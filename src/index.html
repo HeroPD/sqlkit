@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>SqlKit</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="titlebar">
+    <span id="titlebar-title">SqlKit</span>
+  </div>
+
+  <div id="app">
+    <!-- ── Sidebar ──────────────────────────────────────────────── -->
+    <aside id="sidebar">
+
+      <!-- Connection -->
+      <div class="sidebar-section" id="connection-section">
+        <div class="section-label">Connection</div>
+
+        <div id="engine-picker">
+          <button class="engine-btn active" data-engine="postgresql">PostgreSQL</button>
+          <button class="engine-btn" data-engine="mysql">MySQL</button>
+          <button class="engine-btn" data-engine="sqlserver">SQL Server</button>
+        </div>
+
+        <div id="connection-form">
+          <div class="form-row">
+            <label for="host">Host</label>
+            <input type="text" id="host" value="localhost" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-row">
+            <label for="port">Port</label>
+            <input type="text" id="port" value="5432" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-row">
+            <label for="database">Database</label>
+            <input type="text" id="database" value="postgres" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-row">
+            <label for="username">User</label>
+            <input type="text" id="username" value="postgres" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-row">
+            <label for="password">Password</label>
+            <input type="password" id="password" autocomplete="off">
+          </div>
+        </div>
+
+        <div id="connect-buttons">
+          <button id="connect-btn" class="primary-btn">Connect</button>
+          <button id="refresh-btn" disabled>Refresh</button>
+        </div>
+
+        <div id="connection-status"></div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <!-- Explorer -->
+      <div class="sidebar-section flex-grow" id="explorer-section">
+        <div class="section-label">
+          <span>Explorer</span>
+          <button id="browse-btn" class="small-btn" disabled>Browse</button>
+        </div>
+
+        <div id="table-list-wrap">
+          <p id="table-list-empty">Connect to explore tables</p>
+          <ul id="table-list"></ul>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Sidebar resize -->
+    <div id="sidebar-resize"></div>
+
+    <!-- ── Main ────────────────────────────────────────────────── -->
+    <main id="main">
+
+      <!-- Query editor -->
+      <div id="query-section">
+        <div id="query-toolbar">
+          <button id="use-table-btn" class="toolbar-btn" disabled>Use Selected Table</button>
+          <div class="spacer"></div>
+          <span class="hint">⌘↵ to run</span>
+          <button id="run-btn" class="primary-btn toolbar-btn" disabled>Run</button>
+        </div>
+        <textarea id="query-editor"
+          placeholder="-- Enter SQL query here..."
+          spellcheck="false"></textarea>
+      </div>
+
+      <!-- Query/results resize -->
+      <div id="query-resize"></div>
+
+      <!-- Results -->
+      <div id="results-section">
+        <div id="results-bar">
+          <span id="results-status"></span>
+        </div>
+        <div id="results-content">
+          <p id="results-empty">Run a query to see results</p>
+          <div id="results-scroll" hidden>
+            <table id="results-table">
+              <thead id="results-thead"></thead>
+              <tbody id="results-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

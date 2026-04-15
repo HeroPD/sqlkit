@@ -1,5 +1,10 @@
 .DS_Store
 
+# Node / Electron
+node_modules/
+dist/
+out/
+
 # Xcode user-specific data
 xcuserdata/
 *.xcuserdatad/
