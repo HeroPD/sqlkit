@@ -1,0 +1,171 @@
+/* ── Command Palette ───────────────────────────────────────────────────────── */
+#palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  justify-content: center;
+  padding-top: 15%;
+}
+
+#palette-overlay[hidden] { display: none; }
+
+#palette {
+  width: 520px;
+  max-height: 360px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+#palette-input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: var(--font-size);
+  font-family: var(--ui-font);
+  background: var(--input-bg);
+  color: var(--input-fg);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  outline: none;
+  caret-color: var(--text);
+}
+
+#palette-input::placeholder { color: var(--input-placeholder); }
+
+#palette-list {
+  overflow-y: auto;
+  max-height: 310px;
+  padding: 4px 0;
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  padding: 4px 12px;
+  gap: 8px;
+  cursor: pointer;
+  min-height: 26px;
+}
+
+.palette-item:hover { background: var(--list-hover); }
+.palette-item.active { background: var(--list-selection); }
+.palette-item.active .palette-label { color: var(--list-selection-fg); }
+.palette-item.active .palette-detail { color: var(--list-selection-fg); opacity: 0.7; }
+
+.palette-icon {
+  font-size: var(--font-size);
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+
+.palette-label {
+  font-size: var(--font-size);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-label mark {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.palette-detail {
+  font-size: var(--font-size-sm);
+  color: var(--text-3);
+  margin-left: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.palette-keybind {
+  font-size: var(--font-size-sm);
+  font-family: var(--mono-font);
+  color: var(--text-3);
+  background: var(--input-bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.palette-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 12px;
+}
+
+.palette-empty {
+  padding: 12px;
+  text-align: center;
+  font-size: var(--font-size);
+  color: var(--text-3);
+}
+
+/* ── Save Prompt ──────────────────────────────────────────────────────────── */
+#save-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#save-overlay[hidden] { display: none; }
+
+#save-prompt {
+  width: 380px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#save-label {
+  font-size: var(--font-size);
+  color: var(--text);
+}
+
+#save-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: var(--font-size);
+  font-family: var(--mono-font);
+  background: var(--input-bg);
+  color: var(--input-fg);
+  border: 1px solid var(--input-border);
+  border-radius: 3px;
+  outline: none;
+}
+
+#save-input:focus { border-color: var(--input-focus-border); }
+
+#save-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#save-error {
+  font-size: var(--font-size-sm);
+  color: var(--red);
+  min-height: 14px;
+}

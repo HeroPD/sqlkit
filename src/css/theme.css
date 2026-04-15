@@ -1,0 +1,87 @@
+/* ── VS Code Theme Variables ────────────────────────────────────────────────── */
+:root {
+  --mono-font: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+  --ui-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+  /* Font scale — two sizes only */
+  --font-size: 13px;
+  --font-size-sm: 11px;
+
+  /* Layout */
+  --titlebar-h: 38px;
+  --activity-bar-w: 48px;
+  --sidebar-w: 280px;
+  --tab-h: 35px;
+  --panel-header-h: 35px;
+  --status-bar-h: 22px;
+
+  /* VS Code Dark+ */
+  --bg: #1e1e1e;
+  --sidebar-bg: #252526;
+  --activity-bar-bg: #333333;
+  --activity-bar-fg: #ffffff;
+  --activity-bar-inactive: #858585;
+  --activity-bar-badge: #007acc;
+  --activity-bar-indicator: #ffffff;
+  --titlebar-bg: #3c3c3c;
+  --titlebar-fg: #cccccc;
+  --editor-bg: #1e1e1e;
+  --editor-fg: #d4d4d4;
+  --editor-line-number: #858585;
+  --editor-line-number-active: #cccccc;
+  --tab-bar-bg: #252526;
+  --tab-active-bg: #1e1e1e;
+  --tab-active-fg: #ffffff;
+  --tab-active-border: #1e1e1e;
+  --tab-active-top: #007acc;
+  --tab-inactive-bg: #2d2d2d;
+  --tab-inactive-fg: #969696;
+  --tab-border: #252526;
+  --tab-hover-bg: #2d2d2d;
+  --panel-bg: #1e1e1e;
+  --panel-header-bg: #252526;
+  --panel-tab-active: #e7e7e7;
+  --panel-tab-inactive: #969696;
+  --panel-tab-border: #e7e7e7;
+  --status-bar-bg: #007acc;
+  --status-bar-fg: #ffffff;
+  --status-bar-disconnected: #68217a;
+  --border: #474747;
+  --border-subtle: #3c3c3c;
+  --text: #cccccc;
+  --text-2: #858585;
+  --text-3: #5a5a5a;
+  --accent: #007acc;
+  --accent-hover: #1177bb;
+  --focus-border: #007acc;
+  --input-bg: #3c3c3c;
+  --input-border: #3c3c3c;
+  --input-fg: #cccccc;
+  --input-focus-border: #007acc;
+  --input-placeholder: #858585;
+  --btn-bg: #0e639c;
+  --btn-hover: #1177bb;
+  --btn-fg: #ffffff;
+  --btn-secondary-bg: #3c3c3c;
+  --btn-secondary-hover: #505050;
+  --btn-secondary-fg: #cccccc;
+  --list-hover: #2a2d2e;
+  --list-selection: #094771;
+  --list-selection-fg: #ffffff;
+  --list-inactive-selection: #37373d;
+  --section-header-bg: #252526;
+  --section-header-fg: #bbbbbb;
+  --tree-indent-guide: #585858;
+  --grid-border: #3c3c3c;
+  --row-alt: #222222;
+  --row-hover: #264f78;
+  --row-num-bg: #252526;
+  --header-bg: #252526;
+  --green: #89d185;
+  --red: #f48771;
+  --yellow: #cca700;
+  --blue: #6796e6;
+  --scrollbar-thumb: rgba(121, 121, 121, 0.4);
+  --scrollbar-thumb-hover: rgba(100, 100, 100, 0.7);
+  --resize-hover: var(--accent);
+}

@@ -1,0 +1,218 @@
+import { state, el, $, esc } from './utils.js'
+import { updateFileListActive, loadFiles } from './explorer.js'
+import { addMessage, runQuery } from './panel.js'
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+
+export function createNewTab() {
+  state.untitledCount++
+  const tab = {
+    id: state.nextTabId++,
+    name: `Untitled-${state.untitledCount}`,
+    filePath: null,
+    content: '',
+    modified: false,
+  }
+  state.tabs.push(tab)
+  switchTab(tab.id)
+}
+
+export function switchTab(id) {
+  const current = state.tabs.find(t => t.id === state.activeTabId)
+  if (current) {
+    const editorVal = el.queryEditor.value
+    if (current.content !== editorVal) {
+      current.content = editorVal
+      current.modified = true
+    }
+  }
+
+  state.activeTabId = id
+  const tab = state.tabs.find(t => t.id === id)
+  if (tab) {
+    $('editor-wrap').style.display = ''
+    $('panel-resize').style.display = ''
+    $('panel').style.display = ''
+    el.queryEditor.value = tab.content
+    updateLineNumbers()
+  }
+  renderTabs()
+  updateFileListActive()
+}
+
+export function closeTab(id) {
+  const idx = state.tabs.findIndex(t => t.id === id)
+  if (idx === -1) return
+
+  state.tabs.splice(idx, 1)
+
+  if (state.tabs.length === 0) {
+    state.activeTabId = null
+    el.tabBar.innerHTML = ''
+    el.queryEditor.value = ''
+    updateLineNumbers()
+    $('editor-wrap').style.display = 'none'
+    $('panel-resize').style.display = 'none'
+    $('panel').style.display = 'none'
+    return
+  }
+
+  if (state.activeTabId === id) {
+    const newIdx = Math.min(idx, state.tabs.length - 1)
+    switchTab(state.tabs[newIdx].id)
+  } else {
+    renderTabs()
+  }
+}
+
+export function renderTabs() {
+  el.tabBar.innerHTML = ''
+  state.tabs.forEach(tab => {
+    const div = document.createElement('div')
+    div.className = 'editor-tab' + (tab.id === state.activeTabId ? ' active' : '') + (tab.modified ? ' modified' : '')
+    div.dataset.tabId = tab.id
+
+    div.innerHTML = `
+      <span class="tab-label">${esc(tab.name)}</span>
+      <span class="tab-modified"></span>
+      <span class="tab-close">&times;</span>`
+
+    div.querySelector('.tab-label').addEventListener('click', () => switchTab(tab.id))
+    div.querySelector('.tab-close').addEventListener('click', (e) => {
+      e.stopPropagation()
+      closeTab(tab.id)
+    })
+    div.addEventListener('click', () => switchTab(tab.id))
+
+    el.tabBar.appendChild(div)
+  })
+}
+
+export function markCurrentTabModified() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId)
+  if (tab && !tab.modified) {
+    tab.modified = true
+    renderTabs()
+  }
+}
+
+// ── Save ─────────────────────────────────────────────────────────────────────
+
+let saveResolve = null
+
+export async function saveCurrentTab() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId)
+  if (!tab) return
+
+  tab.content = el.queryEditor.value
+
+  if (tab.filePath) {
+    const res = await window.sqlkit.saveFile(tab.filePath, tab.content)
+    if (res.success) {
+      tab.modified = false
+      renderTabs()
+      addMessage('ok', `Saved ${tab.name}`)
+    } else {
+      addMessage('error', `Failed to save: ${res.error}`)
+    }
+  } else {
+    const name = await promptFileName(tab.name)
+    if (!name) return
+
+    const res = await window.sqlkit.saveNewFile(name, tab.content)
+    if (res.success) {
+      tab.name = res.name
+      tab.filePath = res.path
+      tab.modified = false
+      renderTabs()
+      addMessage('ok', `Saved ${res.name}`)
+      loadFiles()
+    } else {
+      addMessage('error', res.error)
+    }
+  }
+}
+
+function promptFileName(defaultName) {
+  return new Promise(resolve => {
+    saveResolve = resolve
+    el.saveInput.value = defaultName.endsWith('.sql') ? defaultName : defaultName + '.sql'
+    el.saveError.textContent = ''
+    el.saveOverlay.hidden = false
+    el.saveInput.focus()
+    el.saveInput.select()
+  })
+}
+
+el.saveConfirm.addEventListener('click', confirmSave)
+el.saveCancel.addEventListener('click', cancelSave)
+
+el.saveInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') confirmSave()
+  if (e.key === 'Escape') cancelSave()
+})
+
+el.saveOverlay.addEventListener('mousedown', e => {
+  if (e.target === el.saveOverlay) cancelSave()
+})
+
+async function confirmSave() {
+  const name = el.saveInput.value.trim()
+  if (!name) {
+    el.saveError.textContent = 'Name cannot be empty'
+    return
+  }
+
+  const fileName = name.endsWith('.sql') ? name : name + '.sql'
+  if (state.files.some(f => f.name === fileName)) {
+    el.saveError.textContent = `"${fileName}" already exists`
+    return
+  }
+
+  el.saveOverlay.hidden = true
+  if (saveResolve) {
+    saveResolve(name)
+    saveResolve = null
+  }
+}
+
+function cancelSave() {
+  el.saveOverlay.hidden = true
+  if (saveResolve) {
+    saveResolve(null)
+    saveResolve = null
+  }
+}
+
+// ── Query Editor ─────────────────────────────────────────────────────────────
+
+el.queryEditor.addEventListener('keydown', e => {
+  if (e.key === 'Tab') {
+    e.preventDefault()
+    const s = el.queryEditor.selectionStart
+    const v = el.queryEditor.value
+    el.queryEditor.value = v.slice(0, s) + '  ' + v.slice(el.queryEditor.selectionEnd)
+    el.queryEditor.selectionStart = el.queryEditor.selectionEnd = s + 2
+    updateLineNumbers()
+    markCurrentTabModified()
+    return
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault()
+    runQuery()
+  }
+})
+
+el.queryEditor.addEventListener('input', () => {
+  updateLineNumbers()
+  markCurrentTabModified()
+})
+
+el.queryEditor.addEventListener('scroll', () => {
+  el.lineNumbers.scrollTop = el.queryEditor.scrollTop
+})
+
+export function updateLineNumbers() {
+  const lines = el.queryEditor.value.split('\n').length
+  el.lineNumbers.textContent = Array.from({ length: lines }, (_, i) => i + 1).join('\n')
+}

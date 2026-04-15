@@ -1,0 +1,52 @@
+/* ── Reset ──────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--ui-font);
+  font-size: var(--font-size);
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Buttons (global) ──────────────────────────────────────────────────────── */
+button {
+  font-family: var(--ui-font);
+  font-size: var(--font-size);
+  font-weight: 400;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background 0.1s, opacity 0.1s;
+  outline: none;
+}
+
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1px; }
+
+.btn-primary {
+  padding: 4px 14px;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+}
+.btn-primary:hover:not(:disabled) { background: var(--btn-hover); }
+
+.btn-secondary {
+  padding: 4px 10px;
+  background: var(--btn-secondary-bg);
+  color: var(--btn-secondary-fg);
+}
+.btn-secondary:hover:not(:disabled) { background: var(--btn-secondary-hover); }
+
+/* ── Scrollbars ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── Utility ───────────────────────────────────────────────────────────────── */
+.spacer { flex: 1; }
