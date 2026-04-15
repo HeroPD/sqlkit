@@ -8,111 +8,182 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- ── Titlebar ───────────────────────────────────────────── -->
   <div id="titlebar">
     <span id="titlebar-title">SqlKit</span>
   </div>
 
-  <div id="app">
-    <!-- ── Sidebar ──────────────────────────────────────────────── -->
+  <!-- ── Workbench ──────────────────────────────────────────── -->
+  <div id="workbench">
+
+    <!-- Activity Bar -->
+    <div id="activity-bar">
+      <div class="activity-item active" data-view="database" title="Database Explorer">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/>
+          <path d="M4.5 5.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
+          <path d="M4.5 10.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
+        </svg>
+      </div>
+      <div class="activity-spacer"></div>
+    </div>
+
+    <!-- Sidebar -->
     <aside id="sidebar">
+      <div class="sidebar-view" id="view-database">
 
-      <!-- Connection -->
-      <div class="sidebar-section" id="connection-section">
-        <div class="section-label">Connection</div>
+        <!-- Connection Section -->
+        <div class="sidebar-section">
+          <div class="section-header" data-section="connection">
+            <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
+            </svg>
+            <span>Connection</span>
+          </div>
+          <div class="section-body" id="connection-body">
+            <div class="connection-body">
 
-        <div id="engine-picker">
-          <button class="engine-btn active" data-engine="postgresql">PostgreSQL</button>
-          <button class="engine-btn" data-engine="mysql">MySQL</button>
-          <button class="engine-btn" data-engine="sqlserver">SQL Server</button>
+              <div id="engine-picker">
+                <button class="engine-btn active" data-engine="postgresql">PostgreSQL</button>
+                <button class="engine-btn" data-engine="mysql">MySQL</button>
+                <button class="engine-btn" data-engine="sqlserver">SQL Server</button>
+              </div>
+
+              <div id="connection-form">
+                <div class="form-row">
+                  <label for="host">Host</label>
+                  <input type="text" id="host" value="localhost" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-row">
+                  <label for="port">Port</label>
+                  <input type="text" id="port" value="5432" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-row">
+                  <label for="database">Database</label>
+                  <input type="text" id="database" value="postgres" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-row">
+                  <label for="username">User</label>
+                  <input type="text" id="username" value="postgres" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-row">
+                  <label for="password">Password</label>
+                  <input type="password" id="password" autocomplete="off">
+                </div>
+              </div>
+
+              <div id="connect-actions">
+                <button id="connect-btn" class="btn-primary">Connect</button>
+              </div>
+
+              <div id="connection-status"></div>
+            </div>
+          </div>
         </div>
 
-        <div id="connection-form">
-          <div class="form-row">
-            <label for="host">Host</label>
-            <input type="text" id="host" value="localhost" autocomplete="off" spellcheck="false">
+        <!-- Tables Section -->
+        <div class="sidebar-section flex-fill">
+          <div class="section-header" data-section="tables">
+            <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
+            </svg>
+            <span>Tables</span>
+            <div class="section-actions">
+              <button id="refresh-btn" title="Refresh Tables" disabled>&#8635;</button>
+            </div>
           </div>
-          <div class="form-row">
-            <label for="port">Port</label>
-            <input type="text" id="port" value="5432" autocomplete="off" spellcheck="false">
-          </div>
-          <div class="form-row">
-            <label for="database">Database</label>
-            <input type="text" id="database" value="postgres" autocomplete="off" spellcheck="false">
-          </div>
-          <div class="form-row">
-            <label for="username">User</label>
-            <input type="text" id="username" value="postgres" autocomplete="off" spellcheck="false">
-          </div>
-          <div class="form-row">
-            <label for="password">Password</label>
-            <input type="password" id="password" autocomplete="off">
+          <div class="section-body" id="tables-body">
+            <div id="table-tree">
+              <p id="table-empty">Connect to explore tables</p>
+            </div>
           </div>
         </div>
 
-        <div id="connect-buttons">
-          <button id="connect-btn" class="primary-btn">Connect</button>
-          <button id="refresh-btn" disabled>Refresh</button>
-        </div>
-
-        <div id="connection-status"></div>
       </div>
-
-      <div class="sidebar-divider"></div>
-
-      <!-- Explorer -->
-      <div class="sidebar-section flex-grow" id="explorer-section">
-        <div class="section-label">
-          <span>Explorer</span>
-          <button id="browse-btn" class="small-btn" disabled>Browse</button>
-        </div>
-
-        <div id="table-list-wrap">
-          <p id="table-list-empty">Connect to explore tables</p>
-          <ul id="table-list"></ul>
-        </div>
-      </div>
-
     </aside>
 
-    <!-- Sidebar resize -->
+    <!-- Sidebar Resize -->
     <div id="sidebar-resize"></div>
 
-    <!-- ── Main ────────────────────────────────────────────────── -->
-    <main id="main">
+    <!-- ── Editor Area ──────────────────────────────────────── -->
+    <div id="editor-area">
 
-      <!-- Query editor -->
-      <div id="query-section">
-        <div id="query-toolbar">
-          <button id="use-table-btn" class="toolbar-btn" disabled>Use Selected Table</button>
-          <div class="spacer"></div>
-          <span class="hint">⌘↵ to run</span>
-          <button id="run-btn" class="primary-btn toolbar-btn" disabled>Run</button>
+      <!-- Tab Bar -->
+      <div id="tab-bar">
+        <div class="editor-tab active">
+          <span class="tab-label">Query 1</span>
         </div>
-        <textarea id="query-editor"
-          placeholder="-- Enter SQL query here..."
-          spellcheck="false"></textarea>
       </div>
 
-      <!-- Query/results resize -->
-      <div id="query-resize"></div>
-
-      <!-- Results -->
-      <div id="results-section">
-        <div id="results-bar">
-          <span id="results-status"></span>
+      <!-- Editor -->
+      <div id="editor-wrap">
+        <div id="editor-container">
+          <div id="line-numbers">1</div>
+          <textarea id="query-editor"
+            placeholder="-- Write your SQL query here..."
+            spellcheck="false"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"></textarea>
         </div>
-        <div id="results-content">
-          <p id="results-empty">Run a query to see results</p>
-          <div id="results-scroll" hidden>
-            <table id="results-table">
-              <thead id="results-thead"></thead>
-              <tbody id="results-tbody"></tbody>
-            </table>
+      </div>
+
+      <!-- Panel Resize -->
+      <div id="panel-resize"></div>
+
+      <!-- Panel -->
+      <div id="panel">
+        <div id="panel-header">
+          <div id="panel-tabs">
+            <button class="panel-tab active" data-panel="results">Results</button>
+            <button class="panel-tab" data-panel="messages">Messages</button>
+          </div>
+          <div id="panel-actions">
+            <span class="hint" id="run-hint">&#8984;&#9166;</span>
+            <button id="run-btn" class="action-btn" disabled title="Run Query">&#9654; Run</button>
+          </div>
+        </div>
+        <div id="panel-content">
+          <!-- Results -->
+          <div id="results-panel" class="panel-view">
+            <p id="results-empty">Run a query to see results</p>
+            <div id="results-scroll" hidden>
+              <table id="results-table">
+                <thead id="results-thead"></thead>
+                <tbody id="results-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <!-- Messages -->
+          <div id="messages-panel" class="panel-view" hidden>
+            <p id="messages-empty">No messages yet</p>
+            <div id="messages-list"></div>
           </div>
         </div>
       </div>
 
-    </main>
+    </div>
+  </div>
+
+  <!-- ── Status Bar ─────────────────────────────────────────── -->
+  <div id="status-bar">
+    <div id="status-left">
+      <span id="status-connection" class="status-item">
+        <span class="status-dot"></span>
+        <span id="status-conn-text">Disconnected</span>
+      </span>
+    </div>
+    <div id="status-right">
+      <span id="status-info" class="status-item"></span>
+    </div>
+  </div>
+
+  <!-- ── Command Palette ────────────────────────────────────── -->
+  <div id="palette-overlay" hidden>
+    <div id="palette">
+      <input id="palette-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search tables...">
+      <div id="palette-list"></div>
+    </div>
   </div>
 
   <script src="renderer.js"></script>

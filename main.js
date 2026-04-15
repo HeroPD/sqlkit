@@ -1,5 +1,7 @@
-const { app, BrowserWindow, ipcMain } = require('electron')
+const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron')
 const path = require('path')
+
+nativeTheme.themeSource = 'dark'
 
 let mainWindow
 let dbClient = null
@@ -7,8 +9,8 @@ let dbEngine = null
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: 1440,
+    height: 900,
     minWidth: 800,
     minHeight: 600,
     titleBarStyle: 'hiddenInset',
@@ -18,7 +20,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false
     },
-    backgroundColor: '#f2f2f7',
+    backgroundColor: '#1e1e1e',
     show: false,
     title: 'SqlKit'
   })
@@ -117,6 +119,26 @@ ipcMain.handle('db:get-tables', async () => {
       ORDER BY table_schema, table_name
     `)
     return { success: true, tables: result.rows }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('db:get-columns', async (_event, schema, table) => {
+  if (!dbClient) return { success: false, error: 'Not connected' }
+
+  try {
+    const result = await dbClient.query(`
+      SELECT
+        column_name   AS name,
+        data_type     AS type,
+        is_nullable   AS nullable,
+        column_default AS default_value
+      FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = $2
+      ORDER BY ordinal_position
+    `, [schema, table])
+    return { success: true, columns: result.rows }
   } catch (err) {
     return { success: false, error: err.message }
   }
