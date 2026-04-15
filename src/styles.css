@@ -3,6 +3,10 @@
   --mono-font: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
   --ui-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
+  /* Font scale — two sizes only */
+  --font-size: 13px;
+  --font-size-sm: 11px;
+
   /* Layout */
   --titlebar-h: 38px;
   --activity-bar-w: 48px;
@@ -91,7 +95,7 @@ html, body {
   height: 100%;
   overflow: hidden;
   font-family: var(--ui-font);
-  font-size: 13px;
+  font-size: var(--font-size);
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -111,7 +115,7 @@ html, body {
 }
 
 #titlebar-title {
-  font-size: 13px;
+  font-size: var(--font-size);
   font-weight: 500;
   color: var(--titlebar-fg);
   opacity: 0.85;
@@ -239,7 +243,7 @@ html, body {
 }
 
 .section-header span {
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   font-weight: 700;
   color: var(--section-header-fg);
   letter-spacing: 0.04em;
@@ -266,7 +270,7 @@ html, body {
   color: var(--text-2);
   border-radius: 3px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--font-size);
   padding: 0;
   -webkit-app-region: no-drag;
 }
@@ -308,7 +312,7 @@ html, body {
 .engine-btn {
   flex: 1;
   padding: 3px 4px;
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   font-family: var(--ui-font);
   border: none;
@@ -335,14 +339,14 @@ html, body {
 }
 
 .form-row label {
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   color: var(--text-2);
   text-align: right;
 }
 
 .form-row input {
   padding: 3px 6px;
-  font-size: 12px;
+  font-size: var(--font-size);
   font-family: var(--ui-font);
   background: var(--input-bg);
   border: 1px solid var(--input-border);
@@ -368,7 +372,7 @@ html, body {
 
 button {
   font-family: var(--ui-font);
-  font-size: 12px;
+  font-size: var(--font-size);
   font-weight: 400;
   border: none;
   border-radius: 3px;
@@ -398,7 +402,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 #connect-btn { flex: 1; }
 
 #connection-status {
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   color: var(--text-2);
   min-height: 14px;
   line-height: 1.4;
@@ -415,7 +419,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 }
 
 #table-empty {
-  font-size: 12px;
+  font-size: var(--font-size);
   color: var(--text-3);
   text-align: center;
   padding: 24px 12px;
@@ -474,7 +478,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 }
 
 .tree-icon {
-  font-size: 12px;
+  font-size: var(--font-size);
   flex-shrink: 0;
   width: 16px;
   text-align: center;
@@ -486,14 +490,14 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 .tree-icon.column-icon { color: var(--text-3); }
 
 .tree-label {
-  font-size: 12px;
+  font-size: var(--font-size);
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .tree-type {
-  font-size: 10px;
+  font-size: var(--font-size-sm);
   color: var(--text-3);
   margin-left: 6px;
   font-family: var(--mono-font);
@@ -540,7 +544,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
   padding: 0 12px;
   min-width: 100px;
   max-width: 200px;
-  font-size: 12px;
+  font-size: var(--font-size);
   color: var(--tab-inactive-fg);
   background: var(--tab-inactive-bg);
   border-right: 1px solid var(--tab-border);
@@ -609,7 +613,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
   padding: 10px 12px 10px 0;
   text-align: right;
   font-family: var(--mono-font);
-  font-size: 13px;
+  font-size: var(--font-size);
   line-height: 1.5;
   color: var(--editor-line-number);
   background: var(--editor-bg);
@@ -624,7 +628,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
   flex: 1;
   padding: 10px 14px 10px 0;
   font-family: var(--mono-font);
-  font-size: 13px;
+  font-size: var(--font-size);
   line-height: 1.5;
   background: var(--editor-bg);
   color: var(--editor-fg);
@@ -682,7 +686,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 
 .panel-tab {
   padding: 0 12px;
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   font-weight: 400;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -712,14 +716,14 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 }
 
 .hint {
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   color: var(--text-3);
   font-family: var(--mono-font);
 }
 
 .action-btn {
   padding: 3px 10px;
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   background: var(--btn-bg);
   color: var(--btn-fg);
@@ -754,7 +758,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: var(--font-size);
   color: var(--text-3);
   pointer-events: none;
 }
@@ -769,7 +773,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 #messages-list {
   padding: 8px 12px;
   font-family: var(--mono-font);
-  font-size: 12px;
+  font-size: var(--font-size);
   overflow-y: auto;
   flex: 1;
 }
@@ -794,7 +798,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 /* ── Results Table ──────────────────────────────────────────────────────────── */
 #results-table {
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--font-size);
   font-family: var(--mono-font);
   min-width: 100%;
   table-layout: auto;
@@ -812,7 +816,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
   border-right: 1px solid var(--grid-border);
   padding: 4px 10px;
   text-align: left;
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
   color: var(--text-2);
   white-space: nowrap;
@@ -842,7 +846,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 #results-table td:first-child {
   text-align: right;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   background: var(--row-num-bg) !important;
   border-right: 1px solid var(--grid-border);
   user-select: none;
@@ -871,7 +875,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 #status-bar.connected { background: var(--status-bar-bg); }
 
 .status-item {
-  font-size: 12px;
+  font-size: var(--font-size);
   color: var(--status-bar-fg);
   display: flex;
   align-items: center;
@@ -932,7 +936,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 #palette-input {
   width: 100%;
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: var(--font-size);
   font-family: var(--ui-font);
   background: var(--input-bg);
   color: var(--input-fg);
@@ -965,7 +969,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 .palette-item.active .palette-detail { color: var(--list-selection-fg); opacity: 0.7; }
 
 .palette-icon {
-  font-size: 12px;
+  font-size: var(--font-size);
   width: 18px;
   text-align: center;
   flex-shrink: 0;
@@ -973,7 +977,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 }
 
 .palette-label {
-  font-size: 13px;
+  font-size: var(--font-size);
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -987,7 +991,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 }
 
 .palette-detail {
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   color: var(--text-3);
   margin-left: auto;
   flex-shrink: 0;
@@ -995,7 +999,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 }
 
 .palette-keybind {
-  font-size: 10px;
+  font-size: var(--font-size-sm);
   font-family: var(--mono-font);
   color: var(--text-3);
   background: var(--input-bg);
@@ -1015,7 +1019,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 .palette-empty {
   padding: 12px;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--font-size);
   color: var(--text-3);
 }
 
