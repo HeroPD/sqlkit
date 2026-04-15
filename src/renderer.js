@@ -494,7 +494,7 @@ function renderResults({ columns, rows }) {
 }
 
 // ── Resize Handles ────────────────────────────────────────────────────────────
-function makeResizable(handleId, targetId, axis) {
+function makeResizable(handleId, targetId, axis, invert = false) {
   const handle = $(handleId)
   const target = $(targetId)
   let dragging = false, start, startSize
@@ -511,9 +511,10 @@ function makeResizable(handleId, targetId, axis) {
 
   document.addEventListener('mousemove', e => {
     if (!dragging) return
-    const delta = (axis === 'x' ? e.clientX : e.clientY) - start
+    const raw   = (axis === 'x' ? e.clientX : e.clientY) - start
+    const delta = invert ? -raw : raw
     const min   = axis === 'x' ? 170  : 100
-    const max   = axis === 'x' ? 500  : 600
+    const max   = axis === 'x' ? 500  : 800
     const size  = Math.max(min, Math.min(max, startSize + delta))
 
     if (axis === 'x') {
@@ -534,7 +535,7 @@ function makeResizable(handleId, targetId, axis) {
 }
 
 makeResizable('sidebar-resize', 'sidebar', 'x')
-makeResizable('panel-resize',   'panel',   'y')
+makeResizable('panel-resize',   'panel',   'y', true)
 
 // ── Status Bar ────────────────────────────────────────────────────────────────
 function setStatusConnection(version) {
