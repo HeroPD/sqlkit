@@ -11,7 +11,17 @@ const state = {
   panelTab: 'results',
   messages: [],
   sidebarVisible: true,
-  tables: []
+  tables: [],
+
+  // Workspace
+  workspace: null,   // { path, name, config }
+  files: [],         // [{ name, path, modified }]
+
+  // Tabs
+  tabs: [],          // [{ id, name, filePath, content, modified }]
+  activeTabId: null,
+  nextTabId: 1,
+  untitledCount: 0,
 }
 
 const ENGINE_DEFAULTS = {
@@ -24,6 +34,14 @@ const ENGINE_DEFAULTS = {
 const $ = id => document.getElementById(id)
 
 const el = {
+  // Screens
+  screenWelcome:   $('screen-welcome'),
+  screenWorkbench: $('screen-workbench'),
+  welcomeOpen:     $('welcome-open'),
+  welcomeRecentSection: $('welcome-recent-section'),
+  welcomeRecentList:    $('welcome-recent-list'),
+  titlebarTitle:   $('titlebar-title'),
+
   // Activity bar
   activityItems: document.querySelectorAll('.activity-item'),
 
@@ -42,11 +60,18 @@ const el = {
   refreshBtn:    $('refresh-btn'),
   connStatus:    $('connection-status'),
 
+  // Files
+  fileTree:      $('file-tree'),
+  fileEmpty:     $('file-empty'),
+  newFileBtn:    $('new-file-btn'),
+  refreshFilesBtn: $('refresh-files-btn'),
+
   // Tables
   tableTree:     $('table-tree'),
   tableEmpty:    $('table-empty'),
 
   // Editor
+  tabBar:        $('tab-bar'),
   lineNumbers:   $('line-numbers'),
   queryEditor:   $('query-editor'),
 
@@ -66,22 +91,116 @@ const el = {
   statusBar:     $('status-bar'),
   statusConnText:$('status-conn-text'),
   statusInfo:    $('status-info'),
+  statusWorkspace: $('status-workspace'),
+
+  // Save prompt
+  saveOverlay:   $('save-overlay'),
+  saveInput:     $('save-input'),
+  saveCancel:    $('save-cancel'),
+  saveConfirm:   $('save-confirm'),
+  saveError:     $('save-error'),
+}
+
+// ── Startup ───────────────────────────────────────────────────────────────────
+async function init() {
+  // Try to open last workspace
+  const last = await window.sqlkit.getLastWorkspace()
+  if (last.success) {
+    const res = await window.sqlkit.openWorkspacePath(last.path)
+    if (res.success) {
+      enterWorkspace(res)
+      return
+    }
+  }
+  // Show welcome
+  showWelcome()
+}
+
+function showScreen(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'))
+  const target = name === 'welcome' ? el.screenWelcome : el.screenWorkbench
+  target.classList.add('active')
+}
+
+async function showWelcome() {
+  showScreen('welcome')
+
+  // Load recent
+  const res = await window.sqlkit.getRecentWorkspaces()
+  if (res.success && res.workspaces.length > 0) {
+    el.welcomeRecentSection.hidden = false
+    el.welcomeRecentList.innerHTML = res.workspaces.map(w => `
+      <div class="recent-item" data-path="${esc(w.path)}">
+        <div>
+          <div class="recent-name">${esc(w.name)}</div>
+          <div class="recent-path">${esc(w.path)}</div>
+        </div>
+      </div>`
+    ).join('')
+
+    el.welcomeRecentList.querySelectorAll('.recent-item').forEach(item => {
+      item.addEventListener('click', async () => {
+        const res = await window.sqlkit.openWorkspacePath(item.dataset.path)
+        if (res.success) enterWorkspace(res)
+      })
+    })
+  }
+}
+
+el.welcomeOpen.addEventListener('click', openWorkspaceDialog)
+
+async function openWorkspaceDialog() {
+  const res = await window.sqlkit.openWorkspace()
+  if (res.success) enterWorkspace(res)
+}
+
+function enterWorkspace(res) {
+  state.workspace = { path: res.path, name: res.name, config: res.config || {} }
+  showScreen('workbench')
+  el.titlebarTitle.textContent = `SqlKit — ${res.name}`
+  el.statusWorkspace.textContent = res.name
+
+  // Restore connection config
+  if (res.config?.connection) {
+    const c = res.config.connection
+    if (c.engine) {
+      state.engine = c.engine
+      el.engineBtns.forEach(b => b.classList.toggle('active', b.dataset.engine === c.engine))
+      const d = ENGINE_DEFAULTS[c.engine]
+      el.port.value = c.port || d.port
+      el.database.value = c.database || d.database
+      el.username.value = c.username || d.username
+    }
+    if (c.host) el.host.value = c.host
+  }
+
+  // Load files and create first tab
+  loadFiles()
+  if (state.tabs.length === 0) createNewTab()
 }
 
 // ── Activity Bar ──────────────────────────────────────────────────────────────
 el.activityItems.forEach(item => {
   item.addEventListener('click', () => {
+    const view = item.dataset.view
     const wasActive = item.classList.contains('active')
+
     if (wasActive) {
-      // Toggle sidebar visibility
+      // Toggle sidebar off
       item.classList.remove('active')
       el.sidebar.classList.add('hidden')
       state.sidebarVisible = false
     } else {
+      // Switch to this view
       el.activityItems.forEach(i => i.classList.remove('active'))
       item.classList.add('active')
       el.sidebar.classList.remove('hidden')
       state.sidebarVisible = true
+
+      // Switch sidebar view
+      document.querySelectorAll('.sidebar-view').forEach(v => v.classList.remove('active'))
+      const target = document.getElementById('view-' + view)
+      if (target) target.classList.add('active')
     }
   })
 })
@@ -89,7 +208,6 @@ el.activityItems.forEach(item => {
 // ── Collapsible Sections ──────────────────────────────────────────────────────
 el.sectionHeaders.forEach(header => {
   header.addEventListener('click', (e) => {
-    // Don't collapse when clicking action buttons
     if (e.target.closest('.section-actions')) return
     header.classList.toggle('collapsed')
   })
@@ -154,6 +272,9 @@ async function connect() {
     setStatusConnection(ver)
     addMessage('ok', `Connected to ${ver}`)
     await loadTables()
+
+    // Save connection to workspace config (no password)
+    saveConnectionConfig(profile)
   } else {
     setConnStatus(res.error, 'error')
     el.connectBtn.textContent = 'Connect'
@@ -182,9 +303,263 @@ async function disconnect() {
   addMessage('info', 'Disconnected')
 }
 
+function saveConnectionConfig(profile) {
+  if (!state.workspace) return
+  const config = state.workspace.config || {}
+  config.connection = {
+    engine: profile.engine,
+    host: profile.host,
+    port: profile.port,
+    database: profile.database,
+    username: profile.username,
+  }
+  state.workspace.config = config
+  window.sqlkit.saveWorkspaceConfig(config)
+}
+
+// ── Files ─────────────────────────────────────────────────────────────────────
+el.newFileBtn.addEventListener('click', () => createNewTab())
+el.refreshFilesBtn.addEventListener('click', loadFiles)
+
+async function loadFiles() {
+  if (!state.workspace) return
+  el.fileTree.querySelectorAll('.file-item').forEach(e => e.remove())
+
+  const res = await window.sqlkit.listFiles()
+  if (!res.success || res.files.length === 0) {
+    el.fileEmpty.style.display = ''
+    el.fileEmpty.textContent = res.files?.length === 0 ? 'No SQL files' : (res.error || 'No files')
+    state.files = []
+    return
+  }
+
+  el.fileEmpty.style.display = 'none'
+  state.files = res.files
+
+  res.files.forEach(f => {
+    const div = document.createElement('div')
+    div.className = 'file-item'
+    div.dataset.path = f.path
+    div.innerHTML = `<span class="file-icon">&#9671;</span><span class="file-name">${esc(f.name)}</span>`
+    div.addEventListener('click', () => openFile(f))
+    el.fileTree.appendChild(div)
+  })
+
+  updateFileListActive()
+}
+
+async function openFile(f) {
+  // Check if already open in a tab
+  const existing = state.tabs.find(t => t.filePath === f.path)
+  if (existing) {
+    switchTab(existing.id)
+    return
+  }
+
+  const res = await window.sqlkit.readFile(f.path)
+  if (!res.success) {
+    addMessage('error', `Failed to open ${f.name}: ${res.error}`)
+    return
+  }
+
+  const tab = {
+    id: state.nextTabId++,
+    name: res.name,
+    filePath: res.path,
+    content: res.content,
+    modified: false,
+  }
+  state.tabs.push(tab)
+  switchTab(tab.id)
+}
+
+function updateFileListActive() {
+  const activeTab = state.tabs.find(t => t.id === state.activeTabId)
+  el.fileTree.querySelectorAll('.file-item').forEach(item => {
+    item.classList.toggle('active', activeTab?.filePath === item.dataset.path)
+  })
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function createNewTab() {
+  state.untitledCount++
+  const tab = {
+    id: state.nextTabId++,
+    name: `Untitled-${state.untitledCount}`,
+    filePath: null,
+    content: '',
+    modified: false,
+  }
+  state.tabs.push(tab)
+  switchTab(tab.id)
+}
+
+function switchTab(id) {
+  // Save current editor content to outgoing tab
+  const current = state.tabs.find(t => t.id === state.activeTabId)
+  if (current) {
+    const editorVal = el.queryEditor.value
+    if (current.content !== editorVal) {
+      current.content = editorVal
+      current.modified = true
+    }
+  }
+
+  state.activeTabId = id
+  const tab = state.tabs.find(t => t.id === id)
+  if (tab) {
+    el.queryEditor.value = tab.content
+    updateLineNumbers()
+  }
+  renderTabs()
+  updateFileListActive()
+}
+
+function closeTab(id) {
+  const idx = state.tabs.findIndex(t => t.id === id)
+  if (idx === -1) return
+
+  state.tabs.splice(idx, 1)
+
+  if (state.tabs.length === 0) {
+    state.activeTabId = null
+    el.tabBar.innerHTML = ''
+    el.queryEditor.value = ''
+    updateLineNumbers()
+    return
+  }
+
+  if (state.activeTabId === id) {
+    const newIdx = Math.min(idx, state.tabs.length - 1)
+    switchTab(state.tabs[newIdx].id)
+  } else {
+    renderTabs()
+  }
+}
+
+function renderTabs() {
+  el.tabBar.innerHTML = ''
+  state.tabs.forEach(tab => {
+    const div = document.createElement('div')
+    div.className = 'editor-tab' + (tab.id === state.activeTabId ? ' active' : '') + (tab.modified ? ' modified' : '')
+    div.dataset.tabId = tab.id
+
+    div.innerHTML = `
+      <span class="tab-label">${esc(tab.name)}</span>
+      <span class="tab-modified"></span>
+      <span class="tab-close">&times;</span>`
+
+    div.querySelector('.tab-label').addEventListener('click', () => switchTab(tab.id))
+    div.querySelector('.tab-close').addEventListener('click', (e) => {
+      e.stopPropagation()
+      closeTab(tab.id)
+    })
+    div.addEventListener('click', () => switchTab(tab.id))
+
+    el.tabBar.appendChild(div)
+  })
+}
+
+function markCurrentTabModified() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId)
+  if (tab && !tab.modified) {
+    tab.modified = true
+    renderTabs()
+  }
+}
+
+// ── Save ──────────────────────────────────────────────────────────────────────
+let saveResolve = null
+
+async function saveCurrentTab() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId)
+  if (!tab) return
+
+  tab.content = el.queryEditor.value
+
+  if (tab.filePath) {
+    // Save directly
+    const res = await window.sqlkit.saveFile(tab.filePath, tab.content)
+    if (res.success) {
+      tab.modified = false
+      renderTabs()
+      addMessage('ok', `Saved ${tab.name}`)
+    } else {
+      addMessage('error', `Failed to save: ${res.error}`)
+    }
+  } else {
+    // Prompt for filename
+    const name = await promptFileName(tab.name)
+    if (!name) return
+
+    const res = await window.sqlkit.saveNewFile(name, tab.content)
+    if (res.success) {
+      tab.name = res.name
+      tab.filePath = res.path
+      tab.modified = false
+      renderTabs()
+      addMessage('ok', `Saved ${res.name}`)
+      loadFiles()
+    } else {
+      addMessage('error', res.error)
+    }
+  }
+}
+
+function promptFileName(defaultName) {
+  return new Promise(resolve => {
+    saveResolve = resolve
+    el.saveInput.value = defaultName.endsWith('.sql') ? defaultName : defaultName + '.sql'
+    el.saveError.textContent = ''
+    el.saveOverlay.hidden = false
+    el.saveInput.focus()
+    el.saveInput.select()
+  })
+}
+
+el.saveConfirm.addEventListener('click', confirmSave)
+el.saveCancel.addEventListener('click', cancelSave)
+
+el.saveInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') confirmSave()
+  if (e.key === 'Escape') cancelSave()
+})
+
+el.saveOverlay.addEventListener('mousedown', e => {
+  if (e.target === el.saveOverlay) cancelSave()
+})
+
+async function confirmSave() {
+  const name = el.saveInput.value.trim()
+  if (!name) {
+    el.saveError.textContent = 'Name cannot be empty'
+    return
+  }
+
+  // Check if file exists
+  const fileName = name.endsWith('.sql') ? name : name + '.sql'
+  if (state.files.some(f => f.name === fileName)) {
+    el.saveError.textContent = `"${fileName}" already exists`
+    return
+  }
+
+  el.saveOverlay.hidden = true
+  if (saveResolve) {
+    saveResolve(name)
+    saveResolve = null
+  }
+}
+
+function cancelSave() {
+  el.saveOverlay.hidden = true
+  if (saveResolve) {
+    saveResolve(null)
+    saveResolve = null
+  }
+}
+
 // ── Table Tree ────────────────────────────────────────────────────────────────
 function clearTableTree() {
-  // Remove all tree items but keep the empty message
   el.tableTree.querySelectorAll('.tree-item').forEach(el => el.remove())
 }
 
@@ -214,7 +589,6 @@ async function loadTables() {
     el.tableTree.appendChild(item)
   })
 
-  // Auto-select first
   const first = res.tables[0]
   const firstEl = el.tableTree.querySelector('.tree-item')
   if (first && firstEl) selectTable(first, firstEl)
@@ -263,12 +637,10 @@ async function toggleTableExpand(t, itemEl) {
   const chevron = itemEl.querySelector('.tree-chevron')
 
   if (state.expandedTables.has(key)) {
-    // Collapse: remove column items
     state.expandedTables.delete(key)
     chevron.classList.remove('expanded')
     removeColumnItems(key)
   } else {
-    // Expand: fetch and show columns
     state.expandedTables.add(key)
     chevron.classList.add('expanded')
 
@@ -291,7 +663,6 @@ async function toggleTableExpand(t, itemEl) {
 
         frag.appendChild(colDiv)
       })
-      // Insert columns after the table item
       itemEl.after(frag)
     }
   }
@@ -302,8 +673,14 @@ function removeColumnItems(parentKey) {
 }
 
 async function browseTable(t) {
-  el.queryEditor.value = `SELECT * FROM "${t.schema}"."${t.name}" LIMIT 200`
-  updateLineNumbers()
+  const tab = state.tabs.find(tb => tb.id === state.activeTabId)
+  if (tab) {
+    tab.content = `SELECT * FROM "${t.schema}"."${t.name}" LIMIT 200`
+    tab.modified = true
+    el.queryEditor.value = tab.content
+    updateLineNumbers()
+    renderTabs()
+  }
   await runQuery()
 }
 
@@ -366,6 +743,7 @@ el.queryEditor.addEventListener('keydown', e => {
     el.queryEditor.value = v.slice(0, s) + '  ' + v.slice(el.queryEditor.selectionEnd)
     el.queryEditor.selectionStart = el.queryEditor.selectionEnd = s + 2
     updateLineNumbers()
+    markCurrentTabModified()
     return
   }
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -374,7 +752,11 @@ el.queryEditor.addEventListener('keydown', e => {
   }
 })
 
-el.queryEditor.addEventListener('input', updateLineNumbers)
+el.queryEditor.addEventListener('input', () => {
+  updateLineNumbers()
+  markCurrentTabModified()
+})
+
 el.queryEditor.addEventListener('scroll', syncLineNumberScroll)
 
 function updateLineNumbers() {
@@ -396,7 +778,6 @@ async function runQuery() {
   el.runBtn.textContent = '▶ Running...'
   el.statusInfo.textContent = 'Running query...'
 
-  // Switch to results panel
   switchPanel('results')
 
   const res = await window.sqlkit.runQuery(sql)
@@ -404,7 +785,6 @@ async function runQuery() {
   if (!res.success) {
     addMessage('error', res.error)
     el.statusInfo.textContent = 'Error'
-    // Show empty with error
     el.resultsScroll.hidden = true
     el.resultsEmpty.textContent = res.error
     el.resultsEmpty.style.display = ''
@@ -445,11 +825,9 @@ function switchPanel(panel) {
 
 // ── Render Results ────────────────────────────────────────────────────────────
 function renderResults({ columns, rows }) {
-  // Reset empty state
   el.resultsEmpty.style.display = 'none'
   el.resultsEmpty.style.color = ''
 
-  // Header
   const hRow = document.createElement('tr')
   const numTh = document.createElement('th')
   numTh.textContent = '#'
@@ -462,7 +840,6 @@ function renderResults({ columns, rows }) {
   })
   el.resultsThead.replaceChildren(hRow)
 
-  // Rows (cap at 10,000)
   const display = rows.length > 10000 ? rows.slice(0, 10000) : rows
   const frag = document.createDocumentFragment()
 
@@ -549,46 +926,31 @@ function setStatusDisconnected() {
   el.statusInfo.textContent = ''
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function setConnStatus(msg, cls) {
-  el.connStatus.textContent = msg
-  el.connStatus.className   = cls
-}
-
-function fmtTime(ms) {
-  if (!ms && ms !== 0) return '?'
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`
-}
-
-function esc(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
 // ── Command Palette ───────────────────────────────────────────────────────────
 const palette = {
   overlay: $('palette-overlay'),
   input:   $('palette-input'),
   list:    $('palette-list'),
-  mode:    null,       // 'tables' (Cmd+P) or 'commands' (Cmd+Shift+P)
-  items:   [],         // current filtered items
-  active:  0,          // active index
+  mode:    null,
+  items:   [],
+  active:  0,
 }
 
 const COMMANDS = [
   { id: 'connect',         label: 'Connect to Database',     icon: '⚡', key: '',         action: () => { if (!state.connected) connect() } },
   { id: 'disconnect',      label: 'Disconnect',              icon: '⊘',  key: '',         action: () => { if (state.connected) disconnect() } },
   { id: 'run-query',       label: 'Run Query',               icon: '▶',  key: '⌘↵',      action: () => runQuery() },
+  { id: 'new-file',        label: 'New File',                icon: '+',  key: '⌘N',      action: () => createNewTab() },
+  { id: 'save-file',       label: 'Save File',               icon: '⬡',  key: '⌘S',      action: () => saveCurrentTab() },
+  { id: 'close-tab',       label: 'Close Tab',               icon: '✕',  key: '⌘W',      action: () => closeTab(state.activeTabId) },
+  { id: 'open-workspace',  label: 'Open Folder...',          icon: '📂', key: '',         action: () => openWorkspaceDialog() },
+  { id: 'refresh-files',   label: 'Refresh Files',           icon: '↻',  key: '',         action: () => loadFiles() },
   { id: 'refresh-tables',  label: 'Refresh Tables',          icon: '↻',  key: '',         action: () => { if (state.connected) loadTables() } },
   { id: 'toggle-sidebar',  label: 'Toggle Sidebar',          icon: '◧',  key: '⌘B',      action: toggleSidebar },
   { id: 'focus-editor',    label: 'Focus Query Editor',      icon: '⌨',  key: '',         action: () => el.queryEditor.focus() },
   { id: 'show-results',    label: 'Show Results Panel',      icon: '▤',  key: '',         action: () => switchPanel('results') },
   { id: 'show-messages',   label: 'Show Messages Panel',     icon: '✉',  key: '',         action: () => switchPanel('messages') },
-  { id: 'clear-messages',  label: 'Clear Messages',          icon: '✕',  key: '',         action: () => { state.messages = []; renderMessages() } },
-  { id: 'clear-editor',    label: 'Clear Editor',            icon: '⌫',  key: '',         action: () => { el.queryEditor.value = ''; updateLineNumbers() } },
+  { id: 'clear-messages',  label: 'Clear Messages',          icon: '⌫',  key: '',         action: () => { state.messages = []; renderMessages() } },
   { id: 'quick-open',      label: 'Go to Table...',          icon: '▦',  key: '⌘P',      action: () => openPalette('tables') },
 ]
 
@@ -599,11 +961,10 @@ function openPalette(mode) {
 
   if (mode === 'commands') {
     palette.input.placeholder = 'Type a command...'
-    palette.input.value = ''
   } else {
     palette.input.placeholder = 'Search tables...'
-    palette.input.value = ''
   }
+  palette.input.value = ''
 
   filterPalette()
   palette.input.focus()
@@ -686,9 +1047,7 @@ function highlightMatch(text, query) {
 
 function bindPaletteClicks() {
   palette.list.querySelectorAll('.palette-item').forEach(item => {
-    item.addEventListener('click', () => {
-      selectPaletteItem(parseInt(item.dataset.index))
-    })
+    item.addEventListener('click', () => selectPaletteItem(parseInt(item.dataset.index)))
     item.addEventListener('mousemove', () => {
       palette.active = parseInt(item.dataset.index)
       updatePaletteActive()
@@ -700,7 +1059,6 @@ function updatePaletteActive() {
   palette.list.querySelectorAll('.palette-item').forEach((item, i) => {
     item.classList.toggle('active', i === palette.active)
   })
-  // Scroll active into view
   const active = palette.list.querySelector('.palette-item.active')
   if (active) active.scrollIntoView({ block: 'nearest' })
 }
@@ -708,15 +1066,11 @@ function updatePaletteActive() {
 function selectPaletteItem(index) {
   if (palette.mode === 'commands') {
     const cmd = palette.items[index]
-    if (cmd) {
-      closePalette()
-      cmd.action()
-    }
+    if (cmd) { closePalette(); cmd.action() }
   } else {
     const table = palette.items[index]
     if (table) {
       closePalette()
-      // Select the table in the tree
       const treeItem = el.tableTree.querySelector(
         `.tree-item[data-schema="${table.schema}"][data-name="${table.name}"]`
       )
@@ -726,64 +1080,67 @@ function selectPaletteItem(index) {
   }
 }
 
-// Palette input events
 palette.input.addEventListener('input', filterPalette)
 
 palette.input.addEventListener('keydown', e => {
   const count = palette.items.length
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    closePalette()
-  } else if (e.key === 'ArrowDown') {
-    e.preventDefault()
-    if (count > 0) {
-      palette.active = (palette.active + 1) % count
-      updatePaletteActive()
-    }
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault()
-    if (count > 0) {
-      palette.active = (palette.active - 1 + count) % count
-      updatePaletteActive()
-    }
-  } else if (e.key === 'Enter') {
-    e.preventDefault()
-    if (count > 0) selectPaletteItem(palette.active)
-  }
+  if (e.key === 'Escape') { e.preventDefault(); closePalette() }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); if (count > 0) { palette.active = (palette.active + 1) % count; updatePaletteActive() } }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); if (count > 0) { palette.active = (palette.active - 1 + count) % count; updatePaletteActive() } }
+  else if (e.key === 'Enter') { e.preventDefault(); if (count > 0) selectPaletteItem(palette.active) }
 })
 
-// Close on overlay click
 palette.overlay.addEventListener('mousedown', e => {
   if (e.target === palette.overlay) closePalette()
 })
 
-// Toggle sidebar helper
 function toggleSidebar() {
-  const activeItem = document.querySelector('.activity-item.active')
   if (state.sidebarVisible) {
-    if (activeItem) activeItem.classList.remove('active')
+    document.querySelector('.activity-item.active')?.classList.remove('active')
     el.sidebar.classList.add('hidden')
     state.sidebarVisible = false
   } else {
+    // Restore last active view or default to explorer
     const first = document.querySelector('.activity-item')
     if (first) first.classList.add('active')
+    document.querySelectorAll('.sidebar-view').forEach(v => v.classList.remove('active'))
+    const view = document.getElementById('view-' + (first?.dataset.view || 'explorer'))
+    if (view) view.classList.add('active')
     el.sidebar.classList.remove('hidden')
     state.sidebarVisible = true
   }
 }
 
-// Global keyboard shortcuts
+// ── Global Keyboard Shortcuts ─────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   // Cmd+Shift+P — Command Palette
   if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'p') {
     e.preventDefault()
-    if (palette.mode === 'commands') { closePalette() } else { openPalette('commands') }
+    if (palette.mode === 'commands') closePalette(); else openPalette('commands')
     return
   }
-  // Cmd+P — Quick Open (tables)
+  // Cmd+P — Quick Open
   if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'p') {
     e.preventDefault()
-    if (palette.mode === 'tables') { closePalette() } else { openPalette('tables') }
+    if (palette.mode === 'tables') closePalette(); else openPalette('tables')
+    return
+  }
+  // Cmd+S — Save
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 's') {
+    e.preventDefault()
+    saveCurrentTab()
+    return
+  }
+  // Cmd+N — New file
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'n') {
+    e.preventDefault()
+    createNewTab()
+    return
+  }
+  // Cmd+W — Close tab
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'w') {
+    e.preventDefault()
+    closeTab(state.activeTabId)
     return
   }
   // Cmd+B — Toggle Sidebar
@@ -792,7 +1149,7 @@ document.addEventListener('keydown', e => {
     toggleSidebar()
     return
   }
-  // Escape closes palette
+  // Escape
   if (e.key === 'Escape' && palette.mode) {
     e.preventDefault()
     closePalette()
@@ -800,12 +1157,24 @@ document.addEventListener('keydown', e => {
   }
 })
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-el.queryEditor.value =
-`SELECT table_schema, table_name, table_type
-FROM information_schema.tables
-WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-ORDER BY table_schema, table_name
-LIMIT 200`
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function setConnStatus(msg, cls) {
+  el.connStatus.textContent = msg
+  el.connStatus.className   = cls
+}
 
-updateLineNumbers()
+function fmtTime(ms) {
+  if (!ms && ms !== 0) return '?'
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`
+}
+
+function esc(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+init()

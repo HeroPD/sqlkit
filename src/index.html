@@ -13,176 +13,250 @@
     <span id="titlebar-title">SqlKit</span>
   </div>
 
-  <!-- ── Workbench ──────────────────────────────────────────── -->
-  <div id="workbench">
+  <!-- ── App: one screen visible at a time ──────────────────── -->
+  <div id="app">
 
-    <!-- Activity Bar -->
-    <div id="activity-bar">
-      <div class="activity-item active" data-view="database" title="Database Explorer">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/>
-          <path d="M4.5 5.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
-          <path d="M4.5 10.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
-        </svg>
+    <!-- ════ Screen: Welcome ════════════════════════════════════ -->
+    <div id="screen-welcome" class="screen active">
+      <div class="welcome-inner">
+        <div class="welcome-brand">
+          <svg class="welcome-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/>
+            <path d="M4.5 5.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
+            <path d="M4.5 10.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
+          </svg>
+          <h1 class="welcome-title">SqlKit</h1>
+          <p class="welcome-subtitle">SQL Database Explorer</p>
+        </div>
+
+        <div class="welcome-section">
+          <h2>Start</h2>
+          <button id="welcome-open" class="welcome-link">Open Folder...</button>
+        </div>
+
+        <div class="welcome-section" id="welcome-recent-section" hidden>
+          <h2>Recent</h2>
+          <div id="welcome-recent-list"></div>
+        </div>
       </div>
-      <div class="activity-spacer"></div>
     </div>
 
-    <!-- Sidebar -->
-    <aside id="sidebar">
-      <div class="sidebar-view" id="view-database">
+    <!-- ════ Screen: Workbench ══════════════════════════════════ -->
+    <div id="screen-workbench" class="screen">
 
-        <!-- Connection Section -->
-        <div class="sidebar-section">
-          <div class="section-header" data-section="connection">
-            <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
+      <!-- Workbench body (activity bar + sidebar + editor) -->
+      <div id="workbench-body">
+
+        <!-- Activity Bar -->
+        <div id="activity-bar">
+          <!-- Explorer: files + tables -->
+          <div class="activity-item active" data-view="explorer" title="Explorer (Files & Tables)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/>
+              <path d="M4.5 5.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
+              <path d="M4.5 10.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
             </svg>
-            <span>Connection</span>
           </div>
-          <div class="section-body" id="connection-body">
-            <div class="connection-body">
-
-              <div id="engine-picker">
-                <button class="engine-btn active" data-engine="postgresql">PostgreSQL</button>
-                <button class="engine-btn" data-engine="mysql">MySQL</button>
-                <button class="engine-btn" data-engine="sqlserver">SQL Server</button>
-              </div>
-
-              <div id="connection-form">
-                <div class="form-row">
-                  <label for="host">Host</label>
-                  <input type="text" id="host" value="localhost" autocomplete="off" spellcheck="false">
-                </div>
-                <div class="form-row">
-                  <label for="port">Port</label>
-                  <input type="text" id="port" value="5432" autocomplete="off" spellcheck="false">
-                </div>
-                <div class="form-row">
-                  <label for="database">Database</label>
-                  <input type="text" id="database" value="postgres" autocomplete="off" spellcheck="false">
-                </div>
-                <div class="form-row">
-                  <label for="username">User</label>
-                  <input type="text" id="username" value="postgres" autocomplete="off" spellcheck="false">
-                </div>
-                <div class="form-row">
-                  <label for="password">Password</label>
-                  <input type="password" id="password" autocomplete="off">
-                </div>
-              </div>
-
-              <div id="connect-actions">
-                <button id="connect-btn" class="btn-primary">Connect</button>
-              </div>
-
-              <div id="connection-status"></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Tables Section -->
-        <div class="sidebar-section flex-fill">
-          <div class="section-header" data-section="tables">
-            <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
+          <!-- Connection -->
+          <div class="activity-item" data-view="connection" title="Connection">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 4h3a2 2 0 0 1 2 2v1"/>
+              <path d="M6 20h3a2 2 0 0 0 2-2v-1"/>
+              <line x1="6" y1="12" x2="11" y2="12"/>
+              <path d="M18 4h-3a2 2 0 0 0-2 2v1"/>
+              <path d="M18 20h-3a2 2 0 0 1-2-2v-1"/>
+              <line x1="18" y1="12" x2="13" y2="12"/>
             </svg>
-            <span>Tables</span>
-            <div class="section-actions">
-              <button id="refresh-btn" title="Refresh Tables" disabled>&#8635;</button>
+          </div>
+          <div class="activity-spacer"></div>
+        </div>
+
+        <!-- Sidebar -->
+        <aside id="sidebar">
+
+          <!-- View: Explorer (Files + Tables) -->
+          <div class="sidebar-view active" id="view-explorer">
+
+            <!-- Files Section -->
+            <div class="sidebar-section flex-fill">
+              <div class="section-header" data-section="files">
+                <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
+                </svg>
+                <span>Files</span>
+                <div class="section-actions">
+                  <button id="new-file-btn" title="New SQL File">+</button>
+                  <button id="refresh-files-btn" title="Refresh Files">&#8635;</button>
+                </div>
+              </div>
+              <div class="section-body" id="files-body">
+                <div id="file-tree">
+                  <p id="file-empty">No SQL files</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tables Section -->
+            <div class="sidebar-section flex-fill">
+              <div class="section-header" data-section="tables">
+                <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
+                </svg>
+                <span>Tables</span>
+                <div class="section-actions">
+                  <button id="refresh-btn" title="Refresh Tables" disabled>&#8635;</button>
+                </div>
+              </div>
+              <div class="section-body" id="tables-body">
+                <div id="table-tree">
+                  <p id="table-empty">Connect to explore tables</p>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- View: Connection -->
+          <div class="sidebar-view" id="view-connection">
+            <div class="sidebar-section flex-fill">
+              <div class="section-header">
+                <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
+                </svg>
+                <span>Connection</span>
+              </div>
+              <div class="section-body" id="connection-body">
+                <div class="connection-body">
+                  <div id="engine-picker">
+                    <button class="engine-btn active" data-engine="postgresql">PostgreSQL</button>
+                    <button class="engine-btn" data-engine="mysql">MySQL</button>
+                    <button class="engine-btn" data-engine="sqlserver">SQL Server</button>
+                  </div>
+                  <div id="connection-form">
+                    <div class="form-row">
+                      <label for="host">Host</label>
+                      <input type="text" id="host" value="localhost" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="form-row">
+                      <label for="port">Port</label>
+                      <input type="text" id="port" value="5432" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="form-row">
+                      <label for="database">Database</label>
+                      <input type="text" id="database" value="postgres" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="form-row">
+                      <label for="username">User</label>
+                      <input type="text" id="username" value="postgres" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="form-row">
+                      <label for="password">Password</label>
+                      <input type="password" id="password" autocomplete="off">
+                    </div>
+                  </div>
+                  <div id="connect-actions">
+                    <button id="connect-btn" class="btn-primary">Connect</button>
+                  </div>
+                  <div id="connection-status"></div>
+                </div>
+              </div>
             </div>
           </div>
-          <div class="section-body" id="tables-body">
-            <div id="table-tree">
-              <p id="table-empty">Connect to explore tables</p>
+
+        </aside>
+
+        <!-- Sidebar Resize -->
+        <div id="sidebar-resize"></div>
+
+        <!-- Editor Area -->
+        <div id="editor-area">
+
+          <!-- Tab Bar -->
+          <div id="tab-bar"></div>
+
+          <!-- Editor -->
+          <div id="editor-wrap">
+            <div id="editor-container">
+              <div id="line-numbers">1</div>
+              <textarea id="query-editor"
+                placeholder="-- Write your SQL query here..."
+                spellcheck="false"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"></textarea>
             </div>
           </div>
-        </div>
 
-      </div>
-    </aside>
+          <!-- Panel Resize -->
+          <div id="panel-resize"></div>
 
-    <!-- Sidebar Resize -->
-    <div id="sidebar-resize"></div>
-
-    <!-- ── Editor Area ──────────────────────────────────────── -->
-    <div id="editor-area">
-
-      <!-- Tab Bar -->
-      <div id="tab-bar">
-        <div class="editor-tab active">
-          <span class="tab-label">Query 1</span>
-        </div>
-      </div>
-
-      <!-- Editor -->
-      <div id="editor-wrap">
-        <div id="editor-container">
-          <div id="line-numbers">1</div>
-          <textarea id="query-editor"
-            placeholder="-- Write your SQL query here..."
-            spellcheck="false"
-            autocomplete="off"
-            autocorrect="off"
-            autocapitalize="off"></textarea>
-        </div>
-      </div>
-
-      <!-- Panel Resize -->
-      <div id="panel-resize"></div>
-
-      <!-- Panel -->
-      <div id="panel">
-        <div id="panel-header">
-          <div id="panel-tabs">
-            <button class="panel-tab active" data-panel="results">Results</button>
-            <button class="panel-tab" data-panel="messages">Messages</button>
-          </div>
-          <div id="panel-actions">
-            <span class="hint" id="run-hint">&#8984;&#9166;</span>
-            <button id="run-btn" class="action-btn" disabled title="Run Query">&#9654; Run</button>
-          </div>
-        </div>
-        <div id="panel-content">
-          <!-- Results -->
-          <div id="results-panel" class="panel-view">
-            <p id="results-empty">Run a query to see results</p>
-            <div id="results-scroll" hidden>
-              <table id="results-table">
-                <thead id="results-thead"></thead>
-                <tbody id="results-tbody"></tbody>
-              </table>
+          <!-- Panel -->
+          <div id="panel">
+            <div id="panel-header">
+              <div id="panel-tabs">
+                <button class="panel-tab active" data-panel="results">Results</button>
+                <button class="panel-tab" data-panel="messages">Messages</button>
+              </div>
+              <div id="panel-actions">
+                <span class="hint" id="run-hint">&#8984;&#9166;</span>
+                <button id="run-btn" class="action-btn" disabled title="Run Query">&#9654; Run</button>
+              </div>
+            </div>
+            <div id="panel-content">
+              <div id="results-panel" class="panel-view">
+                <p id="results-empty">Run a query to see results</p>
+                <div id="results-scroll" hidden>
+                  <table id="results-table">
+                    <thead id="results-thead"></thead>
+                    <tbody id="results-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+              <div id="messages-panel" class="panel-view" hidden>
+                <p id="messages-empty">No messages yet</p>
+                <div id="messages-list"></div>
+              </div>
             </div>
           </div>
-          <!-- Messages -->
-          <div id="messages-panel" class="panel-view" hidden>
-            <p id="messages-empty">No messages yet</p>
-            <div id="messages-list"></div>
-          </div>
+
+        </div>
+      </div>
+
+      <!-- Status Bar (belongs to workbench screen) -->
+      <div id="status-bar">
+        <div id="status-left">
+          <span id="status-connection" class="status-item">
+            <span class="status-dot"></span>
+            <span id="status-conn-text">Disconnected</span>
+          </span>
+        </div>
+        <div id="status-right">
+          <span id="status-workspace" class="status-item"></span>
+          <span id="status-info" class="status-item"></span>
         </div>
       </div>
 
     </div>
+
   </div>
 
-  <!-- ── Status Bar ─────────────────────────────────────────── -->
-  <div id="status-bar">
-    <div id="status-left">
-      <span id="status-connection" class="status-item">
-        <span class="status-dot"></span>
-        <span id="status-conn-text">Disconnected</span>
-      </span>
-    </div>
-    <div id="status-right">
-      <span id="status-info" class="status-item"></span>
-    </div>
-  </div>
-
-  <!-- ── Command Palette ────────────────────────────────────── -->
+  <!-- ── Overlays (global, above all screens) ───────────────── -->
   <div id="palette-overlay" hidden>
     <div id="palette">
       <input id="palette-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search tables...">
       <div id="palette-list"></div>
+    </div>
+  </div>
+
+  <div id="save-overlay" hidden>
+    <div id="save-prompt">
+      <label id="save-label">File name:</label>
+      <input id="save-input" type="text" autocomplete="off" spellcheck="false" placeholder="query.sql">
+      <div id="save-actions">
+        <button id="save-cancel" class="btn-secondary">Cancel</button>
+        <button id="save-confirm" class="btn-primary">Save</button>
+      </div>
+      <div id="save-error"></div>
     </div>
   </div>
 

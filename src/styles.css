@@ -121,10 +121,27 @@ html, body {
   opacity: 0.85;
 }
 
-/* ── Workbench ──────────────────────────────────────────────────────────────── */
-#workbench {
+/* ── App / Screen system ────────────────────────────────────────────────────── */
+#app {
+  height: calc(100vh - var(--titlebar-h));
+  overflow: hidden;
+  position: relative;
+}
+
+.screen {
+  display: none;
+  height: 100%;
+  flex-direction: column;
+}
+
+.screen.active {
   display: flex;
-  height: calc(100vh - var(--titlebar-h) - var(--status-bar-h));
+}
+
+/* ── Workbench body ────────────────────────────────────────────────────────── */
+#workbench-body {
+  display: flex;
+  flex: 1;
   overflow: hidden;
 }
 
@@ -193,10 +210,14 @@ html, body {
 #sidebar.hidden { display: none; }
 
 .sidebar-view {
-  display: flex;
+  display: none;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+}
+
+.sidebar-view.active {
+  display: flex;
 }
 
 /* Sidebar sections (collapsible) */
@@ -861,7 +882,7 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
 /* ── Status Bar ─────────────────────────────────────────────────────────────── */
 #status-bar {
   height: var(--status-bar-h);
-  background: var(--status-bar-disconnected);
+  background: var(--status-bar-bg);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1021,6 +1042,201 @@ button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1
   text-align: center;
   font-size: var(--font-size);
   color: var(--text-3);
+}
+
+/* ── Welcome Screen ────────────────────────────────────────────────────────── */
+#screen-welcome {
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+
+.welcome-inner {
+  width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.welcome-brand {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.welcome-logo {
+  width: 56px;
+  height: 56px;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.welcome-title {
+  font-size: 28px;
+  font-weight: 300;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.welcome-subtitle {
+  font-size: var(--font-size);
+  color: var(--text-3);
+}
+
+.welcome-section h2 {
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+
+.welcome-link {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: var(--font-size);
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.welcome-link:hover { background: var(--list-hover); }
+
+.recent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.recent-item:hover { background: var(--list-hover); }
+
+.recent-name {
+  font-size: var(--font-size);
+  color: var(--accent);
+}
+
+.recent-path {
+  font-size: var(--font-size-sm);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── File Tree ─────────────────────────────────────────────────────────────── */
+#file-tree {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+#file-empty {
+  font-size: var(--font-size);
+  color: var(--text-3);
+  text-align: center;
+  padding: 16px 12px;
+  line-height: 1.5;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px 0 20px;
+  cursor: pointer;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.file-item:hover { background: var(--list-hover); }
+.file-item.active { background: var(--list-selection); }
+.file-item.active .file-name { color: var(--list-selection-fg); }
+
+.file-icon { color: var(--yellow); font-size: var(--font-size); }
+
+.file-name {
+  font-size: var(--font-size);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Tab modified indicator ────────────────────────────────────────────────── */
+.tab-modified {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex-shrink: 0;
+}
+
+.editor-tab.modified .tab-close { display: none; }
+.editor-tab:not(.modified) .tab-modified { display: none; }
+
+/* ── Save Prompt ───────────────────────────────────────────────────────────── */
+#save-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#save-overlay[hidden] { display: none; }
+
+#save-prompt {
+  width: 380px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#save-label {
+  font-size: var(--font-size);
+  color: var(--text);
+}
+
+#save-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: var(--font-size);
+  font-family: var(--mono-font);
+  background: var(--input-bg);
+  color: var(--input-fg);
+  border: 1px solid var(--input-border);
+  border-radius: 3px;
+  outline: none;
+}
+
+#save-input:focus { border-color: var(--input-focus-border); }
+
+#save-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#save-error {
+  font-size: var(--font-size-sm);
+  color: var(--red);
+  min-height: 14px;
 }
 
 /* ── Utility ────────────────────────────────────────────────────────────────── */
