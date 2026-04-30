@@ -44,7 +44,7 @@ package.json       — electron + pg deps only
 - **State**: single `state` object in `js/utils.js` (connection, tabs, files, tables, UI)
 - **IPC channels**: `db:connect/disconnect/get-tables/get-columns/run-query`, `file:list/read/save/save-new/delete`, `workspace:open/open-path/get-recent/get-last/get-current/save-config/get-config`
 - **Workspace**: folder-based, stores config in `.sqlkit/config.json` inside workspace dir
-- **File boundaries**: renderer file IPC is restricted to `.sql` files in the current workspace root
+- **File boundaries**: renderer file IPC is restricted to `.sql` files inside the current workspace, excluding `.sqlkit`
 - **Global config**: `app.getPath('userData')/config.json` — recent workspaces, last opened
 
 ## Key Patterns

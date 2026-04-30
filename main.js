@@ -4,6 +4,17 @@ const fs = require('fs')
 
 nativeTheme.themeSource = 'dark'
 
+if (process.argv.includes('--dev')) {
+  try {
+    require('electron-reloader')(module, {
+      watchRenderer: true,
+      ignore: ['**/*.sql']
+    })
+  } catch (err) {
+    console.warn('Live reload is unavailable:', err.message)
+  }
+}
+
 let mainWindow
 let dbClient = null
 let dbEngine = null
@@ -66,13 +77,14 @@ function validateWorkspaceFilePath(filePath) {
 
   const resolvedPath = path.resolve(filePath)
   const workspacePath = path.resolve(currentWorkspace)
+  const relativePath = path.relative(workspacePath, resolvedPath)
 
   if (!isPathInside(workspacePath, resolvedPath)) {
     return { success: false, error: 'File must be inside the current workspace' }
   }
 
-  if (path.dirname(resolvedPath) !== workspacePath) {
-    return { success: false, error: 'Only SQL files in the workspace root are supported' }
+  if (relativePath.split(path.sep).includes('.sqlkit')) {
+    return { success: false, error: 'Files in .sqlkit are internal' }
   }
 
   if (path.extname(resolvedPath).toLowerCase() !== '.sql') {
@@ -85,17 +97,63 @@ function validateWorkspaceFilePath(filePath) {
 function validateNewFileName(name) {
   if (!currentWorkspace) return { success: false, error: 'No workspace open' }
 
-  const trimmedName = String(name || '').trim()
-  if (!trimmedName) return { success: false, error: 'File name cannot be empty' }
-  if (trimmedName !== path.basename(trimmedName) || trimmedName.includes('/') || trimmedName.includes('\\')) {
-    return { success: false, error: 'File name must not include folders' }
+  const rawName = String(name || '').trim()
+  if (!rawName) return { success: false, error: 'File name cannot be empty' }
+
+  const slashName = rawName.replace(/\\/g, '/')
+  if (slashName.startsWith('/') || path.isAbsolute(rawName)) {
+    return { success: false, error: 'File name must be relative to the workspace' }
   }
 
-  const fileName = trimmedName.toLowerCase().endsWith('.sql') ? trimmedName : trimmedName + '.sql'
+  const normalizedName = slashName
+    .replace(/^\/+|\/+$/g, '')
+    .replace(/\/+/g, '/')
+
+  if (!normalizedName) {
+    return { success: false, error: 'File name must be relative to the workspace' }
+  }
+
+  const parts = normalizedName.split('/')
+  if (parts.some(part => !part || part === '.' || part === '..' || part === '.sqlkit')) {
+    return { success: false, error: 'File name contains an invalid folder segment' }
+  }
+
+  const fileName = normalizedName.toLowerCase().endsWith('.sql') ? normalizedName : normalizedName + '.sql'
   const pathValidation = validateWorkspaceFilePath(path.join(currentWorkspace, fileName))
   if (!pathValidation.success) return pathValidation
 
-  return { success: true, name: fileName, path: pathValidation.path }
+  return { success: true, name: path.basename(fileName), path: pathValidation.path, relativePath: fileName }
+}
+
+function getWorkspaceRelativePath(filePath) {
+  return path.relative(currentWorkspace, filePath).split(path.sep).join('/')
+}
+
+function listSqlFiles(dirPath, files = []) {
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+    .filter(entry => entry.name !== '.sqlkit')
+    .sort((a, b) => {
+      if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry.name)
+    if (entry.isDirectory()) {
+      listSqlFiles(entryPath, files)
+      continue
+    }
+    if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.sql') continue
+
+    files.push({
+      name: entry.name,
+      path: entryPath,
+      relativePath: getWorkspaceRelativePath(entryPath),
+      modified: fs.statSync(entryPath).mtime.toISOString()
+    })
+  }
+
+  return files
 }
 
 async function openWorkspace(wsPath) {
@@ -252,14 +310,8 @@ ipcMain.handle('workspace:get-config', async () => {
 ipcMain.handle('file:list', async () => {
   if (!currentWorkspace) return { success: false, error: 'No workspace' }
   try {
-    const files = fs.readdirSync(currentWorkspace)
-      .filter(f => path.extname(f).toLowerCase() === '.sql')
-      .map(f => ({
-        name: f,
-        path: path.join(currentWorkspace, f),
-        modified: fs.statSync(path.join(currentWorkspace, f)).mtime.toISOString()
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name))
+    const files = listSqlFiles(currentWorkspace)
+      .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
     return { success: true, files }
   } catch (err) {
     return { success: false, error: err.message }
@@ -272,7 +324,7 @@ ipcMain.handle('file:read', async (_event, filePath) => {
 
   try {
     const content = fs.readFileSync(validation.path, 'utf8')
-    return { success: true, content, name: path.basename(validation.path), path: validation.path }
+    return { success: true, content, name: path.basename(validation.path), path: validation.path, relativePath: getWorkspaceRelativePath(validation.path) }
   } catch (err) {
     return { success: false, error: err.message }
   }
@@ -284,7 +336,7 @@ ipcMain.handle('file:save', async (_event, filePath, content) => {
 
   try {
     fs.writeFileSync(validation.path, content, 'utf8')
-    return { success: true, path: validation.path, name: path.basename(validation.path) }
+    return { success: true, path: validation.path, name: path.basename(validation.path), relativePath: getWorkspaceRelativePath(validation.path) }
   } catch (err) {
     return { success: false, error: err.message }
   }
@@ -296,8 +348,9 @@ ipcMain.handle('file:save-new', async (_event, name, content) => {
   if (fs.existsSync(validation.path)) return { success: false, error: `File "${validation.name}" already exists` }
 
   try {
+    fs.mkdirSync(path.dirname(validation.path), { recursive: true })
     fs.writeFileSync(validation.path, content, 'utf8')
-    return { success: true, path: validation.path, name: validation.name }
+    return { success: true, path: validation.path, name: validation.name, relativePath: validation.relativePath }
   } catch (err) {
     return { success: false, error: err.message }
   }

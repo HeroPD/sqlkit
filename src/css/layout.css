@@ -117,6 +117,19 @@
   display: flex;
 }
 
+.sidebar-title {
+  height: 35px;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  font-size: var(--font-size-sm);
+  color: var(--text);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  user-select: none;
+  flex-shrink: 0;
+}
+
 /* Sidebar sections (collapsible) */
 .sidebar-section {
   display: flex;
@@ -127,6 +140,57 @@
 .sidebar-section.flex-fill {
   flex: 1;
   min-height: 0;
+}
+
+.sidebar-section.collapsed {
+  flex: 0 0 auto !important;
+  min-height: 0 !important;
+}
+
+#tables-section.pin-bottom {
+  margin-top: auto;
+}
+
+#view-explorer #workspace-section,
+#view-explorer #tables-section {
+  min-height: 72px;
+}
+
+#explorer-section-resize {
+  height: 4px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+  z-index: 10;
+}
+
+#explorer-section-resize::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 2px;
+  transform: translateY(-50%);
+  background: transparent;
+  transition: background 0.15s;
+}
+
+#explorer-section-resize:hover,
+#explorer-section-resize.active,
+#explorer-section-resize:focus-visible {
+  outline: none;
+}
+
+#explorer-section-resize:hover::before,
+#explorer-section-resize.active::before,
+#explorer-section-resize:focus-visible::before {
+  background: var(--resize-hover);
+}
+
+#explorer-section-resize.disabled {
+  display: none;
 }
 
 .section-header {
@@ -146,18 +210,23 @@
   border-top: none;
 }
 
+.sidebar-title + .sidebar-section .section-header {
+  border-top: none;
+}
+
 .section-header:hover { background: var(--list-hover); }
 
 .section-header .chevron {
   width: 16px;
   height: 16px;
   color: var(--section-header-fg);
+  transform: rotate(90deg);
   transition: transform 0.15s;
   flex-shrink: 0;
 }
 
 .section-header.collapsed .chevron {
-  transform: rotate(-90deg);
+  transform: rotate(0deg);
 }
 
 .section-header span {
@@ -193,6 +262,12 @@
   -webkit-app-region: no-drag;
 }
 
+.section-actions svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.7;
+}
+
 .section-actions button:hover:not(:disabled) { background: var(--list-hover); color: var(--text); }
 .section-actions button:disabled { opacity: 0.35; cursor: not-allowed; }
 
@@ -204,6 +279,7 @@
   min-height: 0;
 }
 
+.sidebar-section.collapsed .section-body,
 .section-header.collapsed + .section-body {
   display: none;
 }

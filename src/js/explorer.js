@@ -127,10 +127,10 @@ el.refreshFilesBtn.addEventListener('click', loadFiles)
 
 export async function loadFiles() {
   if (!state.workspace) return
-  el.fileTree.querySelectorAll('.file-item').forEach(e => e.remove())
+  el.fileTree.querySelectorAll('.file-tree-row').forEach(e => e.remove())
 
   const res = await window.sqlkit.listFiles()
-  if (!res.success || res.files.length === 0) {
+  if (!res.success || !res.files?.length) {
     el.fileEmpty.style.display = ''
     el.fileEmpty.textContent = res.files?.length === 0 ? 'No SQL files' : (res.error || 'No files')
     state.files = []
@@ -139,17 +139,158 @@ export async function loadFiles() {
 
   el.fileEmpty.style.display = 'none'
   state.files = res.files
+  renderFileTree()
+}
 
-  res.files.forEach(f => {
-    const div = document.createElement('div')
-    div.className = 'file-item'
-    div.dataset.path = f.path
-    div.innerHTML = `<span class="file-icon">&#9671;</span><span class="file-name">${esc(f.name)}</span>`
-    div.addEventListener('click', () => openFile(f))
-    el.fileTree.appendChild(div)
+function getFileRelativePath(file) {
+  return file.relativePath || file.name
+}
+
+function buildFileTree(files) {
+  const root = { children: new Map() }
+
+  files.forEach(file => {
+    const parts = getFileRelativePath(file).split('/').filter(Boolean)
+    let node = root
+
+    parts.forEach((part, index) => {
+      const relativePath = parts.slice(0, index + 1).join('/')
+      const isFile = index === parts.length - 1
+
+      if (isFile) {
+        node.children.set(part, {
+          type: 'file',
+          name: file.name || part,
+          relativePath,
+          file,
+        })
+        return
+      }
+
+      if (!node.children.has(part)) {
+        node.children.set(part, {
+          type: 'folder',
+          name: part,
+          relativePath,
+          children: new Map(),
+        })
+      }
+
+      node = node.children.get(part)
+    })
   })
 
+  return root
+}
+
+function getSortedFileChildren(node) {
+  return Array.from(node.children.values()).sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+}
+
+function expandFileParents(filePath) {
+  const file = state.files.find(f => f.path === filePath)
+  if (!file) return false
+
+  const parts = getFileRelativePath(file).split('/').filter(Boolean)
+  parts.pop()
+
+  let changed = false
+  parts.reduce((parent, part) => {
+    const folderPath = parent ? `${parent}/${part}` : part
+    if (!state.expandedFileFolders.has(folderPath)) {
+      state.expandedFileFolders.add(folderPath)
+      changed = true
+    }
+    return folderPath
+  }, '')
+
+  return changed
+}
+
+function renderFileTree() {
+  el.fileTree.querySelectorAll('.file-tree-row').forEach(e => e.remove())
+
+  const activeTab = state.tabs.find(t => t.id === state.activeTabId)
+  if (activeTab?.filePath) expandFileParents(activeTab.filePath)
+
+  const tree = buildFileTree(state.files)
+  const frag = document.createDocumentFragment()
+  getSortedFileChildren(tree).forEach(node => renderFileNode(node, 0, frag))
+  el.fileTree.appendChild(frag)
+
   updateFileListActive()
+}
+
+function renderFileNode(node, depth, target) {
+  const isFolder = node.type === 'folder'
+  const isExpanded = isFolder && state.expandedFileFolders.has(node.relativePath)
+  const row = document.createElement('div')
+  row.className = `file-tree-row ${isFolder ? 'folder-item' : 'file-item'}`
+  row.dataset.type = node.type
+  row.dataset.relativePath = node.relativePath
+  row.style.setProperty('--tree-indent', `${depth * 16}px`)
+  row.tabIndex = 0
+  row.title = node.relativePath
+
+  if (!isFolder) row.dataset.path = node.file.path
+
+  row.innerHTML = isFolder ? `
+    <span class="file-chevron ${isExpanded ? 'expanded' : ''}">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/></svg>
+    </span>
+    <span class="file-icon folder-icon">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 3.5h5.2l1.4 1.6h6.4v7.4h-13z"/></svg>
+    </span>
+    <span class="file-name">${esc(node.name)}</span>` : `
+    <span class="file-chevron hidden">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/></svg>
+    </span>
+    <span class="file-icon sql-icon">SQL</span>
+    <span class="file-name">${esc(node.name)}</span>`
+
+  row.addEventListener('click', () => {
+    if (isFolder) {
+      toggleFileFolder(node.relativePath)
+      return
+    }
+    openFile(node.file)
+  })
+
+  row.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      if (isFolder) toggleFileFolder(node.relativePath)
+      else openFile(node.file)
+      return
+    }
+    if (!isFolder) return
+    if (e.key === 'ArrowRight' && !state.expandedFileFolders.has(node.relativePath)) {
+      e.preventDefault()
+      toggleFileFolder(node.relativePath)
+    }
+    if (e.key === 'ArrowLeft' && state.expandedFileFolders.has(node.relativePath)) {
+      e.preventDefault()
+      toggleFileFolder(node.relativePath)
+    }
+  })
+
+  target.appendChild(row)
+
+  if (isFolder && isExpanded) {
+    getSortedFileChildren(node).forEach(child => renderFileNode(child, depth + 1, target))
+  }
+}
+
+function toggleFileFolder(relativePath) {
+  if (state.expandedFileFolders.has(relativePath)) {
+    state.expandedFileFolders.delete(relativePath)
+  } else {
+    state.expandedFileFolders.add(relativePath)
+  }
+  renderFileTree()
 }
 
 async function openFile(f) {
@@ -161,7 +302,7 @@ async function openFile(f) {
 
   const res = await window.sqlkit.readFile(f.path)
   if (!res.success) {
-    addMessage('error', `Failed to open ${f.name}: ${res.error}`)
+    addMessage('error', `Failed to open ${getFileRelativePath(f)}: ${res.error}`)
     return
   }
 
@@ -169,6 +310,7 @@ async function openFile(f) {
     id: state.nextTabId++,
     name: res.name,
     filePath: res.path,
+    relativePath: res.relativePath || getFileRelativePath(f),
     content: res.content,
     modified: false,
   }
@@ -178,6 +320,11 @@ async function openFile(f) {
 
 export function updateFileListActive() {
   const activeTab = state.tabs.find(t => t.id === state.activeTabId)
+  if (activeTab?.filePath && expandFileParents(activeTab.filePath)) {
+    renderFileTree()
+    return
+  }
+
   el.fileTree.querySelectorAll('.file-item').forEach(item => {
     item.classList.toggle('active', activeTab?.filePath === item.dataset.path)
   })

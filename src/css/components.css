@@ -89,6 +89,7 @@
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding: 2px 0;
 }
 
 #file-empty {
@@ -99,27 +100,68 @@
   line-height: 1.5;
 }
 
-.file-item {
+.file-tree-row {
   display: flex;
   align-items: center;
   height: 22px;
-  padding: 0 8px 0 20px;
+  padding: 0 8px 0 calc(8px + var(--tree-indent, 0px));
   cursor: pointer;
-  gap: 6px;
+  gap: 4px;
   white-space: nowrap;
+  user-select: none;
+  outline: none;
 }
 
-.file-item:hover { background: var(--list-hover); }
+.file-tree-row:hover { background: var(--list-hover); }
+.file-tree-row:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
 .file-item.active { background: var(--list-selection); }
 .file-item.active .file-name { color: var(--list-selection-fg); }
 
-.file-icon { color: var(--yellow); font-size: var(--font-size); }
+.file-chevron {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-2);
+  transition: transform 0.1s;
+}
+
+.file-chevron svg { width: 16px; height: 16px; }
+.file-chevron.expanded { transform: rotate(90deg); }
+.file-chevron.hidden { visibility: hidden; }
+
+.file-icon {
+  width: 18px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.file-icon svg { width: 16px; height: 16px; }
+.folder-icon { color: var(--yellow); }
+
+.sql-icon {
+  width: 18px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 13px;
+}
 
 .file-name {
   font-size: var(--font-size);
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
 /* ── Table Tree ────────────────────────────────────────────────────────────── */

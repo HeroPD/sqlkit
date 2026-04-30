@@ -138,6 +138,7 @@ export async function saveCurrentTab() {
   if (tab.filePath) {
     const res = await window.sqlkit.saveFile(tab.filePath, tab.content)
     if (res.success) {
+      tab.relativePath = res.relativePath || tab.relativePath
       tab.modified = false
       renderTabs()
       addMessage('ok', `Saved ${tab.name}`)
@@ -152,6 +153,7 @@ export async function saveCurrentTab() {
     if (res.success) {
       tab.name = res.name
       tab.filePath = res.path
+      tab.relativePath = res.relativePath
       tab.modified = false
       renderTabs()
       addMessage('ok', `Saved ${res.name}`)
@@ -173,6 +175,25 @@ function promptFileName(defaultName) {
   })
 }
 
+function normalizeSavePath(name) {
+  const slashName = name.trim().replace(/\\/g, '/')
+
+  if (slashName.startsWith('/')) return { error: 'Path must be relative to the workspace' }
+
+  const normalized = slashName
+    .replace(/^\/+|\/+$/g, '')
+    .replace(/\/+/g, '/')
+
+  if (!normalized) return { error: 'Name cannot be empty' }
+
+  const parts = normalized.split('/')
+  if (parts.some(part => !part || part === '.' || part === '..' || part === '.sqlkit')) {
+    return { error: 'Path contains an invalid folder segment' }
+  }
+
+  return { path: normalized.toLowerCase().endsWith('.sql') ? normalized : normalized + '.sql' }
+}
+
 el.saveConfirm.addEventListener('click', confirmSave)
 el.saveCancel.addEventListener('click', cancelSave)
 
@@ -186,21 +207,21 @@ el.saveOverlay.addEventListener('mousedown', e => {
 })
 
 async function confirmSave() {
-  const name = el.saveInput.value.trim()
-  if (!name) {
-    el.saveError.textContent = 'Name cannot be empty'
+  const normalized = normalizeSavePath(el.saveInput.value)
+  if (normalized.error) {
+    el.saveError.textContent = normalized.error
     return
   }
 
-  const fileName = name.endsWith('.sql') ? name : name + '.sql'
-  if (state.files.some(f => f.name === fileName)) {
-    el.saveError.textContent = `"${fileName}" already exists`
+  const filePath = normalized.path
+  if (state.files.some(f => (f.relativePath || f.name) === filePath)) {
+    el.saveError.textContent = `"${filePath}" already exists`
     return
   }
 
   el.saveOverlay.hidden = true
   if (saveResolve) {
-    saveResolve(name)
+    saveResolve(filePath)
     saveResolve = null
   }
 }

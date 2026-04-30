@@ -50,11 +50,12 @@
         <!-- Activity Bar -->
         <div id="activity-bar">
           <!-- Explorer: files + tables -->
-          <div class="activity-item active" data-view="explorer" title="Explorer (Files & Tables)">
+          <div class="activity-item active" data-view="explorer" title="Explorer">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/>
-              <path d="M4.5 5.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
-              <path d="M4.5 10.5v5c0 1.38 3.36 2.5 7.5 2.5s7.5-1.12 7.5-2.5v-5"/>
+              <path d="M6 3.5h7l5 5v12H6z"/>
+              <path d="M13 3.5v5h5"/>
+              <path d="M8.5 13h7"/>
+              <path d="M8.5 16h7"/>
             </svg>
           </div>
           <!-- Connection -->
@@ -76,17 +77,28 @@
 
           <!-- View: Explorer (Files + Tables) -->
           <div class="sidebar-view active" id="view-explorer">
+            <div class="sidebar-title">Explorer</div>
 
             <!-- Files Section -->
-            <div class="sidebar-section flex-fill">
+            <div class="sidebar-section flex-fill" id="workspace-section">
               <div class="section-header" data-section="files">
                 <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
                 </svg>
-                <span>Files</span>
+                <span id="files-section-title">Files</span>
                 <div class="section-actions">
-                  <button id="new-file-btn" title="New SQL File">+</button>
-                  <button id="refresh-files-btn" title="Refresh Files">&#8635;</button>
+                  <button id="new-file-btn" title="New SQL File" aria-label="New SQL File">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M8 3.5v9"/>
+                      <path d="M3.5 8h9"/>
+                    </svg>
+                  </button>
+                  <button id="refresh-files-btn" title="Refresh Files" aria-label="Refresh Files">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12.5 5.5a4.5 4.5 0 1 0 .3 4.4"/>
+                      <path d="M12.5 2.5v3h-3"/>
+                    </svg>
+                  </button>
                 </div>
               </div>
               <div class="section-body" id="files-body">
@@ -96,15 +108,22 @@
               </div>
             </div>
 
+            <div id="explorer-section-resize" role="separator" aria-label="Resize workspace and tables" title="Resize Workspace and Tables"></div>
+
             <!-- Tables Section -->
-            <div class="sidebar-section flex-fill">
+            <div class="sidebar-section flex-fill" id="tables-section">
               <div class="section-header" data-section="tables">
                 <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M5.7 13.7L5 13l4.6-4.6L5 3.7l.7-.7 5.3 5.3z"/>
                 </svg>
                 <span>Tables</span>
                 <div class="section-actions">
-                  <button id="refresh-btn" title="Refresh Tables" disabled>&#8635;</button>
+                  <button id="refresh-btn" title="Refresh Tables" aria-label="Refresh Tables" disabled>
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12.5 5.5a4.5 4.5 0 1 0 .3 4.4"/>
+                      <path d="M12.5 2.5v3h-3"/>
+                    </svg>
+                  </button>
                 </div>
               </div>
               <div class="section-body" id="tables-body">
@@ -118,6 +137,7 @@
 
           <!-- View: Connection -->
           <div class="sidebar-view" id="view-connection">
+            <div class="sidebar-title">Connection</div>
             <div class="sidebar-section flex-fill">
               <div class="section-header">
                 <svg class="chevron" viewBox="0 0 16 16" fill="currentColor">
@@ -250,8 +270,8 @@
 
   <div id="save-overlay" hidden>
     <div id="save-prompt">
-      <label id="save-label">File name:</label>
-      <input id="save-input" type="text" autocomplete="off" spellcheck="false" placeholder="query.sql">
+      <label id="save-label">File path:</label>
+      <input id="save-input" type="text" autocomplete="off" spellcheck="false" placeholder="queries/report.sql">
       <div id="save-actions">
         <button id="save-cancel" class="btn-secondary">Cancel</button>
         <button id="save-confirm" class="btn-primary">Save</button>

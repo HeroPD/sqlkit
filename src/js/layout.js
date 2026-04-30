@@ -55,11 +55,13 @@ export async function enterWorkspace(res) {
     await disconnect(true)
     resetEditorState()
     resetPanelState()
+    state.expandedFileFolders.clear()
   }
 
   state.workspace = { path: res.path, name: res.name, config: res.config || {} }
   showScreen('workbench')
   el.titlebarTitle.textContent = `SqlKit \u2014 ${res.name}`
+  el.filesSectionTitle.textContent = res.name
   el.statusWorkspace.textContent = res.name
 
   const connection = res.config?.connection || {}
@@ -109,7 +111,10 @@ el.activityItems.forEach(item => {
 el.sectionHeaders.forEach(header => {
   header.addEventListener('click', (e) => {
     if (e.target.closest('.section-actions')) return
-    header.classList.toggle('collapsed')
+    const collapsed = header.classList.toggle('collapsed')
+    header.closest('.sidebar-section')?.classList.toggle('collapsed', collapsed)
+    updateExplorerSectionCollapseLayout()
+    updateExplorerResizeState()
   })
 })
 
@@ -173,5 +178,89 @@ function makeResizable(handleId, targetId, axis, invert = false) {
   })
 }
 
+function makeExplorerSectionsResizable() {
+  const handle = $('explorer-section-resize')
+  const view = $('view-explorer')
+  const workspaceSection = $('workspace-section')
+  const tablesSection = $('tables-section')
+  const minSectionHeight = 72
+  let dragging = false, startY, startHeight, workspaceCollapsedOnDrag, tablesCollapsedOnDrag
+
+  handle.addEventListener('mousedown', e => {
+    if (isExplorerResizeDisabled()) return
+    dragging = true
+    startY = e.clientY
+    workspaceCollapsedOnDrag = workspaceSection.classList.contains('collapsed')
+    tablesCollapsedOnDrag = tablesSection.classList.contains('collapsed')
+    startHeight = workspaceCollapsedOnDrag ? 0 : workspaceSection.offsetHeight
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    handle.classList.add('active')
+    e.preventDefault()
+  })
+
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return
+    const delta = e.clientY - startY
+
+    if (workspaceCollapsedOnDrag) {
+      if (delta <= 0) return
+      expandSidebarSection(workspaceSection)
+      workspaceCollapsedOnDrag = false
+    }
+
+    if (tablesCollapsedOnDrag) {
+      if (delta >= 0) return
+      expandSidebarSection(tablesSection)
+      tablesCollapsedOnDrag = false
+    }
+
+    const availableHeight = view.clientHeight - view.querySelector('.sidebar-title').offsetHeight - handle.offsetHeight
+    const maxHeight = Math.max(minSectionHeight, availableHeight - minSectionHeight)
+    const height = Math.max(minSectionHeight, Math.min(maxHeight, startHeight + delta))
+
+    workspaceSection.style.flex = `0 0 ${height}px`
+    tablesSection.style.flex = '1 1 0'
+  })
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return
+    dragging = false
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    handle.classList.remove('active')
+  })
+
+  handle.addEventListener('dblclick', () => {
+    if (isExplorerResizeDisabled()) return
+    workspaceSection.style.flex = ''
+    tablesSection.style.flex = ''
+  })
+
+  updateExplorerResizeState()
+}
+
+function isExplorerResizeDisabled() {
+  return $('tables-section')?.classList.contains('collapsed')
+}
+
+function updateExplorerResizeState() {
+  $('explorer-section-resize')?.classList.toggle('disabled', isExplorerResizeDisabled())
+}
+
+function updateExplorerSectionCollapseLayout() {
+  const workspaceCollapsed = $('workspace-section')?.classList.contains('collapsed')
+  const tablesCollapsed = $('tables-section')?.classList.contains('collapsed')
+  $('tables-section')?.classList.toggle('pin-bottom', tablesCollapsed && !workspaceCollapsed)
+}
+
+function expandSidebarSection(section) {
+  section.classList.remove('collapsed')
+  section.querySelector('.section-header')?.classList.remove('collapsed')
+  updateExplorerSectionCollapseLayout()
+  updateExplorerResizeState()
+}
+
 makeResizable('sidebar-resize', 'sidebar', 'x')
 makeResizable('panel-resize',   'panel',   'y', true)
+makeExplorerSectionsResizable()
