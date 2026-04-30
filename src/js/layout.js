@@ -1,6 +1,7 @@
 import { state, el, $, ENGINE_DEFAULTS, esc } from './utils.js'
-import { loadFiles } from './explorer.js'
-import { createNewTab } from './editor.js'
+import { loadFiles, disconnect } from './explorer.js'
+import { createNewTab, confirmDiscardOpenTabs, resetEditorState } from './editor.js'
+import { resetPanelState } from './panel.js'
 
 // ── Screens ──────────────────────────────────────────────────────────────────
 
@@ -29,38 +30,51 @@ export async function showWelcome() {
 
     el.welcomeRecentList.querySelectorAll('.recent-item').forEach(item => {
       item.addEventListener('click', async () => {
+        if (!confirmWorkspaceSwitch(item.dataset.path)) return
         const res = await window.sqlkit.openWorkspacePath(item.dataset.path)
-        if (res.success) enterWorkspace(res)
+        if (res.success) await enterWorkspace(res)
       })
     })
   }
 }
 
 export async function openWorkspaceDialog() {
+  if (!confirmWorkspaceSwitch()) return
   const res = await window.sqlkit.openWorkspace()
-  if (res.success) enterWorkspace(res)
+  if (res.success) await enterWorkspace(res)
 }
 
-export function enterWorkspace(res) {
+function confirmWorkspaceSwitch(nextPath = null) {
+  if (!state.workspace) return true
+  if (nextPath && nextPath === state.workspace.path) return true
+  return confirmDiscardOpenTabs('Switch workspace and discard unsaved changes in open tabs?')
+}
+
+export async function enterWorkspace(res) {
+  if (state.workspace?.path && state.workspace.path !== res.path) {
+    await disconnect(true)
+    resetEditorState()
+    resetPanelState()
+  }
+
   state.workspace = { path: res.path, name: res.name, config: res.config || {} }
   showScreen('workbench')
   el.titlebarTitle.textContent = `SqlKit \u2014 ${res.name}`
   el.statusWorkspace.textContent = res.name
 
-  if (res.config?.connection) {
-    const c = res.config.connection
-    if (c.engine) {
-      state.engine = c.engine
-      el.engineBtns.forEach(b => b.classList.toggle('active', b.dataset.engine === c.engine))
-      const d = ENGINE_DEFAULTS[c.engine]
-      el.port.value = c.port || d.port
-      el.database.value = c.database || d.database
-      el.username.value = c.username || d.username
-    }
-    if (c.host) el.host.value = c.host
-  }
+  const connection = res.config?.connection || {}
+  const engine = connection.engine || 'postgresql'
+  const defaults = ENGINE_DEFAULTS[engine]
 
-  loadFiles()
+  state.engine = engine
+  el.engineBtns.forEach(b => b.classList.toggle('active', b.dataset.engine === engine))
+  el.host.value = connection.host || 'localhost'
+  el.port.value = connection.port || defaults.port
+  el.database.value = connection.database || defaults.database
+  el.username.value = connection.username || defaults.username
+  el.password.value = ''
+
+  await loadFiles()
   if (state.tabs.length === 0) createNewTab()
 }
 

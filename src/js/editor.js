@@ -18,14 +18,7 @@ export function createNewTab() {
 }
 
 export function switchTab(id) {
-  const current = state.tabs.find(t => t.id === state.activeTabId)
-  if (current) {
-    const editorVal = el.queryEditor.value
-    if (current.content !== editorVal) {
-      current.content = editorVal
-      current.modified = true
-    }
-  }
+  syncActiveTabState()
 
   state.activeTabId = id
   const tab = state.tabs.find(t => t.id === id)
@@ -41,20 +34,21 @@ export function switchTab(id) {
 }
 
 export function closeTab(id) {
+  syncActiveTabState()
   const idx = state.tabs.findIndex(t => t.id === id)
   if (idx === -1) return
+  const tab = state.tabs[idx]
+
+  if (tab.modified && !window.confirm(`Discard unsaved changes to "${tab.name}"?`)) {
+    return false
+  }
 
   state.tabs.splice(idx, 1)
 
   if (state.tabs.length === 0) {
     state.activeTabId = null
-    el.tabBar.innerHTML = ''
-    el.queryEditor.value = ''
-    updateLineNumbers()
-    $('editor-wrap').style.display = 'none'
-    $('panel-resize').style.display = 'none'
-    $('panel').style.display = 'none'
-    return
+    createNewTab()
+    return true
   }
 
   if (state.activeTabId === id) {
@@ -63,6 +57,8 @@ export function closeTab(id) {
   } else {
     renderTabs()
   }
+
+  return true
 }
 
 export function renderTabs() {
@@ -94,6 +90,39 @@ export function markCurrentTabModified() {
     tab.modified = true
     renderTabs()
   }
+}
+
+export function syncActiveTabState() {
+  const current = state.tabs.find(t => t.id === state.activeTabId)
+  if (!current) return
+
+  const editorVal = el.queryEditor.value
+  if (current.content !== editorVal) {
+    current.content = editorVal
+    current.modified = true
+  }
+}
+
+export function hasModifiedTabs() {
+  syncActiveTabState()
+  return state.tabs.some(tab => tab.modified)
+}
+
+export function confirmDiscardOpenTabs(message) {
+  return !hasModifiedTabs() || window.confirm(message)
+}
+
+export function resetEditorState() {
+  state.tabs = []
+  state.activeTabId = null
+  state.nextTabId = 1
+  state.untitledCount = 0
+  el.tabBar.innerHTML = ''
+  el.queryEditor.value = ''
+  updateLineNumbers()
+  $('editor-wrap').style.display = 'none'
+  $('panel-resize').style.display = 'none'
+  $('panel').style.display = 'none'
 }
 
 // ── Save ─────────────────────────────────────────────────────────────────────

@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('sqlkit', {
+  // App
+  onRequestClose:        (callback)       => ipcRenderer.on('app:request-close', callback),
+  respondToClose:        (shouldClose)    => ipcRenderer.send('app:confirm-close-response', shouldClose),
+
   // Database
   connect:      (profile)        => ipcRenderer.invoke('db:connect', profile),
   disconnect:   ()               => ipcRenderer.invoke('db:disconnect'),

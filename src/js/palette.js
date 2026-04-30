@@ -1,5 +1,5 @@
 import { state, el, $, esc } from './utils.js'
-import { connect, disconnect, loadFiles, loadTables, browseTable, selectTable } from './explorer.js'
+import { connect, disconnect, loadFiles, loadTables, browseTable, selectTable, findTableTreeItem } from './explorer.js'
 import { createNewTab, closeTab, saveCurrentTab } from './editor.js'
 import { switchPanel, clearMessages, runQuery } from './panel.js'
 import { toggleSidebar, openWorkspaceDialog } from './layout.js'
@@ -144,9 +144,7 @@ function selectPaletteItem(index) {
     const table = palette.items[index]
     if (table) {
       closePalette()
-      const treeItem = el.tableTree.querySelector(
-        `.tree-item[data-schema="${table.schema}"][data-name="${table.name}"]`
-      )
+      const treeItem = findTableTreeItem(table)
       if (treeItem) selectTable(table, treeItem)
       browseTable(table)
     }

@@ -44,6 +44,7 @@ package.json       — electron + pg deps only
 - **State**: single `state` object in `js/utils.js` (connection, tabs, files, tables, UI)
 - **IPC channels**: `db:connect/disconnect/get-tables/get-columns/run-query`, `file:list/read/save/save-new/delete`, `workspace:open/open-path/get-recent/get-last/get-current/save-config/get-config`
 - **Workspace**: folder-based, stores config in `.sqlkit/config.json` inside workspace dir
+- **File boundaries**: renderer file IPC is restricted to `.sql` files in the current workspace root
 - **Global config**: `app.getPath('userData')/config.json` — recent workspaces, last opened
 
 ## Key Patterns
@@ -56,11 +57,9 @@ package.json       — electron + pg deps only
 - Command palette supports two modes: `commands` and `tables` (palette.js)
 - Keyboard shortcuts: Cmd+Enter=run, Cmd+S=save, Cmd+N=new, Cmd+W=close, Cmd+B=sidebar, Cmd+Shift+P=commands, Cmd+P=tables (palette.js)
 
-## Known Issues (from review 2026-04-15)
+## Known Issues (from review 2026-04-20)
 
-- **Security**: file:read/save/delete accept arbitrary paths (no workspace validation)
 - **Bug**: electron pinned to "latest" (non-reproducible builds)
-- **Bug**: closeTab doesn't warn about unsaved changes
 - **Perf**: renderResults creates DOM for up to 10k rows (no virtual scroll)
 - **Missing**: no query timeout, no query cancellation, no file watcher, single pg.Client blocks on long queries
 

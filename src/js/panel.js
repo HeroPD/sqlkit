@@ -43,6 +43,19 @@ export function clearMessages() {
   renderMessages()
 }
 
+export function resetPanelState() {
+  state.isRunning = false
+  clearMessages()
+  switchPanel('results')
+  el.resultsThead.replaceChildren()
+  el.resultsTbody.replaceChildren()
+  el.resultsScroll.hidden = true
+  el.resultsEmpty.textContent = 'Run a query to see results'
+  el.resultsEmpty.style.display = ''
+  el.resultsEmpty.style.color = ''
+  el.statusInfo.textContent = ''
+}
+
 function renderMessages() {
   if (state.messages.length === 0) {
     el.messagesEmpty.style.display = ''

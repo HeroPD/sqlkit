@@ -2,6 +2,20 @@ import { state, el, ENGINE_DEFAULTS, esc, setConnStatus, setStatusConnection, se
 import { switchTab, createNewTab, renderTabs, updateLineNumbers } from './editor.js'
 import { addMessage, runQuery } from './panel.js'
 
+function getTableKey(t) {
+  return `${t.schema}.${t.name}`
+}
+
+function quoteIdentifier(name) {
+  return `"${String(name).replace(/"/g, '""')}"`
+}
+
+export function findTableTreeItem(table) {
+  return Array.from(el.tableTree.querySelectorAll('.tree-item')).find(item => (
+    item.dataset.schema === table.schema && item.dataset.name === table.name
+  ))
+}
+
 // ── Engine Selection ─────────────────────────────────────────────────────────
 
 el.engineBtns.forEach(btn => {
@@ -74,7 +88,7 @@ export async function connect() {
   state.isConnecting = false
 }
 
-export async function disconnect() {
+export async function disconnect(silent = false) {
   await window.sqlkit.disconnect()
   state.connected = false
   state.selectedTable = null
@@ -89,7 +103,7 @@ export async function disconnect() {
   el.tableEmpty.style.display = ''
   setConnStatus('Disconnected', '')
   setStatusDisconnected()
-  addMessage('info', 'Disconnected')
+  if (!silent) addMessage('info', 'Disconnected')
 }
 
 function saveConnectionConfig(profile) {
@@ -245,13 +259,15 @@ export function selectTable(t, itemEl) {
 }
 
 async function toggleTableExpand(t, itemEl) {
-  const key = `${t.schema}.${t.name}`
+  const key = getTableKey(t)
   const chevron = itemEl.querySelector('.tree-chevron')
 
   if (state.expandedTables.has(key)) {
     state.expandedTables.delete(key)
     chevron.classList.remove('expanded')
-    el.tableTree.querySelectorAll(`.tree-column[data-parent="${key}"]`).forEach(e => e.remove())
+    Array.from(el.tableTree.querySelectorAll('.tree-column'))
+      .filter(e => e.dataset.parent === key)
+      .forEach(e => e.remove())
   } else {
     state.expandedTables.add(key)
     chevron.classList.add('expanded')
@@ -284,7 +300,7 @@ export async function browseTable(t) {
   if (state.tabs.length === 0) createNewTab()
   const tab = state.tabs.find(tb => tb.id === state.activeTabId)
   if (tab) {
-    tab.content = `SELECT * FROM "${t.schema}"."${t.name}" LIMIT 200`
+    tab.content = `SELECT * FROM ${quoteIdentifier(t.schema)}.${quoteIdentifier(t.name)} LIMIT 200`
     tab.modified = true
     el.queryEditor.value = tab.content
     updateLineNumbers()

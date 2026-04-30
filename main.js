@@ -8,6 +8,7 @@ let mainWindow
 let dbClient = null
 let dbEngine = null
 let currentWorkspace = null
+let allowWindowClose = false
 
 // ── Global Config ─────────────────────────────────────────────────────────────
 const GLOBAL_CONFIG_PATH = path.join(app.getPath('userData'), 'config.json')
@@ -39,33 +40,98 @@ function writeWorkspaceConfig(wsPath, config) {
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config, null, 2))
 }
 
-function openWorkspace(wsPath) {
-  fs.mkdirSync(path.join(wsPath, '.sqlkit'), { recursive: true })
-  currentWorkspace = wsPath
+async function closeDbClient() {
+  if (!dbClient) return
+  try { await dbClient.end() } catch (_) {}
+  dbClient = null
+  dbEngine = null
+}
+
+function isDirectoryPath(targetPath) {
+  try {
+    return fs.statSync(targetPath).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function isPathInside(parentPath, targetPath) {
+  const rel = path.relative(path.resolve(parentPath), path.resolve(targetPath))
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+function validateWorkspaceFilePath(filePath) {
+  if (!currentWorkspace) return { success: false, error: 'No workspace open' }
+  if (!filePath) return { success: false, error: 'File path is required' }
+
+  const resolvedPath = path.resolve(filePath)
+  const workspacePath = path.resolve(currentWorkspace)
+
+  if (!isPathInside(workspacePath, resolvedPath)) {
+    return { success: false, error: 'File must be inside the current workspace' }
+  }
+
+  if (path.dirname(resolvedPath) !== workspacePath) {
+    return { success: false, error: 'Only SQL files in the workspace root are supported' }
+  }
+
+  if (path.extname(resolvedPath).toLowerCase() !== '.sql') {
+    return { success: false, error: 'Only .sql files are supported' }
+  }
+
+  return { success: true, path: resolvedPath }
+}
+
+function validateNewFileName(name) {
+  if (!currentWorkspace) return { success: false, error: 'No workspace open' }
+
+  const trimmedName = String(name || '').trim()
+  if (!trimmedName) return { success: false, error: 'File name cannot be empty' }
+  if (trimmedName !== path.basename(trimmedName) || trimmedName.includes('/') || trimmedName.includes('\\')) {
+    return { success: false, error: 'File name must not include folders' }
+  }
+
+  const fileName = trimmedName.toLowerCase().endsWith('.sql') ? trimmedName : trimmedName + '.sql'
+  const pathValidation = validateWorkspaceFilePath(path.join(currentWorkspace, fileName))
+  if (!pathValidation.success) return pathValidation
+
+  return { success: true, name: fileName, path: pathValidation.path }
+}
+
+async function openWorkspace(wsPath) {
+  if (!isDirectoryPath(wsPath)) throw new Error('Directory not found')
+
+  const resolvedWorkspacePath = path.resolve(wsPath)
+  const isSwitchingWorkspace = !currentWorkspace || path.resolve(currentWorkspace) !== resolvedWorkspacePath
+
+  if (isSwitchingWorkspace) await closeDbClient()
+  fs.mkdirSync(path.join(resolvedWorkspacePath, '.sqlkit'), { recursive: true })
+  currentWorkspace = resolvedWorkspacePath
 
   const config = readGlobalConfig()
-  config.recentWorkspaces = (config.recentWorkspaces || []).filter(w => w.path !== wsPath)
+  config.recentWorkspaces = (config.recentWorkspaces || []).filter(w => path.resolve(w.path) !== resolvedWorkspacePath)
   config.recentWorkspaces.unshift({
-    path: wsPath,
-    name: path.basename(wsPath),
+    path: resolvedWorkspacePath,
+    name: path.basename(resolvedWorkspacePath),
     lastOpened: new Date().toISOString()
   })
   config.recentWorkspaces = config.recentWorkspaces.slice(0, 10)
-  config.lastWorkspace = wsPath
+  config.lastWorkspace = resolvedWorkspacePath
   writeGlobalConfig(config)
 
-  if (mainWindow) mainWindow.setTitle(`SqlKit — ${path.basename(wsPath)}`)
+  if (mainWindow) mainWindow.setTitle(`SqlKit — ${path.basename(resolvedWorkspacePath)}`)
 
   return {
     success: true,
-    path: wsPath,
-    name: path.basename(wsPath),
-    config: readWorkspaceConfig(wsPath)
+    path: resolvedWorkspacePath,
+    name: path.basename(resolvedWorkspacePath),
+    config: readWorkspaceConfig(resolvedWorkspacePath)
   }
 }
 
 // ── Window ────────────────────────────────────────────────────────────────────
 function createWindow() {
+  allowWindowClose = false
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -85,6 +151,17 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'))
 
+  mainWindow.on('close', (event) => {
+    if (allowWindowClose) return
+    event.preventDefault()
+    mainWindow.webContents.send('app:request-close')
+  })
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+    allowWindowClose = false
+  })
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show()
   })
@@ -102,9 +179,13 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', async () => {
-  if (dbClient) {
-    try { await dbClient.end() } catch (_) {}
-  }
+  await closeDbClient()
+})
+
+ipcMain.on('app:confirm-close-response', (_event, shouldClose) => {
+  if (!shouldClose || !mainWindow || mainWindow.isDestroyed()) return
+  allowWindowClose = true
+  mainWindow.close()
 })
 
 // ── Workspace IPC ─────────────────────────────────────────────────────────────
@@ -116,23 +197,31 @@ ipcMain.handle('workspace:open', async () => {
     buttonLabel: 'Open'
   })
   if (result.canceled) return { success: false, canceled: true }
-  return openWorkspace(result.filePaths[0])
+  try {
+    return await openWorkspace(result.filePaths[0])
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
 })
 
 ipcMain.handle('workspace:open-path', async (_event, wsPath) => {
-  if (!fs.existsSync(wsPath)) return { success: false, error: 'Directory not found' }
-  return openWorkspace(wsPath)
+  if (!isDirectoryPath(wsPath)) return { success: false, error: 'Directory not found' }
+  try {
+    return await openWorkspace(wsPath)
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
 })
 
 ipcMain.handle('workspace:get-recent', async () => {
   const config = readGlobalConfig()
-  const workspaces = (config.recentWorkspaces || []).filter(w => fs.existsSync(w.path))
+  const workspaces = (config.recentWorkspaces || []).filter(w => isDirectoryPath(w.path))
   return { success: true, workspaces }
 })
 
 ipcMain.handle('workspace:get-last', async () => {
   const config = readGlobalConfig()
-  if (config.lastWorkspace && fs.existsSync(config.lastWorkspace)) {
+  if (config.lastWorkspace && isDirectoryPath(config.lastWorkspace)) {
     return { success: true, path: config.lastWorkspace }
   }
   return { success: false }
@@ -164,7 +253,7 @@ ipcMain.handle('file:list', async () => {
   if (!currentWorkspace) return { success: false, error: 'No workspace' }
   try {
     const files = fs.readdirSync(currentWorkspace)
-      .filter(f => f.endsWith('.sql'))
+      .filter(f => path.extname(f).toLowerCase() === '.sql')
       .map(f => ({
         name: f,
         path: path.join(currentWorkspace, f),
@@ -178,39 +267,48 @@ ipcMain.handle('file:list', async () => {
 })
 
 ipcMain.handle('file:read', async (_event, filePath) => {
+  const validation = validateWorkspaceFilePath(filePath)
+  if (!validation.success) return validation
+
   try {
-    const content = fs.readFileSync(filePath, 'utf8')
-    return { success: true, content, name: path.basename(filePath), path: filePath }
+    const content = fs.readFileSync(validation.path, 'utf8')
+    return { success: true, content, name: path.basename(validation.path), path: validation.path }
   } catch (err) {
     return { success: false, error: err.message }
   }
 })
 
 ipcMain.handle('file:save', async (_event, filePath, content) => {
+  const validation = validateWorkspaceFilePath(filePath)
+  if (!validation.success) return validation
+
   try {
-    fs.writeFileSync(filePath, content, 'utf8')
-    return { success: true, path: filePath, name: path.basename(filePath) }
+    fs.writeFileSync(validation.path, content, 'utf8')
+    return { success: true, path: validation.path, name: path.basename(validation.path) }
   } catch (err) {
     return { success: false, error: err.message }
   }
 })
 
 ipcMain.handle('file:save-new', async (_event, name, content) => {
-  if (!currentWorkspace) return { success: false, error: 'No workspace open' }
-  const fileName = name.endsWith('.sql') ? name : name + '.sql'
-  const filePath = path.join(currentWorkspace, fileName)
-  if (fs.existsSync(filePath)) return { success: false, error: `File "${fileName}" already exists` }
+  const validation = validateNewFileName(name)
+  if (!validation.success) return validation
+  if (fs.existsSync(validation.path)) return { success: false, error: `File "${validation.name}" already exists` }
+
   try {
-    fs.writeFileSync(filePath, content, 'utf8')
-    return { success: true, path: filePath, name: fileName }
+    fs.writeFileSync(validation.path, content, 'utf8')
+    return { success: true, path: validation.path, name: validation.name }
   } catch (err) {
     return { success: false, error: err.message }
   }
 })
 
 ipcMain.handle('file:delete', async (_event, filePath) => {
+  const validation = validateWorkspaceFilePath(filePath)
+  if (!validation.success) return validation
+
   try {
-    fs.unlinkSync(filePath)
+    fs.unlinkSync(validation.path)
     return { success: true }
   } catch (err) {
     return { success: false, error: err.message }
@@ -220,11 +318,7 @@ ipcMain.handle('file:delete', async (_event, filePath) => {
 // ── Database IPC ──────────────────────────────────────────────────────────────
 
 ipcMain.handle('db:connect', async (_event, profile) => {
-  if (dbClient) {
-    try { await dbClient.end() } catch (_) {}
-    dbClient = null
-    dbEngine = null
-  }
+  await closeDbClient()
 
   if (profile.engine !== 'postgresql') {
     const name = profile.engine === 'mysql' ? 'MySQL' : 'SQL Server'
@@ -261,11 +355,7 @@ ipcMain.handle('db:connect', async (_event, profile) => {
 })
 
 ipcMain.handle('db:disconnect', async () => {
-  if (dbClient) {
-    try { await dbClient.end() } catch (_) {}
-    dbClient = null
-    dbEngine = null
-  }
+  await closeDbClient()
   return { success: true }
 })
 
