@@ -1,0 +1,39 @@
+appId: mn.opl.sqlkit
+productName: sqlkit
+
+directories:
+  output: release
+  buildResources: build
+
+# Only the compiled output goes into the asar. Renderer dependencies (lit)
+# are bundled by Vite, so they live in devDependencies and are not packed.
+files:
+  - dist/**
+  - dist-electron/**
+
+# Strip Chromium locale files for languages the app does not ship.
+electronLanguages:
+  - en
+  - en-US
+
+# bzip2 compresses the dmg better than the default lzfse, at the cost of a
+# slower build and slower mount on first open.
+dmg:
+  format: UDBZ
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+
+win:
+  target:
+    - nsis
+
+linux:
+  target:
+    - AppImage
+  category: Development

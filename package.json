@@ -1,0 +1,24 @@
+{
+  "name": "sqlkit",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SQL toolkit desktop app",
+  "author": "Munkhbaatar <munkhbaatar@opl.mn>",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "electron": "npm run build && electron .",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^42.3.3",
+    "electron-builder": "^26.15.2",
+    "lit": "^3.3.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.12"
+  }
+}
