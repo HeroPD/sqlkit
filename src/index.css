@@ -1,24 +1,79 @@
+/* ── Theme tokens (VS Code Dark+, ported from the SqlKit reference) ────────── */
 :root {
-  color-scheme: light dark;
-  background-color: #ffffff;
+  color-scheme: dark;
+
+  --mono-font: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+  --ui-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+  /* Type scale — base 13px + small + two heading steps. Use these tokens
+     instead of hardcoding px so text, controls, and titles scale together. */
+  --font-size: 13px;      /* body, controls, list/tree rows */
+  --font-size-sm: 11px;   /* helpers, meta, tags, keybinds */
+  --font-size-xl: 18px;   /* inline / empty-state headings */
+  --font-size-2xl: 22px;  /* page & brand titles */
+
+  /* Control sizing — inputs, selects, and form buttons share one height. */
+  --control-h: 28px;
+
+  /* Layout */
+  --titlebar-h: 38px;
+  --activity-bar-w: 48px;
+  --sidebar-w: 280px;
+  --tab-h: 35px;
+  --panel-header-h: 35px;
+  --status-bar-h: 22px;
+
+  --bg: #0f1117;
+  --sidebar-bg: #141821;
+  --activity-bar-bg: #0b0d12;
+  --activity-bar-fg: #ffffff;
+  --activity-bar-inactive: #7f8794;
+  --titlebar-bg: #11141b;
+  --titlebar-fg: #d7dce5;
+  --editor-bg: #0f1117;
+  --editor-fg: #dce1ea;
+  --status-bar-bg: #007acc;
+  --status-bar-fg: #ffffff;
+  --status-bar-disconnected: #68217a;
+  --status-dot-connected: #73e05a;
+  --border: #2a3140;
+  --border-subtle: #202735;
+  --text: #d7dce5;
+  --text-2: #9aa4b2;
+  --text-3: #687386;
+  --accent: #007acc;
+  --accent-hover: #1177bb;
+  --on-accent: #ffffff;
+  --focus-border: #007acc;
+  --input-bg: #181d27;
+  --input-border: #2a3140;
+  --input-fg: #d7dce5;
+  --btn-bg: #0e639c;
+  --btn-hover: #1177bb;
+  --btn-fg: #ffffff;
+  --btn-secondary-bg: #1d2430;
+  --btn-secondary-hover: #263044;
+  --btn-secondary-fg: #d7dce5;
+  --list-hover: #1a2030;
+  --list-selection: #123a5c;
+  --list-selection-fg: #ffffff;
+  --scrollbar-thumb: rgba(121, 121, 121, 0.4);
+  --scrollbar-thumb-hover: rgba(100, 100, 100, 0.7);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    background-color: #16171d;
-  }
+html,
+body {
+  height: 100%;
 }
 
 body {
   margin: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-width: 320px;
-  min-height: 100svh;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: var(--font-size) / 1.4 var(--ui-font);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overflow-x: hidden;
 }
