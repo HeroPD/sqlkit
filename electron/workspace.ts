@@ -1,11 +1,40 @@
 import { app } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { RecentWorkspace, WorkspaceResult } from '../src/electron'
+import type { RecentWorkspace, SaveResult, WorkspaceConfig, WorkspaceResult } from '../src/electron'
 
 type GlobalConfig = {
   recentWorkspaces: RecentWorkspace[]
   lastWorkspace: string | null
+}
+
+// The workspace the renderer currently has open; set by openWorkspace and
+// used by the per-workspace config read/write.
+let currentWorkspace: string | null = null
+
+const defaultWorkspaceConfig = (): WorkspaceConfig => ({ version: 1, connections: [] })
+
+const workspaceConfigPathFor = (wsPath: string) => path.join(wsPath, '.sqlkit', 'config.json')
+
+export function readWorkspaceConfig(): WorkspaceConfig {
+  if (!currentWorkspace) return defaultWorkspaceConfig()
+  try {
+    const raw = JSON.parse(fs.readFileSync(workspaceConfigPathFor(currentWorkspace), 'utf8')) as Partial<WorkspaceConfig>
+    return { ...defaultWorkspaceConfig(), ...raw }
+  } catch {
+    return defaultWorkspaceConfig()
+  }
+}
+
+export function writeWorkspaceConfig(config: WorkspaceConfig): SaveResult {
+  if (!currentWorkspace) return { success: false, error: 'No workspace open' }
+  try {
+    fs.mkdirSync(path.join(currentWorkspace, '.sqlkit'), { recursive: true })
+    fs.writeFileSync(workspaceConfigPathFor(currentWorkspace), JSON.stringify(config, null, 2))
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
 }
 
 const globalConfigPath = () => path.join(app.getPath('userData'), 'config.json')
@@ -42,10 +71,11 @@ export function openWorkspace(wsPath: string): WorkspaceResult {
   const sqlkitDir = path.join(workspacePath, '.sqlkit')
   fs.mkdirSync(sqlkitDir, { recursive: true })
 
-  const workspaceConfigPath = path.join(sqlkitDir, 'config.json')
+  const workspaceConfigPath = workspaceConfigPathFor(workspacePath)
   if (!fs.existsSync(workspaceConfigPath)) {
-    fs.writeFileSync(workspaceConfigPath, JSON.stringify({ version: 1 }, null, 2))
+    fs.writeFileSync(workspaceConfigPath, JSON.stringify(defaultWorkspaceConfig(), null, 2))
   }
+  currentWorkspace = workspacePath
 
   const name = path.basename(workspacePath)
   const config = readGlobalConfig()

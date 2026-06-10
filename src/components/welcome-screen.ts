@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { codicons, typography } from '../shared-styles'
+import { codicons, controls, typography } from '../shared-styles'
 import type { RecentWorkspace } from '../electron'
 
 // Welcome view: brand, start actions, and the recent-workspace list (passed
@@ -56,6 +56,7 @@ export class WelcomeScreen extends LitElement {
 
   static styles = [
     typography,
+    controls,
     codicons,
     css`
       :host {
@@ -88,30 +89,7 @@ export class WelcomeScreen extends LitElement {
         margin-bottom: 8px;
       }
 
-      .link {
-        display: block;
-        width: 100%;
-        padding: 6px 10px;
-        font-family: inherit;
-        font-size: var(--font-size);
-        color: var(--accent);
-        background: transparent;
-        border: none;
-        border-radius: 3px;
-        text-align: left;
-        cursor: pointer;
-      }
-
-      .link:hover {
-        background: var(--list-hover);
-      }
-
-      .link:focus-visible {
-        outline: 1px solid var(--focus-border);
-      }
-
-      .recent {
-        display: flex;
+      button.link.recent {
         align-items: baseline;
         gap: 8px;
         min-width: 0;

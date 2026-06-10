@@ -64,6 +64,7 @@
   --list-selection-fg: #ffffff;
   --scrollbar-thumb: rgba(121, 121, 121, 0.4);
   --scrollbar-thumb-hover: rgba(100, 100, 100, 0.7);
+  --resize-hover: var(--accent);
 }
 
 html,

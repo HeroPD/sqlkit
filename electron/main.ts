@@ -1,7 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isDirectory, openWorkspace, readGlobalConfig } from './workspace'
+import {
+  isDirectory,
+  openWorkspace,
+  readGlobalConfig,
+  readWorkspaceConfig,
+  writeWorkspaceConfig,
+} from './workspace'
+import type { WorkspaceConfig } from '../src/electron'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
@@ -70,6 +77,10 @@ function registerWorkspaceIpc() {
   ipcMain.handle('workspace:get-recent', () => {
     return readGlobalConfig().recentWorkspaces.filter((workspace) => isDirectory(workspace.path))
   })
+
+  ipcMain.handle('workspace:get-config', () => readWorkspaceConfig())
+
+  ipcMain.handle('workspace:save-config', (_event, config: WorkspaceConfig) => writeWorkspaceConfig(config))
 }
 
 app.whenReady().then(() => {
