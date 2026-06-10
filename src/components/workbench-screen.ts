@@ -1,5 +1,5 @@
 import { LitElement, css, html } from 'lit'
-import { customElement } from 'lit/decorators.js'
+import { customElement, property } from 'lit/decorators.js'
 import { typography } from '../shared-styles'
 
 // Blank workbench shell: an empty editor area over the status bar. The real
@@ -7,6 +7,9 @@ import { typography } from '../shared-styles'
 // `close-workspace` intent; <app-root> owns the screen switch.
 @customElement('workbench-screen')
 export class WorkbenchScreen extends LitElement {
+  @property({ attribute: false })
+  workspace: { name: string; path: string } | null = null
+
   render() {
     return html`
       <div class="body">
@@ -16,14 +19,14 @@ export class WorkbenchScreen extends LitElement {
             <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
             <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" />
           </svg>
-          <h2>Workbench</h2>
-          <p class="muted">No files or connections yet.</p>
+          <h2>${this.workspace?.name ?? 'Workbench'}</h2>
+          <p class="muted">${this.workspace?.path ?? 'No workspace open.'}</p>
           <button class="secondary" @click=${this._onCloseWorkspace}>Close Workspace</button>
         </div>
       </div>
 
       <footer class="status-bar">
-        <span>SqlKit</span>
+        <span>${this.workspace?.name ?? 'SqlKit'}</span>
         <span class="spacer"></span>
         <span>Not connected</span>
       </footer>

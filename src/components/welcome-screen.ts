@@ -1,11 +1,16 @@
 import { LitElement, css, html } from 'lit'
-import { customElement } from 'lit/decorators.js'
+import { customElement, property } from 'lit/decorators.js'
 import { typography } from '../shared-styles'
+import type { RecentWorkspace } from '../electron'
 
-// Welcome view: brand + start actions. The screen is dumb — it dispatches an
-// `open-folder` intent and <app-root> decides what opening a workspace does.
+// Welcome view: brand, start actions, and the recent-workspace list (passed
+// down by <app-root>). The screen is dumb — it dispatches `open-folder` /
+// `open-recent` intents and <app-root> decides what opening a workspace does.
 @customElement('welcome-screen')
 export class WelcomeScreen extends LitElement {
+  @property({ attribute: false })
+  recents: RecentWorkspace[] = []
+
   render() {
     return html`
       <div class="inner">
@@ -23,12 +28,34 @@ export class WelcomeScreen extends LitElement {
           <h3>Start</h3>
           <button class="link" @click=${this._onOpenFolder}>Open Folder...</button>
         </div>
+
+        ${this.recents.length
+          ? html`
+              <div class="section">
+                <h3>Recent</h3>
+                ${this.recents.map(
+                  (workspace) => html`
+                    <button class="link recent" title=${workspace.path} @click=${() => this._onOpenRecent(workspace)}>
+                      <span class="name">${workspace.name}</span>
+                      <span class="path">${workspace.path}</span>
+                    </button>
+                  `,
+                )}
+              </div>
+            `
+          : ''}
       </div>
     `
   }
 
   private _onOpenFolder() {
     this.dispatchEvent(new CustomEvent('open-folder', { bubbles: true, composed: true }))
+  }
+
+  private _onOpenRecent(workspace: RecentWorkspace) {
+    this.dispatchEvent(
+      new CustomEvent('open-recent', { detail: { path: workspace.path }, bubbles: true, composed: true }),
+    )
   }
 
   static styles = [
@@ -85,6 +112,25 @@ export class WelcomeScreen extends LitElement {
 
       .link:focus-visible {
         outline: 1px solid var(--focus-border);
+      }
+
+      .recent {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .recent .name {
+        flex: none;
+      }
+
+      .recent .path {
+        color: var(--text-3);
+        font-size: var(--font-size-sm);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
     `,
   ]
