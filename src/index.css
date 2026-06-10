@@ -1,3 +1,7 @@
+/* Registers the codicon @font-face globally; the .codicon classes are also
+   composed into shadow roots via the `codicons` module in shared-styles.ts. */
+@import './codicons/codicon.css';
+
 /* ── Theme tokens (VS Code Dark+, ported from the SqlKit reference) ────────── */
 :root {
   color-scheme: dark;
@@ -28,6 +32,7 @@
   --activity-bar-bg: #0b0d12;
   --activity-bar-fg: #ffffff;
   --activity-bar-inactive: #7f8794;
+  --activity-bar-indicator: #ffffff;
   --titlebar-bg: #11141b;
   --titlebar-fg: #d7dce5;
   --editor-bg: #0f1117;

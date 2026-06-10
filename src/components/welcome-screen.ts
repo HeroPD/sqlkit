@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { typography } from '../shared-styles'
+import { codicons, typography } from '../shared-styles'
 import type { RecentWorkspace } from '../electron'
 
 // Welcome view: brand, start actions, and the recent-workspace list (passed
@@ -15,11 +15,7 @@ export class WelcomeScreen extends LitElement {
     return html`
       <div class="inner">
         <div class="brand">
-          <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-            <ellipse cx="12" cy="5" rx="8" ry="3" />
-            <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
-            <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" />
-          </svg>
+          <i class="codicon codicon-database logo" aria-hidden="true"></i>
           <h1>SqlKit</h1>
           <p class="muted">SQL Database Explorer</p>
         </div>
@@ -60,6 +56,7 @@ export class WelcomeScreen extends LitElement {
 
   static styles = [
     typography,
+    codicons,
     css`
       :host {
         align-items: center;
@@ -81,9 +78,8 @@ export class WelcomeScreen extends LitElement {
         text-align: center;
       }
 
-      .logo {
-        width: 56px;
-        height: 56px;
+      .codicon.logo {
+        font-size: 56px;
         color: var(--accent);
         margin-bottom: 4px;
       }

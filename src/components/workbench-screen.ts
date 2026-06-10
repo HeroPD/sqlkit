@@ -1,27 +1,60 @@
 import { LitElement, css, html } from 'lit'
-import { customElement, property } from 'lit/decorators.js'
-import { typography } from '../shared-styles'
+import { customElement, property, state } from 'lit/decorators.js'
+import { codicons, typography } from '../shared-styles'
+import './activity-button'
 
-// Blank workbench shell: an empty editor area over the status bar. The real
-// regions (activity bar, sidebar, editor, panel) land here later. Dispatches a
-// `close-workspace` intent; <app-root> owns the screen switch.
+const VIEWS = [
+  { id: 'explorer', title: 'Explorer', icon: 'codicon-files', hint: 'No files yet.' },
+  { id: 'search', title: 'Search', icon: 'codicon-search', hint: 'Search across your SQL files.' },
+  { id: 'databases', title: 'Databases', icon: 'codicon-database', hint: 'No database connections yet.' },
+  { id: 'history', title: 'History', icon: 'codicon-history', hint: 'No query history yet.' },
+  { id: 'tasks', title: 'Tasks', icon: 'codicon-checklist', hint: 'No running jobs.' },
+] as const
+
+type ViewId = (typeof VIEWS)[number]['id']
+
+// Workbench shell: activity bar + switchable sidebar + editor area over the
+// status bar. Clicking an activity button shows its view; clicking the active
+// one hides the sidebar (reference behavior). Dispatches a `close-workspace`
+// intent; <app-root> owns the screen switch.
 @customElement('workbench-screen')
 export class WorkbenchScreen extends LitElement {
   @property({ attribute: false })
   workspace: { name: string; path: string } | null = null
 
+  @state()
+  private _activeView: ViewId | null = 'explorer'
+
   render() {
+    const activeView = VIEWS.find((view) => view.id === this._activeView)
     return html`
       <div class="body">
-        <div class="empty">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-            <ellipse cx="12" cy="5" rx="8" ry="3" />
-            <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
-            <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" />
-          </svg>
-          <h2>${this.workspace?.name ?? 'Workbench'}</h2>
-          <p class="muted">${this.workspace?.path ?? 'No workspace open.'}</p>
-          <button class="secondary" @click=${this._onCloseWorkspace}>Close Workspace</button>
+        <nav class="activity-bar" @activity-select=${this._onActivitySelect}>
+          ${VIEWS.map(
+            (view) => html`
+              <activity-button view=${view.id} title=${view.title} .active=${view.id === this._activeView}>
+                <i class="codicon ${view.icon}" aria-hidden="true"></i>
+              </activity-button>
+            `,
+          )}
+        </nav>
+
+        ${activeView
+          ? html`
+              <aside class="sidebar">
+                <div class="sidebar-title">${activeView.title}</div>
+                <p class="muted hint">${activeView.hint}</p>
+              </aside>
+            `
+          : ''}
+
+        <div class="editor-area">
+          <div class="empty">
+            <i class="codicon codicon-database" aria-hidden="true"></i>
+            <h2>${this.workspace?.name ?? 'Workbench'}</h2>
+            <p class="muted">${this.workspace?.path ?? 'No workspace open.'}</p>
+            <button class="secondary" @click=${this._onCloseWorkspace}>Close Workspace</button>
+          </div>
         </div>
       </div>
 
@@ -33,12 +66,18 @@ export class WorkbenchScreen extends LitElement {
     `
   }
 
+  private _onActivitySelect(event: Event) {
+    const { view } = (event as CustomEvent<{ view: ViewId }>).detail
+    this._activeView = this._activeView === view ? null : view
+  }
+
   private _onCloseWorkspace() {
     this.dispatchEvent(new CustomEvent('close-workspace', { bubbles: true, composed: true }))
   }
 
   static styles = [
     typography,
+    codicons,
     css`
       :host {
         flex-direction: column;
@@ -48,10 +87,59 @@ export class WorkbenchScreen extends LitElement {
       .body {
         flex: 1;
         display: flex;
+        min-height: 0;
+      }
+
+      .activity-bar {
+        width: var(--activity-bar-w);
+        background: var(--activity-bar-bg);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding-top: 4px;
+        flex-shrink: 0;
+        border-right: 1px solid var(--border);
+      }
+
+      .activity-bar .codicon {
+        font-size: 24px;
+      }
+
+      .sidebar {
+        width: var(--sidebar-w);
+        min-width: 170px;
+        background: var(--sidebar-bg);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        flex-shrink: 0;
+      }
+
+      .sidebar-title {
+        height: 35px;
+        display: flex;
+        align-items: center;
+        padding: 0 20px;
+        font-size: var(--font-size-sm);
+        color: var(--text);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        user-select: none;
+        flex-shrink: 0;
+      }
+
+      .sidebar .hint {
+        padding: 0 20px;
+      }
+
+      .editor-area {
+        flex: 1;
+        display: flex;
         align-items: center;
         justify-content: center;
         background: var(--editor-bg);
-        min-height: 0;
+        min-width: 0;
       }
 
       .empty {
@@ -62,15 +150,14 @@ export class WorkbenchScreen extends LitElement {
         text-align: center;
       }
 
-      .empty p {
-        margin-bottom: 12px;
-      }
-
-      .icon {
-        width: 40px;
-        height: 40px;
+      .empty .codicon {
+        font-size: 40px;
         color: var(--text-3);
         margin-bottom: 4px;
+      }
+
+      .empty p {
+        margin-bottom: 12px;
       }
 
       .secondary {
