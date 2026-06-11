@@ -274,6 +274,29 @@ const baseKeymap = keymap.of([
 // silently loses to One Dark's rules.
 const themeExtensions = [appTheme, oneDarkTheme, syntaxHighlighting(softHighlightStyle), EditorView.lineWrapping]
 
+// Words that can follow a table reference without being its alias.
+const ALIAS_STOPWORDS = new Set([
+  'as', 'where', 'on', 'join', 'left', 'right', 'inner', 'outer', 'cross', 'full', 'natural',
+  'group', 'order', 'limit', 'offset', 'having', 'union', 'intersect', 'except', 'set',
+  'using', 'returning', 'values', 'select', 'from', 'into', 'and', 'or', 'not', 'when',
+  'then', 'else', 'end', 'case', 'by', 'asc', 'desc', 'for', 'with', 'window',
+])
+
+// Finds what table `alias` is bound to in FROM/JOIN/UPDATE/INTO clauses
+// (`from postings p`, `join users as u`, old-style `from a x, b y`). Returns
+// the bare table name (schema stripped), or null when the alias is unbound.
+function findAliasTarget(sql: string, alias: string): string | null {
+  const pattern = /\b(?:from|join|update|into|,)\s*([a-z_][\w$]*(?:\.[a-z_][\w$]*)?)\s+(?:as\s+)?([a-z_][\w$]*)/gi
+  for (const match of sql.matchAll(pattern)) {
+    const candidate = match[2].toLowerCase()
+    if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
+    const table = match[1].toLowerCase()
+    const dot = table.lastIndexOf('.')
+    return dot >= 0 ? table.slice(dot + 1) : table
+  }
+  return null
+}
+
 @customElement('sql-editor')
 export class SqlEditor extends LitElement {
   @property()
@@ -522,11 +545,21 @@ export class SqlEditor extends LitElement {
     return ifNotIn(
       ['String', 'LineComment', 'BlockComment'],
       (context: CompletionContext) => {
-        // `table.` completes that table's columns only.
+        // `x.` completes columns of the table x names — directly, through a
+        // FROM/JOIN alias, or as a unique prefix of one table name.
         const dotted = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_]*/)
         if (dotted) {
           const dot = dotted.text.indexOf('.')
-          const tableColumns = columnsByTable.get(dotted.text.slice(0, dot).toLowerCase())
+          const prefix = dotted.text.slice(0, dot).toLowerCase()
+          let tableColumns = columnsByTable.get(prefix)
+          if (!tableColumns) {
+            const aliased = findAliasTarget(context.state.doc.toString(), prefix)
+            if (aliased) tableColumns = columnsByTable.get(aliased)
+          }
+          if (!tableColumns) {
+            const candidates = [...columnsByTable.keys()].filter((table) => table.startsWith(prefix))
+            if (candidates.length === 1) tableColumns = columnsByTable.get(candidates[0])
+          }
           if (!tableColumns) return null
           const typedColumn = dotted.text.slice(dot + 1).toLowerCase()
           const options = tableColumns.filter((option) => option.label.toLowerCase().startsWith(typedColumn))

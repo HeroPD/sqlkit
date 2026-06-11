@@ -1,10 +1,56 @@
 // @vitest-environment jsdom
 import { beforeAll, expect, test } from 'vitest'
+import { startCompletion, completionStatus } from '@codemirror/autocomplete'
+import type { EditorView } from '@codemirror/view'
 import { stubEditorLayout } from '../test/dom-stubs'
 import './sql-editor'
 import type { SqlEditor } from './sql-editor'
 
 beforeAll(stubEditorLayout)
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// Opens completion at the end of `doc` and returns the option labels.
+async function completionsAt(doc: string) {
+  const el = document.createElement('sql-editor') as SqlEditor
+  el.tabId = `completion:${doc}`
+  el.value = doc
+  el.tables = ['postings', 'users']
+  el.columns = [
+    { schema: null, table: 'postings', name: 'id', dataType: 'integer', nullable: false, primaryKey: true },
+    { schema: null, table: 'postings', name: 'item_count', dataType: 'integer', nullable: true, primaryKey: false },
+    { schema: null, table: 'users', name: 'user_name', dataType: 'text', nullable: true, primaryKey: false },
+  ]
+  document.body.append(el)
+  await el.updateComplete
+  const view = (el as unknown as { _view: EditorView })._view
+  view.dispatch({ selection: { anchor: doc.length } })
+  startCompletion(view)
+  for (let i = 0; i < 20 && completionStatus(view.state) !== 'active'; i++) await sleep(25)
+  const labels = [...el.shadowRoot!.querySelectorAll('.cm-tooltip-autocomplete li .cm-completionLabel')].map(
+    (label) => label.textContent,
+  )
+  el.remove()
+  return labels
+}
+
+test('table. completes its columns', async () => {
+  expect(await completionsAt('SELECT * FROM postings WHERE postings.i')).toEqual(['id', 'item_count'])
+})
+
+test('FROM/JOIN alias resolves to the aliased table', async () => {
+  expect(await completionsAt('SELECT * FROM postings pg WHERE pg.i')).toEqual(['id', 'item_count'])
+  expect(await completionsAt('SELECT * FROM postings AS pg JOIN users u ON u.us')).toEqual(['user_name'])
+})
+
+test('unbound prefix falls back to the unique matching table', async () => {
+  expect(await completionsAt('SELECT * FROM postings WHERE p.i')).toEqual(['id', 'item_count'])
+})
+
+test('ambiguous or unknown prefix completes nothing', async () => {
+  // matches neither a table, an alias, nor a unique prefix
+  expect(await completionsAt('SELECT * FROM postings WHERE x.i')).toEqual([])
+})
 
 const text = (el: SqlEditor) => el.shadowRoot!.querySelector('.cm-content')!.textContent ?? ''
 
