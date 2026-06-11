@@ -6,18 +6,32 @@ const isSqlFile = (name: string) => path.extname(name).toLowerCase() === '.sql'
 
 const toRelative = (root: string, absPath: string) => path.relative(root, absPath).split(path.sep).join('/')
 
-function collectSqlFiles(root: string, dir: string, files: FileInfo[]): FileInfo[] {
-  const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.name !== '.sqlkit')
+// A context folder is one or two plain path segments inside the workspace:
+// the connection's folder, optionally followed by a child-database folder
+// (all-databases mode) — connection/child/file.sql.
+const isSafeSegment = (segment: string) => /^[\w][\w .-]*$/.test(segment) && segment !== '.sqlkit'
+
+export function resolveContextRoot(workspacePath: string, folder: string): string | null {
+  const segments = folder.split('/').filter(Boolean)
+  if (!segments.length || segments.length > 2 || !segments.every(isSafeSegment)) return null
+  return path.join(workspacePath, ...segments)
+}
+
+function collectFiles(root: string, dir: string, files: FileInfo[]): FileInfo[] {
+  // Dotfiles (.sqlkit, .DS_Store, .git…) stay out of the tree.
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => !entry.name.startsWith('.'))
 
   for (const entry of entries) {
     const entryPath = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       // Folders are listed too so empty ones still show in the tree.
       files.push({ type: 'folder', name: entry.name, path: entryPath, relativePath: toRelative(root, entryPath) })
-      collectSqlFiles(root, entryPath, files)
+      collectFiles(root, entryPath, files)
       continue
     }
-    if (!entry.isFile() || !isSqlFile(entry.name)) continue
+    if (!entry.isFile()) continue
+    // Every file type is listed (.sql opens in the editor; the rest open
+    // with the system's default app).
     files.push({ type: 'file', name: entry.name, path: entryPath, relativePath: toRelative(root, entryPath) })
   }
 
@@ -25,20 +39,19 @@ function collectSqlFiles(root: string, dir: string, files: FileInfo[]): FileInfo
 }
 
 // Lists one database context's folder, never the whole workspace — each
-// connection keeps its .sql files in its own subfolder so contexts don't mix.
-export function listSqlFiles(workspacePath: string | null, folder: string): FilesResult {
+// connection (and each child database) keeps its files in its own subfolder
+// so contexts don't mix.
+export function listWorkspaceFiles(workspacePath: string | null, folder: string): FilesResult {
   if (!workspacePath) return { success: false, error: 'No workspace open' }
-  if (!folder || folder.includes('/') || folder.includes('\\') || folder.startsWith('.')) {
-    return { success: false, error: 'Invalid database folder' }
-  }
+  const root = resolveContextRoot(workspacePath, folder)
+  if (!root) return { success: false, error: 'Invalid database folder' }
 
-  const root = path.join(workspacePath, folder)
-  // The folder is created when the profile is saved; a missing one (e.g. a
-  // hand-deleted directory) just lists as empty.
+  // Context folders are created on first save; a missing one (or a child
+  // folder that doesn't exist yet) just lists as empty.
   if (!fs.existsSync(root)) return { success: true, files: [] }
 
   try {
-    const files = collectSqlFiles(root, root, [])
+    const files = collectFiles(root, root, [])
     files.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
     return { success: true, files }
   } catch (error) {
@@ -91,11 +104,9 @@ export function saveWorkspaceFile(workspacePath: string | null, filePath: string
 // overwrite — creation comes from the Explorer's inline "new file" input.
 export function createWorkspaceFile(workspacePath: string | null, folder: string, relativePath: string): FileSaveResult {
   if (!workspacePath) return { success: false, error: 'No workspace open' }
-  if (!folder || folder.includes('/') || folder.includes('\\') || folder.startsWith('.')) {
-    return { success: false, error: 'Invalid database folder' }
-  }
+  const root = resolveContextRoot(workspacePath, folder)
+  if (!root) return { success: false, error: 'Invalid database folder' }
 
-  const root = path.join(workspacePath, folder)
   const resolved = path.resolve(root, relativePath)
   if (!resolved.startsWith(root + path.sep)) return { success: false, error: 'Files must stay inside the database folder' }
   if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
@@ -112,20 +123,21 @@ export function createWorkspaceFile(workspacePath: string | null, folder: string
   }
 }
 
-// Renames a .sql file within its directory; the new name is a bare filename,
-// never a path.
+// Renames a file within its directory; the new name is a bare filename,
+// never a path. A new name without an extension keeps the old one's, so
+// renaming "report.sql" to "monthly" yields "monthly.sql" — same for .xlsx.
 export function renameWorkspaceFile(workspacePath: string | null, filePath: string, newName: string): FileSaveResult {
   if (!workspacePath) return { success: false, error: 'No workspace open' }
 
   const resolved = path.resolve(filePath)
   if (!resolved.startsWith(workspacePath + path.sep)) return { success: false, error: 'File is outside the workspace' }
-  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be renamed' }
+  if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
 
   const trimmed = newName.trim()
   if (!trimmed || trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('.')) {
     return { success: false, error: 'Invalid file name' }
   }
-  const name = isSqlFile(trimmed) ? trimmed : `${trimmed}.sql`
+  const name = path.extname(trimmed) ? trimmed : `${trimmed}${path.extname(resolved)}`
   const target = path.join(path.dirname(resolved), name)
   if (target === resolved) return { success: true, path: resolved, name }
   if (fs.existsSync(target)) return { success: false, error: `${name} already exists` }
@@ -138,15 +150,14 @@ export function renameWorkspaceFile(workspacePath: string | null, filePath: stri
   }
 }
 
-/** Validates a delete target: a .sql file or a folder inside the workspace. */
-export function resolveDeletablePath(workspacePath: string | null, filePath: string): { path: string } | { error: string } {
+/** Validates a workspace file/folder path for delete or open-external. */
+export function resolveWorkspaceItem(workspacePath: string | null, filePath: string): { path: string } | { error: string } {
   if (!workspacePath) return { error: 'No workspace open' }
   const resolved = path.resolve(filePath)
   if (!resolved.startsWith(workspacePath + path.sep)) return { error: 'Path is outside the workspace' }
   if (resolved.split(path.sep).includes('.sqlkit')) return { error: 'The .sqlkit folder is internal' }
   try {
-    const stat = fs.statSync(resolved)
-    if (!stat.isDirectory() && !isSqlFile(resolved)) return { error: 'Only .sql files and folders can be deleted' }
+    fs.statSync(resolved)
     return { path: resolved }
   } catch {
     return { error: 'File not found' }
@@ -184,12 +195,11 @@ export function startWorkspaceWatcher(workspacePath: string, notify: () => void)
   try {
     watcher = fs.watch(workspacePath, { recursive: true, persistent: false }, (_event, filename) => {
       // Some platforms emit events with no filename; refresh defensively.
+      // All file types are listed in the Explorer, so only internal churn
+      // (.sqlkit) is filtered.
       if (filename) {
         const normalized = String(filename).split(path.sep).join('/')
         if (normalized.split('/').includes('.sqlkit')) return
-        // Folder events carry no extension marker, so only filter clearly
-        // unrelated files.
-        if (path.extname(normalized) && !isSqlFile(normalized)) return
       }
       schedule()
     })

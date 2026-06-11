@@ -1,5 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
+import { scrollbars } from '../shared-styles'
 import { basicSetup } from 'codemirror'
 import { Compartment } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
@@ -139,21 +140,25 @@ export class SqlEditor extends LitElement {
     )
   }
 
-  static styles = css`
-    :host {
-      display: block;
-      height: 100%;
-      min-height: 0;
-    }
+  static styles = [
+    // CodeMirror's .cm-scroller lives in this shadow root.
+    scrollbars,
+    css`
+      :host {
+        display: block;
+        height: 100%;
+        min-height: 0;
+      }
 
-    .host {
-      height: 100%;
-    }
+      .host {
+        height: 100%;
+      }
 
-    .host .cm-editor {
-      height: 100%;
-    }
-  `
+      .host .cm-editor {
+        height: 100%;
+      }
+    `,
+  ]
 }
 
 declare global {

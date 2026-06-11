@@ -1,6 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from 'electron'
 import { dirname, join } from 'node:path'
+import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+
+const fsMkdir = (dir: string) => {
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch {
+    // The save dialog falls back to a default location.
+  }
+}
 import {
   currentWorkspacePath,
   isDirectory,
@@ -11,10 +20,11 @@ import {
 } from './workspace'
 import {
   createWorkspaceFile,
-  listSqlFiles,
+  listWorkspaceFiles,
   readWorkspaceFile,
   renameWorkspaceFile,
-  resolveDeletablePath,
+  resolveContextRoot,
+  resolveWorkspaceItem,
   saveWorkspaceFile,
   startWorkspaceWatcher,
   stopWorkspaceWatcher,
@@ -105,7 +115,7 @@ function registerWorkspaceIpc() {
     return opened
   })
 
-  ipcMain.handle('file:list', (_event, folder: string) => listSqlFiles(currentWorkspacePath(), folder))
+  ipcMain.handle('file:list', (_event, folder: string) => listWorkspaceFiles(currentWorkspacePath(), folder))
 
   ipcMain.handle('file:read', (_event, filePath: string) => readWorkspaceFile(currentWorkspacePath(), filePath))
 
@@ -124,7 +134,7 @@ function registerWorkspaceIpc() {
   // Confirmation happens in the renderer (in-app modal); this just validates
   // and moves the target to the Trash.
   ipcMain.handle('file:delete', async (_event, filePath: string) => {
-    const resolved = resolveDeletablePath(currentWorkspacePath(), filePath)
+    const resolved = resolveWorkspaceItem(currentWorkspacePath(), filePath)
     if ('error' in resolved) return { success: false, error: resolved.error }
 
     try {
@@ -135,15 +145,26 @@ function registerWorkspaceIpc() {
     }
   })
 
+  // Non-.sql files (spreadsheets, exports…) open with the system default app.
+  ipcMain.handle('file:open-external', async (_event, filePath: string) => {
+    const resolved = resolveWorkspaceItem(currentWorkspacePath(), filePath)
+    if ('error' in resolved) return { success: false, error: resolved.error }
+    const error = await shell.openPath(resolved.path)
+    return error ? { success: false, error } : { success: true }
+  })
+
   ipcMain.handle('file:save-as', async (event, folder: string, suggestedName: string, content: string) => {
     const workspace = currentWorkspacePath()
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!workspace || !window) return { success: false, error: 'No workspace open' }
 
-    const safeFolder = folder && !folder.includes('/') && !folder.includes('\\') && !folder.startsWith('.') ? folder : ''
+    // Default into the context folder (connection/child); create it so the
+    // dialog can actually start there.
+    const contextRoot = folder ? resolveContextRoot(workspace, folder) : null
+    if (contextRoot) fsMkdir(contextRoot)
     const result = await dialog.showSaveDialog(window, {
       title: 'Save Query',
-      defaultPath: join(workspace, safeFolder, suggestedName || 'query.sql'),
+      defaultPath: join(contextRoot ?? workspace, suggestedName || 'query.sql'),
       filters: [{ name: 'SQL', extensions: ['sql'] }],
     })
     if (result.canceled || !result.filePath) return { success: false, canceled: true }

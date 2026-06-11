@@ -24,6 +24,17 @@ const isMac = navigator.platform.startsWith('Mac')
 
 const parentOf = (relativePath: string) => relativePath.split('/').slice(0, -1).join('/')
 
+// All file types are listed; the icon hints at what opening will do (.sql →
+// editor, the rest → system default app).
+const fileIcon = (name: string) => {
+  const ext = name.toLowerCase().split('.').pop() ?? ''
+  if (ext === 'sql') return 'codicon-file-code'
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'mp4', 'mov'].includes(ext)) return 'codicon-file-media'
+  if (['zip', 'gz', 'tar', '7z'].includes(ext)) return 'codicon-file-zip'
+  if (ext === 'pdf') return 'codicon-file-pdf'
+  return 'codicon-file'
+}
+
 function buildTree(files: FileInfo[]): FileNode {
   const root: FileNode = { type: 'folder', name: '', relativePath: '', children: new Map() }
   for (const file of files) {
@@ -151,7 +162,7 @@ export class FileTree extends LitElement {
           class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''} ${isFolder ? '' : 'hidden'}"
           aria-hidden="true"
         ></i>
-        <i class="codicon ${isFolder ? 'codicon-folder' : 'codicon-file-code'}" aria-hidden="true"></i>
+        <i class="codicon ${isFolder ? 'codicon-folder' : fileIcon(node.name)}" aria-hidden="true"></i>
         <span class="name">${node.name}</span>
       </div>
     `

@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, typography } from '../shared-styles'
+import { codicons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import type { FileInfo, TableRef } from '../electron'
 import './file-tree'
@@ -185,6 +185,9 @@ export class ExplorerView extends LitElement {
   static styles = [
     typography,
     codicons,
+    // The scroll containers in this root include the <file-tree> host itself;
+    // its scrollbar is styled from here, not from its own stylesheet.
+    scrollbars,
     css`
       :host {
         flex: 1;

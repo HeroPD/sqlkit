@@ -72,6 +72,13 @@ const NO_CONTEXT = '__none__'
 const contextKey = (profileId: string | null, childDb: string | null) =>
   profileId === null ? NO_CONTEXT : `${profileId}:${childDb ?? ''}`
 
+// Child database names become folder segments (connection/child/file.sql);
+// strip anything that isn't a safe path character.
+const childFolderSegment = (name: string) => {
+  const cleaned = name.replace(/[^\w .-]/g, '_').replace(/^[. ]+/, '')
+  return cleaned || 'database'
+}
+
 // Commands offered by the ⌘⇧P palette; ids are dispatched to _runCommand.
 const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind?: string }> = [
   { id: 'new-query', label: 'New Query', icon: 'codicon-new-file', keybind: mod('N') },
@@ -203,7 +210,15 @@ export class WorkbenchScreen extends LitElement {
         ? config.activeDbId
         : (config.connections[0]?.id ?? null)
     this._switchInstance(restored, restored ? this._inUseChild(restored) : null)
-    this._workspaceFiles.setFolder(this._activeProfile()?.folder ?? null)
+    this._workspaceFiles.setFolder(this._contextFolder())
+  }
+
+  // Files nest per context: connection-folder/child-folder for all-databases
+  // children, just the connection folder otherwise.
+  private _contextFolder(): string | null {
+    const folder = this._activeProfile()?.folder
+    if (!folder) return null
+    return this._activeChildDb ? `${folder}/${childFolderSegment(this._activeChildDb)}` : folder
   }
 
   /** The child the connection currently targets, when it has several. */
@@ -254,7 +269,7 @@ export class WorkbenchScreen extends LitElement {
   private _setActiveDb(profileId: string, childDb: string | null = this._inUseChild(profileId)) {
     if (this._activeDbId === profileId && this._activeChildDb === childDb) return
     this._switchInstance(profileId, childDb)
-    this._workspaceFiles.setFolder(this._activeProfile()?.folder ?? null)
+    this._workspaceFiles.setFolder(this._contextFolder())
     this._persistConfig()
   }
 
@@ -405,7 +420,7 @@ export class WorkbenchScreen extends LitElement {
     // active context's folder.
     const result = tab.path
       ? await window.sqlkit.saveFile(tab.path, tab.content)
-      : await window.sqlkit.saveFileAs(this._activeProfile()?.folder ?? '', `${tab.name}.sql`, tab.content)
+      : await window.sqlkit.saveFileAs(this._contextFolder() ?? '', `${tab.name}.sql`, tab.content)
 
     if (!result.success) {
       if (!result.canceled) console.error('Save failed:', result.error)
@@ -788,7 +803,7 @@ export class WorkbenchScreen extends LitElement {
         <explorer-view
           .files=${this._workspaceFiles.files}
           .activePath=${activeTab?.kind === 'sql' ? activeTab.path : null}
-          .contextName=${context?.name ?? null}
+          .contextName=${context ? this._contextLabel() : null}
           .profileId=${context?.id ?? null}
           .tables=${connected && context ? (this._live.tables[context.id] ?? []) : null}
           .activeChildName=${activeChild}
@@ -907,12 +922,20 @@ export class WorkbenchScreen extends LitElement {
 
   private _onFileOpen(event: Event) {
     const { file } = (event as CustomEvent<{ file: FileInfo }>).detail
-    void this._openFileTab(file)
+    // Only .sql opens in the editor; spreadsheets, exports etc. go to the
+    // system default app.
+    if (file.name.toLowerCase().endsWith('.sql')) {
+      void this._openFileTab(file)
+      return
+    }
+    void window.sqlkit.openExternal(file.path).then((result) => {
+      if (!result.success) console.error('Open failed:', result.error)
+    })
   }
 
   private async _onFileCreate(event: Event) {
     const { parent, name } = (event as CustomEvent<FileCreateDetail>).detail
-    const folder = this._activeProfile()?.folder
+    const folder = this._contextFolder()
     if (!folder) return
 
     const result = await window.sqlkit.createFile(folder, parent ? `${parent}/${name}` : name)

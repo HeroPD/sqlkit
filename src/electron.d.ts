@@ -159,6 +159,8 @@ export type SqlkitApi = {
   renameFile: (path: string, newName: string) => Promise<FileSaveResult>
   /** Confirms, then moves a workspace file or folder to the Trash. */
   deleteFile: (path: string) => Promise<FileDeleteResult>
+  /** Opens a workspace file with the system default app (non-.sql files). */
+  openExternal: (path: string) => Promise<{ success: boolean; error?: string }>
   /** Fires when .sql files in the workspace change on disk; returns unsubscribe. */
   onFilesChanged: (listener: () => void) => () => void
   /** Fires on the File > Close Tab menu item (⌘W); returns unsubscribe. */
