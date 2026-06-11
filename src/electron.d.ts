@@ -35,6 +35,12 @@ export type ConnectionProfile = {
   database: string
   /** Database file path; only meaningful for file-based engines (sqlite). */
   file: string
+  /**
+   * Workspace subfolder holding this connection's .sql files, so files never
+   * mix between database contexts. Assigned from the name on first save and
+   * then left untouched (renames don't move files).
+   */
+  folder: string
   /** SSH tunnel settings; absent means a direct connection. */
   ssh?: SshConfig
 }
@@ -42,6 +48,8 @@ export type ConnectionProfile = {
 export type WorkspaceConfig = {
   version: number
   connections: ConnectionProfile[]
+  /** The in-use database context (⌘K); restored on workspace open. */
+  activeDbId?: string | null
 }
 
 export type SaveResult = { success: true } | { success: false; error: string }
@@ -86,6 +94,21 @@ export type TableRef = {
 
 export type TablesResult = { success: true; tables: TableRef[] } | { success: false; error: string }
 
+// --- Workspace files ------------------------------------------------------
+
+export type FileInfo = {
+  type: 'file' | 'folder'
+  name: string
+  /** Absolute path. */
+  path: string
+  /** Path relative to the workspace root, '/'-separated. */
+  relativePath: string
+}
+
+export type FilesResult = { success: true; files: FileInfo[] } | { success: false; error: string }
+
+export type FileReadResult = { success: true; content: string } | { success: false; error: string }
+
 export type SqlkitApi = {
   openWorkspace: () => Promise<WorkspaceResult>
   openWorkspacePath: (path: string) => Promise<WorkspaceResult>
@@ -103,6 +126,11 @@ export type SqlkitApi = {
   runQuery: (profileId: string, sql: string, params?: unknown[]) => Promise<QueryResponse>
   listTables: (profileId: string) => Promise<TablesResult>
   pickSqliteFile: () => Promise<string | null>
+  /** Lists the .sql files of one database context's workspace subfolder. */
+  listFiles: (folder: string) => Promise<FilesResult>
+  readFile: (path: string) => Promise<FileReadResult>
+  /** Fires when .sql files in the workspace change on disk; returns unsubscribe. */
+  onFilesChanged: (listener: () => void) => () => void
 }
 
 declare global {

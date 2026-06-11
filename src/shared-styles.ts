@@ -6,6 +6,39 @@ import codiconCss from './codicons/codicon.css?inline'
 // index.css); this module carries the per-icon class rules.
 export const codicons = unsafeCSS(codiconCss)
 
+// App-wide scrollbar standard (matches the reference app): thin, transparent
+// track, rounded thumb inset by a 2px transparent border. Document-level
+// scrollbar styles don't reach into shadow roots, so every component with a
+// scroll area composes this; index.css carries the same rules for the
+// document itself.
+export const scrollbars = css`
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+`
+
 // App-wide typography standard. Every component composes this into its styles
 // (`static styles = [typography, css\`...\`]`) so h1/h2/h3/p look identical
 // everywhere; components add only layout (margins, gaps) on top.

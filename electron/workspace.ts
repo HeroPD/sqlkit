@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { RecentWorkspace, SaveResult, WorkspaceConfig, WorkspaceResult } from '../src/electron'
+import type { ConnectionProfile, RecentWorkspace, SaveResult, WorkspaceConfig, WorkspaceResult } from '../src/electron'
 
 type GlobalConfig = {
   recentWorkspaces: RecentWorkspace[]
@@ -12,9 +12,41 @@ type GlobalConfig = {
 // used by the per-workspace config read/write.
 let currentWorkspace: string | null = null
 
+export const currentWorkspacePath = () => currentWorkspace
+
 const defaultWorkspaceConfig = (): WorkspaceConfig => ({ version: 1, connections: [] })
 
 const workspaceConfigPathFor = (wsPath: string) => path.join(wsPath, '.sqlkit', 'config.json')
+
+const slugify = (name: string) =>
+  name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 _.-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/^[.-]+/, '')
+    .slice(0, 60) || 'database'
+
+// A folder must stay a single path segment inside the workspace; anything
+// else (separators, dot-segments) came from a hand-edited config and is
+// re-derived from the name instead.
+const isSafeFolder = (folder: string) => /^[\w][\w .-]*$/.test(folder) && folder !== '.sqlkit'
+
+// Fills in missing per-profile fields from before they existed: `file`
+// (sqlite) and `folder` — each connection owns a workspace subfolder for its
+// .sql files, slugged from its name and deduped, then never re-derived so
+// later renames don't move files.
+function normalizeConnections(connections: ConnectionProfile[]): ConnectionProfile[] {
+  const taken = new Set(connections.map((connection) => connection.folder).filter(Boolean))
+  return connections.map((connection) => {
+    if (connection.folder && isSafeFolder(connection.folder)) return { ...connection, file: connection.file ?? '' }
+    const base = slugify(connection.name)
+    let folder = base
+    for (let suffix = 2; taken.has(folder); suffix += 1) folder = `${base}-${suffix}`
+    taken.add(folder)
+    return { ...connection, file: connection.file ?? '', folder }
+  })
+}
 
 export function readWorkspaceConfig(): WorkspaceConfig {
   if (!currentWorkspace) return defaultWorkspaceConfig()
@@ -23,8 +55,7 @@ export function readWorkspaceConfig(): WorkspaceConfig {
     return {
       ...defaultWorkspaceConfig(),
       ...raw,
-      // Profiles saved before the sqlite engine existed have no file field.
-      connections: (raw.connections ?? []).map((connection) => ({ ...connection, file: connection.file ?? '' })),
+      connections: normalizeConnections(raw.connections ?? []),
     }
   } catch {
     return defaultWorkspaceConfig()
@@ -34,8 +65,13 @@ export function readWorkspaceConfig(): WorkspaceConfig {
 export function writeWorkspaceConfig(config: WorkspaceConfig): SaveResult {
   if (!currentWorkspace) return { success: false, error: 'No workspace open' }
   try {
+    const normalized = { ...config, connections: normalizeConnections(config.connections) }
     fs.mkdirSync(path.join(currentWorkspace, '.sqlkit'), { recursive: true })
-    fs.writeFileSync(workspaceConfigPathFor(currentWorkspace), JSON.stringify(config, null, 2))
+    // Every connection's files folder exists from the moment it's saved.
+    for (const connection of normalized.connections) {
+      fs.mkdirSync(path.join(currentWorkspace, connection.folder), { recursive: true })
+    }
+    fs.writeFileSync(workspaceConfigPathFor(currentWorkspace), JSON.stringify(normalized, null, 2))
     return { success: true }
   } catch (error) {
     return { success: false, error: (error as Error).message }
@@ -73,14 +109,10 @@ export function openWorkspace(wsPath: string): WorkspaceResult {
   }
 
   const workspacePath = path.resolve(wsPath)
-  const sqlkitDir = path.join(workspacePath, '.sqlkit')
-  fs.mkdirSync(sqlkitDir, { recursive: true })
-
-  const workspaceConfigPath = workspaceConfigPathFor(workspacePath)
-  if (!fs.existsSync(workspaceConfigPath)) {
-    fs.writeFileSync(workspaceConfigPath, JSON.stringify(defaultWorkspaceConfig(), null, 2))
-  }
   currentWorkspace = workspacePath
+  // Seeds the config when missing, and brings older configs up to date:
+  // assigns per-connection folders and creates them on disk.
+  writeWorkspaceConfig(readWorkspaceConfig())
 
   const name = path.basename(workspacePath)
   const config = readGlobalConfig()

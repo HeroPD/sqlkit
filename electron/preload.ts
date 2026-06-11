@@ -21,6 +21,13 @@ const api: SqlkitApi = {
   runQuery: (profileId, sql, params) => ipcRenderer.invoke('db:query', profileId, sql, params),
   listTables: (profileId) => ipcRenderer.invoke('db:list-tables', profileId),
   pickSqliteFile: () => ipcRenderer.invoke('db:pick-sqlite-file'),
+  listFiles: (folder) => ipcRenderer.invoke('file:list', folder),
+  readFile: (path) => ipcRenderer.invoke('file:read', path),
+  onFilesChanged: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on('workspace:files-changed', handler)
+    return () => ipcRenderer.off('workspace:files-changed', handler)
+  },
 }
 
 contextBridge.exposeInMainWorld('sqlkit', api)

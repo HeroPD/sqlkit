@@ -79,6 +79,8 @@
 html,
 body {
   height: 100%;
+  /* Desktop app: never rubber-band the window itself. */
+  overscroll-behavior: none;
 }
 
 body {
@@ -91,4 +93,33 @@ body {
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Document-level scrollbars. Shadow roots don't inherit these; components
+   with scroll areas compose the matching `scrollbars` style from
+   shared-styles.ts. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }

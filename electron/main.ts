@@ -2,12 +2,14 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  currentWorkspacePath,
   isDirectory,
   openWorkspace,
   readGlobalConfig,
   readWorkspaceConfig,
   writeWorkspaceConfig,
 } from './workspace'
+import { listSqlFiles, readWorkspaceFile, startWorkspaceWatcher, stopWorkspaceWatcher } from './files'
 import { createConnectionManager, testConnection } from './db/manager'
 import { testSshTunnel } from './db/transport'
 import type { ConnectionProfile, ConnectionStatus, WorkspaceConfig } from '../src/electron'
@@ -52,7 +54,17 @@ function createWindow() {
   void window.loadFile(join(__dirname, '../dist/index.html'))
 }
 
+function broadcast(channel: string, ...args: unknown[]) {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send(channel, ...args)
+  }
+}
+
 function registerWorkspaceIpc() {
+  const watchOpened = (opened: ReturnType<typeof openWorkspace>) => {
+    if (opened.success) startWorkspaceWatcher(opened.path, () => broadcast('workspace:files-changed'))
+  }
+
   ipcMain.handle('workspace:open', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return { success: false, error: 'Window not ready' }
@@ -66,6 +78,7 @@ function registerWorkspaceIpc() {
 
     const opened = openWorkspace(result.filePaths[0])
     if (opened.success) window.setTitle(`SqlKit — ${opened.name}`)
+    watchOpened(opened)
     return opened
   })
 
@@ -73,8 +86,13 @@ function registerWorkspaceIpc() {
     const opened = openWorkspace(wsPath)
     const window = BrowserWindow.fromWebContents(event.sender)
     if (opened.success && window) window.setTitle(`SqlKit — ${opened.name}`)
+    watchOpened(opened)
     return opened
   })
+
+  ipcMain.handle('file:list', (_event, folder: string) => listSqlFiles(currentWorkspacePath(), folder))
+
+  ipcMain.handle('file:read', (_event, filePath: string) => readWorkspaceFile(currentWorkspacePath(), filePath))
 
   ipcMain.handle('workspace:get-recent', () => {
     return readGlobalConfig().recentWorkspaces.filter((workspace) => isDirectory(workspace.path))
@@ -86,12 +104,7 @@ function registerWorkspaceIpc() {
 }
 
 function registerDbIpc() {
-  const broadcast = (statuses: ConnectionStatus[]) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      window.webContents.send('db:status', statuses)
-    }
-  }
-  const manager = createConnectionManager(broadcast)
+  const manager = createConnectionManager((statuses: ConnectionStatus[]) => broadcast('db:status', statuses))
 
   ipcMain.handle('db:test', (_event, profile: ConnectionProfile) => testConnection(profile))
   ipcMain.handle('db:test-ssh', (_event, profile: ConnectionProfile) => testSshTunnel(profile))
@@ -121,6 +134,7 @@ function registerDbIpc() {
   })
 
   app.on('before-quit', () => {
+    stopWorkspaceWatcher()
     void manager.disconnectAll()
   })
 }
