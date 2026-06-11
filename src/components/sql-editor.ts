@@ -191,6 +191,19 @@ export class SqlEditor extends LitElement {
     return html`<div class="host"></div>`
   }
 
+  /** Moves the cursor to a 1-based line, scrolls it into view, and focuses. */
+  revealLine(line: number) {
+    const view = this._view
+    if (!view) return
+    const doc = view.state.doc
+    const target = doc.line(Math.min(Math.max(line, 1), doc.lines))
+    view.dispatch({
+      selection: { anchor: target.from },
+      effects: EditorView.scrollIntoView(target.from, { y: 'center' }),
+    })
+    view.focus()
+  }
+
   protected firstUpdated() {
     const container = this.shadowRoot!.querySelector('.host')
     if (!container) return

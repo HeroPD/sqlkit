@@ -16,6 +16,7 @@ import './editor-tab'
 import './explorer-view'
 import './history-view'
 import './results-panel'
+import './search-view'
 import './sql-editor'
 import './status-bar'
 import { tableKey } from './explorer-view'
@@ -25,6 +26,7 @@ import type { QueryRun } from './results-panel'
 import type { RunQueryDetail } from './sql-editor'
 import type { TableBrowseDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryItem, HistoryOpenDetail } from './history-view'
+import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 
 const VIEWS = [
@@ -764,6 +766,7 @@ export class WorkbenchScreen extends LitElement {
         @add-database=${this._onAddDatabase}
         @table-select=${this._onTableSelect}
         @table-browse=${this._onTableBrowse}
+        @search-open=${this._onSearchOpen}
         @file-open=${this._onFileOpen}
         @file-create=${this._onFileCreate}
         @file-rename=${this._onFileRename}
@@ -916,6 +919,9 @@ export class WorkbenchScreen extends LitElement {
           .selectedTable=${this._selectedTable}
         ></explorer-view>
       `
+    }
+    if (view.id === 'search') {
+      return html`<search-view .files=${this._workspaceFiles.files}></search-view>`
     }
     if (view.id === 'history') {
       const key = contextKey(this._activeDbId, this._activeChildDb)
@@ -1095,6 +1101,17 @@ export class WorkbenchScreen extends LitElement {
     const { table } = (event as CustomEvent<TableBrowseDetail>).detail
     const profile = this._activeProfile()
     if (profile) this._browseTable(profile, table)
+  }
+
+  // A search match opens the file and lands the cursor on the matched line.
+  private async _onSearchOpen(event: Event) {
+    const { file, line } = (event as CustomEvent<SearchOpenDetail>).detail
+    await this._openFileTab(file)
+    await this.updateComplete
+    const editor = this.shadowRoot?.querySelector('sql-editor')
+    if (!editor) return
+    await editor.updateComplete
+    editor.revealLine(line)
   }
 
   private _onFileOpen(event: Event) {
