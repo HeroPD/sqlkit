@@ -4,8 +4,8 @@ import { codicons, controls, scrollbars, typography } from '../shared-styles'
 
 export type PaletteMode = 'commands' | 'quick' | 'databases'
 
-// One pickable row. The palette is presentation-only: the owner computes the
-// entries for the current mode and decides what a pick means.
+// One row. The palette is presentation-only: the owner computes the entries
+// for the current mode and decides what a pick means.
 export type PaletteEntry = {
   id: string
   label: string
@@ -13,6 +13,14 @@ export type PaletteEntry = {
   /** Codicon name, e.g. 'codicon-database'. */
   icon?: string
   keybind?: string
+  /**
+   * A non-pickable group label; the entries after it (until the next header)
+   * are its children. Hidden when no child survives the filter; a matching
+   * header reveals all of its children.
+   */
+  header?: boolean
+  /** Renders nested under a group header. */
+  indent?: boolean
 }
 
 const PLACEHOLDERS: Record<PaletteMode, string> = {
@@ -27,6 +35,40 @@ function matches(query: string, entry: PaletteEntry): boolean {
   if (!terms.length) return true
   const haystack = `${entry.label} ${entry.detail ?? ''} ${entry.id}`.toLowerCase()
   return terms.every((term) => haystack.includes(term))
+}
+
+// Filters while preserving group structure: a header stays while any of its
+// children match, and a header that matches by itself reveals all of them.
+function filterEntries(query: string, entries: PaletteEntry[]): PaletteEntry[] {
+  const visible: PaletteEntry[] = []
+  let index = 0
+  while (index < entries.length) {
+    const entry = entries[index]
+    if (!entry.header) {
+      if (matches(query, entry)) visible.push(entry)
+      index += 1
+      continue
+    }
+
+    const children: PaletteEntry[] = []
+    let next = index + 1
+    while (next < entries.length && !entries[next].header) {
+      children.push(entries[next])
+      next += 1
+    }
+    const kept = matches(query, entry) ? children : children.filter((child) => matches(query, child))
+    if (kept.length) visible.push(entry, ...kept)
+    index = next
+  }
+  return visible
+}
+
+/** The nearest pickable index at or after `from`, stepping by `step`. */
+function pickable(entries: PaletteEntry[], from: number, step: 1 | -1): number {
+  if (!entries.some((entry) => !entry.header)) return 0
+  let index = ((from % entries.length) + entries.length) % entries.length
+  while (entries[index]?.header) index = (index + step + entries.length) % entries.length
+  return index
 }
 
 // Modal quick-pick overlay (VS Code-style): an input over a filtered list,
@@ -65,8 +107,10 @@ export class CommandPalette extends LitElement {
 
   render() {
     if (!this.open) return nothing
-    const filtered = this.entries.filter((entry) => matches(this._query, entry))
+    const filtered = filterEntries(this._query, this.entries)
 
+    // The active row can never be a header; normalize after filtering moved it.
+    const active = pickable(filtered, this._active, 1)
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <div class="panel">
@@ -75,13 +119,13 @@ export class CommandPalette extends LitElement {
             placeholder=${PLACEHOLDERS[this.mode]}
             .value=${this._query}
             @input=${this._onInput}
-            @keydown=${(e: KeyboardEvent) => this._onKeydown(e, filtered)}
+            @keydown=${(e: KeyboardEvent) => this._onKeydown(e, filtered, active)}
             autocomplete="off"
             spellcheck="false"
           />
           <div class="list" role="listbox">
             ${filtered.length
-              ? filtered.map((entry, index) => this._renderEntry(entry, index))
+              ? filtered.map((entry, index) => this._renderEntry(entry, index, active))
               : html`<div class="empty muted">${this._emptyMessage()}</div>`}
           </div>
         </div>
@@ -98,12 +142,21 @@ export class CommandPalette extends LitElement {
         : 'No commands'
   }
 
-  private _renderEntry(entry: PaletteEntry, index: number) {
+  private _renderEntry(entry: PaletteEntry, index: number, active: number) {
+    if (entry.header) {
+      return html`
+        <div class="row group" role="presentation">
+          <i class="codicon ${entry.icon ?? 'codicon-circle-small'}" aria-hidden="true"></i>
+          <span class="label">${this._highlight(entry.label)}</span>
+          ${entry.detail ? html`<span class="detail">${entry.detail}</span>` : ''}
+        </div>
+      `
+    }
     return html`
       <div
-        class="row ${index === this._active ? 'active' : ''}"
+        class="row ${entry.indent ? 'indent' : ''} ${index === active ? 'active' : ''}"
         role="option"
-        aria-selected=${index === this._active}
+        aria-selected=${index === active}
         @click=${() => this._pick(entry)}
         @mousemove=${() => this._setActive(index)}
       >
@@ -132,7 +185,7 @@ export class CommandPalette extends LitElement {
     this._active = 0
   }
 
-  private _onKeydown(event: KeyboardEvent, filtered: PaletteEntry[]) {
+  private _onKeydown(event: KeyboardEvent, filtered: PaletteEntry[], active: number) {
     if (event.key === 'Escape') {
       event.preventDefault()
       this._close()
@@ -142,7 +195,7 @@ export class CommandPalette extends LitElement {
       event.preventDefault()
       if (!filtered.length) return
       const step = event.key === 'ArrowDown' ? 1 : -1
-      this._active = (this._active + step + filtered.length) % filtered.length
+      this._active = pickable(filtered, active + step, step)
       this.updateComplete.then(() => {
         this.shadowRoot?.querySelector('.row.active')?.scrollIntoView({ block: 'nearest' })
       })
@@ -150,8 +203,8 @@ export class CommandPalette extends LitElement {
     }
     if (event.key === 'Enter') {
       event.preventDefault()
-      const entry = filtered[this._active]
-      if (entry) this._pick(entry)
+      const entry = filtered[active]
+      if (entry && !entry.header) this._pick(entry)
     }
   }
 
@@ -234,6 +287,19 @@ export class CommandPalette extends LitElement {
       .row.active {
         background: var(--list-selection);
         color: var(--list-selection-fg);
+      }
+
+      .row.indent {
+        padding-left: 30px;
+      }
+
+      .row.group {
+        cursor: default;
+        color: var(--text-2);
+      }
+
+      .row.group .label {
+        font-weight: 600;
       }
 
       .row .codicon {

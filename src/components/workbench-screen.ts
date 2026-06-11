@@ -54,6 +54,24 @@ const tabTitle = (tab: EditorTabState) => {
   return tab.content === tab.savedContent ? tab.name : `${tab.name} •`
 }
 
+// Every database context (⌘K) is its own working instance: open tabs, the
+// active tab, the latest query result, and the Explorer's table selection.
+// A context is a connection *and* its child database (all-databases mode) —
+// x1/analytics and x1/billing are separate instances. Switching contexts
+// stashes the live fields here and restores the target's.
+type ContextInstance = {
+  tabs: EditorTabState[]
+  activeTabId: string | null
+  queryRun: QueryRun
+  selectedTable: string | null
+}
+
+/** Instance bucket for tabs opened before any context exists. */
+const NO_CONTEXT = '__none__'
+
+const contextKey = (profileId: string | null, childDb: string | null) =>
+  profileId === null ? NO_CONTEXT : `${profileId}:${childDb ?? ''}`
+
 // Commands offered by the ⌘⇧P palette; ids are dispatched to _runCommand.
 const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind?: string }> = [
   { id: 'new-query', label: 'New Query', icon: 'codicon-new-file', keybind: mod('N') },
@@ -93,6 +111,11 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _activeDbId: string | null = null
 
+  // The child database of the active context (all-databases mode); part of
+  // the context's identity.
+  @state()
+  private _activeChildDb: string | null = null
+
   @state()
   private _selectedTable: string | null = null
 
@@ -130,6 +153,9 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _sidebarCollapsing = false
 
+  // Stashed working instances of inactive contexts, keyed by profile id.
+  private _instances = new Map<string, ContextInstance>()
+
   private _unsubscribeCloseTab: (() => void) | null = null
 
   connectedCallback() {
@@ -153,9 +179,11 @@ export class WorkbenchScreen extends LitElement {
       this._activeTabId = null
       this._connections = []
       this._activeDbId = null
+      this._activeChildDb = null
       this._palette = null
       this._selectedTable = null
       this._queryRun = { phase: 'idle' }
+      this._instances.clear()
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
       void this._live.disconnectAll()
@@ -174,8 +202,38 @@ export class WorkbenchScreen extends LitElement {
       config.activeDbId && config.connections.some((connection) => connection.id === config.activeDbId)
         ? config.activeDbId
         : (config.connections[0]?.id ?? null)
-    this._activeDbId = restored
+    this._switchInstance(restored, restored ? this._inUseChild(restored) : null)
     this._workspaceFiles.setFolder(this._activeProfile()?.folder ?? null)
+  }
+
+  /** The child the connection currently targets, when it has several. */
+  private _inUseChild(profileId: string): string | null {
+    const children = this._live.statuses[profileId]?.children ?? []
+    if (children.length < 2) return null
+    return children.find((child) => child.inUse)?.name ?? null
+  }
+
+  // Swaps the working instance: stashes the live tabs/result/selection under
+  // the outgoing context and restores (or initializes) the incoming one.
+  private _switchInstance(profileId: string | null, childDb: string | null) {
+    const fromKey = contextKey(this._activeDbId, this._activeChildDb)
+    const toKey = contextKey(profileId, childDb)
+    if (fromKey === toKey) return
+
+    this._instances.set(fromKey, {
+      tabs: this._tabs,
+      activeTabId: this._activeTabId,
+      queryRun: this._queryRun,
+      selectedTable: this._selectedTable,
+    })
+
+    this._activeDbId = profileId
+    this._activeChildDb = childDb
+    const incoming = this._instances.get(toKey)
+    this._tabs = incoming?.tabs ?? []
+    this._activeTabId = incoming?.activeTabId ?? null
+    this._queryRun = incoming?.queryRun ?? { phase: 'idle' }
+    this._selectedTable = incoming?.selectedTable ?? null
   }
 
   /** The profile of the in-use database context (⌘K). */
@@ -191,21 +249,27 @@ export class WorkbenchScreen extends LitElement {
     })
   }
 
-  private _setActiveDb(profileId: string) {
-    if (this._activeDbId === profileId) return
-    this._activeDbId = profileId
+  // Defaults to the connection's currently targeted child so a profile-level
+  // switch (⌘P table pick, single-db connect) lands on the right instance.
+  private _setActiveDb(profileId: string, childDb: string | null = this._inUseChild(profileId)) {
+    if (this._activeDbId === profileId && this._activeChildDb === childDb) return
+    this._switchInstance(profileId, childDb)
     this._workspaceFiles.setFolder(this._activeProfile()?.folder ?? null)
     this._persistConfig()
   }
 
-  // ⌘K pick: make the connection the in-use context, connecting it first if
-  // it isn't live yet.
-  private async _switchDatabase(profileId: string) {
-    this._setActiveDb(profileId)
-    const phase = this._live.phase(profileId)
-    if (phase === 'connected' || phase === 'connecting') return
-    const profile = this._connections.find((connection) => connection.id === profileId)
-    if (profile) await this._live.connect(profile)
+  // ⌘K parent pick on a not-yet-connected connection: the palette stays open
+  // and shows the connecting spinner (status pushes drive it). Once live, an
+  // all-databases connection expands into its children in place for the real
+  // pick; a single-db connection becomes the context and the palette closes.
+  private async _connectFromPalette(profile: ConnectionProfile) {
+    const result = await this._live.connect(profile)
+    if (!result.success) return // the entry shows the error state
+    if (this._palette !== 'databases') return // closed meanwhile: treat as canceled
+    if (profile.databaseMode === 'all') return // children just appeared; keep picking
+
+    this._setActiveDb(profile.id)
+    this._palette = null
   }
 
   // --- global shortcuts -----------------------------------------------------
@@ -364,18 +428,34 @@ export class WorkbenchScreen extends LitElement {
       return
     }
 
+    const runKey = contextKey(profile.id, this._activeChildDb)
+
     if (this._live.phase(profile.id) !== 'connected') {
-      this._queryRun = { phase: 'running', note: `Connecting to ${profile.name}…` }
+      this._applyQueryRun(runKey, { phase: 'running', note: `Connecting to ${profile.name}…` })
       const connected = await this._live.connect(profile)
       if (!connected.success) {
-        this._queryRun = { phase: 'error', error: connected.error }
+        this._applyQueryRun(runKey, { phase: 'error', error: connected.error })
         return
       }
     }
 
-    this._queryRun = { phase: 'running' }
+    this._applyQueryRun(runKey, { phase: 'running' })
     const response = await window.sqlkit.runQuery(profile.id, sqlText)
-    this._queryRun = response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error }
+    this._applyQueryRun(
+      runKey,
+      response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error },
+    )
+  }
+
+  // A run that finishes after the user switched contexts belongs to the
+  // instance that started it, not the one on screen.
+  private _applyQueryRun(runKey: string, run: QueryRun) {
+    if (contextKey(this._activeDbId, this._activeChildDb) === runKey) {
+      this._queryRun = run
+      return
+    }
+    const stashed = this._instances.get(runKey)
+    if (stashed) this._instances.set(runKey, { ...stashed, queryRun: run })
   }
 
   // Double-click browse (reference behavior): a query tab named after the
@@ -422,19 +502,56 @@ export class WorkbenchScreen extends LitElement {
     }
 
     if (this._palette === 'databases') {
-      return this._connections.map((connection) => {
+      return this._connections.flatMap((connection) => {
         const phase = this._live.phase(connection.id)
+        const children = this._live.statuses[connection.id]?.children ?? []
+
+        // An all-databases connection with discovered children: the parent
+        // stays visible as a group header (it isn't a single database, so it
+        // can't be picked) and its children nest underneath as the pickable
+        // contexts.
+        if (children.length > 1) {
+          return [
+            {
+              id: `hdr:${connection.id}`,
+              label: connection.name,
+              detail: `${connection.engine} · Connected`,
+              icon: 'codicon-database',
+              header: true,
+            },
+            ...children.map((child) => ({
+              id: `child:${connection.id}:${child.name}`,
+              label: child.name,
+              detail: this._activeDbId === connection.id && this._activeChildDb === child.name ? 'In use' : '',
+              icon: 'codicon-symbol-namespace',
+              indent: true,
+            })),
+          ]
+        }
+
         const label =
           phase === 'connected'
             ? 'Connected'
             : phase === 'connecting'
               ? 'Connecting…'
               : phase === 'error'
-                ? 'Error'
+                ? `Error — ${this._live.statuses[connection.id]?.error ?? ''}`
                 : 'Disconnected'
         const parts = [connection.engine, label]
         if (this._activeDbId === connection.id) parts.push('In use')
-        return { id: connection.id, label: connection.name, detail: parts.join(' · '), icon: 'codicon-database' }
+        // The children of a disconnected all-databases connection aren't
+        // known yet; picking it connects and discovers them.
+        if (connection.databaseMode === 'all' && phase !== 'connected' && phase !== 'connecting') {
+          parts.push('connect to list databases')
+        }
+        return [
+          {
+            id: `db:${connection.id}`,
+            label: connection.name,
+            detail: parts.join(' · '),
+            icon: phase === 'connecting' ? 'codicon-loading codicon-modifier-spin' : 'codicon-database',
+          },
+        ]
       })
     }
 
@@ -443,13 +560,14 @@ export class WorkbenchScreen extends LitElement {
 
   private _onPalettePick(event: Event) {
     const { mode, id } = (event as CustomEvent<{ mode: PaletteMode; id: string }>).detail
-    this._palette = null
 
     if (mode === 'commands') {
+      this._palette = null
       this._runCommand(id)
       return
     }
     if (mode === 'quick') {
+      this._palette = null
       if (id.startsWith('file:')) {
         const relativePath = id.slice('file:'.length)
         const file = this._workspaceFiles.files.find((entry) => entry.type === 'file' && entry.relativePath === relativePath)
@@ -465,7 +583,36 @@ export class WorkbenchScreen extends LitElement {
       this._activeView = 'explorer'
       return
     }
-    void this._switchDatabase(id)
+
+    // databases mode: a child pick switches the active child database; a
+    // parent pick is a whole single-db connection, or a not-yet-connected one
+    // that keeps the palette open while it loads.
+    if (id.startsWith('child:')) {
+      const body = id.slice('child:'.length)
+      const separator = body.indexOf(':')
+      const profileId = body.slice(0, separator)
+      const database = body.slice(separator + 1)
+      this._palette = null
+      this._setActiveDb(profileId, database)
+      void this._live.setActiveChild(profileId, database)
+      return
+    }
+
+    const profileId = id.slice('db:'.length)
+    const profile = this._connections.find((connection) => connection.id === profileId)
+    if (!profile) {
+      this._palette = null
+      return
+    }
+    const phase = this._live.phase(profileId)
+    if (phase === 'connecting') return // already loading; stay open
+    if (phase === 'connected') {
+      // Single-db connection (connected all-mode ones render as children).
+      this._palette = null
+      this._setActiveDb(profileId)
+      return
+    }
+    void this._connectFromPalette(profile)
   }
 
   private _runCommand(id: string) {
@@ -602,11 +749,17 @@ export class WorkbenchScreen extends LitElement {
 
       <status-bar
         .workspaceName=${this.workspace?.name ?? ''}
-        .contextName=${this._activeProfile()?.name ?? ''}
+        .contextName=${this._contextLabel()}
         .connectedCount=${this._live.connected().length}
         .connectedName=${this._connectedName()}
       ></status-bar>
     `
+  }
+
+  private _contextLabel() {
+    const profile = this._activeProfile()
+    if (!profile) return ''
+    return this._activeChildDb ? `${profile.name} · ${this._activeChildDb}` : profile.name
   }
 
   private _connectedName() {
@@ -621,7 +774,6 @@ export class WorkbenchScreen extends LitElement {
         <databases-view
           .connections=${this._connections}
           .statuses=${this._live.statuses}
-          .tables=${this._live.tables}
           .activeTabId=${this._activeTabId}
         ></databases-view>
       `
@@ -630,6 +782,8 @@ export class WorkbenchScreen extends LitElement {
       const activeTab = this._tabs.find((tab) => tab.id === this._activeTabId)
       const context = this._activeProfile()
       const connected = context !== null && this._live.phase(context.id) === 'connected'
+      const children = connected && context ? (this._live.statuses[context.id]?.children ?? []) : []
+      const activeChild = children.length > 1 ? (children.find((child) => child.inUse)?.name ?? null) : null
       return html`
         <explorer-view
           .files=${this._workspaceFiles.files}
@@ -637,6 +791,7 @@ export class WorkbenchScreen extends LitElement {
           .contextName=${context?.name ?? null}
           .profileId=${context?.id ?? null}
           .tables=${connected && context ? (this._live.tables[context.id] ?? []) : null}
+          .activeChildName=${activeChild}
           .selectedTable=${this._selectedTable}
         ></explorer-view>
       `
@@ -738,6 +893,7 @@ export class WorkbenchScreen extends LitElement {
     const { id } = (event as CustomEvent<{ id: string }>).detail
     await this._live.disconnect(id)
   }
+
 
   private _onTableSelect(event: Event) {
     this._selectedTable = (event as CustomEvent<TableSelectDetail>).detail.key

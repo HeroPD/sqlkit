@@ -71,6 +71,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
         phase: 'connected',
         serverVersion,
         tunneled: active.tunnel !== null,
+        children: active.driver.children?.(),
       })
       return { success: true, serverVersion }
     } catch (error) {
@@ -102,6 +103,20 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  // Switches the active child database (all-databases mode) and rebroadcasts
+  // so every window sees the new inUse flags.
+  function setActiveChild(profileId: string, database: string): { success: boolean; error?: string } {
+    const active = connections.get(profileId)
+    if (!active || active.status.phase !== 'connected' || !active.driver) {
+      return { success: false, error: 'Not connected' }
+    }
+    if (!active.driver.useChild?.(database)) {
+      return { success: false, error: `Database "${database}" is not available on this connection` }
+    }
+    setStatus(active, { ...active.status, children: active.driver.children?.() })
+    return { success: true }
+  }
+
   async function listTables(profileId: string): Promise<TablesResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
@@ -112,7 +127,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
-  return { connect, disconnect, disconnectAll, statuses, query, listTables }
+  return { connect, disconnect, disconnectAll, statuses, query, listTables, setActiveChild }
 }
 
 /**

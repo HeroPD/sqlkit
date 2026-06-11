@@ -38,6 +38,10 @@ export class ExplorerView extends LitElement {
   @property({ attribute: false })
   tables: TableRef[] | null = null
 
+  /** Active child database (all-databases mode), shown in the Tables header. */
+  @property()
+  activeChildName: string | null = null
+
   @property()
   selectedTable: string | null = null
 
@@ -103,7 +107,13 @@ export class ExplorerView extends LitElement {
         <button class="section-head-row" @click=${() => (this._tablesCollapsed = !this._tablesCollapsed)}>
           <i class="codicon codicon-chevron-right chevron ${this._tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
           <span>Tables</span>
-          ${this.tables !== null && this.contextName ? html`<span class="section-detail">${this.contextName}</span>` : ''}
+          ${this.tables !== null && this.contextName
+            ? html`
+                <span class="section-detail">
+                  ${this.activeChildName ? `${this.contextName} · ${this.activeChildName}` : this.contextName}
+                </span>
+              `
+            : ''}
         </button>
         ${this._tablesCollapsed ? '' : html`<div class="section-body">${this._renderTables()}</div>`}
       </div>

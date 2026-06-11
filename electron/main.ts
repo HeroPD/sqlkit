@@ -169,6 +169,9 @@ function registerDbIpc() {
   ipcMain.handle('db:connect', (_event, profile: ConnectionProfile) => manager.connect(profile))
   ipcMain.handle('db:disconnect', (_event, profileId: string) => manager.disconnect(profileId))
   ipcMain.handle('db:disconnect-all', () => manager.disconnectAll())
+  ipcMain.handle('db:set-active-child', (_event, profileId: string, database: string) =>
+    manager.setActiveChild(profileId, database),
+  )
   ipcMain.handle('db:statuses', () => manager.statuses())
   ipcMain.handle('db:query', (_event, profileId: string, sql: string, params?: unknown[]) =>
     manager.query(profileId, sql, params),

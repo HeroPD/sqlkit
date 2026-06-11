@@ -12,6 +12,7 @@ const api: SqlkitApi = {
   connectDatabase: (profile) => ipcRenderer.invoke('db:connect', profile),
   disconnectDatabase: (profileId) => ipcRenderer.invoke('db:disconnect', profileId),
   disconnectAllDatabases: () => ipcRenderer.invoke('db:disconnect-all'),
+  setActiveChildDb: (profileId, database) => ipcRenderer.invoke('db:set-active-child', profileId, database),
   getConnectionStatuses: () => ipcRenderer.invoke('db:statuses'),
   onConnectionStatus: (listener) => {
     const handler = (_event: IpcRendererEvent, statuses: ConnectionStatus[]) => listener(statuses)

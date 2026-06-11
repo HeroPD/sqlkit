@@ -50,6 +50,19 @@ export class ConnectionsController implements ReactiveController {
     return window.sqlkit.disconnectAllDatabases()
   }
 
+  /** Switches an all-databases connection's active child and refetches its tables. */
+  async setActiveChild(profileId: string, database: string) {
+    const result = await window.sqlkit.setActiveChildDb(profileId, database)
+    if (result.success) {
+      const tables = { ...this.tables }
+      delete tables[profileId]
+      this.tables = tables
+      this.host.requestUpdate()
+      void this.loadTables(profileId)
+    }
+    return result
+  }
+
   private apply(statuses: ConnectionStatus[]) {
     const byId: Record<string, ConnectionStatus> = {}
     for (const status of statuses) byId[status.profileId] = status

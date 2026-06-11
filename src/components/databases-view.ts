@@ -1,13 +1,14 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
-import type { ConnectionProfile, ConnectionStatus, TableRef } from '../electron'
+import type { ConnectionProfile, ConnectionStatus } from '../electron'
 import './db-list-item'
 
-// The Databases sidebar view: connection list with live status, the table
-// list under each connected database, and the add button. db-list-item events
-// (db-select / db-connect / db-disconnect) bubble through; this view adds
-// `add-database`.
+// The Databases sidebar view: connection list with live status, the child
+// databases of all-databases connections (display-only — the active context
+// is switched via ⌘K, never from here), and the add button. db-list-item
+// events (db-select / db-connect / db-disconnect) bubble through; this view
+// adds `add-database`.
 @customElement('databases-view')
 export class DatabasesView extends LitElement {
   @property({ attribute: false })
@@ -15,9 +16,6 @@ export class DatabasesView extends LitElement {
 
   @property({ attribute: false })
   statuses: Record<string, ConnectionStatus> = {}
-
-  @property({ attribute: false })
-  tables: Record<string, TableRef[]> = {}
 
   /** Highlights the connection whose config tab is active. */
   @property()
@@ -53,21 +51,24 @@ export class DatabasesView extends LitElement {
         status=${status?.phase ?? ''}
         .active=${this.activeTabId === connection.id}
       ></db-list-item>
-      ${status?.phase === 'connected' ? this._renderTables(connection.id) : ''}
+      ${status?.phase === 'connected' ? this._renderChildren(connection.id, status) : ''}
     `
   }
 
-  private _renderTables(profileId: string) {
-    const tables = this.tables[profileId]
-    if (!tables) return ''
-    if (!tables.length) return html`<p class="muted hint table-hint">No tables.</p>`
+  // Child databases of an all-databases connection — display only; switching
+  // the active one happens in the ⌘K palette. A single child carries no
+  // information, so it stays hidden.
+  private _renderChildren(_profileId: string, status: ConnectionStatus) {
+    const children = status.children ?? []
+    if (children.length < 2) return ''
     return html`
-      <div class="table-list">
-        ${tables.map(
-          (table) => html`
-            <div class="table-row" title=${table.schema ? `${table.schema}.${table.name}` : table.name}>
-              <i class="codicon codicon-table" aria-hidden="true"></i>
-              <span>${table.schema ? `${table.schema}.${table.name}` : table.name}</span>
+      <div class="child-list">
+        ${children.map(
+          (child) => html`
+            <div class="child-row ${child.inUse ? 'in-use' : ''}" title=${child.name}>
+              <i class="codicon codicon-symbol-namespace" aria-hidden="true"></i>
+              <span class="child-name">${child.name}</span>
+              ${child.inUse ? html`<span class="child-tag">active</span>` : ''}
             </div>
           `,
         )}
@@ -106,13 +107,13 @@ export class DatabasesView extends LitElement {
         overflow-anchor: none;
       }
 
-      .table-list {
+      .child-list {
         display: flex;
         flex-direction: column;
         padding: 2px 0 6px;
       }
 
-      .table-row {
+      .child-row {
         display: flex;
         align-items: center;
         gap: 6px;
@@ -120,21 +121,34 @@ export class DatabasesView extends LitElement {
         font-size: var(--font-size-sm);
         color: var(--text-2);
         white-space: nowrap;
+        user-select: none;
       }
 
-      .table-row span {
+      .child-row.in-use {
+        color: var(--text);
+      }
+
+      .child-name {
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
-      .table-row .codicon {
+      .child-row .codicon {
         font-size: 13px;
         flex-shrink: 0;
       }
 
-      .table-hint {
-        padding: 2px 10px 6px 36px;
-        font-size: var(--font-size-sm);
+      .child-tag {
+        margin-left: auto;
+        flex-shrink: 0;
+        padding: 0 5px;
+        border-radius: 3px;
+        background: var(--accent);
+        color: var(--on-accent);
+        font-size: 10px;
+        line-height: 14px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
       }
 
       .add {

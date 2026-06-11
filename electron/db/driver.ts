@@ -1,4 +1,4 @@
-import type { ConnectionProfile, QueryResult, TableRef } from '../../src/electron'
+import type { ChildDb, ConnectionProfile, QueryResult, TableRef } from '../../src/electron'
 import type { Endpoint } from './transport'
 import { createPostgresDriver } from './postgres'
 import { createSqliteDriver } from './sqlite'
@@ -10,8 +10,13 @@ export type Driver = {
   /** Opens the connection; resolves with the server version string. */
   connect(): Promise<string>
   disconnect(): Promise<void>
+  /** Targets the active child database (all-databases mode) when present. */
   query(sql: string, params?: unknown[]): Promise<QueryResult>
   listTables(): Promise<TableRef[]>
+  /** Child databases; undefined for engines without all-databases support. */
+  children?(): ChildDb[]
+  /** Switches the active child; false when the name is unknown. */
+  useChild?(database: string): boolean
 }
 
 export type DriverEvents = {

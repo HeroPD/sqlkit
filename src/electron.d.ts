@@ -10,6 +10,15 @@ export type WorkspaceResult =
 
 export type Engine = 'postgresql' | 'sqlite' | 'mysql' | 'sqlserver'
 
+/**
+ * single — the connection stays on its one configured database.
+ * all — list every database on the server as runtime children; one is active
+ * at a time and queries/tables target it.
+ */
+export type DatabaseMode = 'single' | 'all'
+
+export type ChildDb = { name: string; inUse: boolean }
+
 export type SshAuthType = 'password' | 'key'
 
 export type SshConfig = {
@@ -33,6 +42,8 @@ export type ConnectionProfile = {
   username: string
   password: string
   database: string
+  /** Absent means 'single'. */
+  databaseMode?: DatabaseMode
   /** Database file path; only meaningful for file-based engines (sqlite). */
   file: string
   /**
@@ -65,6 +76,8 @@ export type ConnectionStatus = {
   serverVersion?: string
   /** True when the connection runs through an SSH tunnel. */
   tunneled?: boolean
+  /** Child databases (all-databases mode); exactly one is inUse. */
+  children?: ChildDb[]
   error?: string
 }
 
@@ -125,6 +138,8 @@ export type SqlkitApi = {
   testSshTunnel: (profile: ConnectionProfile) => Promise<TestSshResult>
   connectDatabase: (profile: ConnectionProfile) => Promise<ConnectResult>
   disconnectDatabase: (profileId: string) => Promise<void>
+  /** Switches the active child database of an all-databases connection. */
+  setActiveChildDb: (profileId: string, database: string) => Promise<{ success: boolean; error?: string }>
   disconnectAllDatabases: () => Promise<void>
   getConnectionStatuses: () => Promise<ConnectionStatus[]>
   /** Subscribes to status pushes from the main process; returns unsubscribe. */

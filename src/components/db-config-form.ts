@@ -1,7 +1,7 @@
 import { LitElement, css, html, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
-import type { ConnectionProfile, Engine, SshAuthType, SshConfig } from '../electron'
+import type { ConnectionProfile, DatabaseMode, Engine, SshAuthType, SshConfig } from '../electron'
 
 const ENGINES: ReadonlyArray<{ engine: Engine; label: string; disabled?: boolean }> = [
   { engine: 'postgresql', label: 'PostgreSQL' },
@@ -110,6 +110,19 @@ export class DbConfigForm extends LitElement {
         ${this._field('User', this._input(draft, 'username'))}
         ${this._field('Password', this._input(draft, 'password', 'password'))}
         ${this._field('Database', this._input(draft, 'database'))}
+        ${this._field(
+          'Mode',
+          html`
+            <select
+              @change=${(e: Event) =>
+                this._patch({ databaseMode: (e.target as HTMLSelectElement).value as DatabaseMode })}
+            >
+              <option value="single" ?selected=${(draft.databaseMode ?? 'single') === 'single'}>Single database</option>
+              <option value="all" ?selected=${draft.databaseMode === 'all'}>All databases</option>
+            </select>
+          `,
+          'All databases lists every database on the server; switch the active one in the sidebar.',
+        )}
       </section>
     `
   }
