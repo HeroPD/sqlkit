@@ -14,6 +14,7 @@ import './db-config-form'
 import './editor-empty'
 import './editor-tab'
 import './explorer-view'
+import './history-view'
 import './results-panel'
 import './sql-editor'
 import './status-bar'
@@ -23,6 +24,7 @@ import type { PaletteEntry, PaletteMode } from './command-palette'
 import type { QueryRun } from './results-panel'
 import type { RunQueryDetail } from './sql-editor'
 import type { TableBrowseDetail, TableSelectDetail } from './explorer-view'
+import type { HistoryItem, HistoryOpenDetail } from './history-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 
 const VIEWS = [
@@ -32,6 +34,9 @@ const VIEWS = [
   { id: 'history', title: 'History', icon: 'codicon-history', hint: 'No query history yet.' },
   { id: 'tasks', title: 'Tasks', icon: 'codicon-checklist', hint: 'No running jobs.' },
 ] as const
+
+// Reference behavior: keep the most recent runs, drop the tail.
+const MAX_HISTORY = 200
 
 type ViewId = (typeof VIEWS)[number]['id']
 
@@ -45,6 +50,11 @@ type SqlTabState = {
   path: string | null
   content: string
   savedContent: string
+  /**
+   * VS Code-style preview tab: single-click opens recycle it instead of
+   * stacking tabs. Editing or double-clicking promotes it to permanent.
+   */
+  preview?: boolean
 }
 
 type EditorTabState = { id: string; kind: 'config'; profile: ConnectionProfile } | SqlTabState
@@ -142,6 +152,11 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _confirm: { message: string; detail: string; confirmLabel: string; action: () => void } | null = null
 
+  // Query history of every context in this workspace (runtime-only, like the
+  // reference); the History view filters it to the active context.
+  @state()
+  private _history: HistoryItem[] = []
+
   @state()
   private _tabs: EditorTabState[] = []
 
@@ -190,6 +205,7 @@ export class WorkbenchScreen extends LitElement {
       this._palette = null
       this._selectedTable = null
       this._queryRun = { phase: 'idle' }
+      this._history = []
       this._instances.clear()
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
@@ -460,6 +476,20 @@ export class WorkbenchScreen extends LitElement {
       runKey,
       response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error },
     )
+
+    this._history = [
+      {
+        id: crypto.randomUUID(),
+        contextKey: runKey,
+        sql: sqlText,
+        success: response.success,
+        durationMs: response.success ? response.result.durationMs : 0,
+        rowCount: response.success ? response.result.rowCount : null,
+        error: response.success ? '' : response.error,
+        createdAt: new Date().toISOString(),
+      },
+      ...this._history,
+    ].slice(0, MAX_HISTORY)
   }
 
   // A run that finishes after the user switched contexts belongs to the
@@ -732,7 +762,12 @@ export class WorkbenchScreen extends LitElement {
                 <div class="tab-bar">
                   ${this._tabs.map(
                     (tab) => html`
-                      <editor-tab tabId=${tab.id} name=${tabTitle(tab)} .active=${tab.id === this._activeTabId}></editor-tab>
+                      <editor-tab
+                        tabId=${tab.id}
+                        name=${tabTitle(tab)}
+                        .active=${tab.id === this._activeTabId}
+                        .preview=${tab.kind === 'sql' && (tab.preview ?? false)}
+                      ></editor-tab>
                     `,
                   )}
                 </div>
@@ -811,7 +846,72 @@ export class WorkbenchScreen extends LitElement {
         ></explorer-view>
       `
     }
+    if (view.id === 'history') {
+      const key = contextKey(this._activeDbId, this._activeChildDb)
+      return html`
+        <history-view
+          .items=${this._history.filter((item) => item.contextKey === key)}
+          @history-open=${this._onHistoryOpen}
+          @history-open-permanent=${this._onHistoryOpenPermanent}
+          @history-clear=${this._onHistoryClear}
+        ></history-view>
+      `
+    }
     return html`<p class="muted hint">${view.hint}</p>`
+  }
+
+  // Single click: open the SQL in the preview tab (recycled across picks, so
+  // browsing history doesn't stack tabs). Never auto-runs.
+  private _onHistoryOpen(event: Event) {
+    const { sql } = (event as CustomEvent<HistoryOpenDetail>).detail
+    const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview)
+
+    if (preview) {
+      this._tabs = this._tabs.map((tab) =>
+        tab.id === preview.id && tab.kind === 'sql' ? { ...tab, content: sql, savedContent: sql } : tab,
+      )
+      this._activeTabId = preview.id
+      return
+    }
+
+    const tab: SqlTabState = {
+      id: crypto.randomUUID(),
+      kind: 'sql',
+      name: 'History.sql',
+      path: null,
+      content: sql,
+      savedContent: sql,
+      preview: true,
+    }
+    this._tabs = [...this._tabs, tab]
+    this._activeTabId = tab.id
+  }
+
+  // Double click: pin it. The preceding single clicks already recycled the
+  // preview to this SQL, so promotion is just clearing the flag.
+  private _onHistoryOpenPermanent(event: Event) {
+    const { sql } = (event as CustomEvent<HistoryOpenDetail>).detail
+    const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview && tab.content === sql)
+    if (preview) {
+      this._tabs = this._tabs.map((tab) => (tab.id === preview.id ? { ...tab, preview: false } : tab))
+      this._activeTabId = preview.id
+      return
+    }
+    const tab: SqlTabState = {
+      id: crypto.randomUUID(),
+      kind: 'sql',
+      name: 'History.sql',
+      path: null,
+      content: sql,
+      savedContent: sql,
+    }
+    this._tabs = [...this._tabs, tab]
+    this._activeTabId = tab.id
+  }
+
+  private _onHistoryClear() {
+    const key = contextKey(this._activeDbId, this._activeChildDb)
+    this._history = this._history.filter((item) => item.contextKey !== key)
   }
 
   private _renderEditorContent() {
@@ -1001,8 +1101,10 @@ export class WorkbenchScreen extends LitElement {
 
   private _onEditorChange(event: Event) {
     const { value } = (event as CustomEvent<{ value: string }>).detail
+    // Editing a preview tab promotes it to permanent (VS Code behavior) —
+    // a later history pick must not recycle away someone's edits.
     this._tabs = this._tabs.map((tab) =>
-      tab.id === this._activeTabId && tab.kind === 'sql' ? { ...tab, content: value } : tab,
+      tab.id === this._activeTabId && tab.kind === 'sql' ? { ...tab, content: value, preview: false } : tab,
     )
   }
 

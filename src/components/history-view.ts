@@ -1,0 +1,212 @@
+import { LitElement, css, html } from 'lit'
+import { customElement, property } from 'lit/decorators.js'
+import { codicons, controls, scrollbars, typography } from '../shared-styles'
+
+// One run in the query history. Runtime-only, like the reference app: capped
+// per workspace, scoped to the database context that ran it.
+export type HistoryItem = {
+  id: string
+  /** The context (connection + child) that ran the query. */
+  contextKey: string
+  sql: string
+  success: boolean
+  durationMs: number
+  rowCount: number | null
+  error: string
+  createdAt: string
+}
+
+export type HistoryOpenDetail = { sql: string }
+
+const summarize = (sql: string) => sql.replace(/\s+/g, ' ').trim().slice(0, 120)
+
+const timeOf = (iso: string) => new Date(iso).toLocaleTimeString('en-US', { hour12: false })
+
+// The History sidebar view: the active context's runs, newest first. Rows
+// dispatch `history-open` with their SQL (the workbench opens it in a new
+// query tab); the header's clear button dispatches `history-clear`.
+@customElement('history-view')
+export class HistoryView extends LitElement {
+  @property({ attribute: false })
+  items: HistoryItem[] = []
+
+  render() {
+    return html`
+      <div class="head">
+        <span class="spacer"></span>
+        <button
+          class="clear"
+          title="Clear history"
+          aria-label="Clear history"
+          ?disabled=${!this.items.length}
+          @click=${() => this.dispatchEvent(new CustomEvent('history-clear', { bubbles: true, composed: true }))}
+        >
+          <i class="codicon codicon-clear-all" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="list">
+        ${this.items.length
+          ? this.items.map((item) => this._renderItem(item))
+          : html`<p class="muted hint">No queries run yet.</p>`}
+      </div>
+    `
+  }
+
+  private _renderItem(item: HistoryItem) {
+    const meta = [
+      timeOf(item.createdAt),
+      item.success ? 'OK' : 'Error',
+      `${Math.max(1, Math.round(item.durationMs))} ms`,
+      item.rowCount !== null ? `${item.rowCount} row${item.rowCount === 1 ? '' : 's'}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ')
+
+    return html`
+      <div
+        class="item ${item.success ? 'ok' : 'error'}"
+        role="button"
+        tabindex="0"
+        title=${item.success ? item.sql : `${item.sql}\n\n${item.error}`}
+        @click=${() => this._open(item)}
+        @dblclick=${() => this._openPermanent(item)}
+        @keydown=${(e: KeyboardEvent) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            this._open(item)
+          }
+        }}
+      >
+        <span class="sql">${summarize(item.sql)}</span>
+        <span class="meta">${meta}</span>
+      </div>
+    `
+  }
+
+  private _open(item: HistoryItem) {
+    this.dispatchEvent(
+      new CustomEvent<HistoryOpenDetail>('history-open', {
+        detail: { sql: item.sql },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+  }
+
+  // Double click promotes the preview into a permanent tab (the two single
+  // clicks before it recycled the same preview, so this just pins it).
+  private _openPermanent(item: HistoryItem) {
+    this.dispatchEvent(
+      new CustomEvent<HistoryOpenDetail>('history-open-permanent', {
+        detail: { sql: item.sql },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+  }
+
+  static styles = [
+    typography,
+    controls,
+    codicons,
+    scrollbars,
+    css`
+      :host {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .head {
+        display: flex;
+        align-items: center;
+        padding: 0 8px 2px;
+        flex-shrink: 0;
+      }
+
+      .spacer {
+        flex: 1;
+      }
+
+      .clear {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border: none;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--text-2);
+        cursor: pointer;
+      }
+
+      .clear:hover:not(:disabled) {
+        background: var(--btn-secondary-hover);
+        color: var(--text);
+      }
+
+      .clear:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+
+      .clear .codicon {
+        font-size: 14px;
+      }
+
+      .list {
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
+        overscroll-behavior: none;
+        overflow-anchor: none;
+      }
+
+      .hint {
+        padding: 0 20px;
+      }
+
+      .item {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 5px 10px 5px 12px;
+        border-left: 2px solid var(--status-dot-connected);
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .item.error {
+        border-left-color: var(--status-dot-error);
+      }
+
+      .item:hover {
+        background: var(--list-hover);
+      }
+
+      .sql {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 12px;
+        color: var(--text);
+      }
+
+      .meta {
+        font-size: var(--font-size-sm);
+        color: var(--text-3);
+      }
+    `,
+  ]
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'history-view': HistoryView
+  }
+}

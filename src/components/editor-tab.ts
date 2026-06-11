@@ -15,6 +15,10 @@ export class EditorTab extends LitElement {
   @property({ type: Boolean, reflect: true })
   active = false
 
+  /** Preview tabs (single-click opens) render italic, VS Code-style. */
+  @property({ type: Boolean, reflect: true })
+  preview = false
+
   connectedCallback() {
     super.connectedCallback()
     this.addEventListener('click', this._onSelect)
@@ -82,6 +86,10 @@ export class EditorTab extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    :host([preview]) .label {
+      font-style: italic;
     }
 
     .close {
