@@ -88,7 +88,7 @@ export class ResultsPanel extends LitElement {
   private _renderBody() {
     const run = this.run
     if (run.phase === 'idle') {
-      return html`<p class="hint">Run a query with ${isMac ? '⌘↵' : 'Ctrl+↵'} — selection runs alone.</p>`
+      return html`<p class="hint">Run a query with ${isMac ? '⌘↵' : 'Ctrl+↵'}; selection runs alone, otherwise nearest block.</p>`
     }
     if (run.phase === 'running') {
       return html`

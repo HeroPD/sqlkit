@@ -2,7 +2,7 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { scrollbars } from '../shared-styles'
 
-import { Compartment, Prec } from '@codemirror/state'
+import { Compartment } from '@codemirror/state'
 import {
   EditorView,
   keymap,
@@ -35,103 +35,13 @@ import {
   type CompletionContext,
 } from '@codemirror/autocomplete'
 import { searchKeymap } from '@codemirror/search'
-import { PostgreSQL, sql } from '@codemirror/lang-sql'
+import { sql } from '@codemirror/lang-sql'
+import { runQuery } from '../codemirror/run-query'
+import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import {
   oneDarkHighlightStyle,
   oneDarkTheme,
 } from '@codemirror/theme-one-dark'
-
-const POSTGRES_KEYWORDS = [
-  'SELECT',
-  'FROM',
-  'WHERE',
-  'JOIN',
-  'INNER JOIN',
-  'LEFT JOIN',
-  'RIGHT JOIN',
-  'FULL JOIN',
-  'CROSS JOIN',
-  'ON',
-  'GROUP BY',
-  'ORDER BY',
-  'HAVING',
-  'LIMIT',
-  'OFFSET',
-
-  'INSERT',
-  'INTO',
-  'VALUES',
-  'UPDATE',
-  'SET',
-  'DELETE',
-  'RETURNING',
-
-  'WITH',
-  'AS',
-  'DISTINCT',
-
-  'UNION',
-  'UNION ALL',
-  'EXCEPT',
-  'INTERSECT',
-
-  'CASE',
-  'WHEN',
-  'THEN',
-  'ELSE',
-  'END',
-
-  'AND',
-  'OR',
-  'NOT',
-  'NULL',
-  'IS NULL',
-  'IS NOT NULL',
-  'IN',
-  'NOT IN',
-  'LIKE',
-  'ILIKE',
-  'BETWEEN',
-  'EXISTS',
-
-  'TRUE',
-  'FALSE',
-
-  'COUNT',
-  'SUM',
-  'AVG',
-  'MIN',
-  'MAX',
-  'COALESCE',
-  'NULLIF',
-  'NOW',
-  'CURRENT_DATE',
-  'CURRENT_TIMESTAMP',
-
-  'CREATE',
-  'ALTER',
-  'DROP',
-  'TABLE',
-  'INDEX',
-  'VIEW',
-  'PRIMARY KEY',
-  'FOREIGN KEY',
-  'REFERENCES',
-] as const
-
-const KEYWORD_BOOSTS: Record<string, number> = {
-  SELECT: 100,
-  FROM: 95,
-  WHERE: 90,
-  JOIN: 85,
-  'LEFT JOIN': 80,
-  'ORDER BY': 75,
-  'GROUP BY': 75,
-  LIMIT: 70,
-  INSERT: 65,
-  UPDATE: 65,
-  DELETE: 65,
-}
 
 const appTheme = EditorView.theme(
   {
@@ -233,6 +143,9 @@ export class SqlEditor extends LitElement {
   @property({ attribute: false })
   tables: string[] = []
 
+  @property()
+  dialect: SqlDialectName = 'postgres'
+
   private _view: EditorView | null = null
 
   private _language = new Compartment()
@@ -257,17 +170,7 @@ export class SqlEditor extends LitElement {
       doc: this.value,
       parent: container,
       extensions: [
-        Prec.highest(
-          keymap.of([
-            {
-              key: 'Mod-Enter',
-              run: (view) => {
-                this._emitRun(view)
-                return true
-              },
-            },
-          ]),
-        ),
+        runQuery((sql) => this._emitRun(sql)),
 
         lineNumbers(),
         highlightActiveLineGutter(),
@@ -376,10 +279,11 @@ export class SqlEditor extends LitElement {
       this._lastEmittedValue = this.value
     }
 
-    if (changed.has('tables')) {
+    if (changed.has('tables') || changed.has('dialect')) {
       const nextTablesKey = this._makeTablesKey(this.tables)
+      const tablesChanged = nextTablesKey !== this._tablesKey
 
-      if (nextTablesKey !== this._tablesKey) {
+      if (tablesChanged || changed.has('dialect')) {
         this._tablesKey = nextTablesKey
 
         view.dispatch({
@@ -404,14 +308,14 @@ export class SqlEditor extends LitElement {
 
   private _sqlExtension() {
     /**
-     * Keep SQL language support for PostgreSQL parsing/highlighting.
+     * SQL language support for the configured dialect's parsing/highlighting.
      *
      * Do not pass schema here if you do not want CodeMirror's built-in SQL
      * keyword/schema autocomplete to leak noisy parser keywords like SELECTIVE.
      * Table completions are handled by _completionSource instead.
      */
     return sql({
-      dialect: PostgreSQL,
+      dialect: resolveDialect(this.dialect).dialect,
       upperCaseKeywords: true,
     })
   }
@@ -435,7 +339,7 @@ export class SqlEditor extends LitElement {
         boost: 60,
       }))
 
-    const keywordOptions: Completion[] = POSTGRES_KEYWORDS.map((keyword) => ({
+    const keywordOptions: Completion[] = resolveDialect(this.dialect).keywords.map((keyword) => ({
       label: keyword,
       type: 'keyword',
       apply: keyword,
@@ -474,16 +378,10 @@ export class SqlEditor extends LitElement {
       .join('\0')
   }
 
-  private _emitRun(view: EditorView) {
-    const { from, to } = view.state.selection.main
-    const selection = view.state.sliceDoc(from, to).trim()
-    const statement = selection || view.state.doc.toString().trim()
-
-    if (!statement) return
-
+  private _emitRun(sql: string) {
     this.dispatchEvent(
       new CustomEvent<RunQueryDetail>('run-query', {
-        detail: { sql: statement },
+        detail: { sql },
         bubbles: true,
         composed: true,
       }),

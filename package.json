@@ -8,6 +8,8 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "electron": "npm run build && electron .",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
@@ -24,7 +26,8 @@
     "electron-builder": "^26.15.2",
     "lit": "^3.3.3",
     "typescript": "~6.0.2",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "vitest": "^4.1.8"
   },
   "dependencies": {
     "pg": "^8.21.0",
