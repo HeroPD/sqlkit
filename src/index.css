@@ -37,6 +37,14 @@
   --titlebar-fg: #d7dce5;
   --editor-bg: #0f1117;
   --editor-fg: #dce1ea;
+  --tab-bar-bg: #11141b;
+  --tab-active-bg: #0f1117;
+  --tab-active-fg: #ffffff;
+  --tab-active-top: #007acc;
+  --tab-inactive-bg: #181d27;
+  --tab-inactive-fg: #9aa4b2;
+  --tab-border: #252c3a;
+  --tab-hover-bg: #1d2430;
   --status-bar-bg: #007acc;
   --status-bar-fg: #ffffff;
   --status-bar-disconnected: #68217a;

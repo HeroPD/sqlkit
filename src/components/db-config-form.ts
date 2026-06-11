@@ -1,5 +1,5 @@
-import { LitElement, css, html, type PropertyValues, type TemplateResult } from 'lit'
-import { customElement, property, state } from 'lit/decorators.js'
+import { LitElement, css, html, type TemplateResult } from 'lit'
+import { customElement, property } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
 import type { ConnectionProfile, Engine } from '../electron'
 
@@ -11,24 +11,16 @@ const ENGINES: ReadonlyArray<{ engine: Engine; label: string }> = [
 
 // Scoped-down port of the reference config form: connection profile fields
 // with save/cancel. Connect/test flows arrive with the database drivers. The
-// form edits a local draft and only emits it on save — `config-save` with the
-// profile, or `config-cancel`.
+// form is controlled: the draft lives in the owner (the workbench's tab), each
+// edit emits `config-change` with the updated profile, and `config-save` /
+// `config-cancel` carry the commit/discard intents.
 @customElement('db-config-form')
 export class DbConfigForm extends LitElement {
   @property({ attribute: false })
   profile: ConnectionProfile | null = null
 
-  @state()
-  private _draft: ConnectionProfile | null = null
-
-  protected willUpdate(changed: PropertyValues) {
-    if (changed.has('profile')) {
-      this._draft = this.profile ? { ...this.profile } : null
-    }
-  }
-
   render() {
-    const draft = this._draft
+    const draft = this.profile
     if (!draft) return html``
 
     return html`
@@ -105,12 +97,14 @@ export class DbConfigForm extends LitElement {
   }
 
   private _patch<K extends keyof ConnectionProfile>(key: K, value: ConnectionProfile[K]) {
-    if (this._draft) this._draft = { ...this._draft, [key]: value }
+    if (!this.profile) return
+    const profile = { ...this.profile, [key]: value }
+    this.dispatchEvent(new CustomEvent('config-change', { detail: { profile }, bubbles: true, composed: true }))
   }
 
   private _onSave() {
-    if (!this._draft) return
-    const profile = { ...this._draft, name: this._draft.name.trim() || 'Untitled' }
+    if (!this.profile) return
+    const profile = { ...this.profile, name: this.profile.name.trim() || 'Untitled' }
     this.dispatchEvent(new CustomEvent('config-save', { detail: { profile }, bubbles: true, composed: true }))
   }
 

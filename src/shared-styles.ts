@@ -26,8 +26,8 @@ export const typography = css`
 
   h2 {
     font-size: var(--font-size-xl);
-    font-weight: 400;
-    color: var(--text-2);
+    font-weight: 600;
+    color: var(--text);
     margin: 0;
   }
 

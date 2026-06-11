@@ -5,6 +5,9 @@ import type { ConnectionProfile } from '../electron'
 import './activity-button'
 import './db-list-item'
 import './db-config-form'
+import './editor-empty'
+import './editor-tab'
+import type { EmptyAction } from './editor-empty'
 
 const VIEWS = [
   { id: 'explorer', title: 'Explorer', icon: 'codicon-files', hint: 'No files yet.' },
@@ -15,6 +18,12 @@ const VIEWS = [
 ] as const
 
 type ViewId = (typeof VIEWS)[number]['id']
+
+// An editor tab. Config-form tabs for now; file tabs join later. The tab owns
+// the unsaved draft, so edits survive switching tabs.
+type EditorTabState = { id: string; profile: ConnectionProfile }
+
+const tabTitle = (tab: EditorTabState) => tab.profile.name.trim() || 'New Database'
 
 // Workbench shell: activity bar + switchable sidebar + editor area over the
 // status bar. Clicking an activity button shows its view; clicking the active
@@ -32,7 +41,10 @@ export class WorkbenchScreen extends LitElement {
   private _connections: ConnectionProfile[] = []
 
   @state()
-  private _editingProfile: ConnectionProfile | null = null
+  private _tabs: EditorTabState[] = []
+
+  @state()
+  private _activeTabId: string | null = null
 
   @state()
   private _sidebarWidth = 280
@@ -48,7 +60,8 @@ export class WorkbenchScreen extends LitElement {
 
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('workspace')) {
-      this._editingProfile = null
+      this._tabs = []
+      this._activeTabId = null
       this._connections = []
       if (this.workspace) void this._loadConfig()
     }
@@ -62,7 +75,15 @@ export class WorkbenchScreen extends LitElement {
   render() {
     const activeView = VIEWS.find((view) => view.id === this._activeView)
     return html`
-      <div class="body" @db-select=${this._onDbSelect} @config-save=${this._onConfigSave} @config-cancel=${this._onConfigCancel}>
+      <div
+        class="body"
+        @db-select=${this._onDbSelect}
+        @config-change=${this._onConfigChange}
+        @config-save=${this._onConfigSave}
+        @config-cancel=${this._onConfigCancel}
+        @tab-select=${this._onTabSelect}
+        @tab-close=${this._onTabClose}
+      >
         <nav class="activity-bar" @activity-select=${this._onActivitySelect}>
           ${VIEWS.map(
             (view) => html`
@@ -93,17 +114,19 @@ export class WorkbenchScreen extends LitElement {
             `
           : ''}
 
-        <div class="editor-area ${this._editingProfile ? 'form' : ''}">
-          ${this._editingProfile
-            ? html`<db-config-form .profile=${this._editingProfile}></db-config-form>`
-            : html`
-                <div class="empty">
-                  <i class="codicon codicon-database" aria-hidden="true"></i>
-                  <h2>${this.workspace?.name ?? 'Workbench'}</h2>
-                  <p class="muted">${this.workspace?.path ?? 'No workspace open.'}</p>
-                  <button class="secondary" @click=${this._onCloseWorkspace}>Close Workspace</button>
+        <div class="editor-area">
+          ${this._tabs.length
+            ? html`
+                <div class="tab-bar">
+                  ${this._tabs.map(
+                    (tab) => html`
+                      <editor-tab tabId=${tab.id} name=${tabTitle(tab)} .active=${tab.id === this._activeTabId}></editor-tab>
+                    `,
+                  )}
                 </div>
-              `}
+              `
+            : ''}
+          ${this._renderEditorContent()}
         </div>
       </div>
 
@@ -113,6 +136,29 @@ export class WorkbenchScreen extends LitElement {
         <span>Not connected</span>
       </footer>
     `
+  }
+
+  private _renderEditorContent() {
+    const activeTab = this._tabs.find((tab) => tab.id === this._activeTabId)
+    if (activeTab) {
+      return html`
+        <div class="editor-content form">
+          <db-config-form .profile=${activeTab.profile}></db-config-form>
+        </div>
+      `
+    }
+
+    return html`
+      <div class="editor-content">
+        <editor-empty @empty-action=${this._onEmptyAction}></editor-empty>
+      </div>
+    `
+  }
+
+  private _onEmptyAction(event: Event) {
+    const { action } = (event as CustomEvent<{ action: EmptyAction }>).detail
+    if (action === 'add-database') this._onAddDatabase()
+    if (action === 'close-workspace') this._onCloseWorkspace()
   }
 
   private _renderDatabasesView() {
@@ -125,7 +171,7 @@ export class WorkbenchScreen extends LitElement {
                   dbId=${connection.id}
                   name=${connection.name}
                   detail=${connection.engine}
-                  .active=${this._editingProfile?.id === connection.id}
+                  .active=${this._activeTabId === connection.id}
                 ></db-list-item>
               `,
             )
@@ -180,8 +226,25 @@ export class WorkbenchScreen extends LitElement {
     this._sidebarWidth = 280
   }
 
+  private _openTab(profile: ConnectionProfile) {
+    if (!this._tabs.some((tab) => tab.id === profile.id)) {
+      this._tabs = [...this._tabs, { id: profile.id, profile: { ...profile } }]
+    }
+    this._activeTabId = profile.id
+  }
+
+  private _closeTab(id: string) {
+    const index = this._tabs.findIndex((tab) => tab.id === id)
+    if (index < 0) return
+
+    this._tabs = this._tabs.filter((tab) => tab.id !== id)
+    if (this._activeTabId === id) {
+      this._activeTabId = this._tabs[Math.min(index, this._tabs.length - 1)]?.id ?? null
+    }
+  }
+
   private _onAddDatabase() {
-    this._editingProfile = {
+    this._openTab({
       id: crypto.randomUUID(),
       name: '',
       engine: 'postgresql',
@@ -190,13 +253,28 @@ export class WorkbenchScreen extends LitElement {
       username: '',
       password: '',
       database: '',
-    }
+    })
   }
 
   private _onDbSelect(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
     const connection = this._connections.find((profile) => profile.id === id)
-    if (connection) this._editingProfile = { ...connection }
+    if (connection) this._openTab(connection)
+  }
+
+  private _onTabSelect(event: Event) {
+    const { tabId } = (event as CustomEvent<{ tabId: string }>).detail
+    this._activeTabId = tabId
+  }
+
+  private _onTabClose(event: Event) {
+    const { tabId } = (event as CustomEvent<{ tabId: string }>).detail
+    this._closeTab(tabId)
+  }
+
+  private _onConfigChange(event: Event) {
+    const { profile } = (event as CustomEvent<{ profile: ConnectionProfile }>).detail
+    this._tabs = this._tabs.map((tab) => (tab.id === profile.id ? { ...tab, profile } : tab))
   }
 
   private async _onConfigSave(event: Event) {
@@ -214,12 +292,12 @@ export class WorkbenchScreen extends LitElement {
     }
 
     this._connections = connections
-    this._editingProfile = null
+    this._closeTab(profile.id)
     this._activeView = 'databases'
   }
 
   private _onConfigCancel() {
-    this._editingProfile = null
+    if (this._activeTabId) this._closeTab(this._activeTabId)
   }
 
   private _onCloseWorkspace() {
@@ -334,33 +412,33 @@ export class WorkbenchScreen extends LitElement {
       .editor-area {
         flex: 1;
         display: flex;
-        align-items: center;
-        justify-content: center;
+        flex-direction: column;
         background: var(--editor-bg);
         min-width: 0;
       }
 
-      .editor-area.form {
+      .tab-bar {
+        height: var(--tab-h);
+        background: var(--tab-bar-bg);
+        display: flex;
+        align-items: stretch;
+        overflow-x: auto;
+        flex-shrink: 0;
+        border-bottom: 1px solid var(--border);
+        scrollbar-width: none;
+      }
+
+      .editor-content {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 0;
+      }
+
+      .editor-content.form {
         display: block;
         overflow-y: auto;
-      }
-
-      .empty {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 8px;
-        text-align: center;
-      }
-
-      .empty .codicon {
-        font-size: 40px;
-        color: var(--text-3);
-        margin-bottom: 4px;
-      }
-
-      .empty p {
-        margin-bottom: 12px;
       }
 
       .status-bar {
