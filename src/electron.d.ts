@@ -165,9 +165,12 @@ export type SqlkitApi = {
   openExternal: (path: string) => Promise<{ success: boolean; error?: string }>
   /** Fires when .sql files in the workspace change on disk; returns unsubscribe. */
   onFilesChanged: (listener: () => void) => () => void
-  /** Fires on the File > Close Tab menu item (⌘W); returns unsubscribe. */
-  onCloseTabRequest: (listener: () => void) => () => void
+  /** Fires on app-menu items (File > New Query / Save / …); returns unsubscribe. */
+  onMenuAction: (listener: (action: MenuAction) => void) => () => void
 }
+
+/** Action ids the app menu sends over `app:menu`. */
+export type MenuAction = 'new-query' | 'save' | 'save-as' | 'close-tab'
 
 declare global {
   interface Window {

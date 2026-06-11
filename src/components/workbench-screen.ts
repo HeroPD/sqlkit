@@ -4,7 +4,7 @@ import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
 import { FilesController } from '../controllers/files'
-import type { ConnectionProfile, FileInfo, TableRef } from '../electron'
+import type { ConnectionProfile, FileInfo, FileSaveResult, MenuAction, TableRef } from '../electron'
 import './activity-button'
 import './command-palette'
 import './confirm-dialog'
@@ -78,6 +78,9 @@ type ContextInstance = {
 }
 
 /** Instance bucket for tabs opened before any context exists. */
+// Browse/history tab names already end in .sql; don't double it.
+const suggestedSqlName = (tabName: string) => `${tabName.replace(/\.sql$/i, '')}.sql`
+
 const NO_CONTEXT = '__none__'
 
 const contextKey = (profileId: string | null, childDb: string | null) =>
@@ -179,21 +182,37 @@ export class WorkbenchScreen extends LitElement {
   // Stashed working instances of inactive contexts, keyed by profile id.
   private _instances = new Map<string, ContextInstance>()
 
-  private _unsubscribeCloseTab: (() => void) | null = null
+  private _unsubscribeMenu: (() => void) | null = null
 
   connectedCallback() {
     super.connectedCallback()
-    this._unsubscribeCloseTab = window.sqlkit.onCloseTabRequest(() => {
-      if (this._activeTabId) this._requestCloseTab(this._activeTabId)
-    })
+    this._unsubscribeMenu = window.sqlkit.onMenuAction((action) => this._onMenuAction(action))
     window.addEventListener('keydown', this._onGlobalKeydown)
   }
 
   disconnectedCallback() {
     super.disconnectedCallback()
-    this._unsubscribeCloseTab?.()
-    this._unsubscribeCloseTab = null
+    this._unsubscribeMenu?.()
+    this._unsubscribeMenu = null
     window.removeEventListener('keydown', this._onGlobalKeydown)
+  }
+
+  /** App-menu items (File > …) arriving from the main process. */
+  private _onMenuAction(action: MenuAction) {
+    switch (action) {
+      case 'new-query':
+        this._newQuery()
+        break
+      case 'save':
+        void this._saveActiveTab()
+        break
+      case 'save-as':
+        void this._saveActiveTabAs()
+        break
+      case 'close-tab':
+        if (this._activeTabId) this._requestCloseTab(this._activeTabId)
+        break
+    }
   }
 
   protected willUpdate(changed: PropertyValues) {
@@ -473,12 +492,21 @@ export class WorkbenchScreen extends LitElement {
 
     // Untitled queries go through the native dialog, defaulting into the
     // active context's folder.
-    // Browse/history tab names already end in .sql; don't double it.
-    const suggestedName = `${tab.name.replace(/\.sql$/i, '')}.sql`
     const result = tab.path
       ? await window.sqlkit.saveFile(tab.path, tab.content)
-      : await window.sqlkit.saveFileAs(this._contextFolder() ?? '', suggestedName, tab.content)
+      : await window.sqlkit.saveFileAs(this._contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
+    this._applySaveResult(tab, result)
+  }
 
+  // File > Save As…: always the dialog, even for files that have a path.
+  private async _saveActiveTabAs() {
+    const tab = this._activeSqlTab()
+    if (!tab) return
+    const result = await window.sqlkit.saveFileAs(this._contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
+    this._applySaveResult(tab, result)
+  }
+
+  private _applySaveResult(tab: SqlTabState, result: FileSaveResult) {
     if (!result.success) {
       if (!result.canceled) console.error('Save failed:', result.error)
       return

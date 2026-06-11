@@ -223,21 +223,25 @@ function registerDbIpc() {
 
 // The default menu binds ⌘W to Close Window, swallowing it before the
 // renderer sees the key. Rebind: ⌘W closes the active tab (sent to the
-// renderer), ⇧⌘W closes the window — the editor-app convention.
+// renderer), ⇧⌘W closes the window — the editor-app convention. File items
+// route to the renderer over one channel; the workbench maps the action ids
+// to its tab/save logic.
 function buildAppMenu() {
   const isMac = process.platform === 'darwin'
+  const menuAction = (action: string) => (_item: unknown, window: unknown) => {
+    if (window instanceof BrowserWindow) window.webContents.send('app:menu', action)
+  }
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' } as MenuItemConstructorOptions] : []),
     {
       label: 'File',
       submenu: [
-        {
-          label: 'Close Tab',
-          accelerator: 'CmdOrCtrl+W',
-          click: (_item, window) => {
-            if (window instanceof BrowserWindow) window.webContents.send('app:close-tab')
-          },
-        },
+        { label: 'New Query', accelerator: 'CmdOrCtrl+N', click: menuAction('new-query') },
+        { type: 'separator' },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: menuAction('save') },
+        { label: 'Save As…', accelerator: 'Shift+CmdOrCtrl+S', click: menuAction('save-as') },
+        { type: 'separator' },
+        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: menuAction('close-tab') },
         { label: 'Close Window', accelerator: 'Shift+CmdOrCtrl+W', role: 'close' },
         ...(isMac ? [] : [{ type: 'separator' } as MenuItemConstructorOptions, { role: 'quit' } as MenuItemConstructorOptions]),
       ],

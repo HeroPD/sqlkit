@@ -35,10 +35,10 @@ const api: SqlkitApi = {
     ipcRenderer.on('workspace:files-changed', handler)
     return () => ipcRenderer.off('workspace:files-changed', handler)
   },
-  onCloseTabRequest: (listener) => {
-    const handler = () => listener()
-    ipcRenderer.on('app:close-tab', handler)
-    return () => ipcRenderer.off('app:close-tab', handler)
+  onMenuAction: (listener) => {
+    const handler = (_event: IpcRendererEvent, action: Parameters<typeof listener>[0]) => listener(action)
+    ipcRenderer.on('app:menu', handler)
+    return () => ipcRenderer.off('app:menu', handler)
   },
 }
 
