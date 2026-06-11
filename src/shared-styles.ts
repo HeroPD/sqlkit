@@ -4,7 +4,19 @@ import codiconCss from './codicons/codicon.css?inline'
 // The codicon icon classes (.codicon-files etc.), for use inside shadow
 // roots. The @font-face itself only registers at document level (imported in
 // index.css); this module carries the per-icon class rules.
-export const codicons = unsafeCSS(codiconCss)
+//
+// The vendored base rule pins 16px through a `font:` shorthand at (0,2,0)
+// specificity, which silently beats simple component selectors. Sizing
+// therefore goes through --codicon-size, set on any ancestor (it inherits) —
+// no specificity contest needed.
+export const codicons = [
+  unsafeCSS(codiconCss),
+  css`
+    .codicon[class*='codicon-'] {
+      font-size: var(--codicon-size, 16px);
+    }
+  `,
+]
 
 // App-wide scrollbar standard (matches the reference app): thin, transparent
 // track, rounded thumb inset by a 2px transparent border. Document-level

@@ -5,10 +5,11 @@ import type { ConnectionProfile, ConnectionStatus } from '../electron'
 import './db-list-item'
 
 // The Databases sidebar view: connection list with live status, the child
-// databases of all-databases connections (display-only — the active context
-// is switched via ⌘K, never from here), and the add button. db-list-item
-// events (db-select / db-connect / db-disconnect) bubble through; this view
-// adds `add-database`.
+// databases of all-databases connections (display-only — the active child
+// is switched via ⌘K, never from here; connecting does adopt the connection
+// as the in-use context), and the add button. db-list-item events
+// (db-select / db-connect / db-disconnect) bubble through; this view adds
+// `add-database`.
 @customElement('databases-view')
 export class DatabasesView extends LitElement {
   @property({ attribute: false })

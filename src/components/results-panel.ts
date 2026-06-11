@@ -82,7 +82,8 @@ export class ResultsPanel extends LitElement {
     const { result } = this.run
     const rows = `${result.rowCount} row${result.rowCount === 1 ? '' : 's'}`
     const truncated = result.rows.length > MAX_DISPLAY_ROWS ? ` (showing ${MAX_DISPLAY_ROWS})` : ''
-    return `${rows}${truncated} · ${Math.max(1, Math.round(result.durationMs))} ms`
+    const pace = result.durationMs < 500 ? 'fast' : result.durationMs < 2000 ? 'medium' : 'slow'
+    return html`${rows}${truncated} · <span class="duration ${pace}">${Math.max(1, Math.round(result.durationMs))} ms</span>`
   }
 
   private _renderBody() {
@@ -179,6 +180,19 @@ export class ResultsPanel extends LitElement {
         text-transform: none;
         letter-spacing: normal;
         color: var(--text-3);
+      }
+
+      /* Timing at a glance: green under 500 ms, orange under 2 s, red above. */
+      .duration.fast {
+        color: var(--status-dot-connected);
+      }
+
+      .duration.medium {
+        color: var(--status-dot-warning);
+      }
+
+      .duration.slow {
+        color: var(--status-dot-error);
       }
 
       .body {

@@ -576,15 +576,18 @@ export class WorkbenchScreen extends LitElement {
         .filter((file) => file.type === 'file')
         .map((file) => ({ id: `file:${file.relativePath}`, label: file.name, detail: file.relativePath, icon: 'codicon-file-code' }))
 
-      // Tables of every connected database, so ⌘P reaches across contexts.
-      const tables = this._connections.flatMap((connection) =>
-        (this._live.tables[connection.id] ?? []).map((table) => ({
-          id: `table:${tableKey(connection.id, table)}`,
-          label: table.name,
-          detail: [table.schema, connection.name].filter(Boolean).join(' · '),
-          icon: 'codicon-table',
-        })),
-      )
+      // Tables of the in-use context only — ⌘P must not mix databases;
+      // switching context is ⌘K's job.
+      const context = this._activeProfile()
+      const tables =
+        context && this._live.phase(context.id) === 'connected'
+          ? (this._live.tables[context.id] ?? []).map((table) => ({
+              id: `table:${tableKey(context.id, table)}`,
+              label: table.name,
+              detail: table.schema ?? '',
+              icon: 'codicon-table',
+            }))
+          : []
 
       return [...files, ...tables]
     }
@@ -662,8 +665,8 @@ export class WorkbenchScreen extends LitElement {
         if (file) void this._openFileTab(file)
         return
       }
-      // Reveal the picked table in the Explorer; its profile becomes the
-      // in-use context so the Tables section shows the right database.
+      // Reveal the picked table in the Explorer. Entries are scoped to the
+      // in-use context, so the _setActiveDb below is normally a no-op.
       const key = id.slice('table:'.length)
       this._selectedTable = key
       const profileId = key.split(':')[0]
@@ -1067,7 +1070,12 @@ export class WorkbenchScreen extends LitElement {
     if (!connection) return
     // Failures surface through the status push (error dot + message).
     const result = await this._live.connect(connection)
-    if (result.success) await this._alignActiveChild(id)
+    if (!result.success) return
+    await this._alignActiveChild(id)
+    // A successful connect becomes the in-use context and reveals its tables
+    // in the Explorer (same as a ⌘P table pick).
+    this._setActiveDb(id)
+    this._activeView = 'explorer'
   }
 
   private async _onDbDisconnect(event: Event) {

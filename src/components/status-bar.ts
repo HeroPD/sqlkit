@@ -55,6 +55,7 @@ export class StatusBar extends LitElement {
         gap: 10px;
         padding: 0 10px;
         font-size: var(--font-size-sm);
+        --codicon-size: var(--font-size-sm);
         color: var(--status-bar-fg);
         background: var(--status-bar-disconnected);
       }
@@ -64,7 +65,6 @@ export class StatusBar extends LitElement {
       }
 
       .codicon {
-        font-size: 12px;
         vertical-align: -1px;
       }
 

@@ -2,7 +2,9 @@
    composed into shadow roots via the `codicons` module in shared-styles.ts. */
 @import './codicons/codicon.css';
 
-/* ── Theme tokens (VS Code Dark+, ported from the SqlKit reference) ────────── */
+/* ── Theme tokens (VS Code Dark+, ported from the SqlKit reference) ──────────
+   Foreground/text tokens are pre-blended 20% toward their backgrounds for a
+   softer overall contrast; keep that in mind when adding new fg colors. */
 :root {
   color-scheme: dark;
 
@@ -30,25 +32,26 @@
   --bg: #0f1117;
   --sidebar-bg: #141821;
   --activity-bar-bg: #0b0d12;
-  --activity-bar-fg: #ffffff;
-  --activity-bar-inactive: #7f8794;
-  --activity-bar-indicator: #ffffff;
+  --activity-bar-fg: #cecfd0;
+  --activity-bar-inactive: #686f7a;
+  --activity-bar-indicator: #cecfd0;
   --titlebar-bg: #11141b;
-  --titlebar-fg: #d7dce5;
+  --titlebar-fg: #afb4bd;
   --editor-bg: #0f1117;
-  --editor-fg: #dce1ea;
+  --editor-fg: #b3b7c0;
   --tab-bar-bg: #11141b;
   --tab-active-bg: #0f1117;
-  --tab-active-fg: #ffffff;
+  --tab-active-fg: #cfcfd1;
   --tab-active-top: #007acc;
   --tab-inactive-bg: #181d27;
-  --tab-inactive-fg: #9aa4b2;
+  --tab-inactive-fg: #808996;
   --tab-border: #252c3a;
   --tab-hover-bg: #1d2430;
   --status-bar-bg: #007acc;
   --status-bar-fg: #ffffff;
   --status-bar-disconnected: #68217a;
   --status-dot-connected: #73e05a;
+  --status-dot-warning: #d18616;
   --status-dot-error: #f14c4c;
   --grid-border: #252c3a;
   --row-alt: #121620;
@@ -57,22 +60,22 @@
   --header-bg: #141821;
   --border: #2a3140;
   --border-subtle: #202735;
-  --text: #d7dce5;
-  --text-2: #9aa4b2;
-  --text-3: #687386;
+  --text: #afb3bc;
+  --text-2: #7e8793;
+  --text-3: #565f70;
   --accent: #007acc;
   --accent-hover: #1177bb;
   --on-accent: #ffffff;
   --focus-border: #007acc;
   --input-bg: #181d27;
   --input-border: #2a3140;
-  --input-fg: #d7dce5;
+  --input-fg: #b1b6bf;
   --btn-bg: #0e639c;
   --btn-hover: #1177bb;
   --btn-fg: #ffffff;
   --btn-secondary-bg: #1d2430;
   --btn-secondary-hover: #263044;
-  --btn-secondary-fg: #d7dce5;
+  --btn-secondary-fg: #b2b7c1;
   --list-hover: #1a2030;
   --list-selection: #123a5c;
   --list-selection-fg: #ffffff;

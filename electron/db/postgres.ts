@@ -83,9 +83,18 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     },
 
     async listTables() {
+      // pg_class instead of information_schema.tables so partition children
+      // can be excluded — only the partitioned parent is listed (querying it
+      // covers all partitions). relkinds: ordinary/partitioned tables, views,
+      // foreign tables — what information_schema.tables exposed.
       const result = await activePool().query(
-        `select table_schema, table_name from information_schema.tables
-         where table_schema not in ('pg_catalog', 'information_schema')
+        `select n.nspname as table_schema, c.relname as table_name
+         from pg_catalog.pg_class c
+         join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+         where c.relkind in ('r', 'p', 'v', 'f')
+           and not c.relispartition
+           and n.nspname !~ '^pg_'
+           and n.nspname <> 'information_schema'
          order by table_schema, table_name`,
       )
       return result.rows.map(

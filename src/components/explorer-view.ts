@@ -15,9 +15,10 @@ export type TableBrowseDetail = { table: TableRef }
 // The Explorer sidebar view, scoped to the in-use database context (⌘K):
 // VS Code-style Files/Tables split where each section is a flex region with
 // its own scrolling body, a draggable 1px divider between them (double-click
-// resets), and a collapsed Tables header that pins to the bottom. File events
-// bubble through from <file-tree>; tables dispatch `table-select` /
-// `table-browse`.
+// resets), and a collapsed Tables header that pins to the bottom. Tables
+// group under collapsible schema headers when the database has more than one
+// schema. File events bubble through from <file-tree>; tables dispatch
+// `table-select` / `table-browse`.
 @customElement('explorer-view')
 export class ExplorerView extends LitElement {
   @property({ attribute: false })
@@ -51,6 +52,10 @@ export class ExplorerView extends LitElement {
   @state()
   private _tablesCollapsed = false
 
+  /** Collapsed schema groups, keyed `profileId:schema` so state is per profile. */
+  @state()
+  private _collapsedSchemas = new Set<string>()
+
   // null = the default even split; a number pins the Files section height.
   @state()
   private _filesSectionHeight: number | null = null
@@ -59,8 +64,18 @@ export class ExplorerView extends LitElement {
   private _sectionResizing: { startY: number; startHeight: number } | null = null
 
   protected willUpdate(changed: PropertyValues) {
-    // A selection arriving from outside (⌘P table pick) must be visible.
-    if (changed.has('selectedTable') && this.selectedTable) this._tablesCollapsed = false
+    // A selection arriving from outside (⌘P table pick) must be visible:
+    // expand the Tables section and the schema group holding it.
+    if (changed.has('selectedTable') && this.selectedTable) {
+      this._tablesCollapsed = false
+      const [profileId, schema] = this.selectedTable.split(':')
+      const groupKey = `${profileId}:${schema}`
+      if (this._collapsedSchemas.has(groupKey)) {
+        const next = new Set(this._collapsedSchemas)
+        next.delete(groupKey)
+        this._collapsedSchemas = next
+      }
+    }
   }
 
   render() {
@@ -126,24 +141,59 @@ export class ExplorerView extends LitElement {
     }
     if (!this.tables.length) return html`<p class="muted hint">No tables.</p>`
     const profileId = this.profileId
+
+    // Group by schema, preserving the driver's order. With one schema (or
+    // none — SQLite) the list stays flat: a lone group header is just noise.
+    const groups = new Map<string, TableRef[]>()
+    for (const table of this.tables) {
+      const schema = table.schema ?? ''
+      const list = groups.get(schema)
+      if (list) list.push(table)
+      else groups.set(schema, [table])
+    }
+    if (groups.size < 2) {
+      return html`
+        <div class="etable-list">${this.tables.map((table) => this._renderTableRow(profileId, table, false))}</div>
+      `
+    }
     return html`
       <div class="etable-list">
-        ${this.tables.map((table) => {
-          const key = tableKey(profileId, table)
+        ${[...groups.entries()].map(([schema, tables]) => {
+          const groupKey = `${profileId}:${schema}`
+          const collapsed = this._collapsedSchemas.has(groupKey)
           return html`
-            <div
-              class="etable-row ${this.selectedTable === key ? 'selected' : ''}"
-              title="${tableLabel(table)} — double-click to browse"
-              @click=${() => this._select(key)}
-              @dblclick=${() => this._browse(table)}
-            >
-              <i class="codicon codicon-table" aria-hidden="true"></i>
-              <span>${tableLabel(table)}</span>
-            </div>
+            <button class="schema-row" @click=${() => this._toggleSchema(groupKey)}>
+              <i class="codicon codicon-chevron-right chevron ${collapsed ? '' : 'expanded'}" aria-hidden="true"></i>
+              <span>${schema}</span>
+              <span class="schema-count">${tables.length}</span>
+            </button>
+            ${collapsed ? '' : tables.map((table) => this._renderTableRow(profileId, table, true))}
           `
         })}
       </div>
     `
+  }
+
+  private _renderTableRow(profileId: string, table: TableRef, nested: boolean) {
+    const key = tableKey(profileId, table)
+    return html`
+      <div
+        class="etable-row ${nested ? 'nested' : ''} ${this.selectedTable === key ? 'selected' : ''}"
+        title="${tableLabel(table)} — double-click to browse"
+        @click=${() => this._select(key)}
+        @dblclick=${() => this._browse(table)}
+      >
+        <i class="codicon codicon-table" aria-hidden="true"></i>
+        <span>${table.name}</span>
+      </div>
+    `
+  }
+
+  private _toggleSchema(groupKey: string) {
+    const next = new Set(this._collapsedSchemas)
+    if (next.has(groupKey)) next.delete(groupKey)
+    else next.add(groupKey)
+    this._collapsedSchemas = next
   }
 
   private _select(key: string) {
@@ -310,6 +360,54 @@ export class ExplorerView extends LitElement {
       .etable-list {
         display: flex;
         flex-direction: column;
+      }
+
+      .schema-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        width: 100%;
+        padding: 2px 10px 2px 14px;
+        border: none;
+        background: transparent;
+        color: var(--text-2);
+        font-family: inherit;
+        font-size: var(--font-size);
+        text-align: left;
+        white-space: nowrap;
+        cursor: pointer;
+        user-select: none;
+        flex-shrink: 0;
+      }
+
+      .schema-row:hover {
+        background: var(--list-hover);
+      }
+
+      .schema-row .chevron {
+        font-size: 14px;
+        flex-shrink: 0;
+        transition: transform 0.1s ease;
+      }
+
+      .schema-row .chevron.expanded {
+        transform: rotate(90deg);
+      }
+
+      .schema-row span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .schema-count {
+        margin-left: auto;
+        flex-shrink: 0;
+        color: var(--text-3);
+        font-size: var(--font-size-sm);
+      }
+
+      .etable-row.nested {
+        padding-left: 36px;
       }
 
       .etable-row {
