@@ -49,6 +49,7 @@ export class DatabasesView extends LitElement {
         dbId=${connection.id}
         name=${connection.name}
         detail=${detail ?? connection.engine}
+        engine=${connection.engine}
         status=${status?.phase ?? ''}
         .active=${this.activeTabId === connection.id}
       ></db-list-item>

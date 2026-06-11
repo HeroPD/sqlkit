@@ -665,13 +665,17 @@ export class WorkbenchScreen extends LitElement {
         if (file) void this._openFileTab(file)
         return
       }
-      // Reveal the picked table in the Explorer. Entries are scoped to the
+      // Reveal the picked table in the Explorer and open its browse tab —
+      // same as double-clicking it in the sidebar. Entries are scoped to the
       // in-use context, so the _setActiveDb below is normally a no-op.
       const key = id.slice('table:'.length)
       this._selectedTable = key
       const profileId = key.split(':')[0]
       if (profileId) this._setActiveDb(profileId)
       this._activeView = 'explorer'
+      const profile = this._connections.find((connection) => connection.id === profileId)
+      const table = (this._live.tables[profileId] ?? []).find((entry) => tableKey(profileId, entry) === key)
+      if (profile && table) this._browseTable(profile, table)
       return
     }
 
@@ -1072,10 +1076,9 @@ export class WorkbenchScreen extends LitElement {
     const result = await this._live.connect(connection)
     if (!result.success) return
     await this._alignActiveChild(id)
-    // A successful connect becomes the in-use context and reveals its tables
-    // in the Explorer (same as a ⌘P table pick).
+    // A successful connect becomes the in-use context, but stays on the
+    // Databases view — no jumping to the Explorer uninvited.
     this._setActiveDb(id)
-    this._activeView = 'explorer'
   }
 
   private async _onDbDisconnect(event: Event) {

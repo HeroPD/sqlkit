@@ -1,7 +1,8 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { codicons } from '../shared-styles'
-import type { ConnectionPhase } from '../electron'
+import type { ConnectionPhase, Engine } from '../electron'
+import './engine-badge'
 
 // One row in the Databases sidebar list. Dispatches `db-select` with its
 // profile id; the workbench decides what selecting it means (open the form).
@@ -17,6 +18,9 @@ export class DbListItem extends LitElement {
 
   @property()
   detail = ''
+
+  @property()
+  engine: Engine | '' = ''
 
   @property({ reflect: true })
   status: ConnectionPhase | '' = ''
@@ -41,7 +45,10 @@ export class DbListItem extends LitElement {
   render() {
     const live = this.status === 'connected' || this.status === 'connecting'
     return html`
-      <span class="icon">DB<span class="dot"></span></span>
+      <span class="icon">
+        <engine-badge engine=${this.engine}></engine-badge>
+        <span class="dot"></span>
+      </span>
       <span class="meta">
         <span class="name">${this.name}</span>
         <span class="detail">${this.detail}</span>
@@ -83,7 +90,7 @@ export class DbListItem extends LitElement {
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 6px 10px;
+        padding: 4px 10px;
         color: var(--text);
         cursor: pointer;
       }
@@ -103,25 +110,17 @@ export class DbListItem extends LitElement {
 
       .icon {
         position: relative;
-        width: 18px;
-        height: 14px;
+        display: flex;
         flex-shrink: 0;
-        border-radius: 2px;
-        background: var(--accent);
-        color: var(--on-accent);
-        font-size: 7px;
-        font-weight: 700;
-        line-height: 14px;
-        text-align: center;
       }
 
       .dot {
         display: none;
         position: absolute;
-        right: -3px;
-        bottom: -3px;
-        width: 7px;
-        height: 7px;
+        right: -2px;
+        bottom: -2px;
+        width: 8px;
+        height: 8px;
         border-radius: 50%;
         border: 1px solid var(--sidebar-bg);
         box-sizing: border-box;
@@ -140,7 +139,6 @@ export class DbListItem extends LitElement {
       .meta {
         display: flex;
         flex-direction: column;
-        gap: 2px;
         min-width: 0;
         flex: 1;
       }
@@ -150,6 +148,7 @@ export class DbListItem extends LitElement {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        line-height: 1.3;
       }
 
       .name {
