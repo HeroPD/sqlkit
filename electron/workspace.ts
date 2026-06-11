@@ -20,7 +20,12 @@ export function readWorkspaceConfig(): WorkspaceConfig {
   if (!currentWorkspace) return defaultWorkspaceConfig()
   try {
     const raw = JSON.parse(fs.readFileSync(workspaceConfigPathFor(currentWorkspace), 'utf8')) as Partial<WorkspaceConfig>
-    return { ...defaultWorkspaceConfig(), ...raw }
+    return {
+      ...defaultWorkspaceConfig(),
+      ...raw,
+      // Profiles saved before the sqlite engine existed have no file field.
+      connections: (raw.connections ?? []).map((connection) => ({ ...connection, file: connection.file ?? '' })),
+    }
   } catch {
     return defaultWorkspaceConfig()
   }

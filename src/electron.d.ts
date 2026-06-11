@@ -8,7 +8,21 @@ export type WorkspaceResult =
   | { success: true; path: string; name: string }
   | { success: false; canceled?: boolean; error?: string }
 
-export type Engine = 'postgresql' | 'mysql' | 'sqlserver'
+export type Engine = 'postgresql' | 'sqlite' | 'mysql' | 'sqlserver'
+
+export type SshAuthType = 'password' | 'key'
+
+export type SshConfig = {
+  enabled: boolean
+  host: string
+  port: string
+  username: string
+  authType: SshAuthType
+  password: string
+  /** Private key file path; supports a leading ~. */
+  keyPath: string
+  passphrase: string
+}
 
 export type ConnectionProfile = {
   id: string
@@ -19,6 +33,10 @@ export type ConnectionProfile = {
   username: string
   password: string
   database: string
+  /** Database file path; only meaningful for file-based engines (sqlite). */
+  file: string
+  /** SSH tunnel settings; absent means a direct connection. */
+  ssh?: SshConfig
 }
 
 export type WorkspaceConfig = {
@@ -28,12 +46,63 @@ export type WorkspaceConfig = {
 
 export type SaveResult = { success: true } | { success: false; error: string }
 
+// --- Live connections ---------------------------------------------------
+
+export type ConnectionPhase = 'connecting' | 'connected' | 'error'
+
+/** Status of one live connection; profiles with no status are disconnected. */
+export type ConnectionStatus = {
+  profileId: string
+  phase: ConnectionPhase
+  serverVersion?: string
+  /** True when the connection runs through an SSH tunnel. */
+  tunneled?: boolean
+  error?: string
+}
+
+export type ConnectResult = { success: true; serverVersion: string } | { success: false; error: string }
+
+export type TestConnectionResult =
+  | { success: true; serverVersion: string; tookMs: number }
+  | { success: false; error: string; tookMs: number }
+
+export type TestSshResult = { success: true; tookMs: number } | { success: false; error: string; tookMs: number }
+
+export type QueryResult = {
+  columns: string[]
+  rows: unknown[][]
+  /** Rows returned for reads, rows affected for writes. */
+  rowCount: number
+  durationMs: number
+}
+
+export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
+
+export type TableRef = {
+  /** Namespace of the table (Postgres schema); null for engines without one. */
+  schema: string | null
+  name: string
+}
+
+export type TablesResult = { success: true; tables: TableRef[] } | { success: false; error: string }
+
 export type SqlkitApi = {
   openWorkspace: () => Promise<WorkspaceResult>
   openWorkspacePath: (path: string) => Promise<WorkspaceResult>
   getRecentWorkspaces: () => Promise<RecentWorkspace[]>
   getWorkspaceConfig: () => Promise<WorkspaceConfig>
   saveWorkspaceConfig: (config: WorkspaceConfig) => Promise<SaveResult>
+  testConnection: (profile: ConnectionProfile) => Promise<TestConnectionResult>
+  testSshTunnel: (profile: ConnectionProfile) => Promise<TestSshResult>
+  connectDatabase: (profile: ConnectionProfile) => Promise<ConnectResult>
+  disconnectDatabase: (profileId: string) => Promise<void>
+  disconnectAllDatabases: () => Promise<void>
+  getConnectionStatuses: () => Promise<ConnectionStatus[]>
+  /** Subscribes to status pushes from the main process; returns unsubscribe. */
+  onConnectionStatus: (listener: (statuses: ConnectionStatus[]) => void) => () => void
+  runQuery: (profileId: string, sql: string, params?: unknown[]) => Promise<QueryResponse>
+  listTables: (profileId: string) => Promise<TablesResult>
+  pickSqliteFile: () => Promise<string | null>
 }
 
 declare global {

@@ -1,7 +1,7 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, controls, typography } from '../shared-styles'
-import type { ConnectionProfile } from '../electron'
+import type { ConnectionProfile, ConnectionStatus, TableRef } from '../electron'
 import './activity-button'
 import './db-list-item'
 import './db-config-form'
@@ -40,6 +40,17 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _connections: ConnectionProfile[] = []
 
+  // Live connection state, keyed by profile id; pushed from the main process.
+  // Profiles without an entry are disconnected.
+  @state()
+  private _statuses: Record<string, ConnectionStatus> = {}
+
+  // Table lists of connected databases, fetched once per connection.
+  @state()
+  private _tables: Record<string, TableRef[]> = {}
+
+  private _unsubscribeStatus: (() => void) | null = null
+
   @state()
   private _tabs: EditorTabState[] = []
 
@@ -58,11 +69,25 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _sidebarCollapsing = false
 
+  connectedCallback() {
+    super.connectedCallback()
+    this._unsubscribeStatus = window.sqlkit.onConnectionStatus((statuses) => this._applyStatuses(statuses))
+    void window.sqlkit.getConnectionStatuses().then((statuses) => this._applyStatuses(statuses))
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback()
+    this._unsubscribeStatus?.()
+    this._unsubscribeStatus = null
+  }
+
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('workspace')) {
       this._tabs = []
       this._activeTabId = null
       this._connections = []
+      // Connections belong to the workspace they were opened from.
+      void window.sqlkit.disconnectAllDatabases()
       if (this.workspace) void this._loadConfig()
     }
   }
@@ -72,12 +97,40 @@ export class WorkbenchScreen extends LitElement {
     this._connections = config.connections
   }
 
+  private _applyStatuses(statuses: ConnectionStatus[]) {
+    const byId: Record<string, ConnectionStatus> = {}
+    for (const status of statuses) byId[status.profileId] = status
+    this._statuses = byId
+
+    // Keep table lists only for still-connected databases, and fetch for
+    // freshly connected ones.
+    const tables: Record<string, TableRef[]> = {}
+    for (const [id, list] of Object.entries(this._tables)) {
+      if (byId[id]?.phase === 'connected') tables[id] = list
+    }
+    this._tables = tables
+    for (const status of statuses) {
+      if (status.phase === 'connected' && !(status.profileId in this._tables)) {
+        void this._loadTables(status.profileId)
+      }
+    }
+  }
+
+  private async _loadTables(profileId: string) {
+    const result = await window.sqlkit.listTables(profileId)
+    if (result.success && this._statuses[profileId]?.phase === 'connected') {
+      this._tables = { ...this._tables, [profileId]: result.tables }
+    }
+  }
+
   render() {
     const activeView = VIEWS.find((view) => view.id === this._activeView)
     return html`
       <div
         class="body"
         @db-select=${this._onDbSelect}
+        @db-connect=${this._onDbConnect}
+        @db-disconnect=${this._onDbDisconnect}
         @config-change=${this._onConfigChange}
         @config-save=${this._onConfigSave}
         @config-cancel=${this._onConfigCancel}
@@ -130,10 +183,23 @@ export class WorkbenchScreen extends LitElement {
         </div>
       </div>
 
-      <footer class="status-bar">
+      ${this._renderStatusBar()}
+    `
+  }
+
+  private _renderStatusBar() {
+    const connected = Object.values(this._statuses).filter((status) => status.phase === 'connected')
+    const summary =
+      connected.length === 0
+        ? 'Not connected'
+        : connected.length === 1
+          ? (this._connections.find((profile) => profile.id === connected[0].profileId)?.name ?? '1 connected')
+          : `${connected.length} connected`
+    return html`
+      <footer class="status-bar ${connected.length ? 'connected' : ''}">
         <span>${this.workspace?.name ?? 'SqlKit'}</span>
         <span class="spacer"></span>
-        <span>Not connected</span>
+        <span>${summary}</span>
       </footer>
     `
   }
@@ -165,22 +231,51 @@ export class WorkbenchScreen extends LitElement {
     return html`
       <div class="db-list">
         ${this._connections.length
-          ? this._connections.map(
-              (connection) => html`
-                <db-list-item
-                  dbId=${connection.id}
-                  name=${connection.name}
-                  detail=${connection.engine}
-                  .active=${this._activeTabId === connection.id}
-                ></db-list-item>
-              `,
-            )
+          ? this._connections.map((connection) => this._renderDatabaseItem(connection))
           : html`<p class="muted hint">No database connections yet.</p>`}
       </div>
       <button class="link sidebar-action" @click=${this._onAddDatabase}>
         <i class="codicon codicon-add" aria-hidden="true"></i>
         <span>Add Database</span>
       </button>
+    `
+  }
+
+  private _renderDatabaseItem(connection: ConnectionProfile) {
+    const status = this._statuses[connection.id]
+    const detail =
+      status?.phase === 'error'
+        ? status.error
+        : status?.phase === 'connected'
+          ? `${status.serverVersion}${status.tunneled ? ' · SSH' : ''}`
+          : connection.engine
+    return html`
+      <db-list-item
+        dbId=${connection.id}
+        name=${connection.name}
+        detail=${detail ?? connection.engine}
+        status=${status?.phase ?? ''}
+        .active=${this._activeTabId === connection.id}
+      ></db-list-item>
+      ${status?.phase === 'connected' ? this._renderTables(connection.id) : ''}
+    `
+  }
+
+  private _renderTables(profileId: string) {
+    const tables = this._tables[profileId]
+    if (!tables) return ''
+    if (!tables.length) return html`<p class="muted hint table-hint">No tables.</p>`
+    return html`
+      <div class="table-list">
+        ${tables.map(
+          (table) => html`
+            <div class="table-row" title=${table.schema ? `${table.schema}.${table.name}` : table.name}>
+              <i class="codicon codicon-table" aria-hidden="true"></i>
+              <span>${table.schema ? `${table.schema}.${table.name}` : table.name}</span>
+            </div>
+          `,
+        )}
+      </div>
     `
   }
 
@@ -253,6 +348,7 @@ export class WorkbenchScreen extends LitElement {
       username: '',
       password: '',
       database: '',
+      file: '',
     })
   }
 
@@ -260,6 +356,18 @@ export class WorkbenchScreen extends LitElement {
     const { id } = (event as CustomEvent<{ id: string }>).detail
     const connection = this._connections.find((profile) => profile.id === id)
     if (connection) this._openTab(connection)
+  }
+
+  private async _onDbConnect(event: Event) {
+    const { id } = (event as CustomEvent<{ id: string }>).detail
+    const connection = this._connections.find((profile) => profile.id === id)
+    // Failures surface through the status push (error dot + message).
+    if (connection) await window.sqlkit.connectDatabase(connection)
+  }
+
+  private async _onDbDisconnect(event: Event) {
+    const { id } = (event as CustomEvent<{ id: string }>).detail
+    await window.sqlkit.disconnectDatabase(id)
   }
 
   private _onTabSelect(event: Event) {
@@ -400,6 +508,37 @@ export class WorkbenchScreen extends LitElement {
         min-height: 0;
       }
 
+      .table-list {
+        display: flex;
+        flex-direction: column;
+        padding: 2px 0 6px;
+      }
+
+      .table-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 10px 2px 36px;
+        font-size: var(--font-size-sm);
+        color: var(--text-2);
+        white-space: nowrap;
+      }
+
+      .table-row span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .table-row .codicon {
+        font-size: 13px;
+        flex-shrink: 0;
+      }
+
+      .table-hint {
+        padding: 2px 10px 6px 36px;
+        font-size: var(--font-size-sm);
+      }
+
       .sidebar-action {
         width: auto;
         margin: 4px 10px;
@@ -450,6 +589,10 @@ export class WorkbenchScreen extends LitElement {
         font-size: var(--font-size-sm);
         color: var(--status-bar-fg);
         background: var(--status-bar-disconnected);
+      }
+
+      .status-bar.connected {
+        background: var(--status-bar-bg);
       }
 
       .spacer {

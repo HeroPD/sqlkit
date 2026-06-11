@@ -8,7 +8,9 @@ import {
   readWorkspaceConfig,
   writeWorkspaceConfig,
 } from './workspace'
-import type { WorkspaceConfig } from '../src/electron'
+import { createConnectionManager, testConnection } from './db/manager'
+import { testSshTunnel } from './db/transport'
+import type { ConnectionProfile, ConnectionStatus, WorkspaceConfig } from '../src/electron'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
@@ -83,8 +85,49 @@ function registerWorkspaceIpc() {
   ipcMain.handle('workspace:save-config', (_event, config: WorkspaceConfig) => writeWorkspaceConfig(config))
 }
 
+function registerDbIpc() {
+  const broadcast = (statuses: ConnectionStatus[]) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send('db:status', statuses)
+    }
+  }
+  const manager = createConnectionManager(broadcast)
+
+  ipcMain.handle('db:test', (_event, profile: ConnectionProfile) => testConnection(profile))
+  ipcMain.handle('db:test-ssh', (_event, profile: ConnectionProfile) => testSshTunnel(profile))
+  ipcMain.handle('db:connect', (_event, profile: ConnectionProfile) => manager.connect(profile))
+  ipcMain.handle('db:disconnect', (_event, profileId: string) => manager.disconnect(profileId))
+  ipcMain.handle('db:disconnect-all', () => manager.disconnectAll())
+  ipcMain.handle('db:statuses', () => manager.statuses())
+  ipcMain.handle('db:query', (_event, profileId: string, sql: string, params?: unknown[]) =>
+    manager.query(profileId, sql, params),
+  )
+  ipcMain.handle('db:list-tables', (_event, profileId: string) => manager.listTables(profileId))
+
+  ipcMain.handle('db:pick-sqlite-file', async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window) return null
+
+    const result = await dialog.showOpenDialog(window, {
+      title: 'Choose SQLite Database',
+      buttonLabel: 'Choose',
+      properties: ['openFile', 'showHiddenFiles'],
+      filters: [
+        { name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3', 'db3'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
+  app.on('before-quit', () => {
+    void manager.disconnectAll()
+  })
+}
+
 app.whenReady().then(() => {
   registerWorkspaceIpc()
+  registerDbIpc()
 
   createWindow()
 

@@ -15,10 +15,16 @@
     "dist": "npm run build && electron-builder"
   },
   "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "@types/ssh2": "^1.15.5",
     "electron": "^42.3.3",
     "electron-builder": "^26.15.2",
     "lit": "^3.3.3",
     "typescript": "~6.0.2",
     "vite": "^8.0.12"
+  },
+  "dependencies": {
+    "pg": "^8.21.0",
+    "ssh2": "^1.17.0"
   }
 }

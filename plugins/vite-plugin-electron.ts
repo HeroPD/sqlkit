@@ -25,7 +25,7 @@ type EntryKind = 'main' | 'preload'
 type RollupWatcher = Rollup.RollupWatcher
 
 const require = createRequire(import.meta.url)
-const external = [...new Set(['electron', ...builtinModules, ...builtinModules.map((name) => `node:${name}`)])]
+const builtinExternals = [...new Set(['electron', ...builtinModules, ...builtinModules.map((name) => `node:${name}`)])]
 
 export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin {
   let viteConfig: ResolvedConfig
@@ -203,6 +203,12 @@ function createBuildConfig(
   target: { entry: string; kind: EntryKind; outDir: string; watch: boolean },
 ): InlineConfig {
   const { entry, kind, outDir, watch } = target
+
+  // Production dependencies stay external: electron-builder packs them into
+  // the app's node_modules, and CJS drivers with lazy optional requires (pg →
+  // pg-native) don't survive bundling into ESM.
+  const pkg = require(resolve(config.root, 'package.json')) as { dependencies?: Record<string, string> }
+  const external = [...builtinExternals, ...Object.keys(pkg.dependencies ?? {})]
 
   return {
     root: config.root,
