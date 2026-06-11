@@ -639,6 +639,9 @@ export class WorkbenchScreen extends LitElement {
 
   private _onEmptyAction(event: Event) {
     const { action } = (event as CustomEvent<{ action: EmptyAction }>).detail
+    if (action === 'quick-open') this._palette = 'quick'
+    if (action === 'switch-database') this._palette = 'databases'
+    if (action === 'command-palette') this._palette = 'commands'
     if (action === 'add-database') this._onAddDatabase()
     if (action === 'close-workspace') this._onCloseWorkspace()
   }

@@ -19,16 +19,22 @@ const devServerUrl = process.env.VITE_DEV_SERVER_URL
 
 function createWindow() {
   const window = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 320,
-    minHeight: 480,
+    width: 1440,
+    height: 900,
+    minWidth: 800,
+    minHeight: 600,
+    // Matches --bg in index.css; with show-on-ready this kills the white
+    // flash before the renderer paints.
+    backgroundColor: '#0f1117',
+    show: false,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
+
+  window.once('ready-to-show', () => window.show())
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
