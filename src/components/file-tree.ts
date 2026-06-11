@@ -1,4 +1,4 @@
-import { LitElement, css, html, type TemplateResult } from 'lit'
+import { LitElement, css, html, type PropertyValues, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import type { FileInfo } from '../electron'
@@ -10,6 +10,19 @@ type FileNode = {
   file?: FileInfo
   children: Map<string, FileNode>
 }
+
+export type FileRenameDetail = { file: FileInfo; newName: string }
+/** parent is ''-rooted, '/'-separated, relative to the context folder. */
+export type FileCreateDetail = { parent: string; name: string }
+export type FileDeleteDetail = { path: string; name: string }
+
+type Editing = { mode: 'rename'; relativePath: string } | { mode: 'create'; parent: string }
+
+type Menu = { x: number; y: number; node: FileNode | null }
+
+const isMac = navigator.platform.startsWith('Mac')
+
+const parentOf = (relativePath: string) => relativePath.split('/').slice(0, -1).join('/')
 
 function buildTree(files: FileInfo[]): FileNode {
   const root: FileNode = { type: 'folder', name: '', relativePath: '', children: new Map() }
@@ -54,8 +67,11 @@ function ancestorsOf(files: FileInfo[], activePath: string | null): Set<string> 
   return set
 }
 
-// The Explorer sidebar tree of workspace .sql files. Owns folder
-// expand/collapse; dispatches `file-open` with the picked FileInfo.
+// The Explorer sidebar tree of one database context's .sql files. Owns folder
+// expand/collapse and the editing affordances — inline rename (F2, or Enter
+// on macOS), inline create, and a right-click menu — and dispatches
+// `file-open` / `file-rename` / `file-create` / `file-delete`; the workbench
+// performs the actual IPC.
 @customElement('file-tree')
 export class FileTree extends LitElement {
   @property({ attribute: false })
@@ -68,25 +84,54 @@ export class FileTree extends LitElement {
   @state()
   private _expanded = new Set<string>()
 
-  render() {
-    if (!this.files.some((file) => file.type === 'file')) {
-      return html`<p class="muted hint">No .sql files in this workspace yet.</p>`
-    }
+  @state()
+  private _editing: Editing | null = null
 
+  @state()
+  private _menu: Menu | null = null
+
+  render() {
+    const hasFiles = this.files.some((file) => file.type === 'file')
     const ancestors = ancestorsOf(this.files, this.activePath)
     const isOpen = (relativePath: string) => this._expanded.has(relativePath) || ancestors.has(relativePath)
+    const creating = this._editing?.mode === 'create' ? this._editing.parent : null
 
     const rows: TemplateResult[] = []
+    if (creating === '') rows.push(this._renderEditRow(0, ''))
     const walk = (node: FileNode, depth: number) => {
       for (const child of sortedChildren(node)) {
         const isFolder = child.type === 'folder'
         const expanded = isFolder && isOpen(child.relativePath)
-        rows.push(this._renderRow(child, depth, expanded))
-        if (expanded) walk(child, depth + 1)
+        if (this._editing?.mode === 'rename' && this._editing.relativePath === child.relativePath) {
+          rows.push(this._renderEditRow(depth, child.name))
+        } else {
+          rows.push(this._renderRow(child, depth, expanded))
+        }
+        if (isFolder && expanded) {
+          if (creating === child.relativePath) rows.push(this._renderEditRow(depth + 1, ''))
+          walk(child, depth + 1)
+        }
       }
     }
     walk(buildTree(this.files), 0)
-    return html`<div class="tree" role="tree">${rows}</div>`
+
+    return html`
+      <div class="tree" role="tree" @contextmenu=${this._onBackgroundMenu}>
+        ${rows.length ? rows : hasFiles ? '' : html`<p class="muted hint">No .sql files yet. Right-click to create one.</p>`}
+      </div>
+      ${this._renderMenu()}
+    `
+  }
+
+  protected updated(changed: PropertyValues) {
+    if (changed.has('_editing') && this._editing) {
+      const input = this.shadowRoot?.querySelector<HTMLInputElement>('.edit-row input')
+      if (!input) return
+      input.focus()
+      // Pre-select the basename so typing replaces it but the extension stays.
+      const dot = input.value.lastIndexOf('.')
+      input.setSelectionRange(0, dot > 0 ? dot : input.value.length)
+    }
   }
 
   private _renderRow(node: FileNode, depth: number, expanded: boolean) {
@@ -100,6 +145,7 @@ export class FileTree extends LitElement {
         style="padding-left: ${10 + depth * 12}px"
         @click=${() => this._onRow(node)}
         @keydown=${(e: KeyboardEvent) => this._onRowKeydown(e, node)}
+        @contextmenu=${(e: MouseEvent) => this._onRowMenu(e, node)}
       >
         <i
           class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''} ${isFolder ? '' : 'hidden'}"
@@ -110,6 +156,59 @@ export class FileTree extends LitElement {
       </div>
     `
   }
+
+  private _renderEditRow(depth: number, initial: string) {
+    return html`
+      <div class="row edit-row" style="padding-left: ${10 + depth * 12}px">
+        <i class="codicon codicon-chevron-right chevron hidden" aria-hidden="true"></i>
+        <i class="codicon codicon-file-code" aria-hidden="true"></i>
+        <input
+          type="text"
+          .value=${initial}
+          spellcheck="false"
+          autocomplete="off"
+          @keydown=${this._onEditKeydown}
+          @blur=${() => (this._editing = null)}
+          @click=${(e: Event) => e.stopPropagation()}
+        />
+      </div>
+    `
+  }
+
+  private _renderMenu() {
+    const menu = this._menu
+    if (!menu) return ''
+    const node = menu.node
+    const items: Array<{ id: string; label: string; danger?: boolean }> = [{ id: 'new', label: 'New File' }]
+    if (node?.type === 'file') items.push({ id: 'rename', label: `Rename (${isMac ? '↵' : 'F2'})` })
+    if (node) items.push({ id: 'delete', label: 'Delete', danger: true })
+
+    return html`
+      <div
+        class="menu-backdrop"
+        @mousedown=${() => (this._menu = null)}
+        @contextmenu=${(e: Event) => {
+          e.preventDefault()
+          this._menu = null
+        }}
+      ></div>
+      <div class="menu" style="left: ${menu.x}px; top: ${menu.y}px">
+        ${items.map(
+          (item) => html`
+            <button
+              class="menu-item ${item.danger ? 'danger' : ''}"
+              @mousedown=${(e: Event) => e.preventDefault()}
+              @click=${() => this._onMenuPick(item.id, node)}
+            >
+              ${item.label}
+            </button>
+          `,
+        )}
+      </div>
+    `
+  }
+
+  // --- interactions --------------------------------------------------------
 
   private _onRow(node: FileNode) {
     if (node.type === 'folder') {
@@ -124,9 +223,99 @@ export class FileTree extends LitElement {
   }
 
   private _onRowKeydown(event: KeyboardEvent, node: FileNode) {
+    // Platform rename convention: Enter on macOS, F2 elsewhere.
+    const renameKey = event.key === 'F2' || (isMac && event.key === 'Enter')
+    if (renameKey && node.type === 'file') {
+      event.preventDefault()
+      this._startRename(node)
+      return
+    }
+    const deleteKey = isMac ? event.key === 'Backspace' && event.metaKey : event.key === 'Delete'
+    if (deleteKey) {
+      event.preventDefault()
+      this._requestDelete(node)
+      return
+    }
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
       this._onRow(node)
+    }
+  }
+
+  private _onRowMenu(event: MouseEvent, node: FileNode) {
+    event.preventDefault()
+    event.stopPropagation()
+    this._menu = { x: event.clientX, y: event.clientY, node }
+  }
+
+  private _onBackgroundMenu(event: MouseEvent) {
+    event.preventDefault()
+    this._menu = { x: event.clientX, y: event.clientY, node: null }
+  }
+
+  private _onMenuPick(id: string, node: FileNode | null) {
+    this._menu = null
+    if (id === 'new') {
+      const parent = !node ? '' : node.type === 'folder' ? node.relativePath : parentOf(node.relativePath)
+      if (parent) this._expanded = new Set(this._expanded).add(parent)
+      this._editing = { mode: 'create', parent }
+      return
+    }
+    if (id === 'rename' && node?.type === 'file') this._startRename(node)
+    if (id === 'delete' && node) this._requestDelete(node)
+  }
+
+  private _startRename(node: FileNode) {
+    this._editing = { mode: 'rename', relativePath: node.relativePath }
+  }
+
+  private _requestDelete(node: FileNode) {
+    // Folder nodes carry no FileInfo; their absolute path is in the flat list.
+    const info = this.files.find((file) => file.relativePath === node.relativePath && file.type === node.type)
+    if (!info) return
+    this.dispatchEvent(
+      new CustomEvent<FileDeleteDetail>('file-delete', {
+        detail: { path: info.path, name: info.name },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+  }
+
+  private _onEditKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      this._editing = null
+      return
+    }
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+
+    const editing = this._editing
+    const value = (event.target as HTMLInputElement).value.trim()
+    this._editing = null
+    if (!editing || !value || value.includes('/') || value.includes('\\')) return
+
+    if (editing.mode === 'create') {
+      this.dispatchEvent(
+        new CustomEvent<FileCreateDetail>('file-create', {
+          detail: { parent: editing.parent, name: value },
+          bubbles: true,
+          composed: true,
+        }),
+      )
+      return
+    }
+
+    const file = this.files.find((entry) => entry.relativePath === editing.relativePath && entry.type === 'file')
+    if (file && value !== file.name) {
+      this.dispatchEvent(
+        new CustomEvent<FileRenameDetail>('file-rename', {
+          detail: { file, newName: value },
+          bubbles: true,
+          composed: true,
+        }),
+      )
     }
   }
 
@@ -144,6 +333,10 @@ export class FileTree extends LitElement {
            while scrolled to the end. */
         overscroll-behavior: none;
         overflow-anchor: none;
+      }
+
+      .tree {
+        min-height: 100%;
       }
 
       .hint {
@@ -196,6 +389,63 @@ export class FileTree extends LitElement {
       .name {
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+
+      .edit-row {
+        cursor: default;
+      }
+
+      .edit-row input {
+        flex: 1;
+        min-width: 0;
+        height: 20px;
+        padding: 0 4px;
+        font: inherit;
+        color: var(--input-fg);
+        background: var(--input-bg);
+        border: 1px solid var(--input-focus-border);
+        border-radius: 2px;
+        outline: none;
+      }
+
+      .menu-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 90;
+      }
+
+      .menu {
+        position: fixed;
+        z-index: 91;
+        min-width: 160px;
+        padding: 4px;
+        display: flex;
+        flex-direction: column;
+        background: var(--sidebar-bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      }
+
+      .menu-item {
+        display: block;
+        width: 100%;
+        padding: 5px 10px;
+        border: none;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--text);
+        font-size: var(--font-size);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .menu-item:hover {
+        background: var(--list-hover);
+      }
+
+      .menu-item.danger:hover {
+        background: color-mix(in srgb, var(--status-dot-error) 22%, transparent);
       }
     `,
   ]

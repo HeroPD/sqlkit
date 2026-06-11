@@ -1,14 +1,18 @@
 import { LitElement, css, html } from 'lit'
 import { customElement } from 'lit/decorators.js'
 import { codicons, controls, typography } from '../shared-styles'
+import { isMac, mod } from '../platform'
 
-export type EmptyAction = 'quick-open' | 'switch-database' | 'command-palette' | 'add-database' | 'close-workspace'
+export type EmptyAction =
+  | 'new-query'
+  | 'quick-open'
+  | 'switch-database'
+  | 'command-palette'
+  | 'add-database'
+  | 'close-workspace'
 
-const isMac = navigator.platform.startsWith('Mac')
-const mod = (key: string) => (isMac ? `⌘${key}` : `Ctrl+${key}`)
-
-// 'New Query' joins the list when the SQL editor lands.
 const ACTIONS: { action: EmptyAction; label: string; kbd?: string }[] = [
+  { action: 'new-query', label: 'New Query', kbd: mod('N') },
   { action: 'quick-open', label: 'Quick Open', kbd: mod('P') },
   { action: 'switch-database', label: 'Switch Database', kbd: mod('K') },
   { action: 'command-palette', label: 'Command Palette', kbd: isMac ? '⇧⌘P' : 'Ctrl+Shift+P' },

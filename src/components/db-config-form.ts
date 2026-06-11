@@ -299,12 +299,12 @@ export class DbConfigForm extends LitElement {
       }
 
       .card {
-        width: min(100%, 720px);
+        width: 100%;
         margin: 0 auto;
         display: flex;
         flex-direction: column;
         gap: 30px;
-        padding: 32px 42px;
+        padding: 32px 64px;
         box-sizing: border-box;
       }
 

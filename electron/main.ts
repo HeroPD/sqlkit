@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from 'electron'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -9,7 +9,16 @@ import {
   readWorkspaceConfig,
   writeWorkspaceConfig,
 } from './workspace'
-import { listSqlFiles, readWorkspaceFile, startWorkspaceWatcher, stopWorkspaceWatcher } from './files'
+import {
+  createWorkspaceFile,
+  listSqlFiles,
+  readWorkspaceFile,
+  renameWorkspaceFile,
+  resolveDeletablePath,
+  saveWorkspaceFile,
+  startWorkspaceWatcher,
+  stopWorkspaceWatcher,
+} from './files'
 import { createConnectionManager, testConnection } from './db/manager'
 import { testSshTunnel } from './db/transport'
 import type { ConnectionProfile, ConnectionStatus, WorkspaceConfig } from '../src/electron'
@@ -100,6 +109,49 @@ function registerWorkspaceIpc() {
 
   ipcMain.handle('file:read', (_event, filePath: string) => readWorkspaceFile(currentWorkspacePath(), filePath))
 
+  ipcMain.handle('file:save', (_event, filePath: string, content: string) =>
+    saveWorkspaceFile(currentWorkspacePath(), filePath, content),
+  )
+
+  ipcMain.handle('file:create', (_event, folder: string, relativePath: string) =>
+    createWorkspaceFile(currentWorkspacePath(), folder, relativePath),
+  )
+
+  ipcMain.handle('file:rename', (_event, filePath: string, newName: string) =>
+    renameWorkspaceFile(currentWorkspacePath(), filePath, newName),
+  )
+
+  // Confirmation happens in the renderer (in-app modal); this just validates
+  // and moves the target to the Trash.
+  ipcMain.handle('file:delete', async (_event, filePath: string) => {
+    const resolved = resolveDeletablePath(currentWorkspacePath(), filePath)
+    if ('error' in resolved) return { success: false, error: resolved.error }
+
+    try {
+      await shell.trashItem(resolved.path)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle('file:save-as', async (event, folder: string, suggestedName: string, content: string) => {
+    const workspace = currentWorkspacePath()
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!workspace || !window) return { success: false, error: 'No workspace open' }
+
+    const safeFolder = folder && !folder.includes('/') && !folder.includes('\\') && !folder.startsWith('.') ? folder : ''
+    const result = await dialog.showSaveDialog(window, {
+      title: 'Save Query',
+      defaultPath: join(workspace, safeFolder, suggestedName || 'query.sql'),
+      filters: [{ name: 'SQL', extensions: ['sql'] }],
+    })
+    if (result.canceled || !result.filePath) return { success: false, canceled: true }
+
+    const filePath = result.filePath.toLowerCase().endsWith('.sql') ? result.filePath : `${result.filePath}.sql`
+    return saveWorkspaceFile(workspace, filePath, content)
+  })
+
   ipcMain.handle('workspace:get-recent', () => {
     return readGlobalConfig().recentWorkspaces.filter((workspace) => isDirectory(workspace.path))
   })
@@ -145,7 +197,44 @@ function registerDbIpc() {
   })
 }
 
+// The default menu binds ⌘W to Close Window, swallowing it before the
+// renderer sees the key. Rebind: ⌘W closes the active tab (sent to the
+// renderer), ⇧⌘W closes the window — the editor-app convention.
+function buildAppMenu() {
+  const isMac = process.platform === 'darwin'
+  const template: MenuItemConstructorOptions[] = [
+    ...(isMac ? [{ role: 'appMenu' } as MenuItemConstructorOptions] : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Close Tab',
+          accelerator: 'CmdOrCtrl+W',
+          click: (_item, window) => {
+            if (window instanceof BrowserWindow) window.webContents.send('app:close-tab')
+          },
+        },
+        { label: 'Close Window', accelerator: 'Shift+CmdOrCtrl+W', role: 'close' },
+        ...(isMac ? [] : [{ type: 'separator' } as MenuItemConstructorOptions, { role: 'quit' } as MenuItemConstructorOptions]),
+      ],
+    },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    {
+      // Hand-rolled window menu: the windowMenu role would re-register ⌘W.
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        ...(isMac ? [{ type: 'separator' } as MenuItemConstructorOptions, { role: 'front' } as MenuItemConstructorOptions] : []),
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 app.whenReady().then(() => {
+  buildAppMenu()
   registerWorkspaceIpc()
   registerDbIpc()
 

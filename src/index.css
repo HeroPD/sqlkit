@@ -50,6 +50,11 @@
   --status-bar-disconnected: #68217a;
   --status-dot-connected: #73e05a;
   --status-dot-error: #f14c4c;
+  --grid-border: #252c3a;
+  --row-alt: #121620;
+  --row-hover: #163452;
+  --row-num-bg: #11141b;
+  --header-bg: #141821;
   --border: #2a3140;
   --border-subtle: #202735;
   --text: #d7dce5;

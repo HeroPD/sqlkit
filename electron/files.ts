@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { FileInfo, FileReadResult, FilesResult } from '../src/electron'
+import type { FileInfo, FileReadResult, FileSaveResult, FilesResult } from '../src/electron'
 
 const isSqlFile = (name: string) => path.extname(name).toLowerCase() === '.sql'
 
@@ -62,6 +62,94 @@ export function readWorkspaceFile(workspacePath: string | null, filePath: string
     return { success: true, content: fs.readFileSync(resolved, 'utf8') }
   } catch (error) {
     return { success: false, error: (error as Error).message }
+  }
+}
+
+// Writes a .sql file under the workspace root, with the same hardening as
+// readWorkspaceFile. Used by both save (existing path) and save-as (path
+// picked in a native dialog — still validated, dialogs can navigate anywhere).
+export function saveWorkspaceFile(workspacePath: string | null, filePath: string, content: string): FileSaveResult {
+  if (!workspacePath) return { success: false, error: 'No workspace open' }
+
+  const resolved = path.resolve(filePath)
+  if (!resolved.startsWith(workspacePath + path.sep)) {
+    return { success: false, error: 'Files must stay inside the workspace' }
+  }
+  if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be saved' }
+
+  try {
+    fs.mkdirSync(path.dirname(resolved), { recursive: true })
+    fs.writeFileSync(resolved, content, 'utf8')
+    return { success: true, path: resolved, name: path.basename(resolved) }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+}
+
+// Creates an empty .sql file inside a database context's folder. Refuses to
+// overwrite — creation comes from the Explorer's inline "new file" input.
+export function createWorkspaceFile(workspacePath: string | null, folder: string, relativePath: string): FileSaveResult {
+  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!folder || folder.includes('/') || folder.includes('\\') || folder.startsWith('.')) {
+    return { success: false, error: 'Invalid database folder' }
+  }
+
+  const root = path.join(workspacePath, folder)
+  const resolved = path.resolve(root, relativePath)
+  if (!resolved.startsWith(root + path.sep)) return { success: false, error: 'Files must stay inside the database folder' }
+  if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
+
+  const target = isSqlFile(resolved) ? resolved : `${resolved}.sql`
+  if (fs.existsSync(target)) return { success: false, error: `${path.basename(target)} already exists` }
+
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true })
+    fs.writeFileSync(target, '', 'utf8')
+    return { success: true, path: target, name: path.basename(target) }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+}
+
+// Renames a .sql file within its directory; the new name is a bare filename,
+// never a path.
+export function renameWorkspaceFile(workspacePath: string | null, filePath: string, newName: string): FileSaveResult {
+  if (!workspacePath) return { success: false, error: 'No workspace open' }
+
+  const resolved = path.resolve(filePath)
+  if (!resolved.startsWith(workspacePath + path.sep)) return { success: false, error: 'File is outside the workspace' }
+  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be renamed' }
+
+  const trimmed = newName.trim()
+  if (!trimmed || trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('.')) {
+    return { success: false, error: 'Invalid file name' }
+  }
+  const name = isSqlFile(trimmed) ? trimmed : `${trimmed}.sql`
+  const target = path.join(path.dirname(resolved), name)
+  if (target === resolved) return { success: true, path: resolved, name }
+  if (fs.existsSync(target)) return { success: false, error: `${name} already exists` }
+
+  try {
+    fs.renameSync(resolved, target)
+    return { success: true, path: target, name }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+}
+
+/** Validates a delete target: a .sql file or a folder inside the workspace. */
+export function resolveDeletablePath(workspacePath: string | null, filePath: string): { path: string } | { error: string } {
+  if (!workspacePath) return { error: 'No workspace open' }
+  const resolved = path.resolve(filePath)
+  if (!resolved.startsWith(workspacePath + path.sep)) return { error: 'Path is outside the workspace' }
+  if (resolved.split(path.sep).includes('.sqlkit')) return { error: 'The .sqlkit folder is internal' }
+  try {
+    const stat = fs.statSync(resolved)
+    if (!stat.isDirectory() && !isSqlFile(resolved)) return { error: 'Only .sql files and folders can be deleted' }
+    return { path: resolved }
+  } catch {
+    return { error: 'File not found' }
   }
 }
 

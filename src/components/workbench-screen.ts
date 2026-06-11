@@ -1,16 +1,29 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
+import { keyed } from 'lit/directives/keyed.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
-import type { ConnectionProfile, ConnectionStatus, FileInfo, TableRef } from '../electron'
+import { isMac, mod } from '../platform'
+import { ConnectionsController } from '../controllers/connections'
+import { FilesController } from '../controllers/files'
+import type { ConnectionProfile, FileInfo, TableRef } from '../electron'
 import './activity-button'
 import './command-palette'
-import './db-list-item'
+import './confirm-dialog'
+import './databases-view'
 import './db-config-form'
 import './editor-empty'
 import './editor-tab'
-import './file-tree'
+import './explorer-view'
+import './results-panel'
+import './sql-editor'
+import './status-bar'
+import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
 import type { PaletteEntry, PaletteMode } from './command-palette'
+import type { QueryRun } from './results-panel'
+import type { RunQueryDetail } from './sql-editor'
+import type { TableBrowseDetail, TableSelectDetail } from './explorer-view'
+import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 
 const VIEWS = [
   { id: 'explorer', title: 'Explorer', icon: 'codicon-files', hint: 'No files yet.' },
@@ -23,24 +36,29 @@ const VIEWS = [
 type ViewId = (typeof VIEWS)[number]['id']
 
 // An editor tab: a connection-config form (the tab owns the unsaved draft, so
-// edits survive switching tabs) or a read-only view of a workspace .sql file
-// (the SQL editor replaces it later).
-type EditorTabState =
-  | { id: string; kind: 'config'; profile: ConnectionProfile }
-  | { id: string; kind: 'file'; file: FileInfo; content: string }
+// edits survive switching tabs) or a SQL editor over a workspace file —
+// path is null for untitled queries until the first save.
+type SqlTabState = {
+  id: string
+  kind: 'sql'
+  name: string
+  path: string | null
+  content: string
+  savedContent: string
+}
 
-const tabTitle = (tab: EditorTabState) =>
-  tab.kind === 'config' ? tab.profile.name.trim() || 'New Database' : tab.file.name
+type EditorTabState = { id: string; kind: 'config'; profile: ConnectionProfile } | SqlTabState
 
-const isMac = navigator.platform.startsWith('Mac')
-const mod = (key: string) => (isMac ? `⌘${key}` : `Ctrl+${key}`)
-
-const tableKey = (profileId: string, table: TableRef) => `${profileId}:${table.schema ?? ''}:${table.name}`
-
-const tableLabel = (table: TableRef) => (table.schema ? `${table.schema}.${table.name}` : table.name)
+const tabTitle = (tab: EditorTabState) => {
+  if (tab.kind === 'config') return tab.profile.name.trim() || 'New Database'
+  return tab.content === tab.savedContent ? tab.name : `${tab.name} •`
+}
 
 // Commands offered by the ⌘⇧P palette; ids are dispatched to _runCommand.
 const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind?: string }> = [
+  { id: 'new-query', label: 'New Query', icon: 'codicon-new-file', keybind: mod('N') },
+  { id: 'run-query', label: 'Run Query', icon: 'codicon-play', keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
+  { id: 'save-file', label: 'Save File', icon: 'codicon-save', keybind: mod('S') },
   { id: 'quick-open', label: 'Quick Open…', icon: 'codicon-file-code', keybind: mod('P') },
   { id: 'switch-database', label: 'Switch Database…', icon: 'codicon-database', keybind: mod('K') },
   { id: 'add-database', label: 'Add Database', icon: 'codicon-add' },
@@ -51,14 +69,18 @@ const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind
   { id: 'close-workspace', label: 'Close Workspace', icon: 'codicon-folder-opened' },
 ]
 
-// Workbench shell: activity bar + switchable sidebar + editor area over the
-// status bar. Clicking an activity button shows its view; clicking the active
-// one hides the sidebar (reference behavior). Dispatches a `close-workspace`
-// intent; <app-root> owns the screen switch.
+// Workbench shell and orchestrator: owns the tab model, the in-use database
+// context, the command palette, and global shortcuts — and routes events
+// between the sidebar views, the editor, and the panels. Live-connection and
+// file-listing data live in controllers; the views render them.
 @customElement('workbench-screen')
 export class WorkbenchScreen extends LitElement {
   @property({ attribute: false })
   workspace: { name: string; path: string } | null = null
+
+  private _live = new ConnectionsController(this)
+
+  private _workspaceFiles = new FilesController(this)
 
   @state()
   private _activeView: ViewId | null = 'explorer'
@@ -66,51 +88,29 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _connections: ConnectionProfile[] = []
 
-  // Live connection state, keyed by profile id; pushed from the main process.
-  // Profiles without an entry are disconnected.
-  @state()
-  private _statuses: Record<string, ConnectionStatus> = {}
-
-  // Table lists of connected databases, fetched once per connection.
-  @state()
-  private _tables: Record<string, TableRef[]> = {}
-
-  // Workspace .sql files (and their folders), kept fresh by the main-process
-  // file watcher.
-  @state()
-  private _files: FileInfo[] = []
-
-  // Which palette is open, if any.
-  @state()
-  private _palette: PaletteMode | null = null
-
-  // The database context in use (⌘K): the connection queries will run
-  // against once the SQL editor lands.
+  // The database context in use (⌘K): queries run against it, and the
+  // Explorer shows its folder + tables.
   @state()
   private _activeDbId: string | null = null
-
-  // Explorer section collapse + table selection (tableKey of the highlighted
-  // row; browsing arrives with the SQL editor).
-  @state()
-  private _filesCollapsed = false
-
-  @state()
-  private _tablesCollapsed = false
 
   @state()
   private _selectedTable: string | null = null
 
-  // Explorer Files/Tables split: null means the default even split; a number
-  // pins the Files section to that height (set by dragging the divider).
   @state()
-  private _filesSectionHeight: number | null = null
+  private _palette: PaletteMode | null = null
 
   @state()
-  private _sectionResizing: { startY: number; startHeight: number } | null = null
+  private _queryRun: QueryRun = { phase: 'idle' }
 
-  private _unsubscribeStatus: (() => void) | null = null
+  // null = the default split: results take half of the editor area.
+  @state()
+  private _panelHeight: number | null = null
 
-  private _unsubscribeFiles: (() => void) | null = null
+  @state()
+  private _panelResizing: { startY: number; startHeight: number } | null = null
+
+  @state()
+  private _confirm: { message: string; detail: string; confirmLabel: string; action: () => void } | null = null
 
   @state()
   private _tabs: EditorTabState[] = []
@@ -130,20 +130,20 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _sidebarCollapsing = false
 
+  private _unsubscribeCloseTab: (() => void) | null = null
+
   connectedCallback() {
     super.connectedCallback()
-    this._unsubscribeStatus = window.sqlkit.onConnectionStatus((statuses) => this._applyStatuses(statuses))
-    this._unsubscribeFiles = window.sqlkit.onFilesChanged(() => void this._loadFiles())
+    this._unsubscribeCloseTab = window.sqlkit.onCloseTabRequest(() => {
+      if (this._activeTabId) this._requestCloseTab(this._activeTabId)
+    })
     window.addEventListener('keydown', this._onGlobalKeydown)
-    void window.sqlkit.getConnectionStatuses().then((statuses) => this._applyStatuses(statuses))
   }
 
   disconnectedCallback() {
     super.disconnectedCallback()
-    this._unsubscribeStatus?.()
-    this._unsubscribeStatus = null
-    this._unsubscribeFiles?.()
-    this._unsubscribeFiles = null
+    this._unsubscribeCloseTab?.()
+    this._unsubscribeCloseTab = null
     window.removeEventListener('keydown', this._onGlobalKeydown)
   }
 
@@ -152,16 +152,18 @@ export class WorkbenchScreen extends LitElement {
       this._tabs = []
       this._activeTabId = null
       this._connections = []
-      this._files = []
       this._activeDbId = null
       this._palette = null
       this._selectedTable = null
-      this._filesSectionHeight = null
+      this._queryRun = { phase: 'idle' }
+      this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
-      void window.sqlkit.disconnectAllDatabases()
+      void this._live.disconnectAll()
       if (this.workspace) void this._loadConfig()
     }
   }
+
+  // --- workspace config + context -----------------------------------------
 
   private async _loadConfig() {
     const config = await window.sqlkit.getWorkspaceConfig()
@@ -173,26 +175,12 @@ export class WorkbenchScreen extends LitElement {
         ? config.activeDbId
         : (config.connections[0]?.id ?? null)
     this._activeDbId = restored
-    void this._loadFiles()
+    this._workspaceFiles.setFolder(this._activeProfile()?.folder ?? null)
   }
 
   /** The profile of the in-use database context (⌘K). */
   private _activeProfile(): ConnectionProfile | null {
     return this._connections.find((connection) => connection.id === this._activeDbId) ?? null
-  }
-
-  // Files belong to one database context: only the active profile's folder is
-  // listed, so .sql files never mix between databases.
-  private async _loadFiles() {
-    const folder = this._activeProfile()?.folder
-    if (!folder) {
-      this._files = []
-      return
-    }
-    const result = await window.sqlkit.listFiles(folder)
-    // A slow response for a context the user already switched away from must
-    // not clobber the current listing.
-    if (result.success && this._activeProfile()?.folder === folder) this._files = result.files
   }
 
   private _persistConfig() {
@@ -206,13 +194,28 @@ export class WorkbenchScreen extends LitElement {
   private _setActiveDb(profileId: string) {
     if (this._activeDbId === profileId) return
     this._activeDbId = profileId
-    void this._loadFiles()
+    this._workspaceFiles.setFolder(this._activeProfile()?.folder ?? null)
     this._persistConfig()
   }
 
-  // Global shortcuts: ⌘⇧P commands, ⌘P quick open, ⌘K database switch,
-  // ⌘B sidebar. Pressing a palette's own shortcut again closes it.
+  // ⌘K pick: make the connection the in-use context, connecting it first if
+  // it isn't live yet.
+  private async _switchDatabase(profileId: string) {
+    this._setActiveDb(profileId)
+    const phase = this._live.phase(profileId)
+    if (phase === 'connected' || phase === 'connecting') return
+    const profile = this._connections.find((connection) => connection.id === profileId)
+    if (profile) await this._live.connect(profile)
+  }
+
+  // --- global shortcuts -----------------------------------------------------
+
+  // ⌘⇧P commands, ⌘P quick open, ⌘K database switch, ⌘B sidebar, ⌘N new
+  // query, ⌘S save, ⌘↵ run. Pressing a palette's own shortcut again closes it.
   private _onGlobalKeydown = (event: KeyboardEvent) => {
+    // The editor's own keymap (Mod-Enter) prevents default when it handles a
+    // chord; don't run it twice.
+    if (event.defaultPrevented) return
     if (!event.metaKey && !event.ctrlKey) return
     const key = event.key.toLowerCase()
 
@@ -221,14 +224,33 @@ export class WorkbenchScreen extends LitElement {
       this._togglePalette(event.shiftKey ? 'commands' : 'quick')
       return
     }
-    if (key === 'k' && !event.shiftKey) {
+    if (event.shiftKey) return
+    if (key === 'k') {
       event.preventDefault()
       this._togglePalette('databases')
       return
     }
-    if (key === 'b' && !event.shiftKey) {
+    if (key === 'b') {
       event.preventDefault()
       this._toggleSidebar()
+      return
+    }
+    if (key === 'n') {
+      event.preventDefault()
+      this._newQuery()
+      return
+    }
+    if (key === 's') {
+      event.preventDefault()
+      void this._saveActiveTab()
+      return
+    }
+    if (key === 'enter') {
+      const tab = this._activeSqlTab()
+      if (tab?.content.trim()) {
+        event.preventDefault()
+        void this._runSql(tab.content.trim())
+      }
     }
   }
 
@@ -240,17 +262,155 @@ export class WorkbenchScreen extends LitElement {
     this._activeView = this._activeView === null ? 'explorer' : null
   }
 
+  // --- tabs ------------------------------------------------------------------
+
+  private _activeSqlTab(): SqlTabState | null {
+    const tab = this._tabs.find((entry) => entry.id === this._activeTabId)
+    return tab?.kind === 'sql' ? tab : null
+  }
+
+  private _openConfigTab(profile: ConnectionProfile) {
+    if (!this._tabs.some((tab) => tab.id === profile.id)) {
+      this._tabs = [...this._tabs, { id: profile.id, kind: 'config', profile: { ...profile } }]
+    }
+    this._activeTabId = profile.id
+  }
+
+  private async _openFileTab(file: FileInfo) {
+    // Keyed by absolute path: same-named files in different database
+    // folders are distinct tabs.
+    const id = `file:${file.path}`
+    if (!this._tabs.some((tab) => tab.id === id)) {
+      const result = await window.sqlkit.readFile(file.path)
+      if (!result.success) {
+        console.error('Failed to read file:', result.error)
+        return
+      }
+      this._tabs = [
+        ...this._tabs,
+        { id, kind: 'sql', name: file.name, path: file.path, content: result.content, savedContent: result.content },
+      ]
+    }
+    this._activeTabId = id
+  }
+
+  private _newQuery() {
+    const untitled = this._tabs.filter((tab) => tab.kind === 'sql' && tab.path === null).length
+    const tab: SqlTabState = {
+      id: crypto.randomUUID(),
+      kind: 'sql',
+      name: `Untitled-${untitled + 1}`,
+      path: null,
+      content: '',
+      savedContent: '',
+    }
+    this._tabs = [...this._tabs, tab]
+    this._activeTabId = tab.id
+  }
+
+  private _closeTab(id: string) {
+    const index = this._tabs.findIndex((tab) => tab.id === id)
+    if (index < 0) return
+
+    this._tabs = this._tabs.filter((tab) => tab.id !== id)
+    if (this._activeTabId === id) {
+      this._activeTabId = this._tabs[Math.min(index, this._tabs.length - 1)]?.id ?? null
+    }
+  }
+
+  // Close via ⌘W, the tab ✕, etc.: dirty editors get a confirmation first.
+  private _requestCloseTab(id: string) {
+    const tab = this._tabs.find((entry) => entry.id === id)
+    if (tab?.kind === 'sql' && tab.content !== tab.savedContent) {
+      this._confirm = {
+        message: `Close "${tab.name}" without saving?`,
+        detail: 'Unsaved changes will be lost.',
+        confirmLabel: 'Close Without Saving',
+        action: () => this._closeTab(id),
+      }
+      return
+    }
+    this._closeTab(id)
+  }
+
+  private async _saveActiveTab() {
+    const tab = this._activeSqlTab()
+    if (!tab) return
+
+    // Untitled queries go through the native dialog, defaulting into the
+    // active context's folder.
+    const result = tab.path
+      ? await window.sqlkit.saveFile(tab.path, tab.content)
+      : await window.sqlkit.saveFileAs(this._activeProfile()?.folder ?? '', `${tab.name}.sql`, tab.content)
+
+    if (!result.success) {
+      if (!result.canceled) console.error('Save failed:', result.error)
+      return
+    }
+    this._tabs = this._tabs.map((entry) =>
+      entry.id === tab.id && entry.kind === 'sql'
+        ? { ...entry, path: result.path, name: result.name, savedContent: tab.content }
+        : entry,
+    )
+  }
+
+  // --- query running ----------------------------------------------------------
+
+  // Runs against the in-use context (⌘K), connecting it first if needed.
+  private async _runSql(sqlText: string) {
+    const profile = this._activeProfile()
+    if (!profile) {
+      this._queryRun = { phase: 'error', error: `No database selected — press ${mod('K')} to pick one.` }
+      return
+    }
+
+    if (this._live.phase(profile.id) !== 'connected') {
+      this._queryRun = { phase: 'running', note: `Connecting to ${profile.name}…` }
+      const connected = await this._live.connect(profile)
+      if (!connected.success) {
+        this._queryRun = { phase: 'error', error: connected.error }
+        return
+      }
+    }
+
+    this._queryRun = { phase: 'running' }
+    const response = await window.sqlkit.runQuery(profile.id, sqlText)
+    this._queryRun = response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error }
+  }
+
+  // Double-click browse (reference behavior): a query tab named after the
+  // table, pre-filled with a capped SELECT and run immediately. Browsing the
+  // same table again reuses its tab and re-runs whatever it now contains.
+  private _browseTable(profile: ConnectionProfile, table: TableRef) {
+    const quote = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`
+    const qualified = table.schema ? `${quote(table.schema)}.${quote(table.name)}` : quote(table.name)
+    const sqlText = `SELECT * FROM ${qualified} LIMIT 200`
+
+    const id = `browse:${tableKey(profile.id, table)}`
+    const existing = this._tabs.find((tab) => tab.id === id)
+    if (!existing) {
+      this._tabs = [
+        ...this._tabs,
+        { id, kind: 'sql', name: `${table.name}.sql`, path: null, content: sqlText, savedContent: sqlText },
+      ]
+    }
+    this._activeTabId = id
+    void this._runSql(existing?.kind === 'sql' ? existing.content : sqlText)
+  }
+
+  // --- command palette ---------------------------------------------------------
+
   private _paletteEntries(): PaletteEntry[] {
     if (this._palette === 'commands') return [...COMMANDS]
 
     if (this._palette === 'quick') {
-      const files = this._files
+      const files = this._workspaceFiles.files
         .filter((file) => file.type === 'file')
         .map((file) => ({ id: `file:${file.relativePath}`, label: file.name, detail: file.relativePath, icon: 'codicon-file-code' }))
 
       // Tables of every connected database, so ⌘P reaches across contexts.
       const tables = this._connections.flatMap((connection) =>
-        (this._tables[connection.id] ?? []).map((table) => ({
+        (this._live.tables[connection.id] ?? []).map((table) => ({
           id: `table:${tableKey(connection.id, table)}`,
           label: table.name,
           detail: [table.schema, connection.name].filter(Boolean).join(' · '),
@@ -263,16 +423,16 @@ export class WorkbenchScreen extends LitElement {
 
     if (this._palette === 'databases') {
       return this._connections.map((connection) => {
-        const status = this._statuses[connection.id]
-        const phase =
-          status?.phase === 'connected'
+        const phase = this._live.phase(connection.id)
+        const label =
+          phase === 'connected'
             ? 'Connected'
-            : status?.phase === 'connecting'
+            : phase === 'connecting'
               ? 'Connecting…'
-              : status?.phase === 'error'
+              : phase === 'error'
                 ? 'Error'
                 : 'Disconnected'
-        const parts = [connection.engine, phase]
+        const parts = [connection.engine, label]
         if (this._activeDbId === connection.id) parts.push('In use')
         return { id: connection.id, label: connection.name, detail: parts.join(' · '), icon: 'codicon-database' }
       })
@@ -292,19 +452,17 @@ export class WorkbenchScreen extends LitElement {
     if (mode === 'quick') {
       if (id.startsWith('file:')) {
         const relativePath = id.slice('file:'.length)
-        const file = this._files.find((entry) => entry.type === 'file' && entry.relativePath === relativePath)
+        const file = this._workspaceFiles.files.find((entry) => entry.type === 'file' && entry.relativePath === relativePath)
         if (file) void this._openFileTab(file)
         return
       }
-      // Tables can't be browsed yet; reveal the pick in the Explorer. The
-      // key's profile id also becomes the in-use context so the Tables
-      // section shows the right database.
+      // Reveal the picked table in the Explorer; its profile becomes the
+      // in-use context so the Tables section shows the right database.
       const key = id.slice('table:'.length)
       this._selectedTable = key
       const profileId = key.split(':')[0]
       if (profileId) this._setActiveDb(profileId)
       this._activeView = 'explorer'
-      this._tablesCollapsed = false
       return
     }
     void this._switchDatabase(id)
@@ -316,6 +474,17 @@ export class WorkbenchScreen extends LitElement {
       return
     }
     switch (id) {
+      case 'new-query':
+        this._newQuery()
+        break
+      case 'run-query': {
+        const tab = this._activeSqlTab()
+        if (tab?.content.trim()) void this._runSql(tab.content.trim())
+        break
+      }
+      case 'save-file':
+        void this._saveActiveTab()
+        break
       case 'quick-open':
         this._palette = 'quick'
         break
@@ -326,11 +495,10 @@ export class WorkbenchScreen extends LitElement {
         this._onAddDatabase()
         break
       case 'disconnect-all':
-        this._activeDbId = null
-        void window.sqlkit.disconnectAllDatabases()
+        void this._live.disconnectAll()
         break
       case 'refresh-files':
-        void this._loadFiles()
+        void this._workspaceFiles.reload()
         break
       case 'toggle-sidebar':
         this._toggleSidebar()
@@ -341,56 +509,7 @@ export class WorkbenchScreen extends LitElement {
     }
   }
 
-  // ⌘K pick: make the connection the in-use context, connecting it first if
-  // it isn't live yet.
-  private async _switchDatabase(profileId: string) {
-    this._setActiveDb(profileId)
-    const phase = this._statuses[profileId]?.phase
-    if (phase === 'connected' || phase === 'connecting') return
-    const profile = this._connections.find((connection) => connection.id === profileId)
-    if (profile) await window.sqlkit.connectDatabase(profile)
-  }
-
-  private async _openFileTab(file: FileInfo) {
-    // Keyed by absolute path: same-named files in different database
-    // folders are distinct tabs.
-    const id = `file:${file.path}`
-    if (!this._tabs.some((tab) => tab.id === id)) {
-      const result = await window.sqlkit.readFile(file.path)
-      if (!result.success) {
-        console.error('Failed to read file:', result.error)
-        return
-      }
-      this._tabs = [...this._tabs, { id, kind: 'file', file, content: result.content }]
-    }
-    this._activeTabId = id
-  }
-
-  private _applyStatuses(statuses: ConnectionStatus[]) {
-    const byId: Record<string, ConnectionStatus> = {}
-    for (const status of statuses) byId[status.profileId] = status
-    this._statuses = byId
-
-    // Keep table lists only for still-connected databases, and fetch for
-    // freshly connected ones.
-    const tables: Record<string, TableRef[]> = {}
-    for (const [id, list] of Object.entries(this._tables)) {
-      if (byId[id]?.phase === 'connected') tables[id] = list
-    }
-    this._tables = tables
-    for (const status of statuses) {
-      if (status.phase === 'connected' && !(status.profileId in this._tables)) {
-        void this._loadTables(status.profileId)
-      }
-    }
-  }
-
-  private async _loadTables(profileId: string) {
-    const result = await window.sqlkit.listTables(profileId)
-    if (result.success && this._statuses[profileId]?.phase === 'connected') {
-      this._tables = { ...this._tables, [profileId]: result.tables }
-    }
-  }
+  // --- render -------------------------------------------------------------------
 
   render() {
     const activeView = VIEWS.find((view) => view.id === this._activeView)
@@ -400,12 +519,20 @@ export class WorkbenchScreen extends LitElement {
         @db-select=${this._onDbSelect}
         @db-connect=${this._onDbConnect}
         @db-disconnect=${this._onDbDisconnect}
+        @add-database=${this._onAddDatabase}
+        @table-select=${this._onTableSelect}
+        @table-browse=${this._onTableBrowse}
         @file-open=${this._onFileOpen}
+        @file-create=${this._onFileCreate}
+        @file-rename=${this._onFileRename}
+        @file-delete=${this._onFileDelete}
         @config-change=${this._onConfigChange}
         @config-save=${this._onConfigSave}
         @config-cancel=${this._onConfigCancel}
         @tab-select=${this._onTabSelect}
         @tab-close=${this._onTabClose}
+        @editor-change=${this._onEditorChange}
+        @run-query=${this._onRunQuery}
       >
         <nav class="activity-bar" @activity-select=${this._onActivitySelect}>
           ${VIEWS.map(
@@ -421,11 +548,7 @@ export class WorkbenchScreen extends LitElement {
           ? html`
               <aside class="sidebar ${this._sidebarCollapsing ? 'collapsed' : ''}" style="width: ${this._sidebarWidth}px">
                 <div class="sidebar-title">${activeView.title}</div>
-                ${activeView.id === 'databases'
-                  ? this._renderDatabasesView()
-                  : activeView.id === 'explorer'
-                    ? this._renderExplorerView()
-                    : html`<p class="muted hint">${activeView.hint}</p>`}
+                ${this._renderSidebarView(activeView)}
               </aside>
               <div
                 class="sidebar-resize ${this._resizing ? 'active' : ''}"
@@ -436,7 +559,7 @@ export class WorkbenchScreen extends LitElement {
                 @pointermove=${this._onResizeMove}
                 @pointerup=${this._onResizeEnd}
                 @pointercancel=${this._onResizeEnd}
-                @dblclick=${this._onResizeReset}
+                @dblclick=${() => (this._sidebarWidth = 280)}
               ></div>
             `
           : ''}
@@ -465,152 +588,60 @@ export class WorkbenchScreen extends LitElement {
         @palette-pick=${this._onPalettePick}
       ></command-palette>
 
-      ${this._renderStatusBar()}
-    `
-  }
-
-  // VS Code-style split: each section is a flex region with its own
-  // scrolling body, so both headers stay visible no matter how long the
-  // lists get. The 1px divider drags the split; double-click resets it.
-  private _renderExplorerView() {
-    const activeTab = this._tabs.find((tab) => tab.id === this._activeTabId)
-    const source = this._explorerTablesSource()
-    const context = this._activeProfile()
-    const filesStyle =
-      !this._filesCollapsed && this._filesSectionHeight !== null ? `flex: 0 0 ${this._filesSectionHeight}px` : ''
-
-    return html`
-      <div class="explorer">
-        <div class="x-section ${this._filesCollapsed ? 'collapsed' : ''}" style=${filesStyle}>
-          <button class="section-head-row" @click=${() => (this._filesCollapsed = !this._filesCollapsed)}>
-            <i class="codicon codicon-chevron-right chevron ${this._filesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
-            <span>Files</span>
-            ${context ? html`<span class="section-detail">${context.name}</span>` : ''}
-          </button>
-          ${this._filesCollapsed
-            ? ''
-            : html`
-                <div class="section-body">
-                  ${context
-                    ? html`
-                        <file-tree
-                          .files=${this._files}
-                          .activePath=${activeTab?.kind === 'file' ? activeTab.file.path : null}
-                        ></file-tree>
-                      `
-                    : html`<p class="muted hint">Add a database to get its files folder.</p>`}
-                </div>
-              `}
-        </div>
-
-        ${!this._filesCollapsed && !this._tablesCollapsed
-          ? html`
-              <div
-                class="x-resize ${this._sectionResizing ? 'active' : ''}"
-                role="separator"
-                aria-label="Resize Files and Tables"
-                title="Resize Files and Tables"
-                @pointerdown=${this._onSectionResizeStart}
-                @pointermove=${this._onSectionResizeMove}
-                @pointerup=${this._onSectionResizeEnd}
-                @pointercancel=${this._onSectionResizeEnd}
-                @dblclick=${() => (this._filesSectionHeight = null)}
-              ></div>
-            `
-          : ''}
-
-        <div
-          class="x-section ${this._tablesCollapsed ? 'collapsed' : ''} ${this._tablesCollapsed && !this._filesCollapsed ? 'pin-bottom' : ''}"
-        >
-          <button class="section-head-row" @click=${() => (this._tablesCollapsed = !this._tablesCollapsed)}>
-            <i class="codicon codicon-chevron-right chevron ${this._tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
-            <span>Tables</span>
-            ${source ? html`<span class="section-detail">${source.profile.name}</span>` : ''}
-          </button>
-          ${this._tablesCollapsed ? '' : html`<div class="section-body">${this._renderExplorerTables(source)}</div>`}
-        </div>
-      </div>
-    `
-  }
-
-  private _onSectionResizeStart(event: PointerEvent) {
-    const files = this.shadowRoot?.querySelector<HTMLElement>('.explorer .x-section')
-    if (!files) return
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-    this._sectionResizing = { startY: event.clientY, startHeight: files.offsetHeight }
-    event.preventDefault()
-  }
-
-  private _onSectionResizeMove(event: PointerEvent) {
-    if (!this._sectionResizing) return
-    const explorer = this.shadowRoot?.querySelector<HTMLElement>('.explorer')
-    if (!explorer) return
-
-    // Keep at least a header-plus-a-few-rows visible on both sides.
-    const minSection = 72
-    const max = Math.max(minSection, explorer.clientHeight - 1 - minSection)
-    const raw = this._sectionResizing.startHeight + (event.clientY - this._sectionResizing.startY)
-    this._filesSectionHeight = Math.max(minSection, Math.min(max, raw))
-  }
-
-  private _onSectionResizeEnd(event: PointerEvent) {
-    if (!this._sectionResizing) return
-    this._sectionResizing = null
-    ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
-  }
-
-  // The Explorer is scoped to the in-use context: its tables show only while
-  // that database is connected.
-  private _explorerTablesSource(): { profile: ConnectionProfile; tables: TableRef[] } | null {
-    const profile = this._activeProfile()
-    if (!profile || this._statuses[profile.id]?.phase !== 'connected') return null
-    return { profile, tables: this._tables[profile.id] ?? [] }
-  }
-
-  private _renderExplorerTables(source: { profile: ConnectionProfile; tables: TableRef[] } | null) {
-    if (!source) return html`<p class="muted hint">Connect a database to see tables (${mod('K')}).</p>`
-    if (!source.tables.length) return html`<p class="muted hint">No tables.</p>`
-    return html`
-      <div class="etable-list">
-        ${source.tables.map((table) => {
-          const key = tableKey(source.profile.id, table)
-          return html`
-            <div
-              class="etable-row ${this._selectedTable === key ? 'selected' : ''}"
-              title=${tableLabel(table)}
-              @click=${() => (this._selectedTable = key)}
-            >
-              <i class="codicon codicon-table" aria-hidden="true"></i>
-              <span>${tableLabel(table)}</span>
-            </div>
+      ${this._confirm
+        ? html`
+            <confirm-dialog
+              .message=${this._confirm.message}
+              .detail=${this._confirm.detail}
+              .confirmLabel=${this._confirm.confirmLabel}
+              @dialog-cancel=${() => (this._confirm = null)}
+              @dialog-confirm=${this._onConfirmAccept}
+            ></confirm-dialog>
           `
-        })}
-      </div>
+        : ''}
+
+      <status-bar
+        .workspaceName=${this.workspace?.name ?? ''}
+        .contextName=${this._activeProfile()?.name ?? ''}
+        .connectedCount=${this._live.connected().length}
+        .connectedName=${this._connectedName()}
+      ></status-bar>
     `
   }
 
-  private _onFileOpen(event: Event) {
-    const { file } = (event as CustomEvent<{ file: FileInfo }>).detail
-    void this._openFileTab(file)
+  private _connectedName() {
+    const connected = this._live.connected()
+    if (connected.length !== 1) return ''
+    return this._connections.find((profile) => profile.id === connected[0].profileId)?.name ?? ''
   }
 
-  private _renderStatusBar() {
-    const connected = Object.values(this._statuses).filter((status) => status.phase === 'connected')
-    const summary =
-      connected.length === 0
-        ? 'Not connected'
-        : connected.length === 1
-          ? (this._connections.find((profile) => profile.id === connected[0].profileId)?.name ?? '1 connected')
-          : `${connected.length} connected`
-    const activeDb = this._connections.find((profile) => profile.id === this._activeDbId)
-    return html`
-      <footer class="status-bar ${connected.length ? 'connected' : ''}">
-        <span>${this.workspace?.name ?? 'SqlKit'}</span>
-        ${activeDb ? html`<span><i class="codicon codicon-database" aria-hidden="true"></i> ${activeDb.name}</span>` : ''}
-        <span class="spacer"></span>
-        <span>${summary}</span>
-      </footer>
-    `
+  private _renderSidebarView(view: (typeof VIEWS)[number]) {
+    if (view.id === 'databases') {
+      return html`
+        <databases-view
+          .connections=${this._connections}
+          .statuses=${this._live.statuses}
+          .tables=${this._live.tables}
+          .activeTabId=${this._activeTabId}
+        ></databases-view>
+      `
+    }
+    if (view.id === 'explorer') {
+      const activeTab = this._tabs.find((tab) => tab.id === this._activeTabId)
+      const context = this._activeProfile()
+      const connected = context !== null && this._live.phase(context.id) === 'connected'
+      return html`
+        <explorer-view
+          .files=${this._workspaceFiles.files}
+          .activePath=${activeTab?.kind === 'sql' ? activeTab.path : null}
+          .contextName=${context?.name ?? null}
+          .profileId=${context?.id ?? null}
+          .tables=${connected && context ? (this._live.tables[context.id] ?? []) : null}
+          .selectedTable=${this._selectedTable}
+        ></explorer-view>
+      `
+    }
+    return html`<p class="muted hint">${view.hint}</p>`
   }
 
   private _renderEditorContent() {
@@ -622,10 +653,31 @@ export class WorkbenchScreen extends LitElement {
         </div>
       `
     }
-    if (activeTab?.kind === 'file') {
+    if (activeTab?.kind === 'sql') {
+      const tables = (this._activeDbId ? (this._live.tables[this._activeDbId] ?? []) : []).map((table) => table.name)
       return html`
-        <div class="editor-content file">
-          <pre class="file-view">${activeTab.content}</pre>
+        <div class="editor-content sql">
+          <div class="editor-pane">
+            ${keyed(
+              activeTab.id,
+              html`<sql-editor .value=${activeTab.content} .tables=${tables}></sql-editor>`,
+            )}
+          </div>
+          <div
+            class="panel-resize ${this._panelResizing ? 'active' : ''}"
+            role="separator"
+            aria-label="Resize results panel"
+            title="Resize results panel"
+            @pointerdown=${this._onPanelResizeStart}
+            @pointermove=${this._onPanelResizeMove}
+            @pointerup=${this._onPanelResizeEnd}
+            @pointercancel=${this._onPanelResizeEnd}
+            @dblclick=${() => (this._panelHeight = null)}
+          ></div>
+          <results-panel
+            .run=${this._queryRun}
+            style="height: ${this._panelHeight === null ? '50%' : `${this._panelHeight}px`}"
+          ></results-panel>
         </div>
       `
     }
@@ -637,8 +689,16 @@ export class WorkbenchScreen extends LitElement {
     `
   }
 
+  // --- event handlers --------------------------------------------------------
+
+  private _onActivitySelect(event: Event) {
+    const { view } = (event as CustomEvent<{ view: ViewId }>).detail
+    this._activeView = this._activeView === view ? null : view
+  }
+
   private _onEmptyAction(event: Event) {
     const { action } = (event as CustomEvent<{ action: EmptyAction }>).detail
+    if (action === 'new-query') this._newQuery()
     if (action === 'quick-open') this._palette = 'quick'
     if (action === 'switch-database') this._palette = 'databases'
     if (action === 'command-palette') this._palette = 'commands'
@@ -646,119 +706,8 @@ export class WorkbenchScreen extends LitElement {
     if (action === 'close-workspace') this._onCloseWorkspace()
   }
 
-  private _renderDatabasesView() {
-    return html`
-      <div class="db-list">
-        ${this._connections.length
-          ? this._connections.map((connection) => this._renderDatabaseItem(connection))
-          : html`<p class="muted hint">No database connections yet.</p>`}
-      </div>
-      <button class="link sidebar-action" @click=${this._onAddDatabase}>
-        <i class="codicon codicon-add" aria-hidden="true"></i>
-        <span>Add Database</span>
-      </button>
-    `
-  }
-
-  private _renderDatabaseItem(connection: ConnectionProfile) {
-    const status = this._statuses[connection.id]
-    const detail =
-      status?.phase === 'error'
-        ? status.error
-        : status?.phase === 'connected'
-          ? `${status.serverVersion}${status.tunneled ? ' · SSH' : ''}`
-          : connection.engine
-    return html`
-      <db-list-item
-        dbId=${connection.id}
-        name=${connection.name}
-        detail=${detail ?? connection.engine}
-        status=${status?.phase ?? ''}
-        .active=${this._activeTabId === connection.id}
-      ></db-list-item>
-      ${status?.phase === 'connected' ? this._renderTables(connection.id) : ''}
-    `
-  }
-
-  private _renderTables(profileId: string) {
-    const tables = this._tables[profileId]
-    if (!tables) return ''
-    if (!tables.length) return html`<p class="muted hint table-hint">No tables.</p>`
-    return html`
-      <div class="table-list">
-        ${tables.map(
-          (table) => html`
-            <div class="table-row" title=${table.schema ? `${table.schema}.${table.name}` : table.name}>
-              <i class="codicon codicon-table" aria-hidden="true"></i>
-              <span>${table.schema ? `${table.schema}.${table.name}` : table.name}</span>
-            </div>
-          `,
-        )}
-      </div>
-    `
-  }
-
-  private _onActivitySelect(event: Event) {
-    const { view } = (event as CustomEvent<{ view: ViewId }>).detail
-    this._activeView = this._activeView === view ? null : view
-  }
-
-  private _onResizeStart(event: PointerEvent) {
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-    this._resizing = { startX: event.clientX, startWidth: this._sidebarWidth }
-    event.preventDefault()
-  }
-
-  private _onResizeMove(event: PointerEvent) {
-    if (!this._resizing) return
-    const raw = this._resizing.startWidth + (event.clientX - this._resizing.startX)
-
-    // Dragged under the minimum with a little intent margin: snap closed.
-    // Dragging back out reopens at the minimum.
-    if (raw < 110) {
-      this._sidebarCollapsing = true
-      return
-    }
-
-    this._sidebarCollapsing = false
-    this._sidebarWidth = Math.max(170, Math.min(500, raw))
-  }
-
-  private _onResizeEnd(event: PointerEvent) {
-    if (!this._resizing) return
-    this._resizing = null
-    ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
-
-    if (this._sidebarCollapsing) {
-      this._sidebarCollapsing = false
-      this._activeView = null
-      this._sidebarWidth = 280
-    }
-  }
-
-  private _onResizeReset() {
-    this._sidebarWidth = 280
-  }
-
-  private _openTab(profile: ConnectionProfile) {
-    if (!this._tabs.some((tab) => tab.id === profile.id)) {
-      this._tabs = [...this._tabs, { id: profile.id, kind: 'config', profile: { ...profile } }]
-    }
-    this._activeTabId = profile.id
-  }
-
-  private _closeTab(id: string) {
-    const index = this._tabs.findIndex((tab) => tab.id === id)
-    if (index < 0) return
-
-    this._tabs = this._tabs.filter((tab) => tab.id !== id)
-    if (this._activeTabId === id) {
-      this._activeTabId = this._tabs[Math.min(index, this._tabs.length - 1)]?.id ?? null
-    }
-  }
-
   private _onAddDatabase() {
-    this._openTab({
+    this._openConfigTab({
       id: crypto.randomUUID(),
       name: '',
       engine: 'postgresql',
@@ -775,19 +724,112 @@ export class WorkbenchScreen extends LitElement {
   private _onDbSelect(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
     const connection = this._connections.find((profile) => profile.id === id)
-    if (connection) this._openTab(connection)
+    if (connection) this._openConfigTab(connection)
   }
 
   private async _onDbConnect(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
     const connection = this._connections.find((profile) => profile.id === id)
     // Failures surface through the status push (error dot + message).
-    if (connection) await window.sqlkit.connectDatabase(connection)
+    if (connection) await this._live.connect(connection)
   }
 
   private async _onDbDisconnect(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
-    await window.sqlkit.disconnectDatabase(id)
+    await this._live.disconnect(id)
+  }
+
+  private _onTableSelect(event: Event) {
+    this._selectedTable = (event as CustomEvent<TableSelectDetail>).detail.key
+  }
+
+  private _onTableBrowse(event: Event) {
+    const { table } = (event as CustomEvent<TableBrowseDetail>).detail
+    const profile = this._activeProfile()
+    if (profile) this._browseTable(profile, table)
+  }
+
+  private _onFileOpen(event: Event) {
+    const { file } = (event as CustomEvent<{ file: FileInfo }>).detail
+    void this._openFileTab(file)
+  }
+
+  private async _onFileCreate(event: Event) {
+    const { parent, name } = (event as CustomEvent<FileCreateDetail>).detail
+    const folder = this._activeProfile()?.folder
+    if (!folder) return
+
+    const result = await window.sqlkit.createFile(folder, parent ? `${parent}/${name}` : name)
+    if (!result.success) {
+      console.error('Create failed:', result.error)
+      return
+    }
+    await this._workspaceFiles.reload()
+    const created = this._workspaceFiles.files.find((file) => file.path === result.path)
+    if (created) void this._openFileTab(created)
+  }
+
+  private async _onFileRename(event: Event) {
+    const { file, newName } = (event as CustomEvent<FileRenameDetail>).detail
+    const result = await window.sqlkit.renameFile(file.path, newName)
+    if (!result.success) {
+      console.error('Rename failed:', result.error)
+      return
+    }
+
+    // Retarget any open tab; tab ids are keyed by absolute path.
+    const oldId = `file:${file.path}`
+    const newId = `file:${result.path}`
+    this._tabs = this._tabs.map((tab) =>
+      tab.id === oldId && tab.kind === 'sql' ? { ...tab, id: newId, name: result.name, path: result.path } : tab,
+    )
+    if (this._activeTabId === oldId) this._activeTabId = newId
+    void this._workspaceFiles.reload()
+  }
+
+  private _onFileDelete(event: Event) {
+    const { path: targetPath, name } = (event as CustomEvent<FileDeleteDetail>).detail
+    this._confirm = {
+      message: `Delete "${name}"?`,
+      detail: 'It will be moved to the Trash.',
+      confirmLabel: 'Move to Trash',
+      action: () => void this._performDelete(targetPath),
+    }
+  }
+
+  private async _performDelete(targetPath: string) {
+    const result = await window.sqlkit.deleteFile(targetPath)
+    if (!result.success) {
+      console.error('Delete failed:', result.error)
+      return
+    }
+
+    // Close tabs of the deleted file — or of everything under a deleted folder.
+    this._tabs = this._tabs.filter(
+      (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
+    )
+    if (this._activeTabId && !this._tabs.some((tab) => tab.id === this._activeTabId)) {
+      this._activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
+    }
+    void this._workspaceFiles.reload()
+  }
+
+  private _onConfirmAccept = () => {
+    const action = this._confirm?.action
+    this._confirm = null
+    action?.()
+  }
+
+  private _onEditorChange(event: Event) {
+    const { value } = (event as CustomEvent<{ value: string }>).detail
+    this._tabs = this._tabs.map((tab) =>
+      tab.id === this._activeTabId && tab.kind === 'sql' ? { ...tab, content: value } : tab,
+    )
+  }
+
+  private _onRunQuery(event: Event) {
+    const { sql } = (event as CustomEvent<RunQueryDetail>).detail
+    void this._runSql(sql)
   }
 
   private _onTabSelect(event: Event) {
@@ -797,7 +839,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _onTabClose(event: Event) {
     const { tabId } = (event as CustomEvent<{ tabId: string }>).detail
-    this._closeTab(tabId)
+    this._requestCloseTab(tabId)
   }
 
   private _onConfigChange(event: Event) {
@@ -832,6 +874,62 @@ export class WorkbenchScreen extends LitElement {
 
   private _onCloseWorkspace() {
     this.dispatchEvent(new CustomEvent('close-workspace', { bubbles: true, composed: true }))
+  }
+
+  // --- sidebar resize -----------------------------------------------------------
+
+  private _onResizeStart(event: PointerEvent) {
+    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+    this._resizing = { startX: event.clientX, startWidth: this._sidebarWidth }
+    event.preventDefault()
+  }
+
+  private _onResizeMove(event: PointerEvent) {
+    if (!this._resizing) return
+    const raw = this._resizing.startWidth + (event.clientX - this._resizing.startX)
+
+    // Dragged under the minimum with a little intent margin: snap closed.
+    // Dragging back out reopens at the minimum.
+    if (raw < 110) {
+      this._sidebarCollapsing = true
+      return
+    }
+
+    this._sidebarCollapsing = false
+    this._sidebarWidth = Math.max(170, Math.min(500, raw))
+  }
+
+  private _onResizeEnd(event: PointerEvent) {
+    if (!this._resizing) return
+    this._resizing = null
+    ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
+
+    if (this._sidebarCollapsing) {
+      this._sidebarCollapsing = false
+      this._activeView = null
+      this._sidebarWidth = 280
+    }
+  }
+
+  private _onPanelResizeStart(event: PointerEvent) {
+    const panel = this.shadowRoot?.querySelector<HTMLElement>('results-panel')
+    if (!panel) return
+    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+    this._panelResizing = { startY: event.clientY, startHeight: panel.offsetHeight }
+    event.preventDefault()
+  }
+
+  private _onPanelResizeMove(event: PointerEvent) {
+    if (!this._panelResizing) return
+    // Dragging up grows the panel.
+    const raw = this._panelResizing.startHeight - (event.clientY - this._panelResizing.startY)
+    this._panelHeight = Math.max(80, Math.min(600, raw))
+  }
+
+  private _onPanelResizeEnd(event: PointerEvent) {
+    if (!this._panelResizing) return
+    this._panelResizing = null
+    ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
   }
 
   static styles = [
@@ -924,211 +1022,6 @@ export class WorkbenchScreen extends LitElement {
         padding: 0 20px;
       }
 
-      .db-list {
-        display: flex;
-        flex-direction: column;
-        overflow-y: auto;
-        min-height: 0;
-        overscroll-behavior: none;
-        overflow-anchor: none;
-      }
-
-      .explorer {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        min-height: 0;
-        overflow: hidden;
-      }
-
-      /* Expanded sections split the height evenly (or per the dragged
-         divider) and never grow past it: their bodies scroll instead. */
-      .x-section {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        min-height: 72px;
-      }
-
-      .x-section.collapsed {
-        flex: 0 0 auto;
-        min-height: 0;
-      }
-
-      .x-section.pin-bottom {
-        margin-top: auto;
-      }
-
-      .section-body {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        min-height: 0;
-      }
-
-      .section-body > file-tree,
-      .section-body > .etable-list {
-        flex: 1;
-        overflow-y: auto;
-        min-height: 0;
-        overscroll-behavior: none;
-        overflow-anchor: none;
-      }
-
-      .x-resize {
-        height: 1px;
-        flex-shrink: 0;
-        cursor: row-resize;
-        background: var(--border-subtle);
-        position: relative;
-        z-index: 10;
-        touch-action: none;
-      }
-
-      /* Wider invisible hit area than the 1px visible line. */
-      .x-resize::after {
-        content: '';
-        position: absolute;
-        inset: -2px 0;
-      }
-
-      .x-resize:hover,
-      .x-resize.active {
-        background: var(--resize-hover);
-      }
-
-      .body:has(.x-resize.active) {
-        cursor: row-resize;
-        user-select: none;
-      }
-
-      .section-head-row {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        width: 100%;
-        height: auto;
-        padding: 4px 10px;
-        border: none;
-        border-radius: 0;
-        background: transparent;
-        color: var(--text);
-        font-size: var(--font-size-sm);
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        text-align: left;
-        cursor: pointer;
-        flex-shrink: 0;
-      }
-
-      .section-head-row:hover {
-        background: var(--list-hover);
-      }
-
-      .section-head-row .chevron {
-        font-size: 14px;
-        transition: transform 0.1s ease;
-      }
-
-      .section-head-row .chevron.expanded {
-        transform: rotate(90deg);
-      }
-
-      .section-detail {
-        margin-left: auto;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: var(--text-3);
-        font-weight: 400;
-        text-transform: none;
-        letter-spacing: normal;
-      }
-
-      .etable-list {
-        display: flex;
-        flex-direction: column;
-      }
-
-      .etable-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 3px 10px 3px 24px;
-        font-size: var(--font-size);
-        color: var(--text);
-        white-space: nowrap;
-        cursor: pointer;
-        user-select: none;
-      }
-
-      .etable-row:hover {
-        background: var(--list-hover);
-      }
-
-      .etable-row.selected {
-        background: var(--list-selection);
-        color: var(--list-selection-fg);
-      }
-
-      .etable-row .codicon {
-        font-size: 14px;
-        flex-shrink: 0;
-        color: var(--text-2);
-      }
-
-      .etable-row.selected .codicon {
-        color: var(--list-selection-fg);
-      }
-
-      .etable-row span {
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .table-list {
-        display: flex;
-        flex-direction: column;
-        padding: 2px 0 6px;
-      }
-
-      .table-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 2px 10px 2px 36px;
-        font-size: var(--font-size-sm);
-        color: var(--text-2);
-        white-space: nowrap;
-      }
-
-      .table-row span {
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .table-row .codicon {
-        font-size: 13px;
-        flex-shrink: 0;
-      }
-
-      .table-hint {
-        padding: 2px 10px 6px 36px;
-        font-size: var(--font-size-sm);
-      }
-
-      .sidebar-action {
-        width: auto;
-        margin: 4px 10px;
-      }
-
-      .sidebar-action .codicon {
-        font-size: 14px;
-      }
-
       .editor-area {
         flex: 1;
         display: flex;
@@ -1164,45 +1057,43 @@ export class WorkbenchScreen extends LitElement {
         overflow-anchor: none;
       }
 
-      .editor-content.file {
-        display: block;
-        overflow: auto;
-        overscroll-behavior: none;
-        overflow-anchor: none;
-      }
-
-      .file-view {
-        margin: 0;
-        padding: 16px 20px;
-        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-        font-size: 13px;
-        line-height: 1.5;
-        color: var(--text);
-        tab-size: 4;
-      }
-
-      .status-bar .codicon {
-        font-size: 12px;
-        vertical-align: -1px;
-      }
-
-      .status-bar {
-        height: var(--status-bar-h);
+      .editor-content.sql {
         display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 0 10px;
-        font-size: var(--font-size-sm);
-        color: var(--status-bar-fg);
-        background: var(--status-bar-disconnected);
+        flex-direction: column;
+        align-items: stretch;
+        justify-content: flex-start;
+        min-width: 0;
       }
 
-      .status-bar.connected {
-        background: var(--status-bar-bg);
-      }
-
-      .spacer {
+      .editor-pane {
         flex: 1;
+        min-height: 0;
+      }
+
+      .panel-resize {
+        height: 1px;
+        flex-shrink: 0;
+        cursor: row-resize;
+        background: var(--border);
+        position: relative;
+        z-index: 10;
+        touch-action: none;
+      }
+
+      .panel-resize::after {
+        content: '';
+        position: absolute;
+        inset: -2px 0;
+      }
+
+      .panel-resize:hover,
+      .panel-resize.active {
+        background: var(--resize-hover);
+      }
+
+      .body:has(.panel-resize.active) {
+        cursor: row-resize;
+        user-select: none;
       }
     `,
   ]

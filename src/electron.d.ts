@@ -109,6 +109,12 @@ export type FilesResult = { success: true; files: FileInfo[] } | { success: fals
 
 export type FileReadResult = { success: true; content: string } | { success: false; error: string }
 
+export type FileSaveResult =
+  | { success: true; path: string; name: string }
+  | { success: false; canceled?: boolean; error?: string }
+
+export type FileDeleteResult = { success: true } | { success: false; canceled?: boolean; error?: string }
+
 export type SqlkitApi = {
   openWorkspace: () => Promise<WorkspaceResult>
   openWorkspacePath: (path: string) => Promise<WorkspaceResult>
@@ -129,8 +135,19 @@ export type SqlkitApi = {
   /** Lists the .sql files of one database context's workspace subfolder. */
   listFiles: (folder: string) => Promise<FilesResult>
   readFile: (path: string) => Promise<FileReadResult>
+  saveFile: (path: string, content: string) => Promise<FileSaveResult>
+  /** Native save dialog defaulting into a database context's folder. */
+  saveFileAs: (folder: string, suggestedName: string, content: string) => Promise<FileSaveResult>
+  /** Creates an empty .sql file at folder/relativePath; fails if it exists. */
+  createFile: (folder: string, relativePath: string) => Promise<FileSaveResult>
+  /** Renames a file in place (same directory). */
+  renameFile: (path: string, newName: string) => Promise<FileSaveResult>
+  /** Confirms, then moves a workspace file or folder to the Trash. */
+  deleteFile: (path: string) => Promise<FileDeleteResult>
   /** Fires when .sql files in the workspace change on disk; returns unsubscribe. */
   onFilesChanged: (listener: () => void) => () => void
+  /** Fires on the File > Close Tab menu item (⌘W); returns unsubscribe. */
+  onCloseTabRequest: (listener: () => void) => () => void
 }
 
 declare global {

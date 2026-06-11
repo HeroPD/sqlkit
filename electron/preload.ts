@@ -23,10 +23,20 @@ const api: SqlkitApi = {
   pickSqliteFile: () => ipcRenderer.invoke('db:pick-sqlite-file'),
   listFiles: (folder) => ipcRenderer.invoke('file:list', folder),
   readFile: (path) => ipcRenderer.invoke('file:read', path),
+  saveFile: (path, content) => ipcRenderer.invoke('file:save', path, content),
+  saveFileAs: (folder, suggestedName, content) => ipcRenderer.invoke('file:save-as', folder, suggestedName, content),
+  createFile: (folder, relativePath) => ipcRenderer.invoke('file:create', folder, relativePath),
+  renameFile: (path, newName) => ipcRenderer.invoke('file:rename', path, newName),
+  deleteFile: (path) => ipcRenderer.invoke('file:delete', path),
   onFilesChanged: (listener) => {
     const handler = () => listener()
     ipcRenderer.on('workspace:files-changed', handler)
     return () => ipcRenderer.off('workspace:files-changed', handler)
+  },
+  onCloseTabRequest: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on('app:close-tab', handler)
+    return () => ipcRenderer.off('app:close-tab', handler)
   },
 }
 
