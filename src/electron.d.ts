@@ -109,6 +109,18 @@ export type TableRef = {
 
 export type TablesResult = { success: true; tables: TableRef[] } | { success: false; error: string }
 
+export type ColumnRef = {
+  /** Schema of the owning table; null for engines without one. */
+  schema: string | null
+  table: string
+  name: string
+  dataType: string
+  nullable: boolean
+  primaryKey: boolean
+}
+
+export type ColumnsResult = { success: true; columns: ColumnRef[] } | { success: false; error: string }
+
 // --- Workspace files ------------------------------------------------------
 
 export type FileInfo = {
@@ -148,6 +160,8 @@ export type SqlkitApi = {
   onConnectionStatus: (listener: (statuses: ConnectionStatus[]) => void) => () => void
   runQuery: (profileId: string, sql: string, params?: unknown[]) => Promise<QueryResponse>
   listTables: (profileId: string) => Promise<TablesResult>
+  /** Columns of every table in the connected database, one round trip. */
+  listColumns: (profileId: string) => Promise<ColumnsResult>
   pickSqliteFile: () => Promise<string | null>
   /** Lists the .sql files of one database context's workspace subfolder. */
   listFiles: (folder: string) => Promise<FilesResult>

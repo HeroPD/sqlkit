@@ -793,6 +793,7 @@ export class WorkbenchScreen extends LitElement {
         @add-database=${this._onAddDatabase}
         @table-select=${this._onTableSelect}
         @table-browse=${this._onTableBrowse}
+        @tables-refresh=${this._onTablesRefresh}
         @search-open=${this._onSearchOpen}
         @file-open=${this._onFileOpen}
         @file-create=${this._onFileCreate}
@@ -942,6 +943,7 @@ export class WorkbenchScreen extends LitElement {
           .contextName=${context ? this._contextLabel() : null}
           .profileId=${context?.id ?? null}
           .tables=${connected && context ? (this._live.tables[context.id] ?? []) : null}
+          .columns=${connected && context ? (this._live.columns[context.id] ?? null) : null}
           .activeChildName=${activeChild}
           .selectedTable=${this._selectedTable}
         ></explorer-view>
@@ -1029,10 +1031,16 @@ export class WorkbenchScreen extends LitElement {
     }
     if (activeTab?.kind === 'sql') {
       const tables = (this._activeDbId ? (this._live.tables[this._activeDbId] ?? []) : []).map((table) => table.name)
+      const columns = this._activeDbId ? (this._live.columns[this._activeDbId] ?? null) : null
       return html`
         <div class="editor-content sql">
           <div class="editor-pane">
-            <sql-editor .tabId=${activeTab.id} .value=${activeTab.content} .tables=${tables}></sql-editor>
+            <sql-editor
+              .tabId=${activeTab.id}
+              .value=${activeTab.content}
+              .tables=${tables}
+              .columns=${columns}
+            ></sql-editor>
           </div>
           <div
             class="panel-resize ${this._panelResizing ? 'active' : ''}"
@@ -1116,6 +1124,11 @@ export class WorkbenchScreen extends LitElement {
     await this._live.disconnect(id)
   }
 
+
+  private _onTablesRefresh() {
+    const profile = this._activeProfile()
+    if (profile) this._live.refresh(profile.id)
+  }
 
   private _onTableSelect(event: Event) {
     this._selectedTable = (event as CustomEvent<TableSelectDetail>).detail.key

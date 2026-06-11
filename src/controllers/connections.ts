@@ -1,16 +1,19 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ConnectionPhase, ConnectionProfile, ConnectionStatus, TableRef } from '../electron'
+import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectionStatus, TableRef } from '../electron'
 
 // Owns the live-connection picture pushed from the main process: statuses by
-// profile id, and the table list of every connected database (fetched once
-// per connection). Pure data + IPC wrappers — what to render with it is the
-// host's business.
+// profile id, and the table/column metadata of every connected database
+// (fetched once per connection). Pure data + IPC wrappers — what to render
+// with it is the host's business.
 export class ConnectionsController implements ReactiveController {
   /** Live status by profile id; profiles without an entry are disconnected. */
   statuses: Record<string, ConnectionStatus> = {}
 
   /** Tables of connected databases, keyed by profile id. */
   tables: Record<string, TableRef[]> = {}
+
+  /** Columns of every table, keyed by profile id (loaded with the tables). */
+  columns: Record<string, ColumnRef[]> = {}
 
   private host: ReactiveControllerHost
   private unsubscribe: (() => void) | null = null
@@ -50,13 +53,22 @@ export class ConnectionsController implements ReactiveController {
     return window.sqlkit.disconnectAllDatabases()
   }
 
-  /** Switches an all-databases connection's active child and refetches its tables. */
+  /** Re-fetches a connected database's tables and columns. */
+  refresh(profileId: string) {
+    if (this.statuses[profileId]?.phase !== 'connected') return
+    void this.loadTables(profileId)
+  }
+
+  /** Switches an all-databases connection's active child and refetches its metadata. */
   async setActiveChild(profileId: string, database: string) {
     const result = await window.sqlkit.setActiveChildDb(profileId, database)
     if (result.success) {
       const tables = { ...this.tables }
       delete tables[profileId]
       this.tables = tables
+      const columns = { ...this.columns }
+      delete columns[profileId]
+      this.columns = columns
       this.host.requestUpdate()
       void this.loadTables(profileId)
     }
@@ -68,13 +80,18 @@ export class ConnectionsController implements ReactiveController {
     for (const status of statuses) byId[status.profileId] = status
     this.statuses = byId
 
-    // Keep table lists only for still-connected databases, and fetch for
+    // Keep metadata only for still-connected databases, and fetch for
     // freshly connected ones.
     const tables: Record<string, TableRef[]> = {}
+    const columns: Record<string, ColumnRef[]> = {}
     for (const [id, list] of Object.entries(this.tables)) {
       if (byId[id]?.phase === 'connected') tables[id] = list
     }
+    for (const [id, list] of Object.entries(this.columns)) {
+      if (byId[id]?.phase === 'connected') columns[id] = list
+    }
     this.tables = tables
+    this.columns = columns
     for (const status of statuses) {
       if (status.phase === 'connected' && !(status.profileId in this.tables)) {
         void this.loadTables(status.profileId)
@@ -84,10 +101,13 @@ export class ConnectionsController implements ReactiveController {
   }
 
   private async loadTables(profileId: string) {
-    const result = await window.sqlkit.listTables(profileId)
-    if (result.success && this.statuses[profileId]?.phase === 'connected') {
-      this.tables = { ...this.tables, [profileId]: result.tables }
-      this.host.requestUpdate()
-    }
+    const [tables, columns] = await Promise.all([
+      window.sqlkit.listTables(profileId),
+      window.sqlkit.listColumns(profileId),
+    ])
+    if (this.statuses[profileId]?.phase !== 'connected') return
+    if (tables.success) this.tables = { ...this.tables, [profileId]: tables.tables }
+    if (columns.success) this.columns = { ...this.columns, [profileId]: columns.columns }
+    if (tables.success || columns.success) this.host.requestUpdate()
   }
 }

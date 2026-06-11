@@ -1,5 +1,5 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import type { ConnectionProfile, QueryResult, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, QueryResult, TableRef } from '../../src/electron'
 import type { Driver } from './driver'
 
 // SQLite via the node:sqlite module built into Electron's Node — no native
@@ -42,6 +42,31 @@ export function createSqliteDriver(profile: ConnectionProfile): Driver {
         .prepare("select name from sqlite_master where type in ('table', 'view') and name not like 'sqlite_%' order by name")
         .all() as Array<{ name: string }>
       return rows.map((row): TableRef => ({ schema: null, name: row.name }))
+    },
+
+    async listColumns() {
+      // pragma_table_info as a correlated table-valued function: one statement
+      // covers every table without string-built pragmas.
+      const rows = open()
+        .prepare(
+          `select m.name as table_name, p.name as column_name, p.type as data_type,
+                  p."notnull" as not_null, p.pk as pk
+           from sqlite_master m
+           join pragma_table_info(m.name) p
+           where m.type in ('table', 'view') and m.name not like 'sqlite_%'
+           order by m.name, p.cid`,
+        )
+        .all() as Array<{ table_name: string; column_name: string; data_type: string; not_null: number; pk: number }>
+      return rows.map(
+        (row): ColumnRef => ({
+          schema: null,
+          table: row.table_name,
+          name: row.column_name,
+          dataType: row.data_type || 'any',
+          nullable: !row.not_null,
+          primaryKey: row.pk > 0,
+        }),
+      )
     },
   }
 }

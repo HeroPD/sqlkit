@@ -198,6 +198,7 @@ function registerDbIpc() {
     manager.query(profileId, sql, params),
   )
   ipcMain.handle('db:list-tables', (_event, profileId: string) => manager.listTables(profileId))
+  ipcMain.handle('db:list-columns', (_event, profileId: string) => manager.listColumns(profileId))
 
   ipcMain.handle('db:pick-sqlite-file', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)

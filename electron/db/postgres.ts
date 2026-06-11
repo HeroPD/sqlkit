@@ -1,5 +1,5 @@
 import pg from 'pg'
-import type { ConnectionProfile, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, TableRef } from '../../src/electron'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 
@@ -99,6 +99,46 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       )
       return result.rows.map(
         (row: { table_schema: string; table_name: string }): TableRef => ({ schema: row.table_schema, name: row.table_name }),
+      )
+    },
+
+    async listColumns() {
+      // Same relation filter as listTables, joined to attributes; primary-key
+      // membership comes from the table's primary index.
+      const result = await activePool().query(
+        `select n.nspname as table_schema, c.relname as table_name, a.attname as column_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type,
+                not a.attnotnull as nullable,
+                coalesce(i.indisprimary, false) as primary_key
+         from pg_catalog.pg_attribute a
+         join pg_catalog.pg_class c on c.oid = a.attrelid
+         join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+         left join pg_catalog.pg_index i
+           on i.indrelid = a.attrelid and i.indisprimary and a.attnum = any(i.indkey)
+         where c.relkind in ('r', 'p', 'v', 'f')
+           and not c.relispartition
+           and n.nspname !~ '^pg_'
+           and n.nspname <> 'information_schema'
+           and a.attnum > 0
+           and not a.attisdropped
+         order by table_schema, table_name, a.attnum`,
+      )
+      return result.rows.map(
+        (row: {
+          table_schema: string
+          table_name: string
+          column_name: string
+          data_type: string
+          nullable: boolean
+          primary_key: boolean
+        }): ColumnRef => ({
+          schema: row.table_schema,
+          table: row.table_name,
+          name: row.column_name,
+          dataType: row.data_type,
+          nullable: row.nullable,
+          primaryKey: row.primary_key,
+        }),
       )
     },
 

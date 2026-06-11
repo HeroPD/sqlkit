@@ -21,6 +21,7 @@ const api: SqlkitApi = {
   },
   runQuery: (profileId, sql, params) => ipcRenderer.invoke('db:query', profileId, sql, params),
   listTables: (profileId) => ipcRenderer.invoke('db:list-tables', profileId),
+  listColumns: (profileId) => ipcRenderer.invoke('db:list-columns', profileId),
   pickSqliteFile: () => ipcRenderer.invoke('db:pick-sqlite-file'),
   listFiles: (folder) => ipcRenderer.invoke('file:list', folder),
   readFile: (path) => ipcRenderer.invoke('file:read', path),

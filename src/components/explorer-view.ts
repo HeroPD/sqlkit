@@ -2,7 +2,7 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
-import type { FileInfo, TableRef } from '../electron'
+import type { ColumnRef, FileInfo, TableRef } from '../electron'
 import './file-tree'
 
 export const tableKey = (profileId: string, table: TableRef) => `${profileId}:${table.schema ?? ''}:${table.name}`
@@ -39,6 +39,10 @@ export class ExplorerView extends LitElement {
   @property({ attribute: false })
   tables: TableRef[] | null = null
 
+  /** Columns of every context table; tables expand to show theirs. */
+  @property({ attribute: false })
+  columns: ColumnRef[] | null = null
+
   /** Active child database (all-databases mode), shown in the Tables header. */
   @property()
   activeChildName: string | null = null
@@ -55,6 +59,13 @@ export class ExplorerView extends LitElement {
   /** Collapsed schema groups, keyed `profileId:schema` so state is per profile. */
   @state()
   private _collapsedSchemas = new Set<string>()
+
+  /** Expanded tables (showing columns), keyed like selectedTable. */
+  @state()
+  private _expandedTables = new Set<string>()
+
+  // Columns grouped per table, rebuilt only when the columns array changes.
+  private _columnsByTable: { source: ColumnRef[] | null; map: Map<string, ColumnRef[]> } | null = null
 
   // null = the default even split; a number pins the Files section height.
   @state()
@@ -119,17 +130,24 @@ export class ExplorerView extends LitElement {
       <div
         class="x-section ${this._tablesCollapsed ? 'collapsed' : ''} ${this._tablesCollapsed && !this._filesCollapsed ? 'pin-bottom' : ''}"
       >
-        <button class="section-head-row" @click=${() => (this._tablesCollapsed = !this._tablesCollapsed)}>
-          <i class="codicon codicon-chevron-right chevron ${this._tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
-          <span>Tables</span>
-          ${this.tables !== null && this.contextName
+        <div class="section-head">
+          <button class="section-head-row" @click=${() => (this._tablesCollapsed = !this._tablesCollapsed)}>
+            <i class="codicon codicon-chevron-right chevron ${this._tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
+            <span>Tables</span>
+          </button>
+          ${this.tables !== null
             ? html`
-                <span class="section-detail">
-                  ${this.activeChildName ? `${this.contextName} · ${this.activeChildName}` : this.contextName}
-                </span>
+                <button
+                  class="head-action"
+                  title="Refresh tables and columns"
+                  aria-label="Refresh tables and columns"
+                  @click=${this._refresh}
+                >
+                  <i class="codicon codicon-refresh" aria-hidden="true"></i>
+                </button>
               `
             : ''}
-        </button>
+        </div>
         ${this._tablesCollapsed ? '' : html`<div class="section-body">${this._renderTables()}</div>`}
       </div>
     `
@@ -176,6 +194,7 @@ export class ExplorerView extends LitElement {
 
   private _renderTableRow(profileId: string, table: TableRef, nested: boolean) {
     const key = tableKey(profileId, table)
+    const expanded = this._expandedTables.has(key)
     return html`
       <div
         class="etable-row ${nested ? 'nested' : ''} ${this.selectedTable === key ? 'selected' : ''}"
@@ -183,10 +202,65 @@ export class ExplorerView extends LitElement {
         @click=${() => this._select(key)}
         @dblclick=${() => this._browse(table)}
       >
+        <i
+          class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}"
+          aria-hidden="true"
+          @click=${(event: Event) => this._toggleTable(event, key)}
+          @dblclick=${(event: Event) => event.stopPropagation()}
+        ></i>
         <i class="codicon codicon-table" aria-hidden="true"></i>
         <span>${table.name}</span>
       </div>
+      ${expanded ? this._renderColumns(table, nested) : ''}
     `
+  }
+
+  private _renderColumns(table: TableRef, nested: boolean) {
+    const columns = this._tableColumns(table)
+    if (!columns) return html`<p class="muted hint col-hint">Loading columns…</p>`
+    if (!columns.length) return html`<p class="muted hint col-hint">No columns.</p>`
+    return columns.map(
+      (column) => html`
+        <div
+          class="ecol-row ${nested ? 'nested' : ''}"
+          title="${column.name} · ${column.dataType}${column.nullable ? '' : ' · not null'}"
+        >
+          <i
+            class="codicon ${column.primaryKey ? 'codicon-key' : 'codicon-symbol-field'} ${column.primaryKey ? 'pk' : ''}"
+            aria-hidden="true"
+          ></i>
+          <span class="col-name">${column.name}</span>
+          <span class="col-type">${column.dataType}</span>
+        </div>
+      `,
+    )
+  }
+
+  private _tableColumns(table: TableRef): ColumnRef[] | null {
+    if (this.columns === null) return null
+    if (this._columnsByTable?.source !== this.columns) {
+      const map = new Map<string, ColumnRef[]>()
+      for (const column of this.columns) {
+        const key = `${column.schema ?? ''}:${column.table}`
+        const list = map.get(key)
+        if (list) list.push(column)
+        else map.set(key, [column])
+      }
+      this._columnsByTable = { source: this.columns, map }
+    }
+    return this._columnsByTable.map.get(`${table.schema ?? ''}:${table.name}`) ?? []
+  }
+
+  private _toggleTable(event: Event, key: string) {
+    event.stopPropagation() // the row click selects; the chevron only expands
+    const next = new Set(this._expandedTables)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    this._expandedTables = next
+  }
+
+  private _refresh() {
+    this.dispatchEvent(new CustomEvent('tables-refresh', { bubbles: true, composed: true }))
   }
 
   private _toggleSchema(groupKey: string) {
@@ -314,6 +388,39 @@ export class ExplorerView extends LitElement {
         background: var(--resize-hover);
       }
 
+      .section-head {
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+      }
+
+      .section-head .section-head-row {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .head-action {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        margin-right: 4px;
+        padding: 0;
+        flex-shrink: 0;
+        border: none;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--text-2);
+        cursor: pointer;
+        --codicon-size: 14px;
+      }
+
+      .head-action:hover {
+        background: var(--list-hover);
+        color: var(--text);
+      }
+
       .section-head-row {
         display: flex;
         align-items: center;
@@ -407,19 +514,70 @@ export class ExplorerView extends LitElement {
       }
 
       .etable-row.nested {
-        padding-left: 36px;
+        padding-left: 24px;
       }
 
       .etable-row {
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 3px 10px 3px 24px;
+        padding: 3px 10px 3px 8px;
         font-size: var(--font-size);
         color: var(--text);
         white-space: nowrap;
         cursor: pointer;
         user-select: none;
+      }
+
+      .etable-row .chevron {
+        flex-shrink: 0;
+        color: var(--text-3);
+        transition: transform 0.1s ease;
+      }
+
+      .etable-row .chevron.expanded {
+        transform: rotate(90deg);
+      }
+
+      .ecol-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 10px 2px 30px;
+        font-size: var(--font-size-sm);
+        color: var(--text-2);
+        white-space: nowrap;
+        user-select: none;
+        --codicon-size: 13px;
+      }
+
+      .ecol-row.nested {
+        padding-left: 42px;
+      }
+
+      .ecol-row .codicon {
+        flex-shrink: 0;
+        color: var(--text-3);
+      }
+
+      .ecol-row .codicon.pk {
+        color: var(--status-dot-warning);
+      }
+
+      .col-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .col-type {
+        margin-left: auto;
+        flex-shrink: 0;
+        color: var(--text-3);
+      }
+
+      .col-hint {
+        padding: 2px 10px 2px 30px;
+        font-size: var(--font-size-sm);
       }
 
       .etable-row:hover {

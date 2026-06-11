@@ -1,4 +1,5 @@
 import type {
+  ColumnsResult,
   ConnectResult,
   ConnectionProfile,
   ConnectionStatus,
@@ -127,7 +128,17 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
-  return { connect, disconnect, disconnectAll, statuses, query, listTables, setActiveChild }
+  async function listColumns(profileId: string): Promise<ColumnsResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: 'Not connected' }
+    try {
+      return { success: true, columns: await driver.listColumns() }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
+  return { connect, disconnect, disconnectAll, statuses, query, listTables, listColumns, setActiveChild }
 }
 
 /**

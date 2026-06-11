@@ -40,6 +40,7 @@ import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/sea
 import { sql } from '@codemirror/lang-sql'
 import { runQuery } from '../codemirror/run-query'
 import { createFindPanel } from '../codemirror/find-panel'
+import type { ColumnRef } from '../electron'
 import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 
@@ -268,7 +269,10 @@ const baseKeymap = keymap.of([
   ...searchKeymap,
 ])
 
-const themeExtensions = [oneDarkTheme, syntaxHighlighting(softHighlightStyle), appTheme, EditorView.lineWrapping]
+// Theme precedence in CodeMirror is earlier-wins: appTheme must come BEFORE
+// oneDarkTheme or every app override (editor bg, tooltip, panel placement)
+// silently loses to One Dark's rules.
+const themeExtensions = [appTheme, oneDarkTheme, syntaxHighlighting(softHighlightStyle), EditorView.lineWrapping]
 
 @customElement('sql-editor')
 export class SqlEditor extends LitElement {
@@ -281,6 +285,10 @@ export class SqlEditor extends LitElement {
 
   @property({ attribute: false })
   tables: string[] = []
+
+  /** Column metadata of the context, for member and bare-name completion. */
+  @property({ attribute: false })
+  columns: ColumnRef[] | null = null
 
   @property()
   dialect: SqlDialectName = 'postgres'
@@ -421,11 +429,13 @@ export class SqlEditor extends LitElement {
       this._lastEmittedValue = this.value
     }
 
-    if (changed.has('tables') || changed.has('dialect')) {
+    if (changed.has('tables') || changed.has('dialect') || changed.has('columns')) {
       const nextTablesKey = this._makeTablesKey(this.tables)
       const tablesChanged = nextTablesKey !== this._tablesKey
 
-      if (tablesChanged || changed.has('dialect')) {
+      // `columns` is the controller's stable array; a reference change means
+      // fresh metadata.
+      if (tablesChanged || changed.has('dialect') || changed.has('columns')) {
         this._tablesKey = nextTablesKey
 
         view.dispatch({
@@ -491,12 +501,39 @@ export class SqlEditor extends LitElement {
       boost: KEYWORD_BOOSTS[keyword] ?? 0,
     }))
 
+    // Column metadata: per-table lists drive `table.` member completion;
+    // bare-word completion gets the names deduped across tables.
+    const columnsByTable = new Map<string, Completion[]>()
+    const bareColumns = new Map<string, Completion>()
+    for (const column of this.columns ?? []) {
+      const option: Completion = { label: column.name, type: 'property', detail: column.dataType, boost: 30 }
+      const tableLower = column.table.toLowerCase()
+      const list = columnsByTable.get(tableLower)
+      if (list) list.push(option)
+      else columnsByTable.set(tableLower, [option])
+      if (!bareColumns.has(column.name)) bareColumns.set(column.name, { label: column.name, type: 'property', boost: 30 })
+    }
+
     // Lowercased once here, not per keystroke in the source below.
-    const entries = [...keywordOptions, ...tableOptions].map((option) => [option.label.toLowerCase(), option] as const)
+    const entries = [...keywordOptions, ...tableOptions, ...bareColumns.values()].map(
+      (option) => [option.label.toLowerCase(), option] as const,
+    )
 
     return ifNotIn(
       ['String', 'LineComment', 'BlockComment'],
       (context: CompletionContext) => {
+        // `table.` completes that table's columns only.
+        const dotted = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_]*/)
+        if (dotted) {
+          const dot = dotted.text.indexOf('.')
+          const tableColumns = columnsByTable.get(dotted.text.slice(0, dot).toLowerCase())
+          if (!tableColumns) return null
+          const typedColumn = dotted.text.slice(dot + 1).toLowerCase()
+          const options = tableColumns.filter((option) => option.label.toLowerCase().startsWith(typedColumn))
+          if (!options.length) return null
+          return { from: dotted.from + dot + 1, options, validFor: /^[A-Za-z0-9_]*$/ }
+        }
+
         const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/)
 
         if (!word && !context.explicit) return null
