@@ -44,6 +44,8 @@ export type ConnectionProfile = {
   database: string
   /** Absent means 'single'. */
   databaseMode?: DatabaseMode
+  /** Last child database the user worked in (all-databases mode). */
+  lastChildDb?: string
   /** Database file path; only meaningful for file-based engines (sqlite). */
   file: string
   /**

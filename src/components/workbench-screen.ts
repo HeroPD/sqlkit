@@ -225,8 +225,17 @@ export class WorkbenchScreen extends LitElement {
       config.activeDbId && config.connections.some((connection) => connection.id === config.activeDbId)
         ? config.activeDbId
         : (config.connections[0]?.id ?? null)
-    this._switchInstance(restored, restored ? this._inUseChild(restored) : null)
+    const restoredProfile = restored ? (config.connections.find((c) => c.id === restored) ?? null) : null
+    this._switchInstance(restored, restoredProfile ? this._defaultChild(restoredProfile) : null)
     this._workspaceFiles.setFolder(this._contextFolder())
+  }
+
+  // An all-databases context always resolves to a child — the parent folder
+  // never holds files. Preference order: the connection's live child, the
+  // last child the user worked in, then the discovery database.
+  private _defaultChild(profile: ConnectionProfile): string | null {
+    if ((profile.databaseMode ?? 'single') !== 'all') return null
+    return this._inUseChild(profile.id) ?? profile.lastChildDb ?? (profile.database.trim() || 'postgres')
   }
 
   // Files nest per context: connection-folder/child-folder for all-databases
@@ -280,13 +289,42 @@ export class WorkbenchScreen extends LitElement {
     })
   }
 
-  // Defaults to the connection's currently targeted child so a profile-level
-  // switch (⌘P table pick, single-db connect) lands on the right instance.
-  private _setActiveDb(profileId: string, childDb: string | null = this._inUseChild(profileId)) {
-    if (this._activeDbId === profileId && this._activeChildDb === childDb) return
-    this._switchInstance(profileId, childDb)
+  // Without an explicit child, a profile-level switch (⌘P table pick,
+  // single-db connect) resolves the default child so all-databases contexts
+  // never land on the parent folder.
+  private _setActiveDb(profileId: string, childDb?: string | null) {
+    const profile = this._connections.find((connection) => connection.id === profileId)
+    if (!profile) return
+    const child = childDb === undefined ? this._defaultChild(profile) : childDb
+
+    if (this._activeDbId === profileId && this._activeChildDb === child) return
+
+    // Remember the pick so reopening the workspace lands on the same child.
+    if (child && profile.lastChildDb !== child) {
+      this._connections = this._connections.map((connection) =>
+        connection.id === profileId ? { ...connection, lastChildDb: child } : connection,
+      )
+    }
+
+    this._switchInstance(profileId, child)
     this._workspaceFiles.setFolder(this._contextFolder())
     this._persistConfig()
+  }
+
+  // After a connect, the driver targets the discovery database; if the
+  // context remembers a different child, point the driver at it (or follow
+  // the driver when the remembered child no longer exists).
+  private async _alignActiveChild(profileId: string) {
+    if (this._activeDbId !== profileId || !this._activeChildDb) return
+    const children = this._live.statuses[profileId]?.children ?? []
+    if (children.length < 2) return
+    const inUse = children.find((child) => child.inUse)?.name
+    if (inUse === this._activeChildDb) return
+    if (children.some((child) => child.name === this._activeChildDb)) {
+      await this._live.setActiveChild(profileId, this._activeChildDb)
+    } else if (inUse) {
+      this._setActiveDb(profileId, inUse)
+    }
   }
 
   // ⌘K parent pick on a not-yet-connected connection: the palette stays open
@@ -471,6 +509,9 @@ export class WorkbenchScreen extends LitElement {
         return
       }
     }
+    // The driver may be targeting the discovery database; the run belongs to
+    // the context's child.
+    await this._alignActiveChild(profile.id)
 
     this._applyQueryRun(runKey, { phase: 'running' })
     const response = await window.sqlkit.runQuery(profile.id, sqlText)
@@ -741,7 +782,10 @@ export class WorkbenchScreen extends LitElement {
         ${activeView
           ? html`
               <aside class="sidebar ${this._sidebarCollapsing ? 'collapsed' : ''}" style="width: ${this._sidebarWidth}px">
-                <div class="sidebar-title">${activeView.title}</div>
+                <div class="sidebar-title">
+                  <span>${activeView.title}</span>
+                  ${this._renderTitleActions(activeView)}
+                </div>
                 ${this._renderSidebarView(activeView)}
               </aside>
               <div
@@ -818,6 +862,24 @@ export class WorkbenchScreen extends LitElement {
     const connected = this._live.connected()
     if (connected.length !== 1) return ''
     return this._connections.find((profile) => profile.id === connected[0].profileId)?.name ?? ''
+  }
+
+  // View-specific actions level with the sidebar title (reference layout).
+  private _renderTitleActions(view: (typeof VIEWS)[number]) {
+    if (view.id !== 'history') return ''
+    const key = contextKey(this._activeDbId, this._activeChildDb)
+    const count = this._history.filter((item) => item.contextKey === key).length
+    return html`
+      <button
+        class="title-action"
+        title="Clear history"
+        aria-label="Clear history"
+        ?disabled=${!count}
+        @click=${this._onHistoryClear}
+      >
+        <i class="codicon codicon-clear-all" aria-hidden="true"></i>
+      </button>
+    `
   }
 
   private _renderSidebarView(view: (typeof VIEWS)[number]) {
@@ -1002,8 +1064,10 @@ export class WorkbenchScreen extends LitElement {
   private async _onDbConnect(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
     const connection = this._connections.find((profile) => profile.id === id)
+    if (!connection) return
     // Failures surface through the status push (error dot + message).
-    if (connection) await this._live.connect(connection)
+    const result = await this._live.connect(connection)
+    if (result.success) await this._alignActiveChild(id)
   }
 
   private async _onDbDisconnect(event: Event) {
@@ -1292,13 +1356,49 @@ export class WorkbenchScreen extends LitElement {
         height: 35px;
         display: flex;
         align-items: center;
-        padding: 0 20px;
+        padding: 0 12px 0 20px;
         font-size: var(--font-size-sm);
         color: var(--text);
         letter-spacing: 0.04em;
         text-transform: uppercase;
         user-select: none;
         flex-shrink: 0;
+      }
+
+      .sidebar-title span {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .title-action {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        flex-shrink: 0;
+        border: none;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--text-2);
+        cursor: pointer;
+      }
+
+      .title-action:hover:not(:disabled) {
+        background: var(--btn-secondary-hover);
+        color: var(--text);
+      }
+
+      .title-action:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+
+      .title-action .codicon {
+        font-size: 14px;
       }
 
       .sidebar .hint {

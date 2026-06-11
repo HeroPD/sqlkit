@@ -23,8 +23,8 @@ const summarize = (sql: string) => sql.replace(/\s+/g, ' ').trim().slice(0, 120)
 const timeOf = (iso: string) => new Date(iso).toLocaleTimeString('en-US', { hour12: false })
 
 // The History sidebar view: the active context's runs, newest first. Rows
-// dispatch `history-open` with their SQL (the workbench opens it in a new
-// query tab); the header's clear button dispatches `history-clear`.
+// dispatch `history-open` with their SQL (the workbench opens it in the
+// preview tab). The clear button lives in the workbench's sidebar title row.
 @customElement('history-view')
 export class HistoryView extends LitElement {
   @property({ attribute: false })
@@ -32,18 +32,6 @@ export class HistoryView extends LitElement {
 
   render() {
     return html`
-      <div class="head">
-        <span class="spacer"></span>
-        <button
-          class="clear"
-          title="Clear history"
-          aria-label="Clear history"
-          ?disabled=${!this.items.length}
-          @click=${() => this.dispatchEvent(new CustomEvent('history-clear', { bubbles: true, composed: true }))}
-        >
-          <i class="codicon codicon-clear-all" aria-hidden="true"></i>
-        </button>
-      </div>
       <div class="list">
         ${this.items.length
           ? this.items.map((item) => this._renderItem(item))
@@ -117,45 +105,6 @@ export class HistoryView extends LitElement {
         flex-direction: column;
         min-height: 0;
         overflow: hidden;
-      }
-
-      .head {
-        display: flex;
-        align-items: center;
-        padding: 0 8px 2px;
-        flex-shrink: 0;
-      }
-
-      .spacer {
-        flex: 1;
-      }
-
-      .clear {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 22px;
-        height: 22px;
-        padding: 0;
-        border: none;
-        border-radius: 3px;
-        background: transparent;
-        color: var(--text-2);
-        cursor: pointer;
-      }
-
-      .clear:hover:not(:disabled) {
-        background: var(--btn-secondary-hover);
-        color: var(--text);
-      }
-
-      .clear:disabled {
-        opacity: 0.4;
-        cursor: default;
-      }
-
-      .clear .codicon {
-        font-size: 14px;
       }
 
       .list {
