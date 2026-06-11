@@ -1,8 +1,8 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { scrollbars } from '../shared-styles'
+import { codicons, scrollbars } from '../shared-styles'
 
-import { Compartment } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import {
   EditorView,
   keymap,
@@ -36,9 +36,10 @@ import {
   type Completion,
   type CompletionContext,
 } from '@codemirror/autocomplete'
-import { searchKeymap } from '@codemirror/search'
+import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search'
 import { sql } from '@codemirror/lang-sql'
 import { runQuery } from '../codemirror/run-query'
+import { createFindPanel } from '../codemirror/find-panel'
 import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 
@@ -120,6 +121,36 @@ const appTheme = EditorView.theme(
       zIndex: '10000',
     },
 
+    /* VS Code-style find widget: the search panel floats over the top-right
+       corner of the editor instead of docking full-width. */
+    '.cm-panels': {
+      backgroundColor: 'transparent',
+      color: 'var(--text)',
+      zIndex: '10',
+    },
+
+    '.cm-panels-top': {
+      position: 'absolute',
+      top: '0',
+      left: 'auto',
+      right: '14px',
+      borderBottom: 'none',
+    },
+
+    /* VS Code dark match colors: current match vs. the rest, plus passive
+       same-as-selection highlights. */
+    '.cm-searchMatch': {
+      background: '#ea5c0055',
+    },
+
+    '.cm-searchMatch.cm-searchMatch-selected': {
+      background: '#515c6acc',
+    },
+
+    '.cm-selectionMatch': {
+      background: '#add6ff26',
+    },
+
     '.cm-tooltip-autocomplete': {
       border: '1px solid var(--border-subtle)',
       backgroundColor: 'var(--editor-bg)',
@@ -167,10 +198,86 @@ const appTheme = EditorView.theme(
 
 export type RunQueryDetail = { sql: string }
 
+// One editor view serves every tab: tab switches swap immutable EditorStates
+// via setState() instead of tearing the view down and re-parsing, which also
+// preserves each tab's undo history, selection, and scroll position. States
+// are cached here (module level, so remounts restore too), LRU-capped.
+const stateCache = new Map<string, EditorState>()
+const MAX_CACHED_STATES = 20
+
+// Compartments are lookup keys, shared by all states so a state restored
+// across component instances can still be reconfigured.
+const languageCompartment = new Compartment()
+const autocompleteCompartment = new Compartment()
+
+// Everything per-state that doesn't capture component state, built once.
+const baseExtensions = [
+  lineNumbers(),
+  highlightActiveLineGutter(),
+  highlightActiveLine(),
+
+  history(),
+  indentOnInput(),
+  bracketMatching(),
+  closeBrackets(),
+
+  search({ top: true, createPanel: createFindPanel }),
+  highlightSelectionMatches(),
+]
+
+const baseKeymap = keymap.of([
+  {
+    key: 'Ctrl-Space',
+    run: startCompletion,
+  },
+  {
+    key: 'Escape',
+    run: closeCompletion,
+  },
+  {
+    key: 'Enter',
+    run: (view) => {
+      if (completionStatus(view.state) === 'active') {
+        return acceptCompletion(view)
+      }
+
+      return false
+    },
+  },
+  {
+    key: 'Tab',
+    run: (view) => {
+      if (completionStatus(view.state) === 'active') {
+        return acceptCompletion(view)
+      }
+
+      return indentWithTab.run?.(view) ?? false
+    },
+  },
+
+  ...closeBracketsKeymap,
+
+  /**
+   * Keep completion navigation, but remove Enter because we handle it
+   * ourselves above.
+   */
+  ...completionKeymap.filter((binding) => binding.key !== 'Enter'),
+
+  ...defaultKeymap,
+  ...historyKeymap,
+  ...searchKeymap,
+])
+
+const themeExtensions = [oneDarkTheme, syntaxHighlighting(softHighlightStyle), appTheme, EditorView.lineWrapping]
+
 @customElement('sql-editor')
 export class SqlEditor extends LitElement {
   @property()
   value = ''
+
+  /** Identity of the document shown; changing it swaps the EditorState. */
+  @property()
+  tabId = ''
 
   @property({ attribute: false })
   tables: string[] = []
@@ -180,12 +287,31 @@ export class SqlEditor extends LitElement {
 
   private _view: EditorView | null = null
 
-  private _language = new Compartment()
-  private _autocomplete = new Compartment()
-
+  private _renderedTabId = ''
   private _tablesKey = ''
   private _lastEmittedValue = ''
   private _syncingFromEditor = false
+
+  // Built once per component: captures `this` for the change events.
+  private _changeListener = EditorView.updateListener.of((update) => {
+    if (!update.docChanged) return
+
+    const nextValue = update.state.doc.toString()
+    this._lastEmittedValue = nextValue
+    this._syncingFromEditor = true
+
+    this.dispatchEvent(
+      new CustomEvent('editor-change', {
+        detail: { value: nextValue },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+
+    queueMicrotask(() => {
+      this._syncingFromEditor = false
+    })
+  })
 
   render() {
     return html`<div class="host"></div>`
@@ -210,102 +336,73 @@ export class SqlEditor extends LitElement {
 
     this._tablesKey = this._makeTablesKey(this.tables)
     this._lastEmittedValue = this.value
+    this._renderedTabId = this.tabId
 
-    this._view = new EditorView({
-      doc: this.value,
-      parent: container,
-      extensions: [
-        runQuery((sql) => this._emitRun(sql)),
+    this._view = new EditorView({ state: this._restoredState(), parent: container })
+  }
 
-        lineNumbers(),
-        highlightActiveLineGutter(),
-        highlightActiveLine(),
+  // The full extension set of a fresh document state.
+  private _stateExtensions() {
+    return [
+      runQuery((sql) => this._emitRun(sql)),
+      baseExtensions,
+      autocompleteCompartment.of(this._autocompleteExtension()),
+      baseKeymap,
+      languageCompartment.of(this._sqlExtension()),
+      themeExtensions,
+      this._changeListener,
+    ]
+  }
 
-        history(),
-        indentOnInput(),
-        bracketMatching(),
-        closeBrackets(),
+  private _makeState(doc: string) {
+    return EditorState.create({ doc, extensions: this._stateExtensions() })
+  }
 
-        this._autocomplete.of(this._autocompleteExtension()),
+  // The cached state of the tab, but only when its document still matches
+  // what the host passes in — otherwise (file rewritten, id reused) a stale
+  // doc with a misleading undo history must not resurface.
+  private _restoredState() {
+    const cached = this.tabId ? stateCache.get(this.tabId) : undefined
+    if (cached && cached.doc.toString() === this.value) {
+      stateCache.delete(this.tabId)
+      return cached
+    }
+    return this._makeState(this.value)
+  }
 
-        keymap.of([
-          {
-            key: 'Ctrl-Space',
-            run: startCompletion,
-          },
-          {
-            key: 'Escape',
-            run: closeCompletion,
-          },
-          {
-            key: 'Enter',
-            run: (view) => {
-              if (completionStatus(view.state) === 'active') {
-                return acceptCompletion(view)
-              }
-
-              return false
-            },
-          },
-          {
-            key: 'Tab',
-            run: (view) => {
-              if (completionStatus(view.state) === 'active') {
-                return acceptCompletion(view)
-              }
-
-              return indentWithTab.run?.(view) ?? false
-            },
-          },
-
-          ...closeBracketsKeymap,
-
-          /**
-           * Keep completion navigation, but remove Enter because we handle it
-           * ourselves above.
-           */
-          ...completionKeymap.filter((binding) => binding.key !== 'Enter'),
-
-          ...defaultKeymap,
-          ...historyKeymap,
-          ...searchKeymap,
-        ]),
-
-        this._language.of(this._sqlExtension()),
-
-        oneDarkTheme,
-        syntaxHighlighting(softHighlightStyle),
-
-        appTheme,
-
-        EditorView.lineWrapping,
-
-        EditorView.updateListener.of((update) => {
-          if (!update.docChanged) return
-
-          const nextValue = update.state.doc.toString()
-          this._lastEmittedValue = nextValue
-          this._syncingFromEditor = true
-
-          this.dispatchEvent(
-            new CustomEvent('editor-change', {
-              detail: { value: nextValue },
-              bubbles: true,
-              composed: true,
-            }),
-          )
-
-          queueMicrotask(() => {
-            this._syncingFromEditor = false
-          })
-        }),
-      ],
-    })
+  /** Saves the shown tab's state so switching back restores it. */
+  private _stashState() {
+    if (!this._view || !this._renderedTabId) return
+    stateCache.delete(this._renderedTabId)
+    stateCache.set(this._renderedTabId, this._view.state)
+    while (stateCache.size > MAX_CACHED_STATES) {
+      const oldest = stateCache.keys().next().value
+      if (oldest === undefined) break
+      stateCache.delete(oldest)
+    }
   }
 
   protected updated(changed: PropertyValues) {
     const view = this._view
     if (!view) return
+
+    // Tab switch: stash the outgoing state, restore (or create) the incoming
+    // one, and re-point its compartments at the current tables/dialect — a
+    // restored state still carries the config it was created under.
+    if (changed.has('tabId') && this.tabId !== this._renderedTabId) {
+      this._stashState()
+      this._renderedTabId = this.tabId
+      view.setState(this._restoredState())
+      this._lastEmittedValue = this.value
+      this._tablesKey = this._makeTablesKey(this.tables)
+      view.dispatch({
+        effects: [
+          languageCompartment.reconfigure(this._sqlExtension()),
+          autocompleteCompartment.reconfigure(this._autocompleteExtension()),
+        ],
+      })
+      return
+    }
 
     if (
       changed.has('value') &&
@@ -333,8 +430,8 @@ export class SqlEditor extends LitElement {
 
         view.dispatch({
           effects: [
-            this._language.reconfigure(this._sqlExtension()),
-            this._autocomplete.reconfigure(this._autocompleteExtension()),
+            languageCompartment.reconfigure(this._sqlExtension()),
+            autocompleteCompartment.reconfigure(this._autocompleteExtension()),
           ],
         })
       }
@@ -343,6 +440,9 @@ export class SqlEditor extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback()
+    // The element is dropped whenever a non-SQL tab takes the editor area;
+    // stashing here lets the remounted editor pick the tab back up.
+    this._stashState()
     this._view?.destroy()
     this._view = null
   }
@@ -391,6 +491,9 @@ export class SqlEditor extends LitElement {
       boost: KEYWORD_BOOSTS[keyword] ?? 0,
     }))
 
+    // Lowercased once here, not per keystroke in the source below.
+    const entries = [...keywordOptions, ...tableOptions].map((option) => [option.label.toLowerCase(), option] as const)
+
     return ifNotIn(
       ['String', 'LineComment', 'BlockComment'],
       (context: CompletionContext) => {
@@ -401,9 +504,10 @@ export class SqlEditor extends LitElement {
         const from = word ? word.from : context.pos
         const typed = word ? word.text.toLowerCase() : ''
 
-        const options = [...keywordOptions, ...tableOptions].filter((option) =>
-          option.label.toLowerCase().startsWith(typed),
-        )
+        const options: Completion[] = []
+        for (const [lower, option] of entries) {
+          if (lower.startsWith(typed)) options.push(option)
+        }
 
         if (!options.length) return null
 
@@ -434,12 +538,159 @@ export class SqlEditor extends LitElement {
   }
 
   static styles = [
+    codicons,
     scrollbars,
     css`
       :host {
         display: block;
         height: 100%;
         min-height: 0;
+      }
+
+      /* The find widget (codemirror/find-panel.ts) — VS Code's find UI. */
+      .find-widget {
+        display: flex;
+        align-items: stretch;
+        gap: 2px;
+        padding: 4px 4px 4px 0;
+        background: var(--header-bg);
+        border: 1px solid var(--border-subtle);
+        border-top: none;
+        border-radius: 0 0 4px 4px;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+        font-family: var(--ui-font);
+        font-size: var(--font-size-sm);
+        color: var(--text);
+      }
+
+      .toggle-replace {
+        width: 16px;
+        padding: 0;
+        border: none;
+        border-radius: 2px;
+        background: transparent;
+        color: var(--text-2);
+        cursor: pointer;
+        --codicon-size: 14px;
+      }
+
+      .toggle-replace:hover {
+        background: var(--list-hover);
+      }
+
+      .find-rows {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .find-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .replace-row {
+        display: none;
+      }
+
+      .find-widget.replace-on .replace-row {
+        display: flex;
+      }
+
+      .find-input-box {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding-right: 2px;
+        background: var(--input-bg);
+        border: 1px solid var(--input-border);
+        border-radius: 3px;
+      }
+
+      .find-input-box:focus-within {
+        border-color: var(--focus-border);
+      }
+
+      .find-input-box.invalid {
+        border-color: var(--status-dot-error);
+      }
+
+      /* Standard control text size (13px), like every other input. */
+      .find-input-box input {
+        width: 150px;
+        height: 22px;
+        padding: 0 6px;
+        border: none;
+        background: transparent;
+        color: var(--input-fg);
+        font-family: inherit;
+        font-size: var(--font-size);
+        outline: none;
+      }
+
+      .find-toggle {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        border: 1px solid transparent;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--text-2);
+        cursor: pointer;
+        --codicon-size: 14px;
+      }
+
+      .find-toggle:hover {
+        background: var(--list-hover);
+      }
+
+      .find-toggle.on {
+        background: color-mix(in srgb, var(--accent) 35%, transparent);
+        border-color: var(--accent);
+        color: var(--text);
+      }
+
+      .find-count {
+        padding: 0 4px;
+        color: var(--text-2);
+        white-space: nowrap;
+      }
+
+      /* No reserved space before a query exists — empty counter, no gap. */
+      .find-count:empty {
+        display: none;
+      }
+
+      .find-count.no-results {
+        color: var(--status-dot-error);
+      }
+
+      .find-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border: none;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--text);
+        cursor: pointer;
+        --codicon-size: 14px;
+      }
+
+      .find-btn:hover:not(:disabled) {
+        background: var(--list-hover);
+      }
+
+      .find-btn:disabled {
+        opacity: 0.35;
+        cursor: default;
       }
 
       .host {

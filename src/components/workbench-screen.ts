@@ -1,6 +1,5 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { keyed } from 'lit/directives/keyed.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
@@ -1005,10 +1004,7 @@ export class WorkbenchScreen extends LitElement {
       return html`
         <div class="editor-content sql">
           <div class="editor-pane">
-            ${keyed(
-              activeTab.id,
-              html`<sql-editor .value=${activeTab.content} .tables=${tables}></sql-editor>`,
-            )}
+            <sql-editor .tabId=${activeTab.id} .value=${activeTab.content} .tables=${tables}></sql-editor>
           </div>
           <div
             class="panel-resize ${this._panelResizing ? 'active' : ''}"
