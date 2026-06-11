@@ -142,9 +142,37 @@ describe('queryToRun', () => {
     })
   })
 
-  describe('paragraph fallback', () => {
-    it('keeps a single terminated statement whole even across blank lines', () => {
-      expect(queryAtCaret('SELECT 1,\n\n  |2;')).toBe('SELECT 1,\n\n  2;')
+  describe('blank-line separation', () => {
+    it('runs an unterminated query alone when the parser merged it into the next statement', () => {
+      // The examples.sql bug: `SELECT ... LIMIT 200` has no `;`, so the
+      // parser sees it and the WITH query as ONE statement - the blank line
+      // must still separate them.
+      const doc =
+        'SELECT * FROM postings LIMIT 200\n\nWITH f AS (\n  SELECT id FROM t\n)\nSELECT count(*) FROM f;\n\nalter table t add column x int\n\nselect 2;'
+
+      expect(queryAtCaret(doc.replace('LIMIT 200', 'LIMIT| 200'))).toBe(
+        'SELECT * FROM postings LIMIT 200',
+      )
+      expect(queryAtCaret(doc.replace('WITH f', 'WITH| f'))).toBe(
+        'WITH f AS (\n  SELECT id FROM t\n)\nSELECT count(*) FROM f;',
+      )
+      expect(queryAtCaret(doc.replace('alter table', 'alter| table'))).toBe(
+        'alter table t add column x int',
+      )
+    })
+
+    it('splits at a top-level blank line even inside a terminated statement', () => {
+      expect(queryAtCaret('SELECT 1,\n\n  |2;')).toBe('2;')
+    })
+
+    it('keeps a statement whole when the blank line is inside parentheses', () => {
+      const doc = 'WITH f AS (\n  SELECT 1\n\n)\nSELECT * |FROM f;\nSELECT 2;'
+      expect(queryAtCaret(doc)).toBe('WITH f AS (\n  SELECT 1\n\n)\nSELECT * FROM f;')
+    })
+
+    it('keeps a DO block whole when blank lines are inside the dollar-quoted body', () => {
+      const doc = 'DO $$\nBEGIN\n\n  PERFORM| 1;\n\nEND $$;\n\nSELECT 2;'
+      expect(queryAtCaret(doc)).toBe('DO $$\nBEGIN\n\n  PERFORM 1;\n\nEND $$;')
     })
 
     it('splits a semicolon-less scratch even when a string contains a semicolon', () => {

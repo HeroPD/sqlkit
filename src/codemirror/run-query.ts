@@ -6,13 +6,16 @@ import type { SyntaxNode, Tree } from '@lezer/common'
 export type RunQueryHandler = (sql: string, view: EditorView) => void
 
 /**
- * Statement lookup is built to stay cheap on large documents: the doc is
- * never stringified as a whole, the tree is probed around the cursor
- * (O(log n)) instead of walking every statement, and only the block that
- * will run is ever sliced. The editor keeps the tree current incrementally,
- * so the ensureSyntaxTree call is normally a no-op; when the parse genuinely
- * cannot finish in the budget we fall back to line-based blocks rather than
- * risk running a statement truncated at the parse frontier.
+ * A query block is the intersection of two segmentations:
+ *  - parser statements (split on real `;`, so semicolons in strings,
+ *    comments and dollar-quotes never split), and
+ *  - blank-line blocks (scratch files often omit `;` and separate queries
+ *    with blank lines instead; blank lines inside parens, strings or
+ *    dollar-quoted bodies do not count as separators).
+ *
+ * Lookup stays cheap on large documents: the doc is never stringified as a
+ * whole, the tree is probed around the cursor (O(log n)) instead of walking
+ * every statement, and only the block that will run is ever sliced.
  */
 
 const PARSE_TIMEOUT_MS = 100
@@ -34,6 +37,17 @@ const treeForQuery = (state: EditorState, cursor: number) => {
 }
 
 const isBlank = (text: string) => !/\S/.test(text)
+
+/**
+ * A blank line only separates queries at the top level of a statement.
+ * Inside parens, strings or dollar-quoted bodies the innermost node is not
+ * Script/Statement, so the line is part of the query.
+ */
+const isSeparatorLine = (tree: Tree, line: Line) => {
+  if (!isBlank(line.text)) return false
+  const context = tree.resolveInner(line.from, 0)
+  return context.name === 'Script' || context.name === 'Statement'
+}
 
 /** An empty statement (a bare `;`) is never worth running. */
 const isRunnable = (doc: Text, node: SyntaxNode) =>
@@ -58,33 +72,30 @@ const statementSibling = (doc: Text, start: SyntaxNode | null, dir: -1 | 1) => {
 }
 
 /**
- * The top-level Statement nodes around the cursor. The parser already
- * understands strings, comments and dollar-quoting, so semicolons inside
- * those never split a statement. `count` saturates at 2 - it only exists to
- * tell "exactly one statement" (paragraph fallback territory) from "many".
+ * The top-level Statement nodes around the cursor: the one covering it, or
+ * its nearest runnable neighbors when the cursor sits in whitespace or a
+ * top-level comment.
  */
-const statementsAround = (state: EditorState, cursor: number) => {
-  const doc = state.doc
-  const tree = treeForQuery(state, cursor)
+const statementsAround = (tree: Tree, doc: Text, cursor: number) => {
   const top = tree.topNode
 
-  // The node here is either a statement (then it covers the cursor), some
-  // other top-level node like a comment, or null in plain whitespace.
   const at = topLevelNodeAt(tree, cursor)
   const covering = at && isRunnable(doc, at) ? at : null
-  const prev = covering ? null : statementSibling(doc, at ? at.prevSibling : top.childBefore(cursor), -1)
-  const next = covering ? null : statementSibling(doc, at ? at.nextSibling : top.childAfter(cursor), 1)
+  const prev = covering
+    ? null
+    : statementSibling(doc, at ? at.prevSibling : top.childBefore(cursor), -1)
+  const next = covering
+    ? null
+    : statementSibling(doc, at ? at.nextSibling : top.childAfter(cursor), 1)
 
-  let count = 0
-  for (let node = top.firstChild; node && count < 2; node = node.nextSibling) {
-    if (isRunnable(doc, node)) count += 1
-  }
-
-  return { covering, prev, next, count, parsedTo: tree.length }
+  return { covering, prev, next }
 }
 
-/** The blank-line-delimited block at/nearest the cursor, found by walking lines outward. */
-const paragraphBlock = (doc: Text, cursor: number) => {
+/**
+ * The blank-line-delimited block at/nearest the cursor, found by walking
+ * lines outward and clipped to [lo, hi] when given.
+ */
+const paragraphBlock = (tree: Tree, doc: Text, cursor: number, lo = 0, hi = doc.length) => {
   let line = doc.lineAt(cursor)
 
   if (isBlank(line.text)) {
@@ -112,23 +123,30 @@ const paragraphBlock = (doc: Text, cursor: number) => {
   }
 
   let first = line
-  while (first.number > 1 && !isBlank(doc.line(first.number - 1).text)) {
-    first = doc.line(first.number - 1)
+  while (first.number > 1 && first.from > lo) {
+    const candidate = doc.line(first.number - 1)
+    if (isSeparatorLine(tree, candidate)) break
+    first = candidate
   }
 
   let last = line
-  while (last.number < doc.lines && !isBlank(doc.line(last.number + 1).text)) {
-    last = doc.line(last.number + 1)
+  while (last.number < doc.lines && last.to < hi) {
+    const candidate = doc.line(last.number + 1)
+    if (isSeparatorLine(tree, candidate)) break
+    last = candidate
   }
 
-  return doc.sliceString(first.from, last.to).trim()
+  const from = Math.max(first.from, lo)
+  const to = Math.min(last.to, hi)
+  return from < to ? doc.sliceString(from, to).trim() : ''
 }
 
 const closestQueryBlock = (state: EditorState, cursor: number) => {
   const doc = state.doc
-  const { covering, prev, next, count, parsedTo } = statementsAround(state, cursor)
+  const tree = treeForQuery(state, cursor)
+  const { covering, prev, next } = statementsAround(tree, doc, cursor)
 
-  if (!covering && !prev && !next) return paragraphBlock(doc, cursor)
+  if (!covering && !prev && !next) return paragraphBlock(tree, doc, cursor)
 
   const chosen = covering
     ? covering
@@ -140,34 +158,29 @@ const closestQueryBlock = (state: EditorState, cursor: number) => {
           ? next
           : prev
 
-  // Without real semicolons the whole doc parses as one statement; fall back
-  // to blank-line-separated blocks so scratch files still run one query. The
-  // parser splits on actual terminators, so a lone statement is terminated
-  // iff its last character is `;` - semicolons inside strings don't count.
-  if (count === 1 && doc.sliceString(chosen.to - 1, chosen.to) !== ';') {
-    return paragraphBlock(doc, cursor)
-  }
-
   // Partial parse: anything at or past the frontier may be a truncated
   // statement. The line-based block needs no tree, but accept it only when
   // it does not visibly span multiple statements; running nothing is safer
   // than running a fragment or half the file.
-  if (parsedTo < doc.length && (cursor > parsedTo || chosen.to >= parsedTo)) {
-    const block = paragraphBlock(doc, cursor)
+  if (tree.length < doc.length && (cursor > tree.length || chosen.to >= tree.length)) {
+    const block = paragraphBlock(tree, doc, cursor)
     const body = block.endsWith(';') ? block.slice(0, -1) : block
     return body.includes(';') ? '' : block
   }
 
-  return doc.sliceString(chosen.from, chosen.to).trim()
+  // Clip to the blank-line block at the cursor, so an unterminated query
+  // that the parser merged into the next statement still runs alone.
+  const seed = Math.max(chosen.from, Math.min(cursor, chosen.to))
+  return paragraphBlock(tree, doc, seed, chosen.from, chosen.to)
 }
 
-/** The SQL that Mod-Enter would run: the selection if any, else the statement at/nearest the cursor. */
+/** The SQL that Mod-Enter would run: the selection if any, else the query block at/nearest the cursor. */
 export const queryToRun = (state: EditorState) => {
   const { from, to, head } = state.selection.main
   return state.sliceDoc(from, to).trim() || closestQueryBlock(state, head)
 }
 
-/** Binds Mod-Enter to run the selection, or the statement at/nearest the cursor. */
+/** Binds Mod-Enter to run the selection, or the query block at/nearest the cursor. */
 export const runQuery = (onRun: RunQueryHandler): Extension =>
   Prec.highest(
     keymap.of([
