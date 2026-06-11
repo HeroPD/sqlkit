@@ -434,9 +434,11 @@ export class WorkbenchScreen extends LitElement {
 
     // Untitled queries go through the native dialog, defaulting into the
     // active context's folder.
+    // Browse/history tab names already end in .sql; don't double it.
+    const suggestedName = `${tab.name.replace(/\.sql$/i, '')}.sql`
     const result = tab.path
       ? await window.sqlkit.saveFile(tab.path, tab.content)
-      : await window.sqlkit.saveFileAs(this._contextFolder() ?? '', `${tab.name}.sql`, tab.content)
+      : await window.sqlkit.saveFileAs(this._contextFolder() ?? '', suggestedName, tab.content)
 
     if (!result.success) {
       if (!result.canceled) console.error('Save failed:', result.error)
