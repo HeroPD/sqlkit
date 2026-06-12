@@ -102,7 +102,7 @@ export class ResultsPanel extends LitElement {
                 aria-label="Export results"
                 @click=${() => (this._exportOpen = true)}
               >
-                <i class="codicon codicon-desktop-download" aria-hidden="true"></i>
+                <i class="codicon codicon-download" aria-hidden="true"></i>
               </button>
             `
           : ''}
