@@ -77,7 +77,7 @@ export class EditorTab extends LitElement {
       top: 0;
       left: 0;
       right: 0;
-      height: 1px;
+      height: 2.5px;
       background: var(--tab-active-top);
     }
 
