@@ -2,6 +2,8 @@ import { LitElement, css, html, type PropertyValues, type TemplateResult } from 
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import type { FileInfo } from '../electron'
+import './context-menu'
+import type { MenuItem, MenuPickDetail } from './context-menu'
 
 type FileNode = {
   type: 'file' | 'folder'
@@ -190,32 +192,18 @@ export class FileTree extends LitElement {
     const menu = this._menu
     if (!menu) return ''
     const node = menu.node
-    const items: Array<{ id: string; label: string; danger?: boolean }> = [{ id: 'new', label: 'New File' }]
+    const items: MenuItem[] = [{ id: 'new', label: 'New File' }]
     if (node?.type === 'file') items.push({ id: 'rename', label: `Rename (${isMac ? '↵' : 'F2'})` })
     if (node) items.push({ id: 'delete', label: 'Delete', danger: true })
 
     return html`
-      <div
-        class="menu-backdrop"
-        @mousedown=${() => (this._menu = null)}
-        @contextmenu=${(e: Event) => {
-          e.preventDefault()
-          this._menu = null
-        }}
-      ></div>
-      <div class="menu" style="left: ${menu.x}px; top: ${menu.y}px">
-        ${items.map(
-          (item) => html`
-            <button
-              class="menu-item ${item.danger ? 'danger' : ''}"
-              @mousedown=${(e: Event) => e.preventDefault()}
-              @click=${() => this._onMenuPick(item.id, node)}
-            >
-              ${item.label}
-            </button>
-          `,
-        )}
-      </div>
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onMenuPick(e.detail.id, node)}
+        @menu-close=${() => (this._menu = null)}
+      ></context-menu>
     `
   }
 
@@ -419,45 +407,6 @@ export class FileTree extends LitElement {
         outline: none;
       }
 
-      .menu-backdrop {
-        position: fixed;
-        inset: 0;
-        z-index: 90;
-      }
-
-      .menu {
-        position: fixed;
-        z-index: 91;
-        min-width: 160px;
-        padding: 4px;
-        display: flex;
-        flex-direction: column;
-        background: var(--sidebar-bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-      }
-
-      .menu-item {
-        display: block;
-        width: 100%;
-        padding: 5px 10px;
-        border: none;
-        border-radius: 3px;
-        background: transparent;
-        color: var(--text);
-        font-size: var(--font-size);
-        text-align: left;
-        cursor: pointer;
-      }
-
-      .menu-item:hover {
-        background: var(--list-hover);
-      }
-
-      .menu-item.danger:hover {
-        background: color-mix(in srgb, var(--status-dot-error) 22%, transparent);
-      }
     `,
   ]
 }

@@ -4,6 +4,8 @@ import { codicons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
 import type { ColumnRef, Engine, FileInfo, TableRef } from '../electron'
+import './context-menu'
+import type { MenuItem, MenuPickDetail } from './context-menu'
 import './file-tree'
 
 export const tableKey = (profileId: string, table: TableRef) => `${profileId}:${table.schema ?? ''}:${table.name}`
@@ -78,6 +80,9 @@ export class ExplorerView extends LitElement {
 
   @state()
   private _sectionResizing: { startY: number; startHeight: number } | null = null
+
+  @state()
+  private _tableMenu: { x: number; y: number; table: TableRef } | null = null
 
   protected willUpdate(changed: PropertyValues) {
     // A selection arriving from outside (⌘P table pick) must be visible:
@@ -155,7 +160,35 @@ export class ExplorerView extends LitElement {
         </div>
         ${this._tablesCollapsed ? '' : html`<div class="section-body">${this._renderTables()}</div>`}
       </div>
+      ${this._renderTableMenu()}
     `
+  }
+
+  private _renderTableMenu() {
+    const menu = this._tableMenu
+    if (!menu) return ''
+    const items: MenuItem[] = [
+      { id: 'browse', label: 'Browse Data' },
+      { id: 'copy-name', label: 'Copy Name' },
+      { id: 'copy-select', label: 'Copy SELECT' },
+      { id: 'refresh', label: 'Refresh Tables' },
+    ]
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onTableMenuPick(e.detail.id, menu.table)}
+        @menu-close=${() => (this._tableMenu = null)}
+      ></context-menu>
+    `
+  }
+
+  private _onTableMenuPick(id: string, table: TableRef) {
+    if (id === 'browse') this._browse(table)
+    if (id === 'copy-name') void navigator.clipboard.writeText(tableLabel(table))
+    if (id === 'copy-select') void navigator.clipboard.writeText(`select * from ${tableLabel(table)} limit 100;`)
+    if (id === 'refresh') this._refresh()
   }
 
   private _renderTables() {
@@ -206,6 +239,7 @@ export class ExplorerView extends LitElement {
         title="${tableLabel(table)} — double-click to browse"
         @click=${() => this._select(key)}
         @dblclick=${() => this._browse(table)}
+        @contextmenu=${(event: MouseEvent) => this._onTableMenu(event, table)}
       >
         <i
           class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}"
@@ -285,6 +319,12 @@ export class ExplorerView extends LitElement {
     this.dispatchEvent(
       new CustomEvent<TableBrowseDetail>('table-browse', { detail: { table }, bubbles: true, composed: true }),
     )
+  }
+
+  private _onTableMenu(event: MouseEvent, table: TableRef) {
+    event.preventDefault()
+    event.stopPropagation()
+    this._tableMenu = { x: event.clientX, y: event.clientY, table }
   }
 
   private _onResizeStart(event: PointerEvent) {
