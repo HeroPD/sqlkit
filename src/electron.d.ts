@@ -117,6 +117,8 @@ export type ColumnRef = {
   dataType: string
   nullable: boolean
   primaryKey: boolean
+  /** Member of a foreign-key constraint referencing another table. */
+  foreignKey: boolean
 }
 
 export type ColumnsResult = { success: true; columns: ColumnRef[] } | { success: false; error: string }

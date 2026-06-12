@@ -109,7 +109,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         `select n.nspname as table_schema, c.relname as table_name, a.attname as column_name,
                 pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type,
                 not a.attnotnull as nullable,
-                coalesce(i.indisprimary, false) as primary_key
+                coalesce(i.indisprimary, false) as primary_key,
+                exists (select 1 from pg_catalog.pg_constraint fk
+                        where fk.contype = 'f' and fk.conrelid = a.attrelid and a.attnum = any(fk.conkey)) as foreign_key
          from pg_catalog.pg_attribute a
          join pg_catalog.pg_class c on c.oid = a.attrelid
          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -131,6 +133,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           data_type: string
           nullable: boolean
           primary_key: boolean
+          foreign_key: boolean
         }): ColumnRef => ({
           schema: row.table_schema,
           table: row.table_name,
@@ -138,6 +141,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           dataType: row.data_type,
           nullable: row.nullable,
           primaryKey: row.primary_key,
+          foreignKey: row.foreign_key,
         }),
       )
     },

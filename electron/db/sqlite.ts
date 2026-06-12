@@ -50,13 +50,21 @@ export function createSqliteDriver(profile: ConnectionProfile): Driver {
       const rows = open()
         .prepare(
           `select m.name as table_name, p.name as column_name, p.type as data_type,
-                  p."notnull" as not_null, p.pk as pk
+                  p."notnull" as not_null, p.pk as pk,
+                  exists (select 1 from pragma_foreign_key_list(m.name) f where f."from" = p.name) as fk
            from sqlite_master m
            join pragma_table_info(m.name) p
            where m.type in ('table', 'view') and m.name not like 'sqlite_%'
            order by m.name, p.cid`,
         )
-        .all() as Array<{ table_name: string; column_name: string; data_type: string; not_null: number; pk: number }>
+        .all() as Array<{
+        table_name: string
+        column_name: string
+        data_type: string
+        not_null: number
+        pk: number
+        fk: number
+      }>
       return rows.map(
         (row): ColumnRef => ({
           schema: null,
@@ -65,6 +73,7 @@ export function createSqliteDriver(profile: ConnectionProfile): Driver {
           dataType: row.data_type || 'any',
           nullable: !row.not_null,
           primaryKey: row.pk > 0,
+          foreignKey: row.fk > 0,
         }),
       )
     },

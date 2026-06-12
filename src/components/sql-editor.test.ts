@@ -17,9 +17,9 @@ async function completionsAt(doc: string) {
   el.value = doc
   el.tables = ['postings', 'users']
   el.columns = [
-    { schema: null, table: 'postings', name: 'id', dataType: 'integer', nullable: false, primaryKey: true },
-    { schema: null, table: 'postings', name: 'item_count', dataType: 'integer', nullable: true, primaryKey: false },
-    { schema: null, table: 'users', name: 'user_name', dataType: 'text', nullable: true, primaryKey: false },
+    { schema: null, table: 'postings', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
+    { schema: null, table: 'postings', name: 'item_count', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: false },
+    { schema: null, table: 'users', name: 'user_name', dataType: 'text', nullable: true, primaryKey: false, foreignKey: false },
   ]
   document.body.append(el)
   await el.updateComplete

@@ -228,10 +228,10 @@ export class ExplorerView extends LitElement {
       (column) => html`
         <div
           class="ecol-row ${nested ? 'nested' : ''}"
-          title="${column.name} · ${column.dataType}${column.nullable ? '' : ' · not null'}"
+          title="${column.name} · ${column.dataType}${column.nullable ? '' : ' · not null'}${column.foreignKey ? ' · foreign key' : ''}"
         >
           <i
-            class="codicon ${column.primaryKey ? 'codicon-key' : 'codicon-symbol-field'} ${column.primaryKey ? 'pk' : ''}"
+            class="codicon ${column.primaryKey || column.foreignKey ? 'codicon-key' : 'codicon-symbol-field'} ${column.primaryKey ? 'pk' : column.foreignKey ? 'fk' : ''}"
             aria-hidden="true"
           ></i>
           <span class="col-name">${column.name}</span>
@@ -567,6 +567,10 @@ export class ExplorerView extends LitElement {
 
       .ecol-row .codicon.pk {
         color: var(--status-dot-warning);
+      }
+
+      .ecol-row .codicon.fk {
+        color: var(--accent);
       }
 
       .col-name {
