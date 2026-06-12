@@ -1,8 +1,13 @@
 import { LitElement, css, html } from 'lit'
-import { customElement, property } from 'lit/decorators.js'
+import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { isMac } from '../platform'
 import type { QueryResult } from '../electron'
+import { rowToTsv, toDelimited, toJson } from '../result-export'
+import './context-menu'
+import type { MenuItem, MenuPickDetail } from './context-menu'
+import './export-dialog'
+import type { ExportConfirmDetail } from './export-dialog'
 
 /** What the results panel is currently showing. */
 export type QueryRun =
@@ -68,6 +73,14 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   canCancel = false
 
+  /** Cell the context menu was opened on: row/col index into the result
+   * (col -1 on the # column, row -1 on the header row). */
+  @state()
+  private _menu: { x: number; y: number; row: number; col: number } | null = null
+
+  @state()
+  private _exportOpen = false
+
   // Widths are measured once per result set; re-renders reuse the memo.
   private _widthsCache: { result: QueryResult; widths: number[] } | null = null
 
@@ -76,13 +89,98 @@ export class ResultsPanel extends LitElement {
   }
 
   render() {
+    const exportable = this.run.phase === 'done' && this.run.result.columns.length > 0
     return html`
       <div class="head">
         <span>Results</span>
         <span class="status">${this._status()}</span>
+        ${exportable
+          ? html`
+              <button
+                class="head-action"
+                title="Export results…"
+                aria-label="Export results"
+                @click=${() => (this._exportOpen = true)}
+              >
+                <i class="codicon codicon-desktop-download" aria-hidden="true"></i>
+              </button>
+            `
+          : ''}
       </div>
       <div class="body">${this._renderBody()}</div>
+      ${this._renderMenu()}
+      ${this._exportOpen && this.run.phase === 'done'
+        ? html`
+            <export-dialog
+              .total=${this.run.result.rows.length}
+              .truncated=${this.run.result.truncated ?? false}
+              @dialog-cancel=${() => (this._exportOpen = false)}
+              @export-confirm=${this._onExportConfirm}
+            ></export-dialog>
+          `
+        : ''}
     `
+  }
+
+  private _onExportConfirm = (event: CustomEvent<ExportConfirmDetail>) => {
+    this._exportOpen = false
+    if (this.run.phase !== 'done') return
+    const { format, rows } = event.detail
+    const { result } = this.run
+    const slice = result.rows.slice(0, rows)
+    const content =
+      format === 'json' ? toJson(result.columns, slice) : toDelimited(result.columns, slice, format === 'tsv' ? '\t' : ',')
+    void window.sqlkit.exportFile(`results.${format}`, content)
+  }
+
+  // One delegated listener instead of one per cell; indexes recovered from
+  // the DOM table coordinates (# column shifts data columns right by one).
+  private _onTableContextMenu(event: MouseEvent) {
+    if (this.run.phase !== 'done') return
+    const cell = (event.target as HTMLElement).closest('td, th') as HTMLTableCellElement | null
+    if (!cell) return
+    event.preventDefault()
+    const rowEl = cell.closest('tr') as HTMLTableRowElement
+    const row = cell.tagName === 'TH' ? -1 : rowEl.sectionRowIndex
+    this._menu = { x: event.clientX, y: event.clientY, row, col: cell.cellIndex - 1 }
+  }
+
+  private _renderMenu() {
+    const menu = this._menu
+    if (!menu || this.run.phase !== 'done') return ''
+    const { result } = this.run
+    const items: MenuItem[] = [
+      ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'copy-cell', label: 'Copy Cell' }] : []),
+      ...(menu.row >= 0 ? [{ id: 'copy-row', label: 'Copy Row' }] : []),
+      ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: 'Copy Column Name' }] : []),
+      { id: 'copy-csv', label: 'Copy All as CSV' },
+      { id: 'copy-tsv', label: 'Copy All as TSV' },
+      { id: 'copy-json', label: 'Copy All as JSON' },
+      { id: 'export', label: 'Export…' },
+    ]
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onMenuPick(e.detail.id, result, menu)}
+        @menu-close=${() => (this._menu = null)}
+      ></context-menu>
+    `
+  }
+
+  private _onMenuPick(action: string, result: QueryResult, at: { row: number; col: number }) {
+    const copy = (text: string) => void navigator.clipboard.writeText(text)
+    if (action === 'copy-cell') {
+      const value = result.rows[at.row]?.[at.col]
+      copy(value === null || value === undefined ? '' : formatCell(value))
+    }
+    if (action === 'copy-row') copy(rowToTsv(result.rows[at.row] ?? []))
+    if (action === 'copy-column-name') copy(result.columns[at.col] ?? '')
+    if (action === 'copy-csv') copy(toDelimited(result.columns, result.rows, ','))
+    if (action === 'copy-tsv') copy(toDelimited(result.columns, result.rows, '\t'))
+    if (action === 'copy-json') copy(toJson(result.columns, result.rows))
+    if (action === 'export') this._exportOpen = true
   }
 
   private _status() {
@@ -121,7 +219,7 @@ export class ResultsPanel extends LitElement {
     }
     const widths = this._columnWidths(result)
     return html`
-      <table>
+      <table @contextmenu=${this._onTableContextMenu}>
         <colgroup>
           <col style="width: ${NUM_COL_WIDTH}px" />
           ${widths.map((width) => html`<col style="width: ${width}px" />`)}
@@ -184,6 +282,22 @@ export class ResultsPanel extends LitElement {
         letter-spacing: 0.04em;
         border-bottom: 1px solid var(--border-subtle);
         user-select: none;
+      }
+
+      .head-action {
+        display: inline-flex;
+        flex-shrink: 0;
+        padding: 3px;
+        color: var(--text-3);
+        background: transparent;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      .head-action:hover {
+        color: var(--text);
+        background: var(--list-hover);
       }
 
       .status {

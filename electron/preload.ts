@@ -31,6 +31,7 @@ const api: SqlkitApi = {
   readFile: (path) => ipcRenderer.invoke('file:read', path),
   saveFile: (path, content) => ipcRenderer.invoke('file:save', path, content),
   saveFileAs: (folder, suggestedName, content) => ipcRenderer.invoke('file:save-as', folder, suggestedName, content),
+  exportFile: (suggestedName, content) => ipcRenderer.invoke('file:export', suggestedName, content),
   createFile: (folder, relativePath) => ipcRenderer.invoke('file:create', folder, relativePath),
   renameFile: (path, newName) => ipcRenderer.invoke('file:rename', path, newName),
   deleteFile: (path) => ipcRenderer.invoke('file:delete', path),

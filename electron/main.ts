@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from 'electron'
 import { dirname, join } from 'node:path'
 import { mkdirSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
 const fsMkdir = (dir: string) => {
@@ -171,6 +172,25 @@ function registerWorkspaceIpc() {
 
     const filePath = result.filePath.toLowerCase().endsWith('.sql') ? result.filePath : `${result.filePath}.sql`
     return saveWorkspaceFile(workspace, filePath, content)
+  })
+
+  // Results export: anywhere on disk (not workspace-rooted like save-as).
+  ipcMain.handle('file:export', async (event, suggestedName: string, content: string) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window) return { success: false, error: 'No window' }
+    const extension = (suggestedName.split('.').pop() || 'csv').toLowerCase()
+    const result = await dialog.showSaveDialog(window, {
+      title: 'Export Results',
+      defaultPath: join(app.getPath('downloads'), suggestedName || 'results.csv'),
+      filters: [{ name: extension.toUpperCase(), extensions: [extension] }],
+    })
+    if (result.canceled || !result.filePath) return { success: false, canceled: true }
+    try {
+      await writeFile(result.filePath, content, 'utf8')
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
   })
 
   ipcMain.handle('workspace:get-recent', () => {

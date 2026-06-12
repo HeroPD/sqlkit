@@ -197,6 +197,11 @@ export type SqlkitApi = {
   saveFile: (path: string, content: string) => Promise<FileSaveResult>
   /** Native save dialog defaulting into a database context's folder. */
   saveFileAs: (folder: string, suggestedName: string, content: string) => Promise<FileSaveResult>
+  /** Save-dialog export to anywhere on disk (results CSV, not workspace files). */
+  exportFile: (
+    suggestedName: string,
+    content: string,
+  ) => Promise<{ success: boolean; canceled?: boolean; error?: string }>
   /** Creates an empty .sql file at folder/relativePath; fails if it exists. */
   createFile: (folder: string, relativePath: string) => Promise<FileSaveResult>
   /** Renames a file in place (same directory). */
