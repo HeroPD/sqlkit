@@ -167,9 +167,12 @@ const appTheme = EditorView.theme(
       cursor: 'default',
     },
 
+    /* Same selection tokens as the file tree / table list: an opaque,
+       hue-shifted blue reads as "selected" where a white-alpha overlay is
+       ambiguous against neighboring unselected rows. */
     '.cm-tooltip-autocomplete > ul > li[aria-selected]': {
-      backgroundColor: 'rgba(255, 255, 255, 0.10)',
-      color: 'var(--text)',
+      backgroundColor: 'var(--list-selection)',
+      color: 'var(--list-selection-fg)',
     },
 
     '.cm-completionLabel': {
