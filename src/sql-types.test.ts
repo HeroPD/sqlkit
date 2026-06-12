@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { abbreviateType } from './sql-types'
+import { abbreviateType, stripExplain } from './sql-types'
 
 describe('abbreviateType', () => {
   it('shortens verbose postgres names', () => {
@@ -40,5 +40,22 @@ describe('abbreviateType', () => {
     expect(abbreviateType('int(11) unsigned', 'mysql')).toBe('int(11) unsigned')
     expect(abbreviateType('nvarchar(50)', 'sqlserver')).toBe('nvarchar(50)')
     expect(abbreviateType('integer', null)).toBe('integer')
+  })
+})
+
+describe('stripExplain', () => {
+  it('strips plain and modified explains', () => {
+    expect(stripExplain('explain select 1')).toBe('select 1')
+    expect(stripExplain('EXPLAIN ANALYZE select 1')).toBe('select 1')
+    expect(stripExplain('explain analyze verbose select 1')).toBe('select 1')
+    expect(stripExplain('explain (analyze, buffers) select 1')).toBe('select 1')
+    expect(stripExplain('explain query plan select 1')).toBe('select 1')
+    expect(stripExplain('  EXPLAIN  select 1')).toBe('select 1')
+  })
+
+  it('leaves non-explain queries untouched', () => {
+    expect(stripExplain('select 1')).toBe('select 1')
+    expect(stripExplain('select explain from t')).toBe('select explain from t')
+    expect(stripExplain('-- explain\nselect 1')).toBe('-- explain\nselect 1')
   })
 })

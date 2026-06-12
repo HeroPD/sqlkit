@@ -20,6 +20,12 @@ const ENGINE_ALIASES: Partial<Record<Engine, Record<string, string>>> = {
 /** Shorten verbose SQL type names for display ("character varying(255)" → "varchar(255)").
  * Types pass through unchanged for engines without aliases or when unrecognized;
  * modifiers and array suffixes are preserved. */
+/** Strips a leading EXPLAIN — with pg's option list and ANALYZE/VERBOSE
+ * modifiers or SQLite's QUERY PLAN — so re-explaining never stacks prefixes. */
+export function stripExplain(sql: string): string {
+  return sql.replace(/^\s*explain\b\s*(\([^)]*\)\s*)?((?:query\s+plan|analyze|verbose)\b\s*)*/i, '')
+}
+
 export function abbreviateType(dataType: string, engine: Engine | null): string {
   const aliases = engine ? ENGINE_ALIASES[engine] : undefined
   if (!aliases) return dataType

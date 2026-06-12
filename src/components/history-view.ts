@@ -1,6 +1,9 @@
 import { LitElement, css, html } from 'lit'
-import { customElement, property } from 'lit/decorators.js'
+import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import type { Engine } from '../electron'
+import './context-menu'
+import type { MenuItem, MenuPickDetail } from './context-menu'
 
 // One run in the query history. Runtime-only, like the reference app: capped
 // per workspace, scoped to the database context that ran it.
@@ -17,6 +20,7 @@ export type HistoryItem = {
 }
 
 export type HistoryOpenDetail = { sql: string }
+export type HistoryExplainDetail = { sql: string; analyze: boolean }
 
 const summarize = (sql: string) => sql.replace(/\s+/g, ' ').trim().slice(0, 120)
 
@@ -30,6 +34,13 @@ export class HistoryView extends LitElement {
   @property({ attribute: false })
   items: HistoryItem[] = []
 
+  /** Engine of the active context; decides which explain flavors exist. */
+  @property()
+  engine: Engine | null = null
+
+  @state()
+  private _menu: { x: number; y: number; item: HistoryItem } | null = null
+
   render() {
     return html`
       <div class="list">
@@ -37,7 +48,43 @@ export class HistoryView extends LitElement {
           ? this.items.map((item) => this._renderItem(item))
           : html`<p class="muted hint">No queries run yet.</p>`}
       </div>
+      ${this._renderMenu()}
     `
+  }
+
+  private _renderMenu() {
+    const menu = this._menu
+    if (!menu) return ''
+    const items: MenuItem[] = [
+      { id: 'explain', label: 'Explain' },
+      // ANALYZE actually executes the query — a Postgres notion; SQLite's
+      // counterpart is the single `explain query plan` mode.
+      ...(this.engine === 'postgresql' ? [{ id: 'explain-analyze', label: 'Explain Analyze' }] : []),
+      { id: 'copy-sql', label: 'Copy SQL' },
+    ]
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onMenuPick(e.detail.id, menu.item)}
+        @menu-close=${() => (this._menu = null)}
+      ></context-menu>
+    `
+  }
+
+  private _onMenuPick(action: string, item: HistoryItem) {
+    if (action === 'copy-sql') {
+      void navigator.clipboard.writeText(item.sql)
+      return
+    }
+    this.dispatchEvent(
+      new CustomEvent<HistoryExplainDetail>('history-explain', {
+        detail: { sql: item.sql, analyze: action === 'explain-analyze' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
   }
 
   private _renderItem(item: HistoryItem) {
@@ -58,6 +105,10 @@ export class HistoryView extends LitElement {
         title=${item.success ? item.sql : `${item.sql}\n\n${item.error}`}
         @click=${() => this._open(item)}
         @dblclick=${() => this._openPermanent(item)}
+        @contextmenu=${(event: MouseEvent) => {
+          event.preventDefault()
+          this._menu = { x: event.clientX, y: event.clientY, item }
+        }}
         @keydown=${(e: KeyboardEvent) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()

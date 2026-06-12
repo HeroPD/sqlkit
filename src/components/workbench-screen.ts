@@ -27,9 +27,10 @@ import type { EmptyAction } from './editor-empty'
 import type { PaletteEntry, PaletteMode } from './command-palette'
 import type { RunQueryDetail } from './sql-editor'
 import type { TableBrowseDetail, TableSelectDetail } from './explorer-view'
-import type { HistoryOpenDetail } from './history-view'
+import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { QueriesController } from '../controllers/queries'
+import { stripExplain } from '../sql-types'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 
@@ -1005,8 +1006,10 @@ export class WorkbenchScreen extends LitElement {
       return html`
         <history-view
           .items=${this._queries.history.filter((item) => item.contextKey === key)}
+          .engine=${this._activeProfile()?.engine ?? null}
           @history-open=${this._onHistoryOpen}
           @history-open-permanent=${this._onHistoryOpenPermanent}
+          @history-explain=${this._onHistoryExplain}
           @history-clear=${this._onHistoryClear}
         ></history-view>
       `
@@ -1019,6 +1022,22 @@ export class WorkbenchScreen extends LitElement {
   // browsing history doesn't stack tabs). Never auto-runs.
   private _onHistoryOpen(event: Event) {
     const { sql } = (event as CustomEvent<HistoryOpenDetail>).detail
+    this._openPreviewTab(sql)
+  }
+
+  // Right-click explain: the prefixed statement lands in the preview tab and
+  // runs immediately, so the plan arrives with its SQL visible.
+  private _onHistoryExplain(event: Event) {
+    const { sql, analyze } = (event as CustomEvent<HistoryExplainDetail>).detail
+    const profile = this._activeProfile()
+    if (!profile) return
+    const prefix = profile.engine === 'sqlite' ? 'explain query plan ' : analyze ? 'explain analyze ' : 'explain '
+    const statement = prefix + stripExplain(sql)
+    this._openPreviewTab(statement)
+    void this._runSql(statement)
+  }
+
+  private _openPreviewTab(sql: string) {
     const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview)
 
     if (preview) {
