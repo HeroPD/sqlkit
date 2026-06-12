@@ -4,7 +4,7 @@ import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
 import { FilesController } from '../controllers/files'
-import type { ConnectionProfile, FileInfo, FileSaveResult, MenuAction, TableRef } from '../electron'
+import type { ConnectionProfile, DbObject, DbObjectKind, FileInfo, FileSaveResult, MenuAction, TableRef } from '../electron'
 import './activity-button'
 import './command-palette'
 import './confirm-dialog'
@@ -26,7 +26,7 @@ import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
 import type { PaletteEntry, PaletteMode } from './command-palette'
 import type { RunQueryDetail } from './sql-editor'
-import type { TableBrowseDetail, TableSelectDetail } from './explorer-view'
+import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { QueriesController } from '../controllers/queries'
@@ -66,6 +66,7 @@ type SqlTabState = {
 type EditorTabState =
   | { id: string; kind: 'config'; profile: ConnectionProfile }
   | { id: string; kind: 'inspect'; profileId: string; table: TableRef }
+  | { id: string; kind: 'inspect-object'; profileId: string; object: DbObject; objectKind: DbObjectKind }
   | SqlTabState
 
 const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`
@@ -75,6 +76,7 @@ const quoteQualified = (table: TableRef) =>
 const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'config') return tab.profile.name.trim() || 'New Database'
   if (tab.kind === 'inspect') return `${tab.table.name} · info`
+  if (tab.kind === 'inspect-object') return `${tab.object.name} · info`
   return tab.content === tab.savedContent ? tab.name : `${tab.name} •`
 }
 
@@ -807,6 +809,7 @@ export class WorkbenchScreen extends LitElement {
         @table-select=${this._onTableSelect}
         @table-browse=${this._onTableBrowse}
         @table-inspect=${this._onTableInspect}
+        @object-inspect=${this._onObjectInspect}
         @matview-refresh=${this._onMatviewRefresh}
         @table-truncate=${this._onTableTruncate}
         @table-drop=${this._onTableDrop}
@@ -999,6 +1002,7 @@ export class WorkbenchScreen extends LitElement {
           .engine=${context?.engine ?? null}
           .tables=${connected && context ? (this._live.tables[context.id] ?? []) : null}
           .columns=${connected && context ? (this._live.columns[context.id] ?? null) : null}
+          .objects=${connected && context ? (this._live.objects[context.id] ?? null) : null}
           .activeChildName=${activeChild}
           .selectedTable=${this._selectedTable}
         ></explorer-view>
@@ -1108,6 +1112,18 @@ export class WorkbenchScreen extends LitElement {
           <table-inspect
             .profileId=${activeTab.profileId}
             .table=${activeTab.table}
+            .engine=${this._connections.find((connection) => connection.id === activeTab.profileId)?.engine ?? null}
+          ></table-inspect>
+        </div>
+      `
+    }
+    if (activeTab?.kind === 'inspect-object') {
+      return html`
+        <div class="editor-content inspect">
+          <table-inspect
+            .profileId=${activeTab.profileId}
+            .object=${activeTab.object}
+            .objectKind=${activeTab.objectKind}
             .engine=${this._connections.find((connection) => connection.id === activeTab.profileId)?.engine ?? null}
           ></table-inspect>
         </div>
@@ -1383,6 +1399,18 @@ export class WorkbenchScreen extends LitElement {
     const id = `inspect:${tableKey(profile.id, table)}`
     if (!this._tabs.some((tab) => tab.id === id)) {
       this._tabs = [...this._tabs, { id, kind: 'inspect', profileId: profile.id, table }]
+    }
+    this._activeTabId = id
+  }
+
+  // Same for functions/types; detail (identity args) keeps overloads apart.
+  private _onObjectInspect(event: Event) {
+    const { object, objectKind } = (event as CustomEvent<ObjectInspectDetail>).detail
+    const profile = this._activeProfile()
+    if (!profile) return
+    const id = `inspect-object:${profile.id}:${object.schema ?? ''}:${objectKind}:${object.name}:${object.detail}`
+    if (!this._tabs.some((tab) => tab.id === id)) {
+      this._tabs = [...this._tabs, { id, kind: 'inspect-object', profileId: profile.id, object, objectKind }]
     }
     this._activeTabId = id
   }

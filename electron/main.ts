@@ -32,7 +32,7 @@ import {
 } from './files'
 import { createConnectionManager, testConnection } from './db/manager'
 import { testSshTunnel } from './db/transport'
-import type { ConnectionProfile, ConnectionStatus, TableRef, WorkspaceConfig } from '../src/electron'
+import type { ConnectionProfile, ConnectionStatus, DbObject, DbObjectKind, TableRef, WorkspaceConfig } from '../src/electron'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
@@ -228,6 +228,10 @@ function registerDbIpc() {
   ipcMain.handle('db:list-columns', (_event, profileId: string) => manager.listColumns(profileId))
   ipcMain.handle('db:inspect-table', (_event, profileId: string, table: TableRef) =>
     manager.inspectTable(profileId, table),
+  )
+  ipcMain.handle('db:list-objects', (_event, profileId: string) => manager.listObjects(profileId))
+  ipcMain.handle('db:inspect-object', (_event, profileId: string, object: DbObject, objectKind: DbObjectKind) =>
+    manager.inspectObject(profileId, object, objectKind),
   )
 
   ipcMain.handle('db:pick-sqlite-file', async (event) => {

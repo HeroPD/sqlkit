@@ -211,6 +211,138 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       )
     },
 
+    async listObjects() {
+      const pool = activePool()
+      const [functions, types] = await Promise.all([
+        // Plain functions and procedures; aggregates/window functions are
+        // rarely user-authored and would mostly be noise.
+        pool.query(
+          `select n.nspname as schema, p.proname as name,
+                  pg_catalog.pg_get_function_identity_arguments(p.oid) as detail
+           from pg_catalog.pg_proc p
+           join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+           where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+             and p.prokind in ('f', 'p')
+           order by schema, name`,
+        ),
+        // Standalone user types: enums, domains, ranges, and CREATE TYPE AS
+        // composites — every table also has an implicit composite type, so
+        // 'c' is restricted to relkind 'c'.
+        pool.query(
+          `select n.nspname as schema, t.typname as name,
+                  case t.typtype
+                    when 'e' then 'enum' when 'd' then 'domain'
+                    when 'r' then 'range' else 'composite' end as detail
+           from pg_catalog.pg_type t
+           join pg_catalog.pg_namespace n on n.oid = t.typnamespace
+           where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+             and (t.typtype in ('e', 'd', 'r')
+                  or (t.typtype = 'c' and exists (
+                        select 1 from pg_catalog.pg_class c
+                        where c.oid = t.typrelid and c.relkind = 'c')))
+           order by schema, name`,
+        ),
+      ])
+      return { functions: functions.rows, types: types.rows }
+    },
+
+    async inspectObject(object, objectKind) {
+      const pool = activePool()
+      const schema = object.schema ?? 'public'
+
+      if (objectKind === 'function') {
+        // detail carries the identity arguments, which is what distinguishes
+        // overloads sharing a name.
+        const result = await pool.query(
+          `select pg_catalog.pg_get_functiondef(p.oid) as definition
+           from pg_catalog.pg_proc p
+           join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+           where n.nspname = $1 and p.proname = $2
+             and pg_catalog.pg_get_function_identity_arguments(p.oid) = $3`,
+          [schema, object.name, object.detail],
+        )
+        const definition: string = result.rows[0]?.definition ?? ''
+        if (!definition) throw new Error(`Function ${object.name}(${object.detail}) was not found.`)
+        return { columns: [], sections: [{ title: 'Definition', rows: [{ name: object.name, definition }] }] }
+      }
+
+      const typeRow = (
+        await pool.query(
+          `select t.oid, t.typtype, t.typrelid,
+                  pg_catalog.format_type(t.typbasetype, t.typtypmod) as base_type,
+                  t.typnotnull, t.typdefault
+           from pg_catalog.pg_type t
+           join pg_catalog.pg_namespace n on n.oid = t.typnamespace
+           where n.nspname = $1 and t.typname = $2`,
+          [schema, object.name],
+        )
+      ).rows[0] as
+        | { oid: string; typtype: string; typrelid: string; base_type: string; typnotnull: boolean; typdefault: string | null }
+        | undefined
+      if (!typeRow) throw new Error(`Type ${object.name} was not found.`)
+
+      if (typeRow.typtype === 'e') {
+        const values = await pool.query(
+          'select enumlabel from pg_catalog.pg_enum where enumtypid = $1 order by enumsortorder',
+          [typeRow.oid],
+        )
+        return {
+          columns: [],
+          sections: [
+            { title: 'Values', rows: values.rows.map((row: { enumlabel: string }) => ({ name: row.enumlabel, definition: '' })) },
+          ],
+        }
+      }
+
+      if (typeRow.typtype === 'c') {
+        // CREATE TYPE AS composites reuse the column table for attributes.
+        const attrs = await pool.query(
+          `select a.attname as name, pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type
+           from pg_catalog.pg_attribute a
+           where a.attrelid = $1 and a.attnum > 0 and not a.attisdropped
+           order by a.attnum`,
+          [typeRow.typrelid],
+        )
+        return {
+          columns: attrs.rows.map((row: { name: string; data_type: string }) => ({
+            name: row.name,
+            dataType: row.data_type,
+            nullable: true,
+            default: null,
+            primaryKey: false,
+          })),
+          sections: [],
+        }
+      }
+
+      if (typeRow.typtype === 'r') {
+        const range = await pool.query(
+          'select pg_catalog.format_type(rngsubtype, null) as subtype from pg_catalog.pg_range where rngtypid = $1',
+          [typeRow.oid],
+        )
+        return {
+          columns: [],
+          sections: [
+            { title: 'Definition', rows: [{ name: 'subtype', definition: range.rows[0]?.subtype ?? '' }] },
+          ],
+        }
+      }
+
+      // Domain: base type, nullability, default, then its CHECK constraints.
+      const checks = await pool.query(
+        `select conname as name, pg_catalog.pg_get_constraintdef(oid, true) as definition
+         from pg_catalog.pg_constraint where contypid = $1 order by conname`,
+        [typeRow.oid],
+      )
+      const rows = [
+        { name: 'base type', definition: typeRow.base_type },
+        ...(typeRow.typnotnull ? [{ name: 'not null', definition: 'NOT NULL' }] : []),
+        ...(typeRow.typdefault ? [{ name: 'default', definition: typeRow.typdefault }] : []),
+        ...checks.rows,
+      ]
+      return { columns: [], sections: [{ title: 'Definition', rows }] }
+    },
+
     async inspectTable(table) {
       const pool = activePool()
       const schema = table.schema ?? 'public'

@@ -129,6 +129,20 @@ export type ColumnRef = {
 
 export type ColumnsResult = { success: true; columns: ColumnRef[] } | { success: false; error: string }
 
+/** A named schema-scoped object (function, type, …) for the explorer lists. */
+export type DbObject = {
+  schema: string | null
+  name: string
+  /** Function arg signature, or the type's flavor (enum/domain/…). */
+  detail: string
+}
+
+export type DbObjects = { functions: DbObject[]; types: DbObject[] }
+
+export type DbObjectKind = 'function' | 'type'
+
+export type ObjectsResult = { success: true; objects: DbObjects } | { success: false; error: string }
+
 export type InspectColumn = {
   name: string
   dataType: string
@@ -194,6 +208,11 @@ export type SqlkitApi = {
   listColumns: (profileId: string) => Promise<ColumnsResult>
   /** Structure of one table: columns, constraints, indexes, triggers, …. */
   inspectTable: (profileId: string, table: TableRef) => Promise<InspectResult>
+  /** Schema-scoped objects (functions, types) for the explorer. */
+  listObjects: (profileId: string) => Promise<ObjectsResult>
+  /** Structure of one function/type: definition, values, attributes. Reuses
+   * the table-inspection shape (columns for composites, sections for the rest). */
+  inspectObject: (profileId: string, object: DbObject, objectKind: DbObjectKind) => Promise<InspectResult>
   pickSqliteFile: () => Promise<string | null>
   /** Lists the .sql files of one database context's workspace subfolder. */
   listFiles: (folder: string) => Promise<FilesResult>

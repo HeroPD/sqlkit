@@ -1,4 +1,14 @@
-import type { ChildDb, ColumnRef, ConnectionProfile, QueryResult, TableInspection, TableRef } from '../../src/electron'
+import type {
+  ChildDb,
+  ColumnRef,
+  ConnectionProfile,
+  DbObject,
+  DbObjectKind,
+  DbObjects,
+  QueryResult,
+  TableInspection,
+  TableRef,
+} from '../../src/electron'
 import type { Endpoint } from './transport'
 import { createPostgresDriver } from './postgres'
 import { createSqliteDriver } from './sqlite'
@@ -20,6 +30,10 @@ export type Driver = {
   listColumns(): Promise<ColumnRef[]>
   /** One table's structure: columns plus engine-specific sections. */
   inspectTable(table: TableRef): Promise<TableInspection>
+  /** Schema-scoped functions/types; undefined when the engine has none. */
+  listObjects?(): Promise<DbObjects>
+  /** One function/type's structure, in the table-inspection shape. */
+  inspectObject?(object: DbObject, objectKind: DbObjectKind): Promise<TableInspection>
   /** Child databases; undefined for engines without all-databases support. */
   children?(): ChildDb[]
   /** Server-side CREATE DATABASE; undefined for file-based engines. */

@@ -3,7 +3,10 @@ import type {
   ConnectResult,
   ConnectionProfile,
   ConnectionStatus,
+  DbObject,
+  DbObjectKind,
   InspectResult,
+  ObjectsResult,
   QueryResponse,
   TableRef,
   TablesResult,
@@ -162,6 +165,28 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  async function listObjects(profileId: string): Promise<ObjectsResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: 'Not connected' }
+    try {
+      // Engines without schema objects (sqlite) just have empty lists.
+      return { success: true, objects: (await driver.listObjects?.()) ?? { functions: [], types: [] } }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
+  async function inspectObject(profileId: string, object: DbObject, objectKind: DbObjectKind): Promise<InspectResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver.inspectObject) return { success: false, error: 'Not supported for this engine' }
+    try {
+      return { success: true, inspection: await driver.inspectObject(object, objectKind) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
   async function inspectTable(profileId: string, table: TableRef): Promise<InspectResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
@@ -191,7 +216,9 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     cancelQuery,
     listTables,
     listColumns,
+    listObjects,
     inspectTable,
+    inspectObject,
     setActiveChild,
     createDatabase,
     dropDatabase,

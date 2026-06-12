@@ -1,7 +1,7 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
-import type { Engine, TableInspection, TableRef } from '../electron'
+import type { DbObject, DbObjectKind, Engine, TableInspection, TableRef } from '../electron'
 import { abbreviateType } from '../sql-types'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -36,6 +36,13 @@ export class TableInspect extends LitElement {
   @property({ attribute: false })
   table: TableRef | null = null
 
+  /** Alternative target: a schema object (function/type) instead of a table. */
+  @property({ attribute: false })
+  object: DbObject | null = null
+
+  @property()
+  objectKind: DbObjectKind | null = null
+
   @property()
   engine: Engine | null = null
 
@@ -48,29 +55,47 @@ export class TableInspect extends LitElement {
   private _menu: { x: number; y: number; name: string; definition: string | null } | null = null
 
   protected willUpdate(changed: PropertyValues) {
-    if (changed.has('profileId') || changed.has('table')) void this._load()
+    if (changed.has('profileId') || changed.has('table') || changed.has('object')) void this._load()
   }
 
   private async _load() {
     const table = this.table
-    if (!this.profileId || !table) return
+    const object = this.object
+    if (!this.profileId || (!table && !object)) return
     this._state = { phase: 'loading' }
-    const result = await window.sqlkit.inspectTable(this.profileId, table)
+    const result =
+      object && this.objectKind
+        ? await window.sqlkit.inspectObject(this.profileId, object, this.objectKind)
+        : await window.sqlkit.inspectTable(this.profileId, table!)
     // Stale guard: the tab may have been retargeted while this was in flight.
-    if (this.table !== table) return
+    if (this.table !== table || this.object !== object) return
     this._state = result.success ? { phase: 'done', inspection: result.inspection } : { phase: 'error', error: result.error }
   }
 
   render() {
-    const table = this.table
-    if (!table) return ''
-    const label = table.schema ? `${table.schema}.${table.name}` : table.name
+    const target = this.object ?? this.table
+    if (!target) return ''
+    const label = target.schema ? `${target.schema}.${target.name}` : target.name
+    const icon = this.object
+      ? this.objectKind === 'function'
+        ? 'codicon-symbol-method'
+        : this.object.detail === 'enum'
+          ? 'codicon-symbol-enum'
+          : 'codicon-symbol-structure'
+      : (TABLE_KIND_ICONS[this.table!.kind] ?? 'codicon-table')
+    const badge = this.object
+      ? this.objectKind === 'function'
+        ? 'function'
+        : this.object.detail
+      : this.table!.kind !== 'table'
+        ? TABLE_KIND_LABELS[this.table!.kind]
+        : ''
     return html`
       <div class="scroll">
         <div class="head">
-          <i class="codicon ${TABLE_KIND_ICONS[table.kind] ?? 'codicon-table'}" aria-hidden="true"></i>
+          <i class="codicon ${icon}" aria-hidden="true"></i>
           <h3>${label}</h3>
-          ${table.kind !== 'table' ? html`<span class="kind">${TABLE_KIND_LABELS[table.kind]}</span>` : ''}
+          ${badge ? html`<span class="kind">${badge}</span>` : ''}
           <button class="refresh" title="Reload structure" aria-label="Reload structure" @click=${() => void this._load()}>
             <i class="codicon codicon-refresh" aria-hidden="true"></i>
           </button>
@@ -116,7 +141,41 @@ export class TableInspect extends LitElement {
 
     const { columns, sections } = state.inspection
     return html`
-      <h4>Columns <span class="count">${columns.length}</span></h4>
+      ${columns.length ? this._renderColumnsTable(columns) : ''}
+      ${sections.map(
+        (section) => html`
+          <h4>${section.title} <span class="count">${section.rows.length}</span></h4>
+          <table class="section-table">
+            <colgroup>
+              <col class="name-col" />
+              <col />
+            </colgroup>
+            <tbody>
+              ${section.rows.map(
+                (row) => html`
+                  <tr @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}>
+                    <td class="mono name-cell" title=${row.name}>${row.name}</td>
+                    <td class="mono def" title=${row.definition}>${highlightDefinition(row.definition)}</td>
+                  </tr>
+                `,
+              )}
+            </tbody>
+          </table>
+        `,
+      )}
+      ${sections.length
+        ? ''
+        : this.object
+          ? columns.length
+            ? ''
+            : html`<p class="muted hint">Nothing to show.</p>`
+          : html`<p class="muted hint">No constraints, indexes, or triggers.</p>`}
+    `
+  }
+
+  private _renderColumnsTable(columns: TableInspection['columns']) {
+    return html`
+      <h4>${this.object ? 'Attributes' : 'Columns'} <span class="count">${columns.length}</span></h4>
       <table class="columns-table">
         <colgroup>
           <col class="icon-col" />
@@ -150,28 +209,6 @@ export class TableInspect extends LitElement {
           )}
         </tbody>
       </table>
-      ${sections.map(
-        (section) => html`
-          <h4>${section.title} <span class="count">${section.rows.length}</span></h4>
-          <table class="section-table">
-            <colgroup>
-              <col class="name-col" />
-              <col />
-            </colgroup>
-            <tbody>
-              ${section.rows.map(
-                (row) => html`
-                  <tr @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}>
-                    <td class="mono name-cell" title=${row.name}>${row.name}</td>
-                    <td class="mono def" title=${row.definition}>${highlightDefinition(row.definition)}</td>
-                  </tr>
-                `,
-              )}
-            </tbody>
-          </table>
-        `,
-      )}
-      ${sections.length ? '' : html`<p class="muted hint">No constraints, indexes, or triggers.</p>`}
     `
   }
 

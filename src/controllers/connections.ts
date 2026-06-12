@@ -1,5 +1,5 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectionStatus, TableRef } from '../electron'
+import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectionStatus, DbObjects, TableRef } from '../electron'
 
 // Owns the live-connection picture pushed from the main process: statuses by
 // profile id, and the table/column metadata of every connected database
@@ -14,6 +14,9 @@ export class ConnectionsController implements ReactiveController {
 
   /** Columns of every table, keyed by profile id (loaded with the tables). */
   columns: Record<string, ColumnRef[]> = {}
+
+  /** Schema objects (functions, types), keyed by profile id. */
+  objects: Record<string, DbObjects> = {}
 
   private host: ReactiveControllerHost
   private unsubscribe: (() => void) | null = null
@@ -69,6 +72,9 @@ export class ConnectionsController implements ReactiveController {
       const columns = { ...this.columns }
       delete columns[profileId]
       this.columns = columns
+      const objects = { ...this.objects }
+      delete objects[profileId]
+      this.objects = objects
       this.host.requestUpdate()
       void this.loadTables(profileId)
     }
@@ -84,14 +90,19 @@ export class ConnectionsController implements ReactiveController {
     // freshly connected ones.
     const tables: Record<string, TableRef[]> = {}
     const columns: Record<string, ColumnRef[]> = {}
+    const objects: Record<string, DbObjects> = {}
     for (const [id, list] of Object.entries(this.tables)) {
       if (byId[id]?.phase === 'connected') tables[id] = list
     }
     for (const [id, list] of Object.entries(this.columns)) {
       if (byId[id]?.phase === 'connected') columns[id] = list
     }
+    for (const [id, list] of Object.entries(this.objects)) {
+      if (byId[id]?.phase === 'connected') objects[id] = list
+    }
     this.tables = tables
     this.columns = columns
+    this.objects = objects
     for (const status of statuses) {
       if (status.phase === 'connected' && !(status.profileId in this.tables)) {
         void this.loadTables(status.profileId)
@@ -101,13 +112,15 @@ export class ConnectionsController implements ReactiveController {
   }
 
   private async loadTables(profileId: string) {
-    const [tables, columns] = await Promise.all([
+    const [tables, columns, objects] = await Promise.all([
       window.sqlkit.listTables(profileId),
       window.sqlkit.listColumns(profileId),
+      window.sqlkit.listObjects(profileId),
     ])
     if (this.statuses[profileId]?.phase !== 'connected') return
     if (tables.success) this.tables = { ...this.tables, [profileId]: tables.tables }
     if (columns.success) this.columns = { ...this.columns, [profileId]: columns.columns }
-    if (tables.success || columns.success) this.host.requestUpdate()
+    if (objects.success) this.objects = { ...this.objects, [profileId]: objects.objects }
+    if (tables.success || columns.success || objects.success) this.host.requestUpdate()
   }
 }

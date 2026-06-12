@@ -4,7 +4,7 @@ import { codicons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
 import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
-import type { ColumnRef, Engine, FileInfo, TableRef } from '../electron'
+import type { ColumnRef, DbObject, DbObjectKind, DbObjects, Engine, FileInfo, TableRef } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './file-tree'
@@ -13,7 +13,11 @@ export const tableKey = (profileId: string, table: TableRef) => `${profileId}:${
 
 export const tableLabel = (table: TableRef) => (table.schema ? `${table.schema}.${table.name}` : table.name)
 
+const objectIcon = (label: 'Functions' | 'Types', object: DbObject) =>
+  label === 'Functions' ? 'codicon-symbol-method' : object.detail === 'enum' ? 'codicon-symbol-enum' : 'codicon-symbol-structure'
+
 export type TableSelectDetail = { key: string }
+export type ObjectInspectDetail = { object: DbObject; objectKind: DbObjectKind }
 export type TableBrowseDetail = { table: TableRef }
 
 // The Explorer sidebar view, scoped to the in-use database context (⌘K):
@@ -51,6 +55,10 @@ export class ExplorerView extends LitElement {
   @property({ attribute: false })
   columns: ColumnRef[] | null = null
 
+  /** Schema objects (functions, types), shown as collapsed groups. */
+  @property({ attribute: false })
+  objects: DbObjects | null = null
+
   /** Active child database (all-databases mode), shown in the Tables header. */
   @property()
   activeChildName: string | null = null
@@ -84,6 +92,13 @@ export class ExplorerView extends LitElement {
 
   @state()
   private _tableMenu: { x: number; y: number; table: TableRef } | null = null
+
+  /** Function/type groups start collapsed; keys are profile:schema:label. */
+  @state()
+  private _expandedObjectGroups = new Set<string>()
+
+  @state()
+  private _objectMenu: { x: number; y: number; object: DbObject; objectKind: DbObjectKind } | null = null
 
   protected willUpdate(changed: PropertyValues) {
     // A selection arriving from outside (⌘P table pick) must be visible:
@@ -161,7 +176,7 @@ export class ExplorerView extends LitElement {
         </div>
         ${this._tablesCollapsed ? '' : html`<div class="section-body">${this._renderTables()}</div>`}
       </div>
-      ${this._renderTableMenu()}
+      ${this._renderTableMenu()} ${this._renderObjectMenu()}
     `
   }
 
@@ -235,8 +250,12 @@ export class ExplorerView extends LitElement {
       else groups.set(schema, [table])
     }
     if (groups.size < 2) {
+      const schema = this.tables[0]?.schema ?? null
       return html`
-        <div class="etable-list">${this.tables.map((table) => this._renderTableRow(profileId, table, false))}</div>
+        <div class="etable-list">
+          ${this._renderObjectGroups(profileId, schema, false)}
+          ${this.tables.map((table) => this._renderTableRow(profileId, table, false))}
+        </div>
       `
     }
     return html`
@@ -250,11 +269,105 @@ export class ExplorerView extends LitElement {
               <span>${schema}</span>
               <span class="schema-count">${tables.length}</span>
             </button>
+            ${collapsed ? '' : this._renderObjectGroups(profileId, schema, true)}
             ${collapsed ? '' : tables.map((table) => this._renderTableRow(profileId, table, true))}
           `
         })}
       </div>
     `
+  }
+
+  // Functions/Types as collapsed group rows under the schema's tables, the
+  // count visible without expanding; groups with nothing in them are omitted.
+  private _renderObjectGroups(profileId: string, schema: string | null, nested: boolean) {
+    if (!this.objects) return ''
+    const match = (object: DbObject) => (object.schema ?? '') === (schema ?? '')
+    return html`
+      ${this._renderObjectGroup(profileId, schema, 'Functions', this.objects.functions.filter(match), nested)}
+      ${this._renderObjectGroup(profileId, schema, 'Types', this.objects.types.filter(match), nested)}
+    `
+  }
+
+  private _renderObjectGroup(
+    profileId: string,
+    schema: string | null,
+    label: 'Functions' | 'Types',
+    items: DbObject[],
+    nested: boolean,
+  ) {
+    if (!items.length) return ''
+    const key = `${profileId}:${schema ?? ''}:${label}`
+    const expanded = this._expandedObjectGroups.has(key)
+    return html`
+      <button class="object-group ${nested ? 'nested' : ''}" @click=${() => this._toggleObjectGroup(key)}>
+        <i class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}" aria-hidden="true"></i>
+        <span>${label}</span>
+        <span class="schema-count">${items.length}</span>
+      </button>
+      ${expanded
+        ? items.map((item) => {
+            const objectKind: DbObjectKind = label === 'Functions' ? 'function' : 'type'
+            return html`
+              <div
+                class="object-row ${nested ? 'nested' : ''}"
+                title="${label === 'Functions'
+                  ? `${item.name}(${item.detail})`
+                  : `${item.name} · ${item.detail}`} — double-click to inspect"
+                @dblclick=${() => this._inspectObject(item, objectKind)}
+                @contextmenu=${(event: MouseEvent) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  this._objectMenu = { x: event.clientX, y: event.clientY, object: item, objectKind }
+                }}
+              >
+                <i class="codicon ${objectIcon(label, item)}" aria-hidden="true"></i>
+                <span class="object-name">${item.name}</span>
+              </div>
+            `
+          })
+        : ''}
+    `
+  }
+
+  private _renderObjectMenu() {
+    const menu = this._objectMenu
+    if (!menu) return ''
+    const items: MenuItem[] = [
+      { id: 'inspect', label: 'Inspect' },
+      { id: 'copy-name', label: 'Copy Name' },
+    ]
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => {
+          if (e.detail.id === 'inspect') this._inspectObject(menu.object, menu.objectKind)
+          if (e.detail.id === 'copy-name') {
+            void navigator.clipboard.writeText(
+              menu.object.schema ? `${menu.object.schema}.${menu.object.name}` : menu.object.name,
+            )
+          }
+        }}
+        @menu-close=${() => (this._objectMenu = null)}
+      ></context-menu>
+    `
+  }
+
+  private _inspectObject(object: DbObject, objectKind: DbObjectKind) {
+    this.dispatchEvent(
+      new CustomEvent<ObjectInspectDetail>('object-inspect', {
+        detail: { object, objectKind },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+  }
+
+  private _toggleObjectGroup(key: string) {
+    const expanded = new Set(this._expandedObjectGroups)
+    if (!expanded.delete(key)) expanded.add(key)
+    this._expandedObjectGroups = expanded
   }
 
   private _renderTableRow(profileId: string, table: TableRef, nested: boolean) {
@@ -609,6 +722,65 @@ export class ExplorerView extends LitElement {
 
       .etable-row .chevron.expanded {
         transform: rotate(90deg);
+      }
+
+      /* Function/type groups sit at table level; their item rows at column
+         level — same indentation rhythm as tables and their columns. */
+      .object-group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        padding: 3px 10px 3px 8px;
+        border: none;
+        background: transparent;
+        color: var(--text-2);
+        font-family: inherit;
+        font-size: var(--font-size);
+        text-align: left;
+        white-space: nowrap;
+        cursor: pointer;
+        user-select: none;
+        flex-shrink: 0;
+      }
+
+      .object-group.nested {
+        padding-left: 24px;
+      }
+
+      .object-group:hover {
+        background: var(--list-hover);
+      }
+
+      /* Function/type names are navigation targets like table names — full
+         text color and size, not the muted column-row treatment. */
+      .object-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 10px 2px 30px;
+        font-size: var(--font-size);
+        color: var(--text);
+        white-space: nowrap;
+        user-select: none;
+      }
+
+      .object-row.nested {
+        padding-left: 46px;
+      }
+
+      .object-row:hover {
+        background: var(--list-hover);
+      }
+
+      .object-row .codicon {
+        flex-shrink: 0;
+        color: var(--text-3);
+      }
+
+      .object-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .ecol-row {
