@@ -31,6 +31,7 @@ import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { QueriesController } from '../controllers/queries'
 import { stripExplain } from '../sql-types'
+import { TABLE_KIND_LABELS } from '../table-kinds'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 
@@ -807,6 +808,8 @@ export class WorkbenchScreen extends LitElement {
         @table-browse=${this._onTableBrowse}
         @table-inspect=${this._onTableInspect}
         @matview-refresh=${this._onMatviewRefresh}
+        @table-truncate=${this._onTableTruncate}
+        @table-drop=${this._onTableDrop}
         @tables-refresh=${this._onTablesRefresh}
         @search-open=${this._onSearchOpen}
         @file-open=${this._onFileOpen}
@@ -1326,6 +1329,49 @@ export class WorkbenchScreen extends LitElement {
     const statement = `REFRESH MATERIALIZED VIEW ${quoteQualified(table)};`
     this._openPreviewTab(statement)
     void this._runSql(statement)
+  }
+
+  private _onTableDrop(event: Event) {
+    const { table } = (event as CustomEvent<TableBrowseDetail>).detail
+    const profile = this._activeProfile()
+    if (!profile) return
+    const verbs: Record<TableRef['kind'], string> = {
+      table: 'DROP TABLE',
+      view: 'DROP VIEW',
+      matview: 'DROP MATERIALIZED VIEW',
+      foreign: 'DROP FOREIGN TABLE',
+    }
+    const statement = `${verbs[table.kind]} ${quoteQualified(table)};`
+    this._confirm = {
+      message: `Drop ${TABLE_KIND_LABELS[table.kind]} "${table.name}"?`,
+      detail: 'It is permanently deleted on the server. This cannot be undone.',
+      confirmLabel: 'Drop',
+      action: () => {
+        this._openPreviewTab(statement)
+        // The schema changed: re-fetch tables/columns once the drop lands.
+        void this._runSql(statement).then(() => this._live.refresh(profile.id))
+      },
+    }
+  }
+
+  private _onTableTruncate(event: Event) {
+    const { table } = (event as CustomEvent<TableBrowseDetail>).detail
+    const profile = this._activeProfile()
+    if (!profile) return
+    // SQLite has no TRUNCATE; an unqualified DELETE is its idiom.
+    const statement =
+      profile.engine === 'sqlite'
+        ? `DELETE FROM ${quoteQualified(table)};`
+        : `TRUNCATE TABLE ${quoteQualified(table)};`
+    this._confirm = {
+      message: `Truncate "${table.name}"?`,
+      detail: `All rows are permanently deleted (${statement}). This cannot be undone.`,
+      confirmLabel: 'Truncate',
+      action: () => {
+        this._openPreviewTab(statement)
+        void this._runSql(statement)
+      },
+    }
   }
 
   // Inspect opens (or revisits) the table's structure tab — columns,

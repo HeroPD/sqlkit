@@ -168,13 +168,17 @@ export class ExplorerView extends LitElement {
   private _renderTableMenu() {
     const menu = this._tableMenu
     if (!menu) return ''
+    const kind = menu.table.kind
+    const dropLabel = TABLE_KIND_LABELS[kind].replace(/\b\w/g, (c) => c.toUpperCase())
     const items: MenuItem[] = [
       { id: 'browse', label: 'Browse Data' },
       { id: 'inspect', label: 'Inspect Table' },
-      ...(menu.table.kind === 'matview' ? [{ id: 'refresh-matview', label: 'Refresh Materialized View' }] : []),
+      ...(kind === 'matview' ? [{ id: 'refresh-matview', label: 'Refresh Materialized View' }] : []),
       { id: 'copy-name', label: 'Copy Name' },
       { id: 'copy-select', label: 'Copy SELECT' },
       { id: 'refresh', label: 'Refresh Tables' },
+      ...(kind === 'table' ? [{ id: 'truncate', label: 'Truncate Table…', danger: true }] : []),
+      { id: 'drop', label: `Drop ${dropLabel}…`, danger: true },
     ]
     return html`
       <context-menu
@@ -197,6 +201,16 @@ export class ExplorerView extends LitElement {
     if (id === 'refresh-matview') {
       this.dispatchEvent(
         new CustomEvent<TableBrowseDetail>('matview-refresh', { detail: { table }, bubbles: true, composed: true }),
+      )
+    }
+    if (id === 'truncate') {
+      this.dispatchEvent(
+        new CustomEvent<TableBrowseDetail>('table-truncate', { detail: { table }, bubbles: true, composed: true }),
+      )
+    }
+    if (id === 'drop') {
+      this.dispatchEvent(
+        new CustomEvent<TableBrowseDetail>('table-drop', { detail: { table }, bubbles: true, composed: true }),
       )
     }
     if (id === 'copy-name') void navigator.clipboard.writeText(tableLabel(table))
