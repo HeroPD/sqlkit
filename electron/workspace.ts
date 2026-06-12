@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { app, safeStorage } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { ConnectionProfile, RecentWorkspace, SaveResult, WorkspaceConfig, WorkspaceResult } from '../src/electron'
@@ -48,6 +48,36 @@ function normalizeConnections(connections: ConnectionProfile[]): ConnectionProfi
   })
 }
 
+// Secrets at rest: encrypted through the OS keychain (Electron safeStorage)
+// and marked with a prefix so legacy plaintext configs still read — they
+// migrate to encrypted on the next save (openWorkspace re-saves, so on first
+// open). Keychain-bound by design: a config copied to another machine
+// decrypts to '' and the password must be re-entered there. Falls back to
+// plaintext only where the OS offers no key store.
+const SECRET_PREFIX = 'enc:v1:'
+
+const encryptSecret = (value: string): string => {
+  if (!value || value.startsWith(SECRET_PREFIX) || !safeStorage.isEncryptionAvailable()) return value
+  return SECRET_PREFIX + safeStorage.encryptString(value).toString('base64')
+}
+
+const decryptSecret = (value: string): string => {
+  if (!value.startsWith(SECRET_PREFIX)) return value
+  try {
+    return safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), 'base64'))
+  } catch {
+    return ''
+  }
+}
+
+const mapSecrets = (connection: ConnectionProfile, map: (value: string) => string): ConnectionProfile => ({
+  ...connection,
+  password: map(connection.password ?? ''),
+  ...(connection.ssh
+    ? { ssh: { ...connection.ssh, password: map(connection.ssh.password ?? ''), passphrase: map(connection.ssh.passphrase ?? '') } }
+    : {}),
+})
+
 export function readWorkspaceConfig(): WorkspaceConfig {
   if (!currentWorkspace) return defaultWorkspaceConfig()
   try {
@@ -55,7 +85,7 @@ export function readWorkspaceConfig(): WorkspaceConfig {
     return {
       ...defaultWorkspaceConfig(),
       ...raw,
-      connections: normalizeConnections(raw.connections ?? []),
+      connections: normalizeConnections(raw.connections ?? []).map((connection) => mapSecrets(connection, decryptSecret)),
     }
   } catch {
     return defaultWorkspaceConfig()
@@ -71,7 +101,11 @@ export function writeWorkspaceConfig(config: WorkspaceConfig): SaveResult {
     for (const connection of normalized.connections) {
       fs.mkdirSync(path.join(currentWorkspace, connection.folder), { recursive: true })
     }
-    fs.writeFileSync(workspaceConfigPathFor(currentWorkspace), JSON.stringify(normalized, null, 2))
+    const stored = {
+      ...normalized,
+      connections: normalized.connections.map((connection) => mapSecrets(connection, encryptSecret)),
+    }
+    fs.writeFileSync(workspaceConfigPathFor(currentWorkspace), JSON.stringify(stored, null, 2))
     return { success: true }
   } catch (error) {
     return { success: false, error: (error as Error).message }
