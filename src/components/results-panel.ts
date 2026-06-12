@@ -218,8 +218,13 @@ export class ResultsPanel extends LitElement {
       return html`<p class="hint">OK — ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} affected.</p>`
     }
     const widths = this._columnWidths(result)
+    // table-layout: fixed only engages with a definite width; with width:
+    // auto the browser falls back to AUTO layout and the colgroup widths
+    // become minimums a long nowrap cell can blow past. min-width: 100% in
+    // the CSS still stretches the columns when they underfill the panel.
+    const tableWidth = NUM_COL_WIDTH + widths.reduce((sum, width) => sum + width, 0)
     return html`
-      <table @contextmenu=${this._onTableContextMenu}>
+      <table style="width: ${tableWidth}px" @contextmenu=${this._onTableContextMenu}>
         <colgroup>
           <col style="width: ${NUM_COL_WIDTH}px" />
           ${widths.map((width) => html`<col style="width: ${width}px" />`)}

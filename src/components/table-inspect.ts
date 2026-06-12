@@ -117,7 +117,14 @@ export class TableInspect extends LitElement {
     const { columns, sections } = state.inspection
     return html`
       <h4>Columns <span class="count">${columns.length}</span></h4>
-      <table>
+      <table class="columns-table">
+        <colgroup>
+          <col class="icon-col" />
+          <col class="name-col" />
+          <col class="type-col" />
+          <col class="nullable-col" />
+          <col />
+        </colgroup>
         <thead>
           <tr>
             <th></th>
@@ -134,10 +141,10 @@ export class TableInspect extends LitElement {
                 <td class="icon-cell">
                   ${column.primaryKey ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>` : ''}
                 </td>
-                <td class="mono">${column.name}</td>
-                <td class="mono type">${abbreviateType(column.dataType, this.engine)}</td>
+                <td class="mono clip" title=${column.name}>${column.name}</td>
+                <td class="mono type clip" title=${column.dataType}>${abbreviateType(column.dataType, this.engine)}</td>
                 <td class="muted">${column.nullable ? 'yes' : 'no'}</td>
-                <td class="mono muted">${column.default ?? ''}</td>
+                <td class="mono muted clip" title=${column.default ?? ''}>${column.default ?? ''}</td>
               </tr>
             `,
           )}
@@ -286,8 +293,27 @@ export class TableInspect extends LitElement {
 
       /* Fixed layout + a shared name-column width keeps every section's
          columns aligned with each other, however long one name gets. */
-      .section-table {
+      .section-table,
+      .columns-table {
         table-layout: fixed;
+      }
+
+      .icon-col {
+        width: 18px;
+      }
+
+      .type-col {
+        width: 140px;
+      }
+
+      .nullable-col {
+        width: 70px;
+      }
+
+      .clip {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .name-col {
