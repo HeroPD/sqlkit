@@ -8,6 +8,7 @@ import type {
   InspectResult,
   ObjectsResult,
   QueryResponse,
+  ServerInfoResult,
   TableRef,
   TablesResult,
   TestConnectionResult,
@@ -187,6 +188,17 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  async function inspectServer(profileId: string): Promise<ServerInfoResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver.inspectServer) return { success: false, error: 'No server info for this engine' }
+    try {
+      return { success: true, sections: await driver.inspectServer() }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
   async function inspectTable(profileId: string, table: TableRef): Promise<InspectResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
@@ -219,6 +231,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     listObjects,
     inspectTable,
     inspectObject,
+    inspectServer,
     setActiveChild,
     createDatabase,
     dropDatabase,

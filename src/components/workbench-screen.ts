@@ -18,6 +18,7 @@ import './editor-tab'
 import './explorer-view'
 import './history-view'
 import './tasks-view'
+import './server-view'
 import './results-panel'
 import './search-view'
 import './sql-editor'
@@ -41,6 +42,7 @@ const VIEWS = [
   { id: 'databases', title: 'Databases', icon: 'codicon-database', hint: 'No database connections yet.' },
   { id: 'history', title: 'History', icon: 'codicon-history', hint: 'No query history yet.' },
   { id: 'tasks', title: 'Tasks', icon: 'codicon-checklist', hint: 'No running jobs.' },
+  { id: 'server', title: 'Server', icon: 'codicon-server', hint: 'Connect a database to see its server.' },
 ] as const
 
 
@@ -1024,8 +1026,13 @@ export class WorkbenchScreen extends LitElement {
         ></history-view>
       `
     }
-    // Every view id is handled above; 'tasks' is the last one.
-    return html`<tasks-view .items=${this._queries.tasks} @task-stop=${this._onTaskStop}></tasks-view>`
+    if (view.id === 'tasks') {
+      return html`<tasks-view .items=${this._queries.tasks} @task-stop=${this._onTaskStop}></tasks-view>`
+    }
+    // Every view id is handled above; 'server' is the last one.
+    const context = this._activeProfile()
+    const connected = context !== null && this._live.phase(context.id) === 'connected'
+    return html`<server-view .profileId=${connected && context ? context.id : null}></server-view>`
   }
 
   // Single click: open the SQL in the preview tab (recycled across picks, so

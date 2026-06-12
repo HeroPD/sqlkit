@@ -246,6 +246,43 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       return { functions: functions.rows, types: types.rows }
     },
 
+    async inspectServer() {
+      const pool = activePool()
+      const [extensions, roles, tablespaces, settings] = await Promise.all([
+        pool.query(
+          `select e.extname as name,
+                  e.extversion || coalesce(' — ' || pg_catalog.obj_description(e.oid, 'pg_extension'), '') as definition
+           from pg_catalog.pg_extension e order by e.extname`,
+        ),
+        pool.query(
+          `select rolname as name,
+                  concat_ws(', ',
+                    case when rolsuper then 'superuser' end,
+                    case when rolcreatedb then 'createdb' end,
+                    case when rolcreaterole then 'createrole' end,
+                    case when rolreplication then 'replication' end,
+                    case when not rolcanlogin then 'nologin' end) as definition
+           from pg_catalog.pg_roles where rolname !~ '^pg_' order by rolname`,
+        ),
+        pool.query(
+          `select spcname as name, pg_catalog.pg_tablespace_location(oid) as definition
+           from pg_catalog.pg_tablespace order by spcname`,
+        ),
+        // The full pg_settings catalog is ~350 rows of noise in a sidebar;
+        // what was changed from the defaults is the interesting part.
+        pool.query(
+          `select name, setting || coalesce(' ' || unit, '') as definition
+           from pg_catalog.pg_settings where source not in ('default', 'override') order by name`,
+        ),
+      ])
+      return [
+        { title: 'Extensions', rows: extensions.rows },
+        { title: 'Roles', rows: roles.rows },
+        { title: 'Tablespaces', rows: tablespaces.rows },
+        { title: 'Settings (non-default)', rows: settings.rows },
+      ].filter((section) => section.rows.length)
+    },
+
     async inspectObject(object, objectKind) {
       const pool = activePool()
       const schema = object.schema ?? 'public'

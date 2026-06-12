@@ -3,8 +3,10 @@
 @import './codicons/codicon.css';
 
 /* ── Theme tokens (VS Code Dark+, ported from the SqlKit reference) ──────────
-   Foreground/text tokens are pre-blended 20% toward their backgrounds for a
-   softer overall contrast; keep that in mind when adding new fg colors. */
+   Foreground/text tokens were originally pre-blended 20% toward their
+   backgrounds; the text ramp has since been brightened ~15% (June 2026)
+   after the soft version proved hard to read. Keep the tier order:
+   --text > --text-2 > --text-3. */
 :root {
   color-scheme: dark;
 
@@ -60,16 +62,18 @@
   --header-bg: #141821;
   --border: #2a3140;
   --border-subtle: #202735;
-  --text: #afb3bc;
-  --text-2: #7e8793;
-  --text-3: #565f70;
+  /* Three clearly separated steps — adjacent tiers must be tellable apart
+     at 13px, not just technically ordered. */
+  --text: #c9cdd4;
+  --text-2: #a3adbb;
+  --text-3: #78808d;
   --accent: #007acc;
   --accent-hover: #1177bb;
   --on-accent: #ffffff;
   --focus-border: #007acc;
   --input-bg: #181d27;
   --input-border: #2a3140;
-  --input-fg: #b1b6bf;
+  --input-fg: #c4c8d0;
   --btn-bg: #0e639c;
   --btn-hover: #1177bb;
   --btn-fg: #ffffff;

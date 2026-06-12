@@ -28,6 +28,7 @@ const api: SqlkitApi = {
   inspectTable: (profileId, table) => ipcRenderer.invoke('db:inspect-table', profileId, table),
   listObjects: (profileId) => ipcRenderer.invoke('db:list-objects', profileId),
   inspectObject: (profileId, object, objectKind) => ipcRenderer.invoke('db:inspect-object', profileId, object, objectKind),
+  inspectServer: (profileId) => ipcRenderer.invoke('db:inspect-server', profileId),
   pickSqliteFile: () => ipcRenderer.invoke('db:pick-sqlite-file'),
   listFiles: (folder) => ipcRenderer.invoke('file:list', folder),
   readFile: (path) => ipcRenderer.invoke('file:read', path),

@@ -159,6 +159,8 @@ export type TableInspection = { columns: InspectColumn[]; sections: InspectSecti
 
 export type InspectResult = { success: true; inspection: TableInspection } | { success: false; error: string }
 
+export type ServerInfoResult = { success: true; sections: InspectSection[] } | { success: false; error: string }
+
 // --- Workspace files ------------------------------------------------------
 
 export type FileInfo = {
@@ -213,6 +215,8 @@ export type SqlkitApi = {
   /** Structure of one function/type: definition, values, attributes. Reuses
    * the table-inspection shape (columns for composites, sections for the rest). */
   inspectObject: (profileId: string, object: DbObject, objectKind: DbObjectKind) => Promise<InspectResult>
+  /** Server/cluster-scoped reference: extensions, roles, tablespaces, settings. */
+  inspectServer: (profileId: string) => Promise<ServerInfoResult>
   pickSqliteFile: () => Promise<string | null>
   /** Lists the .sql files of one database context's workspace subfolder. */
   listFiles: (folder: string) => Promise<FilesResult>

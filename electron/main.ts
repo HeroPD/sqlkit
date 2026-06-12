@@ -233,6 +233,7 @@ function registerDbIpc() {
   ipcMain.handle('db:inspect-object', (_event, profileId: string, object: DbObject, objectKind: DbObjectKind) =>
     manager.inspectObject(profileId, object, objectKind),
   )
+  ipcMain.handle('db:inspect-server', (_event, profileId: string) => manager.inspectServer(profileId))
 
   ipcMain.handle('db:pick-sqlite-file', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)

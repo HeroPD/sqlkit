@@ -5,6 +5,7 @@ import type {
   DbObject,
   DbObjectKind,
   DbObjects,
+  InspectSection,
   QueryResult,
   TableInspection,
   TableRef,
@@ -34,6 +35,8 @@ export type Driver = {
   listObjects?(): Promise<DbObjects>
   /** One function/type's structure, in the table-inspection shape. */
   inspectObject?(object: DbObject, objectKind: DbObjectKind): Promise<TableInspection>
+  /** Server-scoped reference (extensions, roles, …) for the Server view. */
+  inspectServer?(): Promise<InspectSection[]>
   /** Child databases; undefined for engines without all-databases support. */
   children?(): ChildDb[]
   /** Server-side CREATE DATABASE; undefined for file-based engines. */
