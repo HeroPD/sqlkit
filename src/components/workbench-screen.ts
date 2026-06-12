@@ -942,6 +942,7 @@ export class WorkbenchScreen extends LitElement {
           .activePath=${activeTab?.kind === 'sql' ? activeTab.path : null}
           .contextName=${context ? this._contextLabel() : null}
           .profileId=${context?.id ?? null}
+          .engine=${context?.engine ?? null}
           .tables=${connected && context ? (this._live.tables[context.id] ?? []) : null}
           .columns=${connected && context ? (this._live.columns[context.id] ?? null) : null}
           .activeChildName=${activeChild}

@@ -2,7 +2,8 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
-import type { ColumnRef, FileInfo, TableRef } from '../electron'
+import { abbreviateType } from '../sql-types'
+import type { ColumnRef, Engine, FileInfo, TableRef } from '../electron'
 import './file-tree'
 
 export const tableKey = (profileId: string, table: TableRef) => `${profileId}:${table.schema ?? ''}:${table.name}`
@@ -34,6 +35,10 @@ export class ExplorerView extends LitElement {
 
   @property()
   profileId: string | null = null
+
+  /** Engine of the in-use context; drives type-name abbreviation. */
+  @property()
+  engine: Engine | null = null
 
   /** Tables of the connected context; null while it is not connected. */
   @property({ attribute: false })
@@ -230,7 +235,7 @@ export class ExplorerView extends LitElement {
             aria-hidden="true"
           ></i>
           <span class="col-name">${column.name}</span>
-          <span class="col-type">${column.dataType}</span>
+          <span class="col-type">${abbreviateType(column.dataType, this.engine)}</span>
         </div>
       `,
     )
