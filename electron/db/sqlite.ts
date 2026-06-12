@@ -1,5 +1,5 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import type { ColumnRef, ConnectionProfile, QueryResult, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, InspectSection, QueryResult, TableRef } from '../../src/electron'
 import type { Driver } from './driver'
 
 // SQLite via the node:sqlite module built into Electron's Node — no native
@@ -76,6 +76,61 @@ export function createSqliteDriver(profile: ConnectionProfile): Driver {
           foreignKey: row.fk > 0,
         }),
       )
+    },
+
+    async inspectTable(table) {
+      const db = open()
+      const columns = db.prepare(`select name, type, "notnull" as not_null, dflt_value, pk from pragma_table_info(?)`).all(table.name) as Array<{
+        name: string
+        type: string
+        not_null: number
+        dflt_value: string | null
+        pk: number
+      }>
+      const foreignKeys = db
+        .prepare(`select id, seq, "table" as ref_table, "from" as from_col, "to" as to_col, on_update, on_delete from pragma_foreign_key_list(?) order by id, seq`)
+        .all(table.name) as Array<{
+        id: number
+        ref_table: string
+        from_col: string
+        to_col: string | null
+        on_update: string
+        on_delete: string
+      }>
+      const named = db
+        .prepare(`select name, type, sql from sqlite_master where tbl_name = ? and type in ('index', 'trigger') order by type, name`)
+        .all(table.name) as Array<{ name: string; type: string; sql: string | null }>
+
+      const sections: InspectSection[] = [
+        {
+          title: 'Foreign Keys',
+          rows: foreignKeys.map((fk) => ({
+            name: fk.from_col,
+            definition: `REFERENCES ${fk.ref_table}(${fk.to_col ?? 'rowid'}) ON UPDATE ${fk.on_update} ON DELETE ${fk.on_delete}`,
+          })),
+        },
+        {
+          title: 'Indexes',
+          // sql is null for the implicit indexes behind UNIQUE/PK constraints.
+          rows: named
+            .filter((row) => row.type === 'index')
+            .map((row) => ({ name: row.name, definition: row.sql ?? '(auto: unique/primary key)' })),
+        },
+        {
+          title: 'Triggers',
+          rows: named.filter((row) => row.type === 'trigger').map((row) => ({ name: row.name, definition: row.sql ?? '' })),
+        },
+      ]
+      return {
+        columns: columns.map((row) => ({
+          name: row.name,
+          dataType: row.type || 'any',
+          nullable: !row.not_null,
+          default: row.dflt_value,
+          primaryKey: row.pk > 0,
+        })),
+        sections: sections.filter((section) => section.rows.length),
+      }
     },
   }
 }

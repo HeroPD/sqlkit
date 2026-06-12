@@ -9,6 +9,7 @@ import './activity-button'
 import './command-palette'
 import './confirm-dialog'
 import './prompt-dialog'
+import './table-inspect'
 import type { PromptConfirmDetail } from './prompt-dialog'
 import './databases-view'
 import './db-config-form'
@@ -60,10 +61,14 @@ type SqlTabState = {
   preview?: boolean
 }
 
-type EditorTabState = { id: string; kind: 'config'; profile: ConnectionProfile } | SqlTabState
+type EditorTabState =
+  | { id: string; kind: 'config'; profile: ConnectionProfile }
+  | { id: string; kind: 'inspect'; profileId: string; table: TableRef }
+  | SqlTabState
 
 const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'config') return tab.profile.name.trim() || 'New Database'
+  if (tab.kind === 'inspect') return `${tab.table.name} · info`
   return tab.content === tab.savedContent ? tab.name : `${tab.name} •`
 }
 
@@ -797,6 +802,7 @@ export class WorkbenchScreen extends LitElement {
         @add-database=${this._onAddDatabase}
         @table-select=${this._onTableSelect}
         @table-browse=${this._onTableBrowse}
+        @table-inspect=${this._onTableInspect}
         @tables-refresh=${this._onTablesRefresh}
         @search-open=${this._onSearchOpen}
         @file-open=${this._onFileOpen}
@@ -1071,6 +1077,17 @@ export class WorkbenchScreen extends LitElement {
         </div>
       `
     }
+    if (activeTab?.kind === 'inspect') {
+      return html`
+        <div class="editor-content inspect">
+          <table-inspect
+            .profileId=${activeTab.profileId}
+            .table=${activeTab.table}
+            .engine=${this._connections.find((connection) => connection.id === activeTab.profileId)?.engine ?? null}
+          ></table-inspect>
+        </div>
+      `
+    }
     if (activeTab?.kind === 'sql') {
       const tables = (this._activeDbId ? (this._live.tables[this._activeDbId] ?? []) : []).map((table) => table.name)
       const columns = this._activeDbId ? (this._live.columns[this._activeDbId] ?? null) : null
@@ -1277,6 +1294,19 @@ export class WorkbenchScreen extends LitElement {
     const { table } = (event as CustomEvent<TableBrowseDetail>).detail
     const profile = this._activeProfile()
     if (profile) this._browseTable(profile, table)
+  }
+
+  // Inspect opens (or revisits) the table's structure tab — columns,
+  // constraints, indexes and friends; table-inspect fetches its own data.
+  private _onTableInspect(event: Event) {
+    const { table } = (event as CustomEvent<TableBrowseDetail>).detail
+    const profile = this._activeProfile()
+    if (!profile) return
+    const id = `inspect:${tableKey(profile.id, table)}`
+    if (!this._tabs.some((tab) => tab.id === id)) {
+      this._tabs = [...this._tabs, { id, kind: 'inspect', profileId: profile.id, table }]
+    }
+    this._activeTabId = id
   }
 
   // A search match opens the file and lands the cursor on the matched line.
@@ -1670,6 +1700,11 @@ export class WorkbenchScreen extends LitElement {
         overflow-y: auto;
         overscroll-behavior: none;
         overflow-anchor: none;
+      }
+
+      .editor-content.inspect {
+        display: block;
+        min-width: 0;
       }
 
       .editor-content.sql {

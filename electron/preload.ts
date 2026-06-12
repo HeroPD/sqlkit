@@ -25,6 +25,7 @@ const api: SqlkitApi = {
   dropDatabase: (profileId, name) => ipcRenderer.invoke('db:drop-database', profileId, name),
   listTables: (profileId) => ipcRenderer.invoke('db:list-tables', profileId),
   listColumns: (profileId) => ipcRenderer.invoke('db:list-columns', profileId),
+  inspectTable: (profileId, table) => ipcRenderer.invoke('db:inspect-table', profileId, table),
   pickSqliteFile: () => ipcRenderer.invoke('db:pick-sqlite-file'),
   listFiles: (folder) => ipcRenderer.invoke('file:list', folder),
   readFile: (path) => ipcRenderer.invoke('file:read', path),

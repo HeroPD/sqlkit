@@ -3,7 +3,9 @@ import type {
   ConnectResult,
   ConnectionProfile,
   ConnectionStatus,
+  InspectResult,
   QueryResponse,
+  TableRef,
   TablesResult,
   TestConnectionResult,
 } from '../../src/electron'
@@ -160,6 +162,16 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  async function inspectTable(profileId: string, table: TableRef): Promise<InspectResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: 'Not connected' }
+    try {
+      return { success: true, inspection: await driver.inspectTable(table) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
   async function listColumns(profileId: string): Promise<ColumnsResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
@@ -179,6 +191,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     cancelQuery,
     listTables,
     listColumns,
+    inspectTable,
     setActiveChild,
     createDatabase,
     dropDatabase,

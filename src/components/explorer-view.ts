@@ -169,6 +169,7 @@ export class ExplorerView extends LitElement {
     if (!menu) return ''
     const items: MenuItem[] = [
       { id: 'browse', label: 'Browse Data' },
+      { id: 'inspect', label: 'Inspect Table' },
       { id: 'copy-name', label: 'Copy Name' },
       { id: 'copy-select', label: 'Copy SELECT' },
       { id: 'refresh', label: 'Refresh Tables' },
@@ -186,6 +187,11 @@ export class ExplorerView extends LitElement {
 
   private _onTableMenuPick(id: string, table: TableRef) {
     if (id === 'browse') this._browse(table)
+    if (id === 'inspect') {
+      this.dispatchEvent(
+        new CustomEvent<TableBrowseDetail>('table-inspect', { detail: { table }, bubbles: true, composed: true }),
+      )
+    }
     if (id === 'copy-name') void navigator.clipboard.writeText(tableLabel(table))
     if (id === 'copy-select') void navigator.clipboard.writeText(`select * from ${tableLabel(table)} limit 100;`)
     if (id === 'refresh') this._refresh()

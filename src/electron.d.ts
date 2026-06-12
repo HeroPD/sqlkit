@@ -125,6 +125,22 @@ export type ColumnRef = {
 
 export type ColumnsResult = { success: true; columns: ColumnRef[] } | { success: false; error: string }
 
+export type InspectColumn = {
+  name: string
+  dataType: string
+  nullable: boolean
+  default: string | null
+  primaryKey: boolean
+}
+
+/** One named-rows block of a table inspection (Indexes, Triggers, …).
+ * Engines supply whichever sections they have; empty ones are omitted. */
+export type InspectSection = { title: string; rows: Array<{ name: string; definition: string }> }
+
+export type TableInspection = { columns: InspectColumn[]; sections: InspectSection[] }
+
+export type InspectResult = { success: true; inspection: TableInspection } | { success: false; error: string }
+
 // --- Workspace files ------------------------------------------------------
 
 export type FileInfo = {
@@ -172,6 +188,8 @@ export type SqlkitApi = {
   listTables: (profileId: string) => Promise<TablesResult>
   /** Columns of every table in the connected database, one round trip. */
   listColumns: (profileId: string) => Promise<ColumnsResult>
+  /** Structure of one table: columns, constraints, indexes, triggers, …. */
+  inspectTable: (profileId: string, table: TableRef) => Promise<InspectResult>
   pickSqliteFile: () => Promise<string | null>
   /** Lists the .sql files of one database context's workspace subfolder. */
   listFiles: (folder: string) => Promise<FilesResult>

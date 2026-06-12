@@ -1,0 +1,327 @@
+import { LitElement, css, html, type PropertyValues } from 'lit'
+import { customElement, property, state } from 'lit/decorators.js'
+import { codicons, scrollbars, typography } from '../shared-styles'
+import type { Engine, TableInspection, TableRef } from '../electron'
+import { abbreviateType } from '../sql-types'
+import './context-menu'
+import type { MenuItem, MenuPickDetail } from './context-menu'
+
+// The DDL words that show up in constraint/index/trigger/policy definitions;
+// matched case-insensitively so SQLite's hand-written DDL highlights too.
+const SQL_KEYWORDS = new Set(
+  `PRIMARY KEY FOREIGN REFERENCES UNIQUE CHECK NOT NULL DEFAULT ON UPDATE DELETE INSERT SELECT
+   CASCADE RESTRICT SET USING CREATE INDEX TRIGGER BEFORE AFTER INSTEAD OF FOR EACH ROW STATEMENT
+   EXECUTE FUNCTION PROCEDURE WHEN WHERE AND OR IN IS LIKE BETWEEN EXISTS TO WITH AS VALUES
+   PARTITION BY RANGE LIST HASH FROM MINVALUE MAXVALUE ASC DESC NULLS FIRST LAST ALL
+   DEFERRABLE INITIALLY DEFERRED IMMEDIATE MATCH FULL SIMPLE PARTIAL GENERATED ALWAYS STORED DO ALSO`
+    .split(/\s+/)
+    .filter(Boolean),
+)
+
+// Splitting on word runs keeps every character of the original text; only
+// keyword tokens get wrapped, everything else passes through verbatim.
+const highlightDefinition = (text: string) =>
+  text.split(/(\w+)/).map((part) => (SQL_KEYWORDS.has(part.toUpperCase()) ? html`<span class="kw">${part}</span>` : part))
+
+// The Inspect tab's body: one table's structure — columns up top, then the
+// engine's sections (foreign keys, constraints, indexes, partitions,
+// triggers, rules, policies). Fetches its own data from the profile so the
+// workbench only mounts it; re-fetches when retargeted to another table.
+@customElement('table-inspect')
+export class TableInspect extends LitElement {
+  @property()
+  profileId = ''
+
+  @property({ attribute: false })
+  table: TableRef | null = null
+
+  @property()
+  engine: Engine | null = null
+
+  @state()
+  private _state: { phase: 'loading' } | { phase: 'error'; error: string } | { phase: 'done'; inspection: TableInspection } = {
+    phase: 'loading',
+  }
+
+  @state()
+  private _menu: { x: number; y: number; name: string; definition: string | null } | null = null
+
+  protected willUpdate(changed: PropertyValues) {
+    if (changed.has('profileId') || changed.has('table')) void this._load()
+  }
+
+  private async _load() {
+    const table = this.table
+    if (!this.profileId || !table) return
+    this._state = { phase: 'loading' }
+    const result = await window.sqlkit.inspectTable(this.profileId, table)
+    // Stale guard: the tab may have been retargeted while this was in flight.
+    if (this.table !== table) return
+    this._state = result.success ? { phase: 'done', inspection: result.inspection } : { phase: 'error', error: result.error }
+  }
+
+  render() {
+    const table = this.table
+    if (!table) return ''
+    const label = table.schema ? `${table.schema}.${table.name}` : table.name
+    return html`
+      <div class="scroll">
+        <div class="head">
+          <i class="codicon codicon-table" aria-hidden="true"></i>
+          <h3>${label}</h3>
+          <button class="refresh" title="Reload structure" aria-label="Reload structure" @click=${() => void this._load()}>
+            <i class="codicon codicon-refresh" aria-hidden="true"></i>
+          </button>
+        </div>
+        ${this._renderBody()}
+      </div>
+      ${this._renderMenu()}
+    `
+  }
+
+  private _renderMenu() {
+    const menu = this._menu
+    if (!menu) return ''
+    const items: MenuItem[] = [
+      { id: 'copy-name', label: 'Copy Name' },
+      ...(menu.definition ? [{ id: 'copy-definition', label: 'Copy Definition' }] : []),
+    ]
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) =>
+          void navigator.clipboard.writeText(e.detail.id === 'copy-name' ? menu.name : (menu.definition ?? ''))}
+        @menu-close=${() => (this._menu = null)}
+      ></context-menu>
+    `
+  }
+
+  private _onRowMenu(event: MouseEvent, name: string, definition: string | null = null) {
+    event.preventDefault()
+    this._menu = { x: event.clientX, y: event.clientY, name, definition }
+  }
+
+  private _renderBody() {
+    const state = this._state
+    if (state.phase === 'loading') {
+      return html`<p class="muted hint">
+        <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> Loading structure…
+      </p>`
+    }
+    if (state.phase === 'error') return html`<pre class="error">${state.error}</pre>`
+
+    const { columns, sections } = state.inspection
+    return html`
+      <h4>Columns <span class="count">${columns.length}</span></h4>
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Nullable</th>
+            <th>Default</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${columns.map(
+            (column) => html`
+              <tr @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, column.name)}>
+                <td class="icon-cell">
+                  ${column.primaryKey ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>` : ''}
+                </td>
+                <td class="mono">${column.name}</td>
+                <td class="mono type">${abbreviateType(column.dataType, this.engine)}</td>
+                <td class="muted">${column.nullable ? 'yes' : 'no'}</td>
+                <td class="mono muted">${column.default ?? ''}</td>
+              </tr>
+            `,
+          )}
+        </tbody>
+      </table>
+      ${sections.map(
+        (section) => html`
+          <h4>${section.title} <span class="count">${section.rows.length}</span></h4>
+          <table class="section-table">
+            <colgroup>
+              <col class="name-col" />
+              <col />
+            </colgroup>
+            <tbody>
+              ${section.rows.map(
+                (row) => html`
+                  <tr @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}>
+                    <td class="mono name-cell" title=${row.name}>${row.name}</td>
+                    <td class="mono def" title=${row.definition}>${highlightDefinition(row.definition)}</td>
+                  </tr>
+                `,
+              )}
+            </tbody>
+          </table>
+        `,
+      )}
+      ${sections.length ? '' : html`<p class="muted hint">No constraints, indexes, or triggers.</p>`}
+    `
+  }
+
+  static styles = [
+    typography,
+    codicons,
+    scrollbars,
+    css`
+      :host {
+        display: block;
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .scroll {
+        height: 100%;
+        overflow-y: auto;
+        padding: 14px 18px 24px;
+        box-sizing: border-box;
+      }
+
+      .head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+
+      .head h3 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .refresh {
+        display: inline-flex;
+        padding: 3px;
+        margin-left: auto;
+        color: var(--text-3);
+        background: transparent;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      .refresh:hover {
+        color: var(--text);
+        background: var(--list-hover);
+      }
+
+      h4 {
+        margin: 18px 0 6px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-2);
+      }
+
+      .count {
+        font-weight: 400;
+        color: var(--text-3);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      td,
+      th {
+        padding: 3px 10px 3px 0;
+        text-align: left;
+        border-bottom: 1px solid var(--border-subtle, var(--border));
+        vertical-align: top;
+      }
+
+      th {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-3);
+      }
+
+      .mono {
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      }
+
+      .muted {
+        color: var(--text-3);
+      }
+
+      .type {
+        color: var(--text-2);
+      }
+
+      .icon-cell {
+        width: 18px;
+      }
+
+      .icon-cell .pk {
+        font-size: 12px;
+        color: var(--status-dot-warning);
+      }
+
+      /* Fixed layout + a shared name-column width keeps every section's
+         columns aligned with each other, however long one name gets. */
+      .section-table {
+        table-layout: fixed;
+      }
+
+      .name-col {
+        width: 280px;
+      }
+
+      .name-cell {
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .def {
+        color: var(--text-2);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .def .kw {
+        font-weight: 600;
+        /* The editor's keyword violet (sql-editor.ts softHighlightStyle), so
+           definitions read as the same language as the editor. */
+        color: #a163b5;
+      }
+
+      .hint {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 0;
+      }
+
+      .error {
+        margin: 10px 0;
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 12px;
+        color: var(--status-dot-error);
+        white-space: pre-wrap;
+      }
+    `,
+  ]
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'table-inspect': TableInspect
+  }
+}

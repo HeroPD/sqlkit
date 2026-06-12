@@ -1,5 +1,5 @@
 import pg from 'pg'
-import type { ColumnRef, ConnectionProfile, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, InspectSection, TableRef } from '../../src/electron'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 
@@ -203,6 +203,89 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           foreignKey: row.foreign_key,
         }),
       )
+    },
+
+    async inspectTable(table) {
+      const pool = activePool()
+      const schema = table.schema ?? 'public'
+      const args = [schema, table.name]
+      type Row = { name: string; definition: string }
+      const rows = async (sql: string): Promise<Row[]> => (await pool.query(sql, args)).rows
+
+      const [columns, constraints, indexes, partitions, triggers, rules, policies] = await Promise.all([
+        pool.query(
+          `select a.attname as name,
+                  pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type,
+                  not a.attnotnull as nullable,
+                  pg_catalog.pg_get_expr(d.adbin, d.adrelid) as default_expr,
+                  coalesce(i.indisprimary, false) as primary_key
+           from pg_catalog.pg_attribute a
+           join pg_catalog.pg_class c on c.oid = a.attrelid
+           join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+           left join pg_catalog.pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+           left join pg_catalog.pg_index i
+             on i.indrelid = a.attrelid and i.indisprimary and a.attnum = any(i.indkey)
+           where n.nspname = $1 and c.relname = $2 and a.attnum > 0 and not a.attisdropped
+           order by a.attnum`,
+          args,
+        ),
+        pool.query(
+          `select con.conname as name, pg_catalog.pg_get_constraintdef(con.oid, true) as definition,
+                  con.contype as type
+           from pg_catalog.pg_constraint con
+           join pg_catalog.pg_class c on c.oid = con.conrelid
+           join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+           where n.nspname = $1 and c.relname = $2
+           order by con.contype, con.conname`,
+          args,
+        ),
+        rows(`select indexname as name, indexdef as definition
+              from pg_catalog.pg_indexes where schemaname = $1 and tablename = $2 order by indexname`),
+        rows(`select child.relname as name,
+                     coalesce(pg_catalog.pg_get_expr(child.relpartbound, child.oid, true), '') as definition
+              from pg_catalog.pg_inherits
+              join pg_catalog.pg_class child on child.oid = inhrelid
+              join pg_catalog.pg_class parent on parent.oid = inhparent
+              join pg_catalog.pg_namespace n on n.oid = parent.relnamespace
+              where n.nspname = $1 and parent.relname = $2 order by child.relname`),
+        rows(`select t.tgname as name, pg_catalog.pg_get_triggerdef(t.oid, true) as definition
+              from pg_catalog.pg_trigger t
+              join pg_catalog.pg_class c on c.oid = t.tgrelid
+              join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = $1 and c.relname = $2 and not t.tgisinternal order by t.tgname`),
+        rows(`select rulename as name, definition
+              from pg_catalog.pg_rules where schemaname = $1 and tablename = $2 order by rulename`),
+        rows(`select policyname as name,
+                     concat_ws(' ', 'FOR', cmd, 'TO', array_to_string(roles, ', '),
+                               case when qual is not null then 'USING (' || qual || ')' end,
+                               case when with_check is not null then 'WITH CHECK (' || with_check || ')' end
+                     ) as definition
+              from pg_catalog.pg_policies where schemaname = $1 and tablename = $2 order by policyname`),
+      ])
+
+      const constraintRows = constraints.rows as Array<Row & { type: string }>
+      const sections: InspectSection[] = [
+        // FKs are constraints too, but they're what people look for most.
+        { title: 'Foreign Keys', rows: constraintRows.filter((row) => row.type === 'f') },
+        { title: 'Constraints', rows: constraintRows.filter((row) => row.type !== 'f') },
+        { title: 'Indexes', rows: indexes },
+        { title: 'Partitions', rows: partitions },
+        { title: 'Triggers', rows: triggers },
+        { title: 'Rules', rows: rules },
+        { title: 'Policies', rows: policies },
+      ]
+      return {
+        columns: columns.rows.map(
+          (row: { name: string; data_type: string; nullable: boolean; default_expr: string | null; primary_key: boolean }) => ({
+            name: row.name,
+            dataType: row.data_type,
+            nullable: row.nullable,
+            default: row.default_expr,
+            primaryKey: row.primary_key,
+          }),
+        ),
+        sections: sections.filter((section) => section.rows.length),
+      }
     },
 
     children() {
