@@ -1,0 +1,172 @@
+import type { ReactiveController, ReactiveControllerHost } from 'lit'
+import type { ConnectionProfile } from '../electron'
+import type { QueryRun } from '../components/results-panel'
+import type { HistoryItem } from '../components/history-view'
+import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
+
+// Reference behavior: keep the most recent runs, drop the tail.
+const MAX_HISTORY = 200
+
+const MAX_TASKS = 50
+
+// Owns everything a query run produces: the per-tab results (switching tabs
+// brings a tab's result back), the cross-connection task list with its live
+// ticker, and per-context history. The workbench decides what to run and
+// ensures the connection; execute() does the bookkeeping. Runtime-only, like
+// the other controllers.
+export class QueriesController implements ReactiveController {
+  /** Last run of every tab, keyed by tab id. */
+  runs = new Map<string, QueryRun>()
+
+  /** Query history of every context in this workspace, newest first. */
+  history: HistoryItem[] = []
+
+  /** Every query run across all connections; the Tasks view shows long ones. */
+  tasks: TaskItem[] = []
+
+  private host: ReactiveControllerHost
+  /** Guards against landing results on tabs closed mid-run. */
+  private tabExists: (tabId: string) => boolean
+  private timer: number | null = null
+
+  constructor(host: ReactiveControllerHost, tabExists: (tabId: string) => boolean) {
+    this.host = host
+    this.tabExists = tabExists
+    host.addController(this)
+  }
+
+  hostConnected() {}
+
+  hostDisconnected() {
+    if (this.timer !== null) clearInterval(this.timer)
+    this.timer = null
+  }
+
+  /** What the results panel shows: the given tab's last run. */
+  runFor(tabId: string | null): QueryRun {
+    return (tabId ? this.runs.get(tabId) : undefined) ?? { phase: 'idle' }
+  }
+
+  /** A run belongs to the tab that started it, wherever the user is now. */
+  setRun(tabId: string, run: QueryRun) {
+    if (!this.tabExists(tabId)) return
+    this.runs = new Map(this.runs).set(tabId, run)
+    this.host.requestUpdate()
+  }
+
+  /** Runs the SQL on an already-connected profile and records the outcome. */
+  async execute(args: {
+    tabId: string
+    profile: ConnectionProfile
+    childDb: string | null
+    contextKey: string
+    sql: string
+  }) {
+    const { tabId, profile, childDb, contextKey, sql } = args
+    this.setRun(tabId, { phase: 'running' })
+    const task: TaskItem = {
+      id: crypto.randomUUID(),
+      profileId: profile.id,
+      contextLabel: childDb ? `${profile.name} / ${childDb}` : profile.name,
+      sql,
+      startedAt: Date.now(),
+      status: 'running',
+      durationMs: null,
+      rowCount: null,
+    }
+    this.tasks = [task, ...this.tasks].slice(0, MAX_TASKS)
+    this.ensureTimer()
+    this.host.requestUpdate()
+
+    const response = await window.sqlkit.runQuery(profile.id, sql)
+
+    this.setRun(
+      tabId,
+      response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error },
+    )
+    this.tasks = this.tasks.map((entry) =>
+      entry.id === task.id
+        ? {
+            ...entry,
+            status: response.success ? 'done' : response.error === 'Query cancelled.' ? 'cancelled' : 'error',
+            durationMs: response.success ? response.result.durationMs : Date.now() - task.startedAt,
+            rowCount: response.success ? response.result.rowCount : null,
+          }
+        : entry,
+    )
+    this.history = [
+      {
+        id: crypto.randomUUID(),
+        contextKey,
+        sql,
+        success: response.success,
+        durationMs: response.success ? response.result.durationMs : 0,
+        rowCount: response.success ? response.result.rowCount : null,
+        error: response.success ? '' : response.error,
+        createdAt: new Date().toISOString(),
+      },
+      ...this.history,
+    ].slice(0, MAX_HISTORY)
+    this.host.requestUpdate()
+  }
+
+  /** Running queries past the threshold — the Tasks activity-bar badge. */
+  longRunningCount(): number {
+    const now = Date.now()
+    return this.tasks.filter((task) => task.status === 'running' && now - task.startedAt >= LONG_RUNNING_MS).length
+  }
+
+  clearFinishedTasks() {
+    this.tasks = this.tasks.filter((task) => task.status === 'running')
+    this.host.requestUpdate()
+  }
+
+  clearHistory(contextKey: string) {
+    this.history = this.history.filter((item) => item.contextKey !== contextKey)
+    this.host.requestUpdate()
+  }
+
+  // --- tab lifecycle hooks, called by the workbench's tab management -------
+
+  dropTab(tabId: string) {
+    this.runs.delete(tabId)
+  }
+
+  renameTab(oldId: string, newId: string) {
+    const run = this.runs.get(oldId)
+    if (!run) return
+    const next = new Map(this.runs)
+    next.delete(oldId)
+    this.runs = next.set(newId, run)
+  }
+
+  /** Drops runs whose tabs are gone (folder deletes, context removals). */
+  sweepOrphans() {
+    for (const id of [...this.runs.keys()]) {
+      if (!this.tabExists(id)) this.runs.delete(id)
+    }
+  }
+
+  /** Workspace switch: results, tasks and history all belong to the old one. */
+  reset() {
+    this.runs = new Map()
+    this.history = []
+    this.tasks = []
+    this.host.requestUpdate()
+  }
+
+  // Re-renders the host twice a second while queries run, so live elapsed
+  // labels tick and the badge appears once a run crosses the threshold;
+  // stops itself when nothing is running.
+  private ensureTimer() {
+    if (this.timer !== null) return
+    this.timer = window.setInterval(() => {
+      if (this.tasks.some((task) => task.status === 'running')) {
+        this.host.requestUpdate()
+      } else {
+        clearInterval(this.timer!)
+        this.timer = null
+      }
+    }, 500)
+  }
+}

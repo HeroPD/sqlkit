@@ -165,6 +165,10 @@ export type SqlkitApi = {
   runQuery: (profileId: string, sql: string, params?: unknown[]) => Promise<QueryResponse>
   /** Cancels the profile's in-flight query; the pending runQuery rejects. */
   cancelQuery: (profileId: string) => Promise<{ success: boolean; error?: string }>
+  /** Server-side CREATE DATABASE on a connected profile (postgres only). */
+  createDatabase: (profileId: string, name: string) => Promise<{ success: boolean; error?: string }>
+  /** Server-side DROP DATABASE; refuses the connection's in-use child. */
+  dropDatabase: (profileId: string, name: string) => Promise<{ success: boolean; error?: string }>
   listTables: (profileId: string) => Promise<TablesResult>
   /** Columns of every table in the connected database, one round trip. */
   listColumns: (profileId: string) => Promise<ColumnsResult>

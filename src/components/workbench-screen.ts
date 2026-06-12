@@ -8,6 +8,8 @@ import type { ConnectionProfile, FileInfo, FileSaveResult, MenuAction, TableRef 
 import './activity-button'
 import './command-palette'
 import './confirm-dialog'
+import './prompt-dialog'
+import type { PromptConfirmDetail } from './prompt-dialog'
 import './databases-view'
 import './db-config-form'
 import './editor-empty'
@@ -22,11 +24,11 @@ import './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
 import type { PaletteEntry, PaletteMode } from './command-palette'
-import type { QueryRun } from './results-panel'
 import type { RunQueryDetail } from './sql-editor'
 import type { TableBrowseDetail, TableSelectDetail } from './explorer-view'
-import type { HistoryItem, HistoryOpenDetail } from './history-view'
-import { LONG_RUNNING_MS, type TaskItem, type TaskStopDetail } from './tasks-view'
+import type { HistoryOpenDetail } from './history-view'
+import type { TaskStopDetail } from './tasks-view'
+import { QueriesController } from '../controllers/queries'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 
@@ -38,10 +40,6 @@ const VIEWS = [
   { id: 'tasks', title: 'Tasks', icon: 'codicon-checklist', hint: 'No running jobs.' },
 ] as const
 
-// Reference behavior: keep the most recent runs, drop the tail.
-const MAX_HISTORY = 200
-
-const MAX_TASKS = 50
 
 type ViewId = (typeof VIEWS)[number]['id']
 
@@ -73,8 +71,9 @@ const tabTitle = (tab: EditorTabState) => {
 // active tab, and the Explorer's table selection. A context is a connection
 // *and* its child database (all-databases mode) — x1/analytics and
 // x1/billing are separate instances. Switching contexts stashes the live
-// fields here and restores the target's. Query results live in _tabRuns,
-// keyed by tab id, so they follow their tab through any switch.
+// fields here and restores the target's. Query results live in the
+// QueriesController, keyed by tab id, so they follow their tab through any
+// switch.
 type ContextInstance = {
   tabs: EditorTabState[]
   activeTabId: string | null
@@ -147,10 +146,8 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _palette: PaletteMode | null = null
 
-  // The last run of every tab (runtime-only); the panel shows the active
-  // tab's, so switching tabs brings its result back.
-  @state()
-  private _tabRuns = new Map<string, QueryRun>()
+  // Query results, tasks, and history; re-renders us as runs progress.
+  private _queries = new QueriesController(this, (tabId) => this._tabExists(tabId))
 
   // null = the default split: results take half of the editor area.
   @state()
@@ -162,22 +159,14 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _confirm: { message: string; detail: string; confirmLabel: string; action: () => void } | null = null
 
-  // Query history of every context in this workspace (runtime-only, like the
-  // reference); the History view filters it to the active context.
   @state()
-  private _history: HistoryItem[] = []
-
-  // Every query run, across all connections; the Tasks view shows the long
-  // ones, live timers for those still going.
-  @state()
-  private _tasks: TaskItem[] = []
-
-  // Bumped while queries run so the Tasks badge appears once a run crosses
-  // the threshold; the interval stops itself when nothing is running.
-  @state()
-  private _taskTick = 0
-
-  private _taskTimer: number | null = null
+  private _prompt: {
+    message: string
+    detail: string
+    confirmLabel: string
+    placeholder: string
+    action: (value: string) => void
+  } | null = null
 
   @state()
   private _tabs: EditorTabState[] = []
@@ -213,8 +202,6 @@ export class WorkbenchScreen extends LitElement {
     this._unsubscribeMenu?.()
     this._unsubscribeMenu = null
     window.removeEventListener('keydown', this._onGlobalKeydown)
-    if (this._taskTimer !== null) clearInterval(this._taskTimer)
-    this._taskTimer = null
   }
 
   /** App-menu items (File > …) arriving from the main process. */
@@ -244,9 +231,7 @@ export class WorkbenchScreen extends LitElement {
       this._activeChildDb = null
       this._palette = null
       this._selectedTable = null
-      this._tabRuns = new Map()
-      this._history = []
-      this._tasks = []
+      this._queries.reset()
       this._instances.clear()
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
@@ -494,7 +479,7 @@ export class WorkbenchScreen extends LitElement {
     if (index < 0) return
 
     this._tabs = this._tabs.filter((tab) => tab.id !== id)
-    this._tabRuns.delete(id)
+    this._queries.dropTab(id)
     if (this._activeTabId === id) {
       this._activeTabId = this._tabs[Math.min(index, this._tabs.length - 1)]?.id ?? null
     }
@@ -558,17 +543,15 @@ export class WorkbenchScreen extends LitElement {
 
     const profile = this._activeProfile()
     if (!profile) {
-      this._applyQueryRun(tabId, { phase: 'error', error: `No database selected — press ${mod('K')} to pick one.` })
+      this._queries.setRun(tabId, { phase: 'error', error: `No database selected — press ${mod('K')} to pick one.` })
       return
     }
 
-    const runKey = contextKey(profile.id, this._activeChildDb)
-
     if (this._live.phase(profile.id) !== 'connected') {
-      this._applyQueryRun(tabId, { phase: 'running', note: `Connecting to ${profile.name}…` })
+      this._queries.setRun(tabId, { phase: 'running', note: `Connecting to ${profile.name}…` })
       const connected = await this._live.connect(profile)
       if (!connected.success) {
-        this._applyQueryRun(tabId, { phase: 'error', error: connected.error })
+        this._queries.setRun(tabId, { phase: 'error', error: connected.error })
         return
       }
     }
@@ -576,56 +559,13 @@ export class WorkbenchScreen extends LitElement {
     // the context's child.
     await this._alignActiveChild(profile.id)
 
-    this._applyQueryRun(tabId, { phase: 'running' })
-    const task: TaskItem = {
-      id: crypto.randomUUID(),
-      profileId: profile.id,
-      contextLabel: this._activeChildDb ? `${profile.name} / ${this._activeChildDb}` : profile.name,
-      sql: sqlText,
-      startedAt: Date.now(),
-      status: 'running',
-      durationMs: null,
-      rowCount: null,
-    }
-    this._tasks = [task, ...this._tasks].slice(0, MAX_TASKS)
-    this._ensureTaskTimer()
-
-    const response = await window.sqlkit.runQuery(profile.id, sqlText)
-    this._applyQueryRun(
+    await this._queries.execute({
       tabId,
-      response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error },
-    )
-    this._tasks = this._tasks.map((entry) =>
-      entry.id === task.id
-        ? {
-            ...entry,
-            status: response.success ? 'done' : response.error === 'Query cancelled.' ? 'cancelled' : 'error',
-            durationMs: response.success ? response.result.durationMs : Date.now() - task.startedAt,
-            rowCount: response.success ? response.result.rowCount : null,
-          }
-        : entry,
-    )
-
-    this._history = [
-      {
-        id: crypto.randomUUID(),
-        contextKey: runKey,
-        sql: sqlText,
-        success: response.success,
-        durationMs: response.success ? response.result.durationMs : 0,
-        rowCount: response.success ? response.result.rowCount : null,
-        error: response.success ? '' : response.error,
-        createdAt: new Date().toISOString(),
-      },
-      ...this._history,
-    ].slice(0, MAX_HISTORY)
-  }
-
-  // Reassigned (not mutated) so Lit re-renders when the active tab's run
-  // changes; runs landing on a tab closed mid-flight are dropped.
-  private _applyQueryRun(tabId: string, run: QueryRun) {
-    if (!this._tabExists(tabId)) return
-    this._tabRuns = new Map(this._tabRuns).set(tabId, run)
+      profile,
+      childDb: this._activeChildDb,
+      contextKey: contextKey(profile.id, this._activeChildDb),
+      sql: sqlText,
+    })
   }
 
   private _tabExists(id: string): boolean {
@@ -634,11 +574,6 @@ export class WorkbenchScreen extends LitElement {
       if (instance.tabs.some((tab) => tab.id === id)) return true
     }
     return false
-  }
-
-  /** What the results panel shows: the active tab's last run. */
-  private _activeQueryRun(): QueryRun {
-    return (this._activeTabId ? this._tabRuns.get(this._activeTabId) : undefined) ?? { phase: 'idle' }
   }
 
   // Double-click browse (reference behavior): a query tab named after the
@@ -856,6 +791,9 @@ export class WorkbenchScreen extends LitElement {
         @db-select=${this._onDbSelect}
         @db-connect=${this._onDbConnect}
         @db-disconnect=${this._onDbDisconnect}
+        @db-remove=${this._onDbRemove}
+        @db-create-database=${this._onDbCreateDatabase}
+        @db-drop-database=${this._onDbDropDatabase}
         @add-database=${this._onAddDatabase}
         @table-select=${this._onTableSelect}
         @table-browse=${this._onTableBrowse}
@@ -880,7 +818,7 @@ export class WorkbenchScreen extends LitElement {
                 view=${view.id}
                 title=${view.title}
                 .active=${view.id === this._activeView}
-                .badge=${view.id === 'tasks' ? this._longRunningCount() : 0}
+                .badge=${view.id === 'tasks' ? this._queries.longRunningCount() : 0}
               >
                 <i class="codicon ${view.icon}" aria-hidden="true"></i>
               </activity-button>
@@ -951,6 +889,18 @@ export class WorkbenchScreen extends LitElement {
             ></confirm-dialog>
           `
         : ''}
+      ${this._prompt
+        ? html`
+            <prompt-dialog
+              .message=${this._prompt.message}
+              .detail=${this._prompt.detail}
+              .confirmLabel=${this._prompt.confirmLabel}
+              .placeholder=${this._prompt.placeholder}
+              @dialog-cancel=${() => (this._prompt = null)}
+              @dialog-confirm=${this._onPromptAccept}
+            ></prompt-dialog>
+          `
+        : ''}
 
       <status-bar
         .workspaceName=${this.workspace?.name ?? ''}
@@ -977,7 +927,7 @@ export class WorkbenchScreen extends LitElement {
   private _renderTitleActions(view: (typeof VIEWS)[number]) {
     if (view.id === 'history') {
       const key = contextKey(this._activeDbId, this._activeChildDb)
-      const count = this._history.filter((item) => item.contextKey === key).length
+      const count = this._queries.history.filter((item) => item.contextKey === key).length
       return html`
         <button
           class="title-action"
@@ -991,7 +941,7 @@ export class WorkbenchScreen extends LitElement {
       `
     }
     if (view.id === 'tasks') {
-      const finished = this._tasks.some((task) => task.status !== 'running')
+      const finished = this._queries.tasks.some((task) => task.status !== 'running')
       return html`
         <button
           class="title-action"
@@ -1008,7 +958,7 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onTasksClear() {
-    this._tasks = this._tasks.filter((task) => task.status === 'running')
+    this._queries.clearFinishedTasks()
   }
 
   private _renderSidebarView(view: (typeof VIEWS)[number]) {
@@ -1048,7 +998,7 @@ export class WorkbenchScreen extends LitElement {
       const key = contextKey(this._activeDbId, this._activeChildDb)
       return html`
         <history-view
-          .items=${this._history.filter((item) => item.contextKey === key)}
+          .items=${this._queries.history.filter((item) => item.contextKey === key)}
           @history-open=${this._onHistoryOpen}
           @history-open-permanent=${this._onHistoryOpenPermanent}
           @history-clear=${this._onHistoryClear}
@@ -1056,7 +1006,7 @@ export class WorkbenchScreen extends LitElement {
       `
     }
     // Every view id is handled above; 'tasks' is the last one.
-    return html`<tasks-view .items=${this._tasks} @task-stop=${this._onTaskStop}></tasks-view>`
+    return html`<tasks-view .items=${this._queries.tasks} @task-stop=${this._onTaskStop}></tasks-view>`
   }
 
   // Single click: open the SQL in the preview tab (recycled across picks, so
@@ -1109,8 +1059,7 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onHistoryClear() {
-    const key = contextKey(this._activeDbId, this._activeChildDb)
-    this._history = this._history.filter((item) => item.contextKey !== key)
+    this._queries.clearHistory(contextKey(this._activeDbId, this._activeChildDb))
   }
 
   private _renderEditorContent() {
@@ -1147,7 +1096,7 @@ export class WorkbenchScreen extends LitElement {
             @dblclick=${() => (this._panelHeight = null)}
           ></div>
           <results-panel
-            .run=${this._activeQueryRun()}
+            .run=${this._queries.runFor(this._activeTabId)}
             .canCancel=${this._activeProfile()?.engine === 'postgresql'}
             @cancel-query=${this._onCancelQuery}
             style="height: ${this._panelHeight === null ? '50%' : `${this._panelHeight}px`}"
@@ -1219,6 +1168,101 @@ export class WorkbenchScreen extends LitElement {
     await this._live.disconnect(id)
   }
 
+  private _onDbCreateDatabase(event: Event) {
+    const { id } = (event as CustomEvent<{ id: string }>).detail
+    this._prompt = {
+      message: 'Create Database',
+      detail: 'Name of the new database on this server.',
+      confirmLabel: 'Create',
+      placeholder: 'my_database',
+      action: (name) => void this._createDatabase(id, name),
+    }
+  }
+
+  private async _createDatabase(id: string, name: string) {
+    const result = await window.sqlkit.createDatabase(id, name)
+    if (!result.success) this._notice(`Could not create "${name}"`, result.error ?? 'Unknown error')
+  }
+
+  private _onDbDropDatabase(event: Event) {
+    const { id, database } = (event as CustomEvent<{ id: string; database: string }>).detail
+    this._confirm = {
+      message: `Drop database "${database}"?`,
+      detail: 'All data in it is permanently deleted on the server. This cannot be undone.',
+      confirmLabel: 'Drop Database',
+      action: () => void this._dropDatabase(id, database),
+    }
+  }
+
+  private async _dropDatabase(id: string, database: string) {
+    const result = await window.sqlkit.dropDatabase(id, database)
+    if (!result.success) {
+      this._notice(`Could not drop "${database}"`, result.error ?? 'Unknown error')
+      return
+    }
+
+    // The dropped child's working context is gone with it.
+    this._instances.delete(contextKey(id, database))
+    this._queries.sweepOrphans()
+    if (this._connections.some((connection) => connection.id === id && connection.lastChildDb === database)) {
+      this._connections = this._connections.map((connection) =>
+        connection.id === id && connection.lastChildDb === database
+          ? { ...connection, lastChildDb: undefined }
+          : connection,
+      )
+      this._persistConfig()
+    }
+    // If the user was working in the dropped child, follow the driver's
+    // in-use child instead of pointing at a database that no longer exists.
+    if (this._activeDbId === id && this._activeChildDb === database) {
+      this._setActiveDb(id, this._inUseChild(id) ?? undefined)
+    }
+  }
+
+  private _onDbRemove(event: Event) {
+    const { id } = (event as CustomEvent<{ id: string }>).detail
+    const profile = this._connections.find((connection) => connection.id === id)
+    if (!profile) return
+    this._confirm = {
+      message: `Remove "${profile.name.trim() || 'New Database'}"?`,
+      detail: 'The connection is removed from this workspace. Its files folder stays on disk.',
+      confirmLabel: 'Remove',
+      action: () => void this._removeDatabase(id),
+    }
+  }
+
+  private async _removeDatabase(id: string) {
+    await this._live.disconnect(id)
+
+    // Leave the context first so _switchInstance doesn't re-stash it below.
+    if (this._activeDbId === id) {
+      const next = this._connections.find((connection) => connection.id !== id) ?? null
+      this._switchInstance(next?.id ?? null, next ? this._defaultChild(next) : null)
+    }
+
+    this._connections = this._connections.filter((connection) => connection.id !== id)
+
+    // Purge the profile's stashed contexts, then its config tab wherever it
+    // is open — live tab strip or another context's stash.
+    for (const key of [...this._instances.keys()]) {
+      if (key.startsWith(`${id}:`)) this._instances.delete(key)
+    }
+    this._tabs = this._tabs.filter((tab) => tab.id !== id)
+    if (this._activeTabId === id) this._activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
+    for (const [key, instance] of this._instances) {
+      if (!instance.tabs.some((tab) => tab.id === id)) continue
+      this._instances.set(key, {
+        ...instance,
+        tabs: instance.tabs.filter((tab) => tab.id !== id),
+        activeTabId: instance.activeTabId === id ? null : instance.activeTabId,
+      })
+    }
+    this._queries.sweepOrphans()
+
+    this._workspaceFiles.setFolder(this._contextFolder())
+    this._persistConfig()
+  }
+
 
   private _onTablesRefresh() {
     const profile = this._activeProfile()
@@ -1288,12 +1332,7 @@ export class WorkbenchScreen extends LitElement {
     this._tabs = this._tabs.map((tab) =>
       tab.id === oldId && tab.kind === 'sql' ? { ...tab, id: newId, name: result.name, path: result.path } : tab,
     )
-    const run = this._tabRuns.get(oldId)
-    if (run) {
-      const next = new Map(this._tabRuns)
-      next.delete(oldId)
-      this._tabRuns = next.set(newId, run)
-    }
+    this._queries.renameTab(oldId, newId)
     if (this._activeTabId === oldId) this._activeTabId = newId
     void this._workspaceFiles.reload()
   }
@@ -1319,9 +1358,7 @@ export class WorkbenchScreen extends LitElement {
     this._tabs = this._tabs.filter(
       (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
     )
-    for (const id of [...this._tabRuns.keys()]) {
-      if (!this._tabExists(id)) this._tabRuns.delete(id)
-    }
+    this._queries.sweepOrphans()
     if (this._activeTabId && !this._tabs.some((tab) => tab.id === this._activeTabId)) {
       this._activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
     }
@@ -1332,6 +1369,18 @@ export class WorkbenchScreen extends LitElement {
     const action = this._confirm?.action
     this._confirm = null
     action?.()
+  }
+
+  private _onPromptAccept = (event: Event) => {
+    const { value } = (event as CustomEvent<PromptConfirmDetail>).detail
+    const action = this._prompt?.action
+    this._prompt = null
+    action?.(value)
+  }
+
+  /** Error notice via the confirm dialog, with only an acknowledge action. */
+  private _notice(message: string, detail: string) {
+    this._confirm = { message, detail, confirmLabel: 'OK', action: () => {} }
   }
 
   private _onEditorChange(event: Event) {
@@ -1360,24 +1409,6 @@ export class WorkbenchScreen extends LitElement {
   private _onTaskStop(event: Event) {
     const { profileId } = (event as CustomEvent<TaskStopDetail>).detail
     void window.sqlkit.cancelQuery(profileId)
-  }
-
-  private _ensureTaskTimer() {
-    if (this._taskTimer !== null) return
-    this._taskTimer = window.setInterval(() => {
-      if (this._tasks.some((task) => task.status === 'running')) {
-        this._taskTick++
-      } else {
-        clearInterval(this._taskTimer!)
-        this._taskTimer = null
-      }
-    }, 500)
-  }
-
-  /** Running queries past the threshold — the Tasks activity-bar badge. */
-  private _longRunningCount(): number {
-    const now = Date.now()
-    return this._tasks.filter((task) => task.status === 'running' && now - task.startedAt >= LONG_RUNNING_MS).length
   }
 
   private _onTabSelect(event: Event) {

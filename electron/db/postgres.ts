@@ -40,6 +40,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     return pool
   }
 
+  const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`
+
   return {
     async connect() {
       const discovery = profile.database.trim() || 'postgres'
@@ -97,6 +99,37 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       } finally {
         running = null
       }
+    },
+
+    async createDatabase(name) {
+      // CREATE DATABASE refuses to run inside a transaction; a plain
+      // single-statement pool query never opens one, so this is fine.
+      await activePool().query(`create database ${quoteIdent(name)}`)
+      if (profile.databaseMode === 'all' && pools && !pools.has(name)) {
+        pools.set(name, makePool(name))
+        childNames = [...childNames, name].sort()
+      }
+    },
+
+    async dropDatabase(name) {
+      if (!pools) throw new Error('Not connected')
+      if (name === active) {
+        throw new Error('Cannot drop the database currently in use — switch to another one first.')
+      }
+      // The server refuses while connections exist; ours must go first.
+      const pool = pools.get(name)
+      if (pool) {
+        pools.delete(name)
+        await pool.end().catch(() => {})
+      }
+      try {
+        await activePool().query(`drop database ${quoteIdent(name)}`)
+      } catch (error) {
+        // Drop refused (e.g. someone else is connected): keep it browsable.
+        if (pool) pools.set(name, makePool(name))
+        throw error
+      }
+      childNames = childNames.filter((child) => child !== name)
     },
 
     async cancel() {

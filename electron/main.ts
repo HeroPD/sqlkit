@@ -198,6 +198,12 @@ function registerDbIpc() {
     manager.query(profileId, sql, params),
   )
   ipcMain.handle('db:cancel', (_event, profileId: string) => manager.cancelQuery(profileId))
+  ipcMain.handle('db:create-database', (_event, profileId: string, name: string) =>
+    manager.createDatabase(profileId, name),
+  )
+  ipcMain.handle('db:drop-database', (_event, profileId: string, name: string) =>
+    manager.dropDatabase(profileId, name),
+  )
   ipcMain.handle('db:list-tables', (_event, profileId: string) => manager.listTables(profileId))
   ipcMain.handle('db:list-columns', (_event, profileId: string) => manager.listColumns(profileId))
 

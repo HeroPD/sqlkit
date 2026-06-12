@@ -1,7 +1,9 @@
 import { LitElement, css, html } from 'lit'
-import { customElement, property } from 'lit/decorators.js'
+import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import type { ConnectionProfile, ConnectionStatus } from '../electron'
+import './context-menu'
+import type { MenuItem, MenuPickDetail } from './context-menu'
 import './db-list-item'
 
 // The Databases sidebar view: connection list with live status, the child
@@ -9,7 +11,7 @@ import './db-list-item'
 // is switched via ⌘K, never from here; connecting does adopt the connection
 // as the in-use context), and the add button. db-list-item events
 // (db-select / db-connect / db-disconnect) bubble through; this view adds
-// `add-database`.
+// `add-database` and, via the right-click menu, `db-remove`.
 @customElement('databases-view')
 export class DatabasesView extends LitElement {
   @property({ attribute: false })
@@ -22,6 +24,12 @@ export class DatabasesView extends LitElement {
   @property()
   activeTabId: string | null = null
 
+  @state()
+  private _menu: { x: number; y: number; id: string } | null = null
+
+  @state()
+  private _childMenu: { x: number; y: number; id: string; database: string } | null = null
+
   render() {
     return html`
       <div class="db-list">
@@ -33,7 +41,79 @@ export class DatabasesView extends LitElement {
         <i class="codicon codicon-add" aria-hidden="true"></i>
         <span>Add Database</span>
       </button>
+      ${this._renderMenu()} ${this._renderChildMenu()}
     `
+  }
+
+  private _renderMenu() {
+    const menu = this._menu
+    if (!menu) return ''
+    const connected = this.statuses[menu.id]?.phase === 'connected'
+    const engine = this.connections.find((connection) => connection.id === menu.id)?.engine
+    const items: MenuItem[] = [
+      connected ? { id: 'disconnect', label: 'Disconnect' } : { id: 'connect', label: 'Connect' },
+      ...(connected && engine === 'postgresql' ? [{ id: 'create-db', label: 'Create Database…' }] : []),
+      { id: 'edit', label: 'Edit Connection' },
+      { id: 'remove', label: 'Remove Database…', danger: true },
+    ]
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onMenuPick(e.detail.id, menu.id)}
+        @menu-close=${() => (this._menu = null)}
+      ></context-menu>
+    `
+  }
+
+  private _renderChildMenu() {
+    const menu = this._childMenu
+    if (!menu) return ''
+    const items: MenuItem[] = [{ id: 'drop-db', label: `Drop Database "${menu.database}"…`, danger: true }]
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${() =>
+          this.dispatchEvent(
+            new CustomEvent('db-drop-database', {
+              detail: { id: menu.id, database: menu.database },
+              bubbles: true,
+              composed: true,
+            }),
+          )}
+        @menu-close=${() => (this._childMenu = null)}
+      ></context-menu>
+    `
+  }
+
+  // The in-use child can't be dropped (the connection sits on it), so it
+  // gets no menu rather than a doomed action.
+  private _onChildMenu(event: MouseEvent, id: string, database: string, inUse: boolean) {
+    event.preventDefault()
+    if (inUse) return
+    this._childMenu = { x: event.clientX, y: event.clientY, id, database }
+  }
+
+  private _onItemMenu(event: MouseEvent, id: string) {
+    event.preventDefault()
+    this._menu = { x: event.clientX, y: event.clientY, id }
+  }
+
+  private _onMenuPick(action: string, id: string) {
+    const type =
+      action === 'connect'
+        ? 'db-connect'
+        : action === 'disconnect'
+          ? 'db-disconnect'
+          : action === 'create-db'
+            ? 'db-create-database'
+            : action === 'edit'
+              ? 'db-select'
+              : 'db-remove'
+    this.dispatchEvent(new CustomEvent(type, { detail: { id }, bubbles: true, composed: true }))
   }
 
   private _renderItem(connection: ConnectionProfile) {
@@ -52,6 +132,7 @@ export class DatabasesView extends LitElement {
         engine=${connection.engine}
         status=${status?.phase ?? ''}
         .active=${this.activeTabId === connection.id}
+        @contextmenu=${(event: MouseEvent) => this._onItemMenu(event, connection.id)}
       ></db-list-item>
       ${status?.phase === 'connected' ? this._renderChildren(connection.id, status) : ''}
     `
@@ -60,14 +141,18 @@ export class DatabasesView extends LitElement {
   // Child databases of an all-databases connection — display only; switching
   // the active one happens in the ⌘K palette. A single child carries no
   // information, so it stays hidden.
-  private _renderChildren(_profileId: string, status: ConnectionStatus) {
+  private _renderChildren(profileId: string, status: ConnectionStatus) {
     const children = status.children ?? []
     if (children.length < 2) return ''
     return html`
       <div class="child-list">
         ${children.map(
           (child) => html`
-            <div class="child-row ${child.inUse ? 'in-use' : ''}" title=${child.name}>
+            <div
+              class="child-row ${child.inUse ? 'in-use' : ''}"
+              title=${child.name}
+              @contextmenu=${(event: MouseEvent) => this._onChildMenu(event, profileId, child.name, child.inUse)}
+            >
               <i class="codicon codicon-symbol-namespace" aria-hidden="true"></i>
               <span class="child-name">${child.name}</span>
               ${child.inUse ? html`<span class="child-tag">active</span>` : ''}

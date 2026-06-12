@@ -128,6 +128,28 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     return { success: true }
   }
 
+  // Create/drop run through the driver (it owns the pools that must close
+  // before a drop) and rebroadcast so every window sees the new child list.
+  async function mutateDatabase(profileId: string, run: (driver: Driver) => Promise<void> | undefined) {
+    const active = connections.get(profileId)
+    if (active?.status.phase !== 'connected' || !active.driver) return { success: false, error: 'Not connected' }
+    try {
+      const pending = run(active.driver)
+      if (!pending) return { success: false, error: 'Not supported for this engine' }
+      await pending
+      setStatus(active, { ...active.status, children: active.driver.children?.() })
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
+  const createDatabase = (profileId: string, name: string) =>
+    mutateDatabase(profileId, (driver) => driver.createDatabase?.(name))
+
+  const dropDatabase = (profileId: string, name: string) =>
+    mutateDatabase(profileId, (driver) => driver.dropDatabase?.(name))
+
   async function listTables(profileId: string): Promise<TablesResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
@@ -148,7 +170,19 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
-  return { connect, disconnect, disconnectAll, statuses, query, cancelQuery, listTables, listColumns, setActiveChild }
+  return {
+    connect,
+    disconnect,
+    disconnectAll,
+    statuses,
+    query,
+    cancelQuery,
+    listTables,
+    listColumns,
+    setActiveChild,
+    createDatabase,
+    dropDatabase,
+  }
 }
 
 /**

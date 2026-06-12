@@ -20,6 +20,10 @@ export type Driver = {
   listColumns(): Promise<ColumnRef[]>
   /** Child databases; undefined for engines without all-databases support. */
   children?(): ChildDb[]
+  /** Server-side CREATE DATABASE; undefined for file-based engines. */
+  createDatabase?(name: string): Promise<void>
+  /** Server-side DROP DATABASE; refuses the in-use child. */
+  dropDatabase?(name: string): Promise<void>
   /** Switches the active child; false when the name is unknown. */
   useChild?(database: string): boolean
 }
