@@ -79,11 +79,6 @@ const softHighlightStyle = HighlightStyle.define([
 
 const appTheme = EditorView.theme(
   {
-    '&': {
-      height: '100%',
-      fontSize: '13px',
-      backgroundColor: 'var(--editor-bg)',
-    },
 
     '.cm-scroller': {
       fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
@@ -99,19 +94,9 @@ const appTheme = EditorView.theme(
       padding: '0 12px',
     },
 
-    '.cm-gutters': {
-      backgroundColor: 'var(--editor-bg)',
-      color: 'var(--text-3)',
-      borderRight: '1px solid var(--border-subtle)',
-    },
-
     '.cm-activeLineGutter': {
       backgroundColor: 'transparent',
       color: 'var(--text)',
-    },
-
-    '.cm-activeLine': {
-      backgroundColor: 'rgba(255, 255, 255, 0.03)',
     },
 
     '&.cm-focused': {
