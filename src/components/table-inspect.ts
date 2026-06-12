@@ -5,6 +5,7 @@ import type { Engine, TableInspection, TableRef } from '../electron'
 import { abbreviateType } from '../sql-types'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
+import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
 
 // The DDL words that show up in constraint/index/trigger/policy definitions;
 // matched case-insensitively so SQLite's hand-written DDL highlights too.
@@ -67,8 +68,9 @@ export class TableInspect extends LitElement {
     return html`
       <div class="scroll">
         <div class="head">
-          <i class="codicon codicon-table" aria-hidden="true"></i>
+          <i class="codicon ${TABLE_KIND_ICONS[table.kind] ?? 'codicon-table'}" aria-hidden="true"></i>
           <h3>${label}</h3>
+          ${table.kind !== 'table' ? html`<span class="kind">${TABLE_KIND_LABELS[table.kind]}</span>` : ''}
           <button class="refresh" title="Reload structure" aria-label="Reload structure" @click=${() => void this._load()}>
             <i class="codicon codicon-refresh" aria-hidden="true"></i>
           </button>
@@ -197,6 +199,16 @@ export class TableInspect extends LitElement {
         font-size: 14px;
         font-weight: 600;
         color: var(--text);
+      }
+
+      .kind {
+        padding: 1px 6px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-3);
       }
 
       .refresh {

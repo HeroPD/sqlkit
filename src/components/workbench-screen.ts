@@ -67,6 +67,10 @@ type EditorTabState =
   | { id: string; kind: 'inspect'; profileId: string; table: TableRef }
   | SqlTabState
 
+const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`
+const quoteQualified = (table: TableRef) =>
+  table.schema ? `${quoteIdent(table.schema)}.${quoteIdent(table.name)}` : quoteIdent(table.name)
+
 const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'config') return tab.profile.name.trim() || 'New Database'
   if (tab.kind === 'inspect') return `${tab.table.name} · info`
@@ -586,9 +590,7 @@ export class WorkbenchScreen extends LitElement {
   // table, pre-filled with a capped SELECT and run immediately. Browsing the
   // same table again reuses its tab and re-runs whatever it now contains.
   private _browseTable(profile: ConnectionProfile, table: TableRef) {
-    const quote = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`
-    const qualified = table.schema ? `${quote(table.schema)}.${quote(table.name)}` : quote(table.name)
-    const sqlText = `SELECT * FROM ${qualified} LIMIT 200`
+    const sqlText = `SELECT * FROM ${quoteQualified(table)} LIMIT 200`
 
     const id = `browse:${tableKey(profile.id, table)}`
     const existing = this._tabs.find((tab) => tab.id === id)
@@ -804,6 +806,7 @@ export class WorkbenchScreen extends LitElement {
         @table-select=${this._onTableSelect}
         @table-browse=${this._onTableBrowse}
         @table-inspect=${this._onTableInspect}
+        @matview-refresh=${this._onMatviewRefresh}
         @tables-refresh=${this._onTablesRefresh}
         @search-open=${this._onSearchOpen}
         @file-open=${this._onFileOpen}
@@ -1313,6 +1316,16 @@ export class WorkbenchScreen extends LitElement {
     const { table } = (event as CustomEvent<TableBrowseDetail>).detail
     const profile = this._activeProfile()
     if (profile) this._browseTable(profile, table)
+  }
+
+  // Refresh runs as a visible statement: it lands in the preview tab and
+  // through the normal query path, so it shows in results, Tasks (matview
+  // refreshes are classic long-runners), and history.
+  private _onMatviewRefresh(event: Event) {
+    const { table } = (event as CustomEvent<TableBrowseDetail>).detail
+    const statement = `REFRESH MATERIALIZED VIEW ${quoteQualified(table)};`
+    this._openPreviewTab(statement)
+    void this._runSql(statement)
   }
 
   // Inspect opens (or revisits) the table's structure tab — columns,

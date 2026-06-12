@@ -145,19 +145,25 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // pg_class instead of information_schema.tables so partition children
       // can be excluded — only the partitioned parent is listed (querying it
       // covers all partitions). relkinds: ordinary/partitioned tables, views,
-      // foreign tables — what information_schema.tables exposed.
+      // materialized views, foreign tables — information_schema.tables would
+      // miss matviews entirely.
       const result = await activePool().query(
-        `select n.nspname as table_schema, c.relname as table_name
+        `select n.nspname as table_schema, c.relname as table_name, c.relkind as relkind
          from pg_catalog.pg_class c
          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-         where c.relkind in ('r', 'p', 'v', 'f')
+         where c.relkind in ('r', 'p', 'v', 'm', 'f')
            and not c.relispartition
            and n.nspname !~ '^pg_'
            and n.nspname <> 'information_schema'
          order by table_schema, table_name`,
       )
+      const kinds: Record<string, TableRef['kind']> = { r: 'table', p: 'table', v: 'view', m: 'matview', f: 'foreign' }
       return result.rows.map(
-        (row: { table_schema: string; table_name: string }): TableRef => ({ schema: row.table_schema, name: row.table_name }),
+        (row: { table_schema: string; table_name: string; relkind: string }): TableRef => ({
+          schema: row.table_schema,
+          name: row.table_name,
+          kind: kinds[row.relkind] ?? 'table',
+        }),
       )
     },
 
@@ -176,7 +182,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
          left join pg_catalog.pg_index i
            on i.indrelid = a.attrelid and i.indisprimary and a.attnum = any(i.indkey)
-         where c.relkind in ('r', 'p', 'v', 'f')
+         where c.relkind in ('r', 'p', 'v', 'm', 'f')
            and not c.relispartition
            and n.nspname !~ '^pg_'
            and n.nspname <> 'information_schema'

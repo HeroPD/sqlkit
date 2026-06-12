@@ -39,9 +39,11 @@ export function createSqliteDriver(profile: ConnectionProfile): Driver {
 
     async listTables() {
       const rows = open()
-        .prepare("select name from sqlite_master where type in ('table', 'view') and name not like 'sqlite_%' order by name")
-        .all() as Array<{ name: string }>
-      return rows.map((row): TableRef => ({ schema: null, name: row.name }))
+        .prepare(
+          "select name, type from sqlite_master where type in ('table', 'view') and name not like 'sqlite_%' order by name",
+        )
+        .all() as Array<{ name: string; type: string }>
+      return rows.map((row): TableRef => ({ schema: null, name: row.name, kind: row.type === 'view' ? 'view' : 'table' }))
     },
 
     async listColumns() {

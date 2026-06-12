@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
+import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
 import type { ColumnRef, Engine, FileInfo, TableRef } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -170,6 +171,7 @@ export class ExplorerView extends LitElement {
     const items: MenuItem[] = [
       { id: 'browse', label: 'Browse Data' },
       { id: 'inspect', label: 'Inspect Table' },
+      ...(menu.table.kind === 'matview' ? [{ id: 'refresh-matview', label: 'Refresh Materialized View' }] : []),
       { id: 'copy-name', label: 'Copy Name' },
       { id: 'copy-select', label: 'Copy SELECT' },
       { id: 'refresh', label: 'Refresh Tables' },
@@ -190,6 +192,11 @@ export class ExplorerView extends LitElement {
     if (id === 'inspect') {
       this.dispatchEvent(
         new CustomEvent<TableBrowseDetail>('table-inspect', { detail: { table }, bubbles: true, composed: true }),
+      )
+    }
+    if (id === 'refresh-matview') {
+      this.dispatchEvent(
+        new CustomEvent<TableBrowseDetail>('matview-refresh', { detail: { table }, bubbles: true, composed: true }),
       )
     }
     if (id === 'copy-name') void navigator.clipboard.writeText(tableLabel(table))
@@ -242,7 +249,7 @@ export class ExplorerView extends LitElement {
     return html`
       <div
         class="etable-row ${nested ? 'nested' : ''} ${this.selectedTable === key ? 'selected' : ''}"
-        title="${tableLabel(table)} — double-click to browse"
+        title="${tableLabel(table)}${table.kind !== 'table' ? ` · ${TABLE_KIND_LABELS[table.kind]}` : ''} — double-click to browse"
         @click=${() => this._select(key)}
         @dblclick=${() => this._browse(table)}
         @contextmenu=${(event: MouseEvent) => this._onTableMenu(event, table)}
@@ -253,7 +260,7 @@ export class ExplorerView extends LitElement {
           @click=${(event: Event) => this._toggleTable(event, key)}
           @dblclick=${(event: Event) => event.stopPropagation()}
         ></i>
-        <i class="codicon codicon-table" aria-hidden="true"></i>
+        <i class="codicon ${TABLE_KIND_ICONS[table.kind] ?? 'codicon-table'}" aria-hidden="true"></i>
         <span>${table.name}</span>
       </div>
       ${expanded ? this._renderColumns(table, nested) : ''}

@@ -103,10 +103,14 @@ export type QueryResult = {
 
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
 
+/** Partitioned tables count as plain tables — partitioning is hidden anyway. */
+export type TableKind = 'table' | 'view' | 'matview' | 'foreign'
+
 export type TableRef = {
   /** Namespace of the table (Postgres schema); null for engines without one. */
   schema: string | null
   name: string
+  kind: TableKind
 }
 
 export type TablesResult = { success: true; tables: TableRef[] } | { success: false; error: string }
