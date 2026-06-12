@@ -195,6 +195,10 @@ const MAX_CACHED_STATES = 20
 // across component instances can still be reconfigured.
 const languageCompartment = new Compartment()
 const autocompleteCompartment = new Compartment()
+// run-query + change events close over the component instance; a cached
+// state restored into a NEW element must be rebound to it, or those events
+// fire on the old detached element and vanish.
+const handlersCompartment = new Compartment()
 
 // Everything per-state that doesn't capture component state, built once.
 const baseExtensions = [
@@ -355,19 +359,38 @@ export class SqlEditor extends LitElement {
     this._renderedTabId = this.tabId
 
     this._view = new EditorView({ state: this._restoredState(), parent: container })
+    // The element was just (re)created: a cached state restored here is
+    // bound to its previous element until rebound.
+    this._rebindState(this._view)
   }
 
   // The full extension set of a fresh document state.
   private _stateExtensions() {
     return [
-      runQuery((sql) => this._emitRun(sql)),
+      handlersCompartment.of(this._handlerExtensions()),
       baseExtensions,
       autocompleteCompartment.of(this._autocompleteExtension()),
       baseKeymap,
       languageCompartment.of(this._sqlExtension()),
       themeExtensions,
-      this._changeListener,
     ]
+  }
+
+  // Everything that captures `this` — rebound whenever a state lands in a view.
+  private _handlerExtensions() {
+    return [runQuery((sql) => this._emitRun(sql)), this._changeListener]
+  }
+
+  // A restored state carries the closures and config of the element/props it
+  // was created under; re-point every compartment at the current ones.
+  private _rebindState(view: EditorView) {
+    view.dispatch({
+      effects: [
+        handlersCompartment.reconfigure(this._handlerExtensions()),
+        languageCompartment.reconfigure(this._sqlExtension()),
+        autocompleteCompartment.reconfigure(this._autocompleteExtension()),
+      ],
+    })
   }
 
   private _makeState(doc: string) {
@@ -411,12 +434,7 @@ export class SqlEditor extends LitElement {
       view.setState(this._restoredState())
       this._lastEmittedValue = this.value
       this._tablesKey = this._makeTablesKey(this.tables)
-      view.dispatch({
-        effects: [
-          languageCompartment.reconfigure(this._sqlExtension()),
-          autocompleteCompartment.reconfigure(this._autocompleteExtension()),
-        ],
-      })
+      this._rebindState(view)
       return
     }
 

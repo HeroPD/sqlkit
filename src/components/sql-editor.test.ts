@@ -98,3 +98,27 @@ test('a changed doc under a reused tab id is not resurrected from cache', async 
   expect(text(second)).not.toContain('original;')
   second.remove()
 })
+
+// Regression: a cached state restored into a remounted element carried the
+// old element's run/change closures, so Mod-Enter and edits dispatched
+// events on a detached node and vanished (Cmd+Enter dead after switching
+// contexts or visiting a config tab).
+test('run-query and editor-change fire on the remounted element', async () => {
+  const first = await mount('tab-remount', 'select 42;')
+  first.remove() // stashes the state, like opening a config/inspect tab
+
+  const second = await mount('tab-remount', 'select 42;')
+  const view = (second as unknown as { _view: EditorView })._view
+
+  const events: string[] = []
+  second.addEventListener('run-query', () => events.push('run'))
+  second.addEventListener('editor-change', () => events.push('change'))
+
+  // Mod-Enter through the restored state's keymap (Mod = Ctrl off-Mac/jsdom).
+  view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))
+  view.dispatch({ changes: { from: 0, insert: '-- edit\n' } })
+
+  expect(events).toContain('run')
+  expect(events).toContain('change')
+  second.remove()
+})
