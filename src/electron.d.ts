@@ -97,6 +97,8 @@ export type QueryResult = {
   /** Rows returned for reads, rows affected for writes. */
   rowCount: number
   durationMs: number
+  /** Rows were capped before crossing IPC; rowCount still reports the full count. */
+  truncated?: boolean
 }
 
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
@@ -161,6 +163,8 @@ export type SqlkitApi = {
   /** Subscribes to status pushes from the main process; returns unsubscribe. */
   onConnectionStatus: (listener: (statuses: ConnectionStatus[]) => void) => () => void
   runQuery: (profileId: string, sql: string, params?: unknown[]) => Promise<QueryResponse>
+  /** Cancels the profile's in-flight query; the pending runQuery rejects. */
+  cancelQuery: (profileId: string) => Promise<{ success: boolean; error?: string }>
   listTables: (profileId: string) => Promise<TablesResult>
   /** Columns of every table in the connected database, one round trip. */
   listColumns: (profileId: string) => Promise<ColumnsResult>

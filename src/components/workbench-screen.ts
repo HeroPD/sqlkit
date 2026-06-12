@@ -66,14 +66,14 @@ const tabTitle = (tab: EditorTabState) => {
 }
 
 // Every database context (⌘K) is its own working instance: open tabs, the
-// active tab, the latest query result, and the Explorer's table selection.
-// A context is a connection *and* its child database (all-databases mode) —
-// x1/analytics and x1/billing are separate instances. Switching contexts
-// stashes the live fields here and restores the target's.
+// active tab, and the Explorer's table selection. A context is a connection
+// *and* its child database (all-databases mode) — x1/analytics and
+// x1/billing are separate instances. Switching contexts stashes the live
+// fields here and restores the target's. Query results live in _tabRuns,
+// keyed by tab id, so they follow their tab through any switch.
 type ContextInstance = {
   tabs: EditorTabState[]
   activeTabId: string | null
-  queryRun: QueryRun
   selectedTable: string | null
 }
 
@@ -143,8 +143,10 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _palette: PaletteMode | null = null
 
+  // The last run of every tab (runtime-only); the panel shows the active
+  // tab's, so switching tabs brings its result back.
   @state()
-  private _queryRun: QueryRun = { phase: 'idle' }
+  private _tabRuns = new Map<string, QueryRun>()
 
   // null = the default split: results take half of the editor area.
   @state()
@@ -224,7 +226,7 @@ export class WorkbenchScreen extends LitElement {
       this._activeChildDb = null
       this._palette = null
       this._selectedTable = null
-      this._queryRun = { phase: 'idle' }
+      this._tabRuns = new Map()
       this._history = []
       this._instances.clear()
       this._workspaceFiles.setFolder(null)
@@ -283,7 +285,6 @@ export class WorkbenchScreen extends LitElement {
     this._instances.set(fromKey, {
       tabs: this._tabs,
       activeTabId: this._activeTabId,
-      queryRun: this._queryRun,
       selectedTable: this._selectedTable,
     })
 
@@ -292,7 +293,6 @@ export class WorkbenchScreen extends LitElement {
     const incoming = this._instances.get(toKey)
     this._tabs = incoming?.tabs ?? []
     this._activeTabId = incoming?.activeTabId ?? null
-    this._queryRun = incoming?.queryRun ?? { phase: 'idle' }
     this._selectedTable = incoming?.selectedTable ?? null
   }
 
@@ -475,6 +475,7 @@ export class WorkbenchScreen extends LitElement {
     if (index < 0) return
 
     this._tabs = this._tabs.filter((tab) => tab.id !== id)
+    this._tabRuns.delete(id)
     if (this._activeTabId === id) {
       this._activeTabId = this._tabs[Math.min(index, this._tabs.length - 1)]?.id ?? null
     }
@@ -531,19 +532,24 @@ export class WorkbenchScreen extends LitElement {
 
   // Runs against the in-use context (⌘K), connecting it first if needed.
   private async _runSql(sqlText: string) {
+    // The run belongs to the tab it started from, even if the user switches
+    // tabs or contexts before it finishes.
+    const tabId = this._activeTabId
+    if (!tabId) return
+
     const profile = this._activeProfile()
     if (!profile) {
-      this._queryRun = { phase: 'error', error: `No database selected — press ${mod('K')} to pick one.` }
+      this._applyQueryRun(tabId, { phase: 'error', error: `No database selected — press ${mod('K')} to pick one.` })
       return
     }
 
     const runKey = contextKey(profile.id, this._activeChildDb)
 
     if (this._live.phase(profile.id) !== 'connected') {
-      this._applyQueryRun(runKey, { phase: 'running', note: `Connecting to ${profile.name}…` })
+      this._applyQueryRun(tabId, { phase: 'running', note: `Connecting to ${profile.name}…` })
       const connected = await this._live.connect(profile)
       if (!connected.success) {
-        this._applyQueryRun(runKey, { phase: 'error', error: connected.error })
+        this._applyQueryRun(tabId, { phase: 'error', error: connected.error })
         return
       }
     }
@@ -551,10 +557,10 @@ export class WorkbenchScreen extends LitElement {
     // the context's child.
     await this._alignActiveChild(profile.id)
 
-    this._applyQueryRun(runKey, { phase: 'running' })
+    this._applyQueryRun(tabId, { phase: 'running' })
     const response = await window.sqlkit.runQuery(profile.id, sqlText)
     this._applyQueryRun(
-      runKey,
+      tabId,
       response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error },
     )
 
@@ -573,15 +579,24 @@ export class WorkbenchScreen extends LitElement {
     ].slice(0, MAX_HISTORY)
   }
 
-  // A run that finishes after the user switched contexts belongs to the
-  // instance that started it, not the one on screen.
-  private _applyQueryRun(runKey: string, run: QueryRun) {
-    if (contextKey(this._activeDbId, this._activeChildDb) === runKey) {
-      this._queryRun = run
-      return
+  // Reassigned (not mutated) so Lit re-renders when the active tab's run
+  // changes; runs landing on a tab closed mid-flight are dropped.
+  private _applyQueryRun(tabId: string, run: QueryRun) {
+    if (!this._tabExists(tabId)) return
+    this._tabRuns = new Map(this._tabRuns).set(tabId, run)
+  }
+
+  private _tabExists(id: string): boolean {
+    if (this._tabs.some((tab) => tab.id === id)) return true
+    for (const instance of this._instances.values()) {
+      if (instance.tabs.some((tab) => tab.id === id)) return true
     }
-    const stashed = this._instances.get(runKey)
-    if (stashed) this._instances.set(runKey, { ...stashed, queryRun: run })
+    return false
+  }
+
+  /** What the results panel shows: the active tab's last run. */
+  private _activeQueryRun(): QueryRun {
+    return (this._activeTabId ? this._tabRuns.get(this._activeTabId) : undefined) ?? { phase: 'idle' }
   }
 
   // Double-click browse (reference behavior): a query tab named after the
@@ -1064,7 +1079,9 @@ export class WorkbenchScreen extends LitElement {
             @dblclick=${() => (this._panelHeight = null)}
           ></div>
           <results-panel
-            .run=${this._queryRun}
+            .run=${this._activeQueryRun()}
+            .canCancel=${this._activeProfile()?.engine === 'postgresql'}
+            @cancel-query=${this._onCancelQuery}
             style="height: ${this._panelHeight === null ? '50%' : `${this._panelHeight}px`}"
           ></results-panel>
         </div>
@@ -1203,6 +1220,12 @@ export class WorkbenchScreen extends LitElement {
     this._tabs = this._tabs.map((tab) =>
       tab.id === oldId && tab.kind === 'sql' ? { ...tab, id: newId, name: result.name, path: result.path } : tab,
     )
+    const run = this._tabRuns.get(oldId)
+    if (run) {
+      const next = new Map(this._tabRuns)
+      next.delete(oldId)
+      this._tabRuns = next.set(newId, run)
+    }
     if (this._activeTabId === oldId) this._activeTabId = newId
     void this._workspaceFiles.reload()
   }
@@ -1228,6 +1251,9 @@ export class WorkbenchScreen extends LitElement {
     this._tabs = this._tabs.filter(
       (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
     )
+    for (const id of [...this._tabRuns.keys()]) {
+      if (!this._tabExists(id)) this._tabRuns.delete(id)
+    }
     if (this._activeTabId && !this._tabs.some((tab) => tab.id === this._activeTabId)) {
       this._activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
     }
@@ -1252,6 +1278,13 @@ export class WorkbenchScreen extends LitElement {
   private _onRunQuery(event: Event) {
     const { sql } = (event as CustomEvent<RunQueryDetail>).detail
     void this._runSql(sql)
+  }
+
+  // The pending runQuery settles on its own with "Query cancelled." — this
+  // only asks the server to interrupt the backend.
+  private _onCancelQuery() {
+    const profile = this._activeProfile()
+    if (profile) void window.sqlkit.cancelQuery(profile.id)
   }
 
   private _onTabSelect(event: Event) {

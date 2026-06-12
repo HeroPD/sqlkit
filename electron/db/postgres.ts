@@ -13,6 +13,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   let pools: Map<string, pg.Pool> | null = null
   let childNames: string[] = []
   let active = ''
+  // Backend of the in-flight user query, so cancel() can target it. The UI
+  // runs one query per connection at a time; a single slot is enough.
+  let running: { pid: number | null; pool: pg.Pool } | null = null
 
   const makePool = (database: string) => {
     const pool = new pg.Pool({
@@ -72,14 +75,37 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
     async query(sql, params = []) {
       const started = performance.now()
-      // rowMode array keeps duplicate column names (select a.id, b.id) intact.
-      const result = await activePool().query({ text: sql, values: params, rowMode: 'array' })
-      return {
-        columns: result.fields.map((field) => field.name),
-        rows: result.rows,
-        rowCount: result.rowCount ?? result.rows.length,
-        durationMs: performance.now() - started,
+      const pool = activePool()
+      // Checked out manually (not pool.query) so the backend PID is known
+      // while the statement runs and cancel() has a target.
+      const client = await pool.connect()
+      running = { pid: (client as unknown as { processID?: number }).processID ?? null, pool }
+      try {
+        // rowMode array keeps duplicate column names (select a.id, b.id) intact.
+        const result = await client.query({ text: sql, values: params, rowMode: 'array' })
+        client.release()
+        return {
+          columns: result.fields.map((field) => field.name),
+          rows: result.rows,
+          rowCount: result.rowCount ?? result.rows.length,
+          durationMs: performance.now() - started,
+        }
+      } catch (error) {
+        // Mirror pool.query: an errored client is destroyed, not reused.
+        client.release(error as Error)
+        throw (error as { code?: string }).code === '57014' ? new Error('Query cancelled.') : error
+      } finally {
+        running = null
       }
+    },
+
+    async cancel() {
+      const target = running
+      if (!target?.pid) return false
+      // Issued from a second connection; the server interrupts the backend
+      // and the in-flight query rejects with SQLSTATE 57014.
+      await target.pool.query('select pg_cancel_backend($1)', [target.pid])
+      return true
     },
 
     async listTables() {

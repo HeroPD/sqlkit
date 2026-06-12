@@ -64,8 +64,16 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   run: QueryRun = { phase: 'idle' }
 
+  /** Whether the active connection's engine supports cancelling a run. */
+  @property({ attribute: false })
+  canCancel = false
+
   // Widths are measured once per result set; re-renders reuse the memo.
   private _widthsCache: { result: QueryResult; widths: number[] } | null = null
+
+  private _cancel() {
+    this.dispatchEvent(new CustomEvent('cancel-query', { bubbles: true, composed: true }))
+  }
 
   render() {
     return html`
@@ -81,7 +89,8 @@ export class ResultsPanel extends LitElement {
     if (this.run.phase !== 'done') return ''
     const { result } = this.run
     const rows = `${result.rowCount} row${result.rowCount === 1 ? '' : 's'}`
-    const truncated = result.rows.length > MAX_DISPLAY_ROWS ? ` (showing ${MAX_DISPLAY_ROWS})` : ''
+    const shown = Math.min(result.rows.length, MAX_DISPLAY_ROWS)
+    const truncated = result.truncated || shown < result.rows.length ? ` (showing first ${shown})` : ''
     const pace = result.durationMs < 500 ? 'fast' : result.durationMs < 2000 ? 'medium' : 'slow'
     return html`${rows}${truncated} · <span class="duration ${pace}">${Math.max(1, Math.round(result.durationMs))} ms</span>`
   }
@@ -92,10 +101,13 @@ export class ResultsPanel extends LitElement {
       return html`<p class="hint">Run a query with ${isMac ? '⌘↵' : 'Ctrl+↵'}; selection runs alone, otherwise nearest block.</p>`
     }
     if (run.phase === 'running') {
+      // A note means connecting, which has no backend to cancel yet.
+      const cancellable = !run.note && this.canCancel
       return html`
         <p class="hint">
           <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i>
           ${run.note ?? 'Running…'}
+          ${cancellable ? html`<button class="stop" @click=${this._cancel}>Stop</button>` : ''}
         </p>
       `
     }
@@ -210,6 +222,21 @@ export class ResultsPanel extends LitElement {
         margin: 0;
         padding: 10px 12px;
         color: var(--text-3);
+      }
+
+      .stop {
+        padding: 2px 10px;
+        font: inherit;
+        font-size: 11px;
+        color: var(--status-dot-error);
+        background: transparent;
+        border: 1px solid var(--border-subtle);
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      .stop:hover {
+        border-color: var(--status-dot-error);
       }
 
       .error {

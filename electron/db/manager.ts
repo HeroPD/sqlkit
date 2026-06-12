@@ -7,7 +7,7 @@ import type {
   TablesResult,
   TestConnectionResult,
 } from '../../src/electron'
-import { createDriver, type Driver } from './driver'
+import { capResult, createDriver, type Driver } from './driver'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
 
 type Active = {
@@ -98,7 +98,17 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
-      return { success: true, result: await driver.query(sql, params) }
+      return { success: true, result: capResult(await driver.query(sql, params)) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
+  async function cancelQuery(profileId: string): Promise<{ success: boolean; error?: string }> {
+    const driver = connectedDriver(profileId)
+    if (!driver?.cancel) return { success: false, error: 'Cancel is not supported on this connection' }
+    try {
+      return { success: await driver.cancel() }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
@@ -138,7 +148,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
-  return { connect, disconnect, disconnectAll, statuses, query, listTables, listColumns, setActiveChild }
+  return { connect, disconnect, disconnectAll, statuses, query, cancelQuery, listTables, listColumns, setActiveChild }
 }
 
 /**

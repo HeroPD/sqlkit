@@ -12,6 +12,9 @@ export type Driver = {
   disconnect(): Promise<void>
   /** Targets the active child database (all-databases mode) when present. */
   query(sql: string, params?: unknown[]): Promise<QueryResult>
+  /** Cancels the in-flight query; false when nothing is running. Engines
+   * without server-side cancellation (sqlite) leave it undefined. */
+  cancel?(): Promise<boolean>
   listTables(): Promise<TableRef[]>
   /** Columns of every listed table, in table order then column position. */
   listColumns(): Promise<ColumnRef[]>
@@ -24,6 +27,16 @@ export type Driver = {
 export type DriverEvents = {
   /** Async failure outside a call (e.g. an idle pool client dropping). */
   onError(message: string): void
+}
+
+/** Rows shipped to the renderer per query; the rest never cross IPC. */
+export const MAX_RESULT_ROWS = 1000
+
+// Caps rows at the IPC boundary so a stray `select *` on a huge table can't
+// flood the renderer. rowCount keeps the full count for the status line.
+export function capResult(result: QueryResult): QueryResult {
+  if (result.rows.length <= MAX_RESULT_ROWS) return result
+  return { ...result, rows: result.rows.slice(0, MAX_RESULT_ROWS), truncated: true }
 }
 
 // The endpoint carries the host/port the driver should actually dial — the
