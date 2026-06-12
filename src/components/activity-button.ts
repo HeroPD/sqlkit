@@ -12,6 +12,10 @@ export class ActivityButton extends LitElement {
   @property({ type: Boolean, reflect: true })
   active = false
 
+  /** Count bubble over the icon (VS Code style); hidden at 0. */
+  @property({ type: Number })
+  badge = 0
+
   connectedCallback() {
     super.connectedCallback()
     this.addEventListener('click', this._onClick)
@@ -23,7 +27,10 @@ export class ActivityButton extends LitElement {
   }
 
   render() {
-    return html`<slot></slot>`
+    return html`
+      <slot></slot>
+      ${this.badge > 0 ? html`<span class="badge">${this.badge > 9 ? '9+' : this.badge}</span>` : ''}
+    `
   }
 
   private _onClick = () => {
@@ -48,6 +55,24 @@ export class ActivityButton extends LitElement {
     :host(:hover),
     :host([active]) {
       color: var(--activity-bar-fg);
+    }
+
+    .badge {
+      position: absolute;
+      right: 5px;
+      bottom: 5px;
+      min-width: 14px;
+      height: 14px;
+      padding: 0 3px;
+      box-sizing: border-box;
+      border-radius: 7px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 9px;
+      font-weight: 600;
+      line-height: 14px;
+      text-align: center;
+      pointer-events: none;
     }
 
     :host([active])::before {

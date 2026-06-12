@@ -14,6 +14,7 @@ import './editor-empty'
 import './editor-tab'
 import './explorer-view'
 import './history-view'
+import './tasks-view'
 import './results-panel'
 import './search-view'
 import './sql-editor'
@@ -25,6 +26,7 @@ import type { QueryRun } from './results-panel'
 import type { RunQueryDetail } from './sql-editor'
 import type { TableBrowseDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryItem, HistoryOpenDetail } from './history-view'
+import { LONG_RUNNING_MS, type TaskItem, type TaskStopDetail } from './tasks-view'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 
@@ -38,6 +40,8 @@ const VIEWS = [
 
 // Reference behavior: keep the most recent runs, drop the tail.
 const MAX_HISTORY = 200
+
+const MAX_TASKS = 50
 
 type ViewId = (typeof VIEWS)[number]['id']
 
@@ -163,6 +167,18 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _history: HistoryItem[] = []
 
+  // Every query run, across all connections; the Tasks view shows the long
+  // ones, live timers for those still going.
+  @state()
+  private _tasks: TaskItem[] = []
+
+  // Bumped while queries run so the Tasks badge appears once a run crosses
+  // the threshold; the interval stops itself when nothing is running.
+  @state()
+  private _taskTick = 0
+
+  private _taskTimer: number | null = null
+
   @state()
   private _tabs: EditorTabState[] = []
 
@@ -197,6 +213,8 @@ export class WorkbenchScreen extends LitElement {
     this._unsubscribeMenu?.()
     this._unsubscribeMenu = null
     window.removeEventListener('keydown', this._onGlobalKeydown)
+    if (this._taskTimer !== null) clearInterval(this._taskTimer)
+    this._taskTimer = null
   }
 
   /** App-menu items (File > …) arriving from the main process. */
@@ -228,6 +246,7 @@ export class WorkbenchScreen extends LitElement {
       this._selectedTable = null
       this._tabRuns = new Map()
       this._history = []
+      this._tasks = []
       this._instances.clear()
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
@@ -558,10 +577,33 @@ export class WorkbenchScreen extends LitElement {
     await this._alignActiveChild(profile.id)
 
     this._applyQueryRun(tabId, { phase: 'running' })
+    const task: TaskItem = {
+      id: crypto.randomUUID(),
+      profileId: profile.id,
+      contextLabel: this._activeChildDb ? `${profile.name} / ${this._activeChildDb}` : profile.name,
+      sql: sqlText,
+      startedAt: Date.now(),
+      status: 'running',
+      durationMs: null,
+      rowCount: null,
+    }
+    this._tasks = [task, ...this._tasks].slice(0, MAX_TASKS)
+    this._ensureTaskTimer()
+
     const response = await window.sqlkit.runQuery(profile.id, sqlText)
     this._applyQueryRun(
       tabId,
       response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error },
+    )
+    this._tasks = this._tasks.map((entry) =>
+      entry.id === task.id
+        ? {
+            ...entry,
+            status: response.success ? 'done' : response.error === 'Query cancelled.' ? 'cancelled' : 'error',
+            durationMs: response.success ? response.result.durationMs : Date.now() - task.startedAt,
+            rowCount: response.success ? response.result.rowCount : null,
+          }
+        : entry,
     )
 
     this._history = [
@@ -834,7 +876,12 @@ export class WorkbenchScreen extends LitElement {
         <nav class="activity-bar" @activity-select=${this._onActivitySelect}>
           ${VIEWS.map(
             (view) => html`
-              <activity-button view=${view.id} title=${view.title} .active=${view.id === this._activeView}>
+              <activity-button
+                view=${view.id}
+                title=${view.title}
+                .active=${view.id === this._activeView}
+                .badge=${view.id === 'tasks' ? this._longRunningCount() : 0}
+              >
                 <i class="codicon ${view.icon}" aria-hidden="true"></i>
               </activity-button>
             `,
@@ -928,20 +975,40 @@ export class WorkbenchScreen extends LitElement {
 
   // View-specific actions level with the sidebar title (reference layout).
   private _renderTitleActions(view: (typeof VIEWS)[number]) {
-    if (view.id !== 'history') return ''
-    const key = contextKey(this._activeDbId, this._activeChildDb)
-    const count = this._history.filter((item) => item.contextKey === key).length
-    return html`
-      <button
-        class="title-action"
-        title="Clear history"
-        aria-label="Clear history"
-        ?disabled=${!count}
-        @click=${this._onHistoryClear}
-      >
-        <i class="codicon codicon-clear-all" aria-hidden="true"></i>
-      </button>
-    `
+    if (view.id === 'history') {
+      const key = contextKey(this._activeDbId, this._activeChildDb)
+      const count = this._history.filter((item) => item.contextKey === key).length
+      return html`
+        <button
+          class="title-action"
+          title="Clear history"
+          aria-label="Clear history"
+          ?disabled=${!count}
+          @click=${this._onHistoryClear}
+        >
+          <i class="codicon codicon-clear-all" aria-hidden="true"></i>
+        </button>
+      `
+    }
+    if (view.id === 'tasks') {
+      const finished = this._tasks.some((task) => task.status !== 'running')
+      return html`
+        <button
+          class="title-action"
+          title="Clear finished tasks"
+          aria-label="Clear finished tasks"
+          ?disabled=${!finished}
+          @click=${this._onTasksClear}
+        >
+          <i class="codicon codicon-clear-all" aria-hidden="true"></i>
+        </button>
+      `
+    }
+    return ''
+  }
+
+  private _onTasksClear() {
+    this._tasks = this._tasks.filter((task) => task.status === 'running')
   }
 
   private _renderSidebarView(view: (typeof VIEWS)[number]) {
@@ -988,7 +1055,8 @@ export class WorkbenchScreen extends LitElement {
         ></history-view>
       `
     }
-    return html`<p class="muted hint">${view.hint}</p>`
+    // Every view id is handled above; 'tasks' is the last one.
+    return html`<tasks-view .items=${this._tasks} @task-stop=${this._onTaskStop}></tasks-view>`
   }
 
   // Single click: open the SQL in the preview tab (recycled across picks, so
@@ -1285,6 +1353,31 @@ export class WorkbenchScreen extends LitElement {
   private _onCancelQuery() {
     const profile = this._activeProfile()
     if (profile) void window.sqlkit.cancelQuery(profile.id)
+  }
+
+  // Stop from the Tasks view: targets the task's own connection, which may
+  // not be the active context.
+  private _onTaskStop(event: Event) {
+    const { profileId } = (event as CustomEvent<TaskStopDetail>).detail
+    void window.sqlkit.cancelQuery(profileId)
+  }
+
+  private _ensureTaskTimer() {
+    if (this._taskTimer !== null) return
+    this._taskTimer = window.setInterval(() => {
+      if (this._tasks.some((task) => task.status === 'running')) {
+        this._taskTick++
+      } else {
+        clearInterval(this._taskTimer!)
+        this._taskTimer = null
+      }
+    }, 500)
+  }
+
+  /** Running queries past the threshold — the Tasks activity-bar badge. */
+  private _longRunningCount(): number {
+    const now = Date.now()
+    return this._tasks.filter((task) => task.status === 'running' && now - task.startedAt >= LONG_RUNNING_MS).length
   }
 
   private _onTabSelect(event: Event) {
