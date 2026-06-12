@@ -383,6 +383,15 @@ export class WorkbenchScreen extends LitElement {
       this._togglePalette('databases')
       return
     }
+    // Sublime-style tab switching: Mod+1..8 pick that tab, Mod+9 the last.
+    if (key >= '1' && key <= '9') {
+      const tab = key === '9' ? this._tabs[this._tabs.length - 1] : this._tabs[Number(key) - 1]
+      if (tab) {
+        event.preventDefault()
+        this._activeTabId = tab.id
+      }
+      return
+    }
     if (key === 'b') {
       event.preventDefault()
       this._toggleSidebar()
