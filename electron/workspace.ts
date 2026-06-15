@@ -8,12 +8,6 @@ type GlobalConfig = {
   lastWorkspace: string | null
 }
 
-// The workspace the renderer currently has open; set by openWorkspace and
-// used by the per-workspace config read/write.
-let currentWorkspace: string | null = null
-
-export const currentWorkspacePath = () => currentWorkspace
-
 const defaultWorkspaceConfig = (): WorkspaceConfig => ({ version: 1, connections: [] })
 
 const workspaceConfigPathFor = (wsPath: string) => path.join(wsPath, '.sqlkit', 'config.json')
@@ -78,10 +72,10 @@ const mapSecrets = (connection: ConnectionProfile, map: (value: string) => strin
     : {}),
 })
 
-export function readWorkspaceConfig(): WorkspaceConfig {
-  if (!currentWorkspace) return defaultWorkspaceConfig()
+export function readWorkspaceConfig(workspacePath: string | null): WorkspaceConfig {
+  if (!workspacePath) return defaultWorkspaceConfig()
   try {
-    const raw = JSON.parse(fs.readFileSync(workspaceConfigPathFor(currentWorkspace), 'utf8')) as Partial<WorkspaceConfig>
+    const raw = JSON.parse(fs.readFileSync(workspaceConfigPathFor(workspacePath), 'utf8')) as Partial<WorkspaceConfig>
     return {
       ...defaultWorkspaceConfig(),
       ...raw,
@@ -92,20 +86,20 @@ export function readWorkspaceConfig(): WorkspaceConfig {
   }
 }
 
-export function writeWorkspaceConfig(config: WorkspaceConfig): SaveResult {
-  if (!currentWorkspace) return { success: false, error: 'No workspace open' }
+export function writeWorkspaceConfig(workspacePath: string | null, config: WorkspaceConfig): SaveResult {
+  if (!workspacePath) return { success: false, error: 'No workspace open' }
   try {
     const normalized = { ...config, connections: normalizeConnections(config.connections) }
-    fs.mkdirSync(path.join(currentWorkspace, '.sqlkit'), { recursive: true })
+    fs.mkdirSync(path.join(workspacePath, '.sqlkit'), { recursive: true })
     // Every connection's files folder exists from the moment it's saved.
     for (const connection of normalized.connections) {
-      fs.mkdirSync(path.join(currentWorkspace, connection.folder), { recursive: true })
+      fs.mkdirSync(path.join(workspacePath, connection.folder), { recursive: true })
     }
     const stored = {
       ...normalized,
       connections: normalized.connections.map((connection) => mapSecrets(connection, encryptSecret)),
     }
-    fs.writeFileSync(workspaceConfigPathFor(currentWorkspace), JSON.stringify(stored, null, 2))
+    fs.writeFileSync(workspaceConfigPathFor(workspacePath), JSON.stringify(stored, null, 2))
     return { success: true }
   } catch (error) {
     return { success: false, error: (error as Error).message }
@@ -143,10 +137,9 @@ export function openWorkspace(wsPath: string): WorkspaceResult {
   }
 
   const workspacePath = path.resolve(wsPath)
-  currentWorkspace = workspacePath
   // Seeds the config when missing, and brings older configs up to date:
   // assigns per-connection folders and creates them on disk.
-  writeWorkspaceConfig(readWorkspaceConfig())
+  writeWorkspaceConfig(workspacePath, readWorkspaceConfig(workspacePath))
 
   const name = path.basename(workspacePath)
   const config = readGlobalConfig()

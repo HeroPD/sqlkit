@@ -68,8 +68,10 @@ export class AppRoot extends LitElement {
   }
 
   private _onCloseWorkspace() {
+    void window.sqlkit.closeWorkspace()
     this._workspace = null
     this._screen = 'welcome'
+    void this._loadRecents()
   }
 
   static styles = css`

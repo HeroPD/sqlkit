@@ -168,32 +168,45 @@ export function resolveWorkspaceItem(workspacePath: string | null, filePath: str
 
 const DEBOUNCE_MS = 150
 
-let watcher: fs.FSWatcher | null = null
-let debounceTimer: NodeJS.Timeout | null = null
+type WatchState = {
+  watcher: fs.FSWatcher | null
+  debounceTimer: NodeJS.Timeout | null
+}
 
-export function stopWorkspaceWatcher() {
-  watcher?.close()
-  watcher = null
-  if (debounceTimer) clearTimeout(debounceTimer)
-  debounceTimer = null
+const watchers = new Map<number, WatchState>()
+
+export function stopWorkspaceWatcher(id?: number) {
+  if (id === undefined) {
+    for (const key of watchers.keys()) stopWorkspaceWatcher(key)
+    return
+  }
+
+  const state = watchers.get(id)
+  if (!state) return
+  state.watcher?.close()
+  if (state.debounceTimer) clearTimeout(state.debounceTimer)
+  watchers.delete(id)
 }
 
 // Watches the workspace for .sql changes and fires `notify` (debounced) so
 // the renderer can refresh its file list. Watch failures degrade to manual
 // refresh rather than erroring the app.
-export function startWorkspaceWatcher(workspacePath: string, notify: () => void) {
-  stopWorkspaceWatcher()
+export function startWorkspaceWatcher(id: number, workspacePath: string, notify: () => void) {
+  stopWorkspaceWatcher(id)
+
+  const state: WatchState = { watcher: null, debounceTimer: null }
+  watchers.set(id, state)
 
   const schedule = () => {
-    if (debounceTimer) return
-    debounceTimer = setTimeout(() => {
-      debounceTimer = null
+    if (state.debounceTimer) return
+    state.debounceTimer = setTimeout(() => {
+      state.debounceTimer = null
       notify()
     }, DEBOUNCE_MS)
   }
 
   try {
-    watcher = fs.watch(workspacePath, { recursive: true, persistent: false }, (_event, filename) => {
+    state.watcher = fs.watch(workspacePath, { recursive: true, persistent: false }, (_event, filename) => {
       // Some platforms emit events with no filename; refresh defensively.
       // All file types are listed in the Explorer, so only internal churn
       // (.sqlkit) is filtered.
@@ -203,8 +216,8 @@ export function startWorkspaceWatcher(workspacePath: string, notify: () => void)
       }
       schedule()
     })
-    watcher.on('error', stopWorkspaceWatcher)
+    state.watcher.on('error', () => stopWorkspaceWatcher(id))
   } catch {
-    watcher = null
+    stopWorkspaceWatcher(id)
   }
 }

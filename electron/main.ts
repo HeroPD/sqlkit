@@ -1,6 +1,16 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from 'electron'
-import { dirname, join } from 'node:path'
-import { mkdirSync } from 'node:fs'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  shell,
+  type IpcMainInvokeEvent,
+  type MenuItemConstructorOptions,
+  type WebContents,
+} from 'electron'
+import { dirname, join, resolve } from 'node:path'
+import { mkdirSync, realpathSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
@@ -12,7 +22,6 @@ const fsMkdir = (dir: string) => {
   }
 }
 import {
-  currentWorkspacePath,
   isDirectory,
   openWorkspace,
   readGlobalConfig,
@@ -30,12 +39,64 @@ import {
   startWorkspaceWatcher,
   stopWorkspaceWatcher,
 } from './files'
-import { createConnectionManager, testConnection } from './db/manager'
+import { createConnectionManager, testConnection, type ConnectionManager } from './db/manager'
 import { testSshTunnel } from './db/transport'
 import type { ConnectionProfile, ConnectionStatus, DbObject, DbObjectKind, TableRef, WorkspaceConfig } from '../src/electron'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
+const workspacePaths = new Map<number, string>()
+const dbManagers = new Map<number, ConnectionManager>()
+
+const workspaceFor = (contents: WebContents) => workspacePaths.get(contents.id) ?? null
+const normalizeWorkspacePath = (wsPath: string) => {
+  try {
+    return resolve(realpathSync(wsPath))
+  } catch {
+    return resolve(wsPath)
+  }
+}
+
+function focusWindow(window: BrowserWindow) {
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+}
+
+function focusExistingWorkspace(wsPath: string, requesterId: number) {
+  const target = normalizeWorkspacePath(wsPath)
+  for (const [contentsId, openedPath] of workspacePaths) {
+    if (normalizeWorkspacePath(openedPath) !== target) continue
+    if (contentsId === requesterId) return false
+    const window = BrowserWindow.getAllWindows().find((entry) => entry.webContents.id === contentsId)
+    if (!window) {
+      cleanupWindow(contentsId)
+      continue
+    }
+    focusWindow(window)
+    return true
+  }
+  return false
+}
+
+function cleanupWindow(contentsId: number) {
+  workspacePaths.delete(contentsId)
+  stopWorkspaceWatcher(contentsId)
+  const manager = dbManagers.get(contentsId)
+  dbManagers.delete(contentsId)
+  void manager?.disconnectAll()
+}
+
+function dbManagerFor(contents: WebContents) {
+  let manager = dbManagers.get(contents.id)
+  if (!manager) {
+    manager = createConnectionManager((statuses: ConnectionStatus[]) => {
+      if (!contents.isDestroyed()) contents.send('db:status', statuses)
+    })
+    dbManagers.set(contents.id, manager)
+  }
+  return manager
+}
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -53,6 +114,9 @@ function createWindow() {
       nodeIntegration: false,
     },
   })
+
+  const contentsId = window.webContents.id
+  window.on('closed', () => cleanupWindow(contentsId))
 
   window.once('ready-to-show', () => window.show())
 
@@ -80,15 +144,13 @@ function createWindow() {
   void window.loadFile(join(__dirname, '../dist/index.html'))
 }
 
-function broadcast(channel: string, ...args: unknown[]) {
-  for (const window of BrowserWindow.getAllWindows()) {
-    window.webContents.send(channel, ...args)
-  }
-}
-
 function registerWorkspaceIpc() {
-  const watchOpened = (opened: ReturnType<typeof openWorkspace>) => {
-    if (opened.success) startWorkspaceWatcher(opened.path, () => broadcast('workspace:files-changed'))
+  const watchOpened = (contents: WebContents, opened: ReturnType<typeof openWorkspace>) => {
+    if (!opened.success) return
+    workspacePaths.set(contents.id, opened.path)
+    startWorkspaceWatcher(contents.id, opened.path, () => {
+      if (!contents.isDestroyed()) contents.send('workspace:files-changed')
+    })
   }
 
   ipcMain.handle('workspace:open', async (event) => {
@@ -101,41 +163,53 @@ function registerWorkspaceIpc() {
       buttonLabel: 'Open',
     })
     if (result.canceled) return { success: false, canceled: true }
+    if (focusExistingWorkspace(result.filePaths[0], event.sender.id)) return { success: false, canceled: true }
 
     const opened = openWorkspace(result.filePaths[0])
     if (opened.success) window.setTitle(`SqlKit — ${opened.name}`)
-    watchOpened(opened)
+    watchOpened(event.sender, opened)
     return opened
   })
 
   ipcMain.handle('workspace:open-path', (event, wsPath: string) => {
+    if (focusExistingWorkspace(wsPath, event.sender.id)) return { success: false, canceled: true }
     const opened = openWorkspace(wsPath)
     const window = BrowserWindow.fromWebContents(event.sender)
     if (opened.success && window) window.setTitle(`SqlKit — ${opened.name}`)
-    watchOpened(opened)
+    watchOpened(event.sender, opened)
     return opened
   })
 
-  ipcMain.handle('file:list', (_event, folder: string) => listWorkspaceFiles(currentWorkspacePath(), folder))
+  ipcMain.handle('workspace:close', (event) => {
+    workspacePaths.delete(event.sender.id)
+    stopWorkspaceWatcher(event.sender.id)
+    BrowserWindow.fromWebContents(event.sender)?.setTitle('SqlKit')
+  })
 
-  ipcMain.handle('file:read', (_event, filePath: string) => readWorkspaceFile(currentWorkspacePath(), filePath))
+  ipcMain.handle('app:new-window', () => {
+    createWindow()
+  })
 
-  ipcMain.handle('file:save', (_event, filePath: string, content: string) =>
-    saveWorkspaceFile(currentWorkspacePath(), filePath, content),
+  ipcMain.handle('file:list', (event, folder: string) => listWorkspaceFiles(workspaceFor(event.sender), folder))
+
+  ipcMain.handle('file:read', (event, filePath: string) => readWorkspaceFile(workspaceFor(event.sender), filePath))
+
+  ipcMain.handle('file:save', (event, filePath: string, content: string) =>
+    saveWorkspaceFile(workspaceFor(event.sender), filePath, content),
   )
 
-  ipcMain.handle('file:create', (_event, folder: string, relativePath: string) =>
-    createWorkspaceFile(currentWorkspacePath(), folder, relativePath),
+  ipcMain.handle('file:create', (event, folder: string, relativePath: string) =>
+    createWorkspaceFile(workspaceFor(event.sender), folder, relativePath),
   )
 
-  ipcMain.handle('file:rename', (_event, filePath: string, newName: string) =>
-    renameWorkspaceFile(currentWorkspacePath(), filePath, newName),
+  ipcMain.handle('file:rename', (event, filePath: string, newName: string) =>
+    renameWorkspaceFile(workspaceFor(event.sender), filePath, newName),
   )
 
   // Confirmation happens in the renderer (in-app modal); this just validates
   // and moves the target to the Trash.
-  ipcMain.handle('file:delete', async (_event, filePath: string) => {
-    const resolved = resolveWorkspaceItem(currentWorkspacePath(), filePath)
+  ipcMain.handle('file:delete', async (event, filePath: string) => {
+    const resolved = resolveWorkspaceItem(workspaceFor(event.sender), filePath)
     if ('error' in resolved) return { success: false, error: resolved.error }
 
     try {
@@ -147,15 +221,15 @@ function registerWorkspaceIpc() {
   })
 
   // Non-.sql files (spreadsheets, exports…) open with the system default app.
-  ipcMain.handle('file:open-external', async (_event, filePath: string) => {
-    const resolved = resolveWorkspaceItem(currentWorkspacePath(), filePath)
+  ipcMain.handle('file:open-external', async (event, filePath: string) => {
+    const resolved = resolveWorkspaceItem(workspaceFor(event.sender), filePath)
     if ('error' in resolved) return { success: false, error: resolved.error }
     const error = await shell.openPath(resolved.path)
     return error ? { success: false, error } : { success: true }
   })
 
   ipcMain.handle('file:save-as', async (event, folder: string, suggestedName: string, content: string) => {
-    const workspace = currentWorkspacePath()
+    const workspace = workspaceFor(event.sender)
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!workspace || !window) return { success: false, error: 'No workspace open' }
 
@@ -197,43 +271,46 @@ function registerWorkspaceIpc() {
     return readGlobalConfig().recentWorkspaces.filter((workspace) => isDirectory(workspace.path))
   })
 
-  ipcMain.handle('workspace:get-config', () => readWorkspaceConfig())
+  ipcMain.handle('workspace:get-config', (event) => readWorkspaceConfig(workspaceFor(event.sender)))
 
-  ipcMain.handle('workspace:save-config', (_event, config: WorkspaceConfig) => writeWorkspaceConfig(config))
+  ipcMain.handle('workspace:save-config', (event, config: WorkspaceConfig) =>
+    writeWorkspaceConfig(workspaceFor(event.sender), config),
+  )
 }
 
 function registerDbIpc() {
-  const manager = createConnectionManager((statuses: ConnectionStatus[]) => broadcast('db:status', statuses))
+  const manager = (event: IpcMainInvokeEvent) => dbManagerFor(event.sender)
+  const existingManager = (event: IpcMainInvokeEvent) => dbManagers.get(event.sender.id)
 
   ipcMain.handle('db:test', (_event, profile: ConnectionProfile) => testConnection(profile))
   ipcMain.handle('db:test-ssh', (_event, profile: ConnectionProfile) => testSshTunnel(profile))
-  ipcMain.handle('db:connect', (_event, profile: ConnectionProfile) => manager.connect(profile))
-  ipcMain.handle('db:disconnect', (_event, profileId: string) => manager.disconnect(profileId))
-  ipcMain.handle('db:disconnect-all', () => manager.disconnectAll())
-  ipcMain.handle('db:set-active-child', (_event, profileId: string, database: string) =>
-    manager.setActiveChild(profileId, database),
+  ipcMain.handle('db:connect', (event, profile: ConnectionProfile) => manager(event).connect(profile))
+  ipcMain.handle('db:disconnect', (event, profileId: string) => existingManager(event)?.disconnect(profileId))
+  ipcMain.handle('db:disconnect-all', (event) => existingManager(event)?.disconnectAll())
+  ipcMain.handle('db:set-active-child', (event, profileId: string, database: string) =>
+    manager(event).setActiveChild(profileId, database),
   )
-  ipcMain.handle('db:statuses', () => manager.statuses())
-  ipcMain.handle('db:query', (_event, profileId: string, sql: string, params?: unknown[]) =>
-    manager.query(profileId, sql, params),
+  ipcMain.handle('db:statuses', (event) => existingManager(event)?.statuses() ?? [])
+  ipcMain.handle('db:query', (event, profileId: string, sql: string, params?: unknown[]) =>
+    manager(event).query(profileId, sql, params),
   )
-  ipcMain.handle('db:cancel', (_event, profileId: string) => manager.cancelQuery(profileId))
-  ipcMain.handle('db:create-database', (_event, profileId: string, name: string) =>
-    manager.createDatabase(profileId, name),
+  ipcMain.handle('db:cancel', (event, profileId: string) => manager(event).cancelQuery(profileId))
+  ipcMain.handle('db:create-database', (event, profileId: string, name: string) =>
+    manager(event).createDatabase(profileId, name),
   )
-  ipcMain.handle('db:drop-database', (_event, profileId: string, name: string) =>
-    manager.dropDatabase(profileId, name),
+  ipcMain.handle('db:drop-database', (event, profileId: string, name: string) =>
+    manager(event).dropDatabase(profileId, name),
   )
-  ipcMain.handle('db:list-tables', (_event, profileId: string) => manager.listTables(profileId))
-  ipcMain.handle('db:list-columns', (_event, profileId: string) => manager.listColumns(profileId))
-  ipcMain.handle('db:inspect-table', (_event, profileId: string, table: TableRef) =>
-    manager.inspectTable(profileId, table),
+  ipcMain.handle('db:list-tables', (event, profileId: string) => manager(event).listTables(profileId))
+  ipcMain.handle('db:list-columns', (event, profileId: string) => manager(event).listColumns(profileId))
+  ipcMain.handle('db:inspect-table', (event, profileId: string, table: TableRef) =>
+    manager(event).inspectTable(profileId, table),
   )
-  ipcMain.handle('db:list-objects', (_event, profileId: string) => manager.listObjects(profileId))
-  ipcMain.handle('db:inspect-object', (_event, profileId: string, object: DbObject, objectKind: DbObjectKind) =>
-    manager.inspectObject(profileId, object, objectKind),
+  ipcMain.handle('db:list-objects', (event, profileId: string) => manager(event).listObjects(profileId))
+  ipcMain.handle('db:inspect-object', (event, profileId: string, object: DbObject, objectKind: DbObjectKind) =>
+    manager(event).inspectObject(profileId, object, objectKind),
   )
-  ipcMain.handle('db:inspect-server', (_event, profileId: string) => manager.inspectServer(profileId))
+  ipcMain.handle('db:inspect-server', (event, profileId: string) => manager(event).inspectServer(profileId))
 
   ipcMain.handle('db:pick-sqlite-file', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)
@@ -252,8 +329,9 @@ function registerDbIpc() {
   })
 
   app.on('before-quit', () => {
+    // Window 'closed' cleanup normally handles this; keep this belt-and-suspenders path for quit races.
     stopWorkspaceWatcher()
-    void manager.disconnectAll()
+    void Promise.all([...dbManagers.values()].map((active) => active.disconnectAll()))
   })
 }
 
@@ -272,6 +350,8 @@ function buildAppMenu() {
     {
       label: 'File',
       submenu: [
+        { label: 'New Window', accelerator: 'Shift+CmdOrCtrl+N', click: () => createWindow() },
+        { type: 'separator' },
         { label: 'New Query', accelerator: 'CmdOrCtrl+N', click: menuAction('new-query') },
         { type: 'separator' },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: menuAction('save') },

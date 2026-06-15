@@ -114,6 +114,7 @@ const childFolderSegment = (name: string) => {
 // Commands offered by the ⌘⇧P palette; ids are dispatched to _runCommand.
 const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind?: string }> = [
   { id: 'new-query', label: 'New Query', icon: 'codicon-new-file', keybind: mod('N') },
+  { id: 'new-window', label: 'New Window', icon: 'codicon-window', keybind: `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}N` },
   { id: 'run-query', label: 'Run Query', icon: 'codicon-play', keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
   { id: 'save-file', label: 'Save File', icon: 'codicon-save', keybind: mod('S') },
   { id: 'quick-open', label: 'Quick Open…', icon: 'codicon-file-code', keybind: mod('P') },
@@ -761,6 +762,9 @@ export class WorkbenchScreen extends LitElement {
     switch (id) {
       case 'new-query':
         this._newQuery()
+        break
+      case 'new-window':
+        void window.sqlkit.newWindow()
         break
       case 'run-query': {
         const tab = this._activeSqlTab()

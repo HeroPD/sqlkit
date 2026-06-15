@@ -4,6 +4,8 @@ import type { ConnectionStatus, SqlkitApi } from '../src/electron'
 const api: SqlkitApi = {
   openWorkspace: () => ipcRenderer.invoke('workspace:open'),
   openWorkspacePath: (path) => ipcRenderer.invoke('workspace:open-path', path),
+  closeWorkspace: () => ipcRenderer.invoke('workspace:close'),
+  newWindow: () => ipcRenderer.invoke('app:new-window'),
   getRecentWorkspaces: () => ipcRenderer.invoke('workspace:get-recent'),
   getWorkspaceConfig: () => ipcRenderer.invoke('workspace:get-config'),
   saveWorkspaceConfig: (config) => ipcRenderer.invoke('workspace:save-config', config),
