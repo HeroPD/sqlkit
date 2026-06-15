@@ -1,7 +1,31 @@
 import pg from 'pg'
+import { readFileSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import type { ConnectionOptions } from 'node:tls'
 import type { ColumnRef, ConnectionProfile, InspectSection, TableRef } from '../../src/electron'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
+
+const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
+
+function sslOptions(profile: ConnectionProfile): boolean | ConnectionOptions {
+  const ssl = profile.ssl
+  if (!ssl || ssl.mode === 'disable') return false
+  if (ssl.mode === 'require') return { rejectUnauthorized: false }
+
+  const options: ConnectionOptions = { rejectUnauthorized: true }
+  const caPath = ssl.ca.trim()
+  if (caPath) {
+    try {
+      options.ca = readFileSync(expandHome(caPath), 'utf8')
+    } catch (error) {
+      throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`)
+    }
+  }
+  if (ssl.mode === 'verify-ca') options.checkServerIdentity = () => undefined
+  return options
+}
 
 // PostgreSQL with all-databases support (reference behavior): connect to a
 // discovery database, optionally list every database on the server, and keep
@@ -16,6 +40,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   // Backend of the in-flight user query, so cancel() can target it. The UI
   // runs one query per connection at a time; a single slot is enough.
   let running: { pid: number | null; pool: pg.Pool } | null = null
+  const ssl = sslOptions(profile)
 
   const makePool = (database: string) => {
     const pool = new pg.Pool({
@@ -24,6 +49,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       user: profile.username,
       password: profile.password,
       database,
+      ssl,
       max: 4,
       connectionTimeoutMillis: 8000,
     })

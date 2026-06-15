@@ -21,6 +21,15 @@ export type ChildDb = { name: string; inUse: boolean }
 
 export type SshAuthType = 'password' | 'key'
 
+export type SslMode = 'disable' | 'require' | 'verify-ca' | 'verify-full'
+
+export type SslConfig = {
+  /** disable = plain TCP; require = encrypted without certificate verification. */
+  mode: SslMode
+  /** Optional CA certificate file path for verify-ca / verify-full. Supports a leading ~. */
+  ca: string
+}
+
 export type SshConfig = {
   enabled: boolean
   host: string
@@ -54,6 +63,8 @@ export type ConnectionProfile = {
    * then left untouched (renames don't move files).
    */
   folder: string
+  /** TLS settings for server-based engines; absent means SSL disabled. */
+  ssl?: SslConfig
   /** SSH tunnel settings; absent means a direct connection. */
   ssh?: SshConfig
 }

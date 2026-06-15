@@ -1,7 +1,7 @@
 import { LitElement, css, html, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
-import type { ConnectionProfile, DatabaseMode, Engine, SshAuthType, SshConfig } from '../electron'
+import type { ConnectionProfile, DatabaseMode, Engine, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
 
 const ENGINES: ReadonlyArray<{ engine: Engine; label: string; disabled?: boolean }> = [
   { engine: 'postgresql', label: 'PostgreSQL' },
@@ -33,6 +33,11 @@ const defaultSsh = (): SshConfig => ({
   passphrase: '',
 })
 
+const defaultSsl = (): SslConfig => ({
+  mode: 'disable',
+  ca: '',
+})
+
 // Connection profile fields with test/save/cancel. The form is controlled:
 // the draft lives in the owner (the workbench's tab), each edit emits
 // `config-change` with the updated profile, and `config-save` /
@@ -54,7 +59,7 @@ export class DbConfigForm extends LitElement {
     if (!draft) return html``
 
     return html`
-      <div class="card">
+      <div class="card" @keydown=${this._onFieldKeydown}>
         <header>
           <h1>${draft.name.trim() || 'New Database'}</h1>
           <p class="muted">Connection settings are saved into this workspace's .sqlkit folder.</p>
@@ -82,13 +87,16 @@ export class DbConfigForm extends LitElement {
         </section>
 
         ${draft.engine === 'sqlite' ? this._sqliteSection(draft) : this._serverSection(draft)}
+        ${draft.engine === 'sqlite' ? '' : this._sslSection(draft)}
         ${draft.engine === 'sqlite' ? '' : this._sshSection(draft)}
 
         <footer>
           <button class="primary" @click=${this._onSave}>Save</button>
           <button class="secondary" @click=${this._onCancel}>Cancel</button>
           <span class="spacer"></span>
-          <span class="test-result ${this._test.phase}">${'message' in this._test ? this._test.message : ''}</span>
+          <span class="test-result ${this._test.phase}" title=${'message' in this._test ? this._test.message : ''}>
+            ${'message' in this._test ? this._test.message : ''}
+          </span>
           <button class="secondary" @click=${this._onTest} ?disabled=${this._test.phase === 'testing'}>
             ${this._test.phase === 'testing' ? 'Testing…' : 'Test Connection'}
           </button>
@@ -149,6 +157,77 @@ export class DbConfigForm extends LitElement {
     `
   }
 
+  private _sslSection(draft: ConnectionProfile) {
+    const ssl = draft.ssl ?? defaultSsl()
+    return html`
+      <section>
+        <div class="section-head">
+          <h4>SSL</h4>
+          <p class="muted small">Encrypt the database connection</p>
+        </div>
+        ${this._field(
+          'Mode',
+          html`
+            <select @change=${(e: Event) => this._patchSsl(ssl, { mode: (e.target as HTMLSelectElement).value as SslMode })}>
+              <option value="disable" ?selected=${ssl.mode === 'disable'}>Disable</option>
+              <option value="require" ?selected=${ssl.mode === 'require'}>Require encryption</option>
+              <option value="verify-ca" ?selected=${ssl.mode === 'verify-ca'}>Verify CA</option>
+              <option value="verify-full" ?selected=${ssl.mode === 'verify-full'}>Verify full</option>
+            </select>
+          `,
+          ssl.mode === 'require'
+            ? 'Encrypted, but the server certificate is not verified.'
+            : 'Verify full validates both the certificate chain and hostname.',
+        )}
+        ${ssl.mode === 'verify-ca' || ssl.mode === 'verify-full'
+          ? this._field('CA certificate', this._sslInput(ssl, 'ca'), 'Optional path to a custom root CA certificate. System roots are used when empty.')
+          : ''}
+      </section>
+    `
+  }
+
+  private _sslInput(ssl: SslConfig, key: keyof Pick<SslConfig, 'ca'>) {
+    return html`
+      <input
+        type="text"
+        .value=${ssl[key]}
+        @input=${(e: Event) => this._patchSsl(ssl, { [key]: (e.target as HTMLInputElement).value })}
+        autocomplete="off"
+        spellcheck="false"
+      />
+    `
+  }
+
+  private _patchSsl(current: SslConfig, partial: Partial<SslConfig>) {
+    this._patch({ ssl: { ...current, ...partial } })
+  }
+
+  private _onFieldKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      const target = event.target
+      if (!(target instanceof HTMLSelectElement)) return
+      event.preventDefault()
+      const picker = target as HTMLSelectElement & { showPicker?: () => void }
+      picker.showPicker?.() ?? target.click()
+      return
+    }
+
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    const target = event.target
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return
+
+    const controls = [...this.renderRoot.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.field-control input, .field-control select')]
+      .filter((control) => !control.disabled && control.getClientRects().length > 0)
+    const index = controls.indexOf(target)
+    if (index < 0) return
+
+    event.preventDefault()
+    const next = controls[index + (event.key === 'ArrowDown' ? 1 : -1)]
+    if (!next) return
+    next.focus()
+    if (next instanceof HTMLInputElement && next.type !== 'checkbox') next.select()
+  }
+
   private _sshSection(draft: ConnectionProfile) {
     const ssh = draft.ssh ?? defaultSsh()
     return html`
@@ -202,7 +281,9 @@ export class DbConfigForm extends LitElement {
             <button class="secondary" @click=${this._onTestSsh} ?disabled=${this._sshTest.phase === 'testing'}>
               ${this._sshTest.phase === 'testing' ? 'Testing…' : 'Test SSH'}
             </button>
-            <span class="test-result ${this._sshTest.phase}">${'message' in this._sshTest ? this._sshTest.message : ''}</span>
+            <span class="test-result ${this._sshTest.phase}" title=${'message' in this._sshTest ? this._sshTest.message : ''}>
+              ${'message' in this._sshTest ? this._sshTest.message : ''}
+            </span>
           </div>
         `,
       )}
@@ -414,10 +495,14 @@ export class DbConfigForm extends LitElement {
       .test-result {
         font-size: var(--font-size-sm);
         text-align: right;
-        max-width: 280px;
+        max-width: min(520px, 45vw);
         overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+        white-space: normal;
       }
 
       .test-result.ok {
