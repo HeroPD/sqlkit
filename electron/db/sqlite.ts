@@ -1,5 +1,6 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type { ColumnRef, ConnectionProfile, InspectSection, QueryResult, TableRef } from '../../src/electron'
+import { MAX_RESULT_ROWS } from './driver'
 import type { Driver } from './driver'
 
 // SQLite via the node:sqlite module built into Electron's Node — no native
@@ -147,12 +148,13 @@ function run(statement: StatementSync, params: Array<string | number | bigint | 
     return { columns: [], rows: [], rowCount: Number(info.changes) }
   }
 
-  const rows = statement.all(...params) as Array<Record<string, unknown>>
-  // Object rows collapse duplicate column names (select a.id, b.id); the
-  // duplicates still appear as columns, both reading the surviving value.
-  return {
-    columns,
-    rows: rows.map((row) => columns.map((column) => row[column])),
-    rowCount: rows.length,
+  // Stream rows (iterate, not all) so a huge result can't blow up memory; keep
+  // only what the renderer shows. Object rows collapse duplicate column names.
+  const rows: unknown[][] = []
+  let total = 0
+  for (const row of statement.iterate(...params)) {
+    total += 1
+    if (rows.length < MAX_RESULT_ROWS) rows.push(columns.map((column) => row[column]))
   }
+  return { columns, rows, rowCount: total, truncated: total > MAX_RESULT_ROWS }
 }
