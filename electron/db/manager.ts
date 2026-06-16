@@ -60,19 +60,40 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     connections.set(profile.id, active)
     broadcast(statuses())
 
+    // True while `active` is still the entry registered for this profile. A
+    // concurrent connect (or a disconnect) replaces or removes it mid-await;
+    // when that happens this attempt must tear down whatever it built and
+    // leave the newer entry's state alone.
+    const isCurrent = () => connections.get(profile.id) === active
+
+    // Closes only the resources this attempt opened — used on failure and when
+    // the attempt is superseded, so a slow tunnel/pool can't outlive its entry.
+    const teardown = async () => {
+      await active.driver?.disconnect().catch(() => {})
+      await active.tunnel?.close().catch(() => {})
+    }
+
     // Only flag the session that actually failed; a reconnect may have
     // already replaced this entry.
     const onError = (message: string) => {
-      if (connections.get(profile.id) === active) {
-        setStatus(active, { profileId: profile.id, phase: 'error', error: message })
-      }
+      if (isCurrent()) setStatus(active, { profileId: profile.id, phase: 'error', error: message })
     }
 
     try {
       const endpoint = await resolveEndpoint(profile, onError)
       active.tunnel = endpoint.tunnel
+      // Superseded while the tunnel was opening: own the tunnel we just got so
+      // teardown can close it, then bail without overwriting the newer entry.
+      if (!isCurrent()) {
+        await teardown()
+        return { success: false, error: 'Connection superseded' }
+      }
       active.driver = createDriver(profile, endpoint, { onError })
       const serverVersion = await active.driver.connect()
+      if (!isCurrent()) {
+        await teardown()
+        return { success: false, error: 'Connection superseded' }
+      }
       setStatus(active, {
         profileId: profile.id,
         phase: 'connected',
@@ -83,10 +104,9 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       return { success: true, serverVersion }
     } catch (error) {
       const message = (error as Error).message
-      setStatus(active, { profileId: profile.id, phase: 'error', error: message })
+      if (isCurrent()) setStatus(active, { profileId: profile.id, phase: 'error', error: message })
       // A failed connect must not leak the pool or the tunnel under it.
-      await active.driver?.disconnect().catch(() => {})
-      await active.tunnel?.close().catch(() => {})
+      await teardown()
       return { success: false, error: message }
     }
   }

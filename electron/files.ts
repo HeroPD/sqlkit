@@ -6,6 +6,36 @@ const isSqlFile = (name: string) => path.extname(name).toLowerCase() === '.sql'
 
 const toRelative = (root: string, absPath: string) => path.relative(root, absPath).split(path.sep).join('/')
 
+// realpath of the deepest existing ancestor with the not-yet-created tail
+// re-appended, so a path whose final segments don't exist yet (save/create)
+// still resolves through any symlinked parent.
+function realpathDeep(target: string): string {
+  let current = target
+  const tail: string[] = []
+  for (;;) {
+    try {
+      const real = fs.realpathSync(current)
+      return tail.length ? path.join(real, ...tail) : real
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) return target
+      tail.unshift(path.basename(current))
+      current = parent
+    }
+  }
+}
+
+// True when `target` stays inside the workspace even after symlinks are
+// followed. Lexical resolve + startsWith is bypassable: a symlink inside the
+// workspace can point out of it, so both sides are compared by real path.
+// (The caller still operates on the lexical path — reading/writing it follows
+// the same symlinks we just proved resolve inside the root.)
+function isInsideWorkspace(workspacePath: string, target: string): boolean {
+  const root = realpathDeep(path.resolve(workspacePath))
+  const real = realpathDeep(path.resolve(target))
+  return real === root || real.startsWith(root + path.sep)
+}
+
 // A context folder is one or two plain path segments inside the workspace:
 // the connection's folder, optionally followed by a child-database folder
 // (all-databases mode) — connection/child/file.sql.
@@ -66,7 +96,7 @@ export function readWorkspaceFile(workspacePath: string | null, filePath: string
   if (!workspacePath) return { success: false, error: 'No workspace open' }
 
   const resolved = path.resolve(filePath)
-  if (!resolved.startsWith(workspacePath + path.sep)) {
+  if (!isInsideWorkspace(workspacePath, resolved)) {
     return { success: false, error: 'Path is outside the workspace' }
   }
   if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be opened' }
@@ -85,7 +115,7 @@ export function saveWorkspaceFile(workspacePath: string | null, filePath: string
   if (!workspacePath) return { success: false, error: 'No workspace open' }
 
   const resolved = path.resolve(filePath)
-  if (!resolved.startsWith(workspacePath + path.sep)) {
+  if (!isInsideWorkspace(workspacePath, resolved)) {
     return { success: false, error: 'Files must stay inside the workspace' }
   }
   if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
@@ -108,10 +138,13 @@ export function createWorkspaceFile(workspacePath: string | null, folder: string
   if (!root) return { success: false, error: 'Invalid database folder' }
 
   const resolved = path.resolve(root, relativePath)
+  // Lexical check keeps relativePath inside this context folder; the realpath
+  // check below additionally blocks escapes through a symlinked folder.
   if (!resolved.startsWith(root + path.sep)) return { success: false, error: 'Files must stay inside the database folder' }
   if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
 
   const target = isSqlFile(resolved) ? resolved : `${resolved}.sql`
+  if (!isInsideWorkspace(workspacePath, target)) return { success: false, error: 'Files must stay inside the database folder' }
   if (fs.existsSync(target)) return { success: false, error: `${path.basename(target)} already exists` }
 
   try {
@@ -130,7 +163,7 @@ export function renameWorkspaceFile(workspacePath: string | null, filePath: stri
   if (!workspacePath) return { success: false, error: 'No workspace open' }
 
   const resolved = path.resolve(filePath)
-  if (!resolved.startsWith(workspacePath + path.sep)) return { success: false, error: 'File is outside the workspace' }
+  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: 'File is outside the workspace' }
   if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
 
   const trimmed = newName.trim()
@@ -154,7 +187,7 @@ export function renameWorkspaceFile(workspacePath: string | null, filePath: stri
 export function resolveWorkspaceItem(workspacePath: string | null, filePath: string): { path: string } | { error: string } {
   if (!workspacePath) return { error: 'No workspace open' }
   const resolved = path.resolve(filePath)
-  if (!resolved.startsWith(workspacePath + path.sep)) return { error: 'Path is outside the workspace' }
+  if (!isInsideWorkspace(workspacePath, resolved)) return { error: 'Path is outside the workspace' }
   if (resolved.split(path.sep).includes('.sqlkit')) return { error: 'The .sqlkit folder is internal' }
   try {
     fs.statSync(resolved)
