@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { SshConfig } from '../../src/electron'
 import type { Tunnel } from './transport'
+import { makeHostVerifier } from './knownHosts'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
@@ -57,6 +58,9 @@ export function openSshTunnel(
     let server: net.Server | null = null
     let settled = false
     let closing = false
+    // Set by the host-key verifier on a pinned-key mismatch so the generic
+    // ssh2 handshake error is replaced with one the user can act on.
+    let rejectionMessage: string | null = null
 
     const close = () =>
       new Promise<void>((done) => {
@@ -73,13 +77,14 @@ export function openSshTunnel(
       })
 
     const fail = (error: Error) => {
+      const finalError = rejectionMessage ? new Error(rejectionMessage) : error
       if (settled) {
-        if (!closing) onError(`SSH tunnel: ${error.message}`)
+        if (!closing) onError(`SSH tunnel: ${finalError.message}`)
         return
       }
       settled = true
       void close()
-      reject(error)
+      reject(finalError)
     }
 
     client.on('error', fail)
@@ -116,7 +121,13 @@ export function openSshTunnel(
     })
 
     try {
-      client.connect(buildConnectConfig(ssh))
+      const config = buildConnectConfig(ssh)
+      // Pin the bastion's host key on first use and reject if it ever changes;
+      // without this ssh2 accepts any key, leaving the tunnel open to MITM.
+      config.hostVerifier = makeHostVerifier(config.host as string, config.port as number, (message) => {
+        rejectionMessage = message
+      })
+      client.connect(config)
     } catch (error) {
       fail(error as Error)
     }
