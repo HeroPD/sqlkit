@@ -20,6 +20,8 @@ export class ConnectionsController implements ReactiveController {
 
   private host: ReactiveControllerHost
   private unsubscribe: (() => void) | null = null
+  /** Per-profile metadata-load token; a newer load invalidates older ones. */
+  private metaGen: Record<string, number> = {}
 
   constructor(host: ReactiveControllerHost) {
     this.host = host
@@ -112,11 +114,16 @@ export class ConnectionsController implements ReactiveController {
   }
 
   private async loadTables(profileId: string) {
+    // Tag this load; a newer one (child switch, refresh, reconnect) for the
+    // same profile supersedes it, so a slower earlier response can't overwrite
+    // the newer child's metadata.
+    const gen = (this.metaGen[profileId] = (this.metaGen[profileId] ?? 0) + 1)
     const [tables, columns, objects] = await Promise.all([
       window.sqlkit.listTables(profileId),
       window.sqlkit.listColumns(profileId),
       window.sqlkit.listObjects(profileId),
     ])
+    if (this.metaGen[profileId] !== gen) return
     if (this.statuses[profileId]?.phase !== 'connected') return
     if (tables.success) this.tables = { ...this.tables, [profileId]: tables.tables }
     if (columns.success) this.columns = { ...this.columns, [profileId]: columns.columns }
