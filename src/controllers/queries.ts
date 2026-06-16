@@ -1,5 +1,5 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ConnectionProfile } from '../electron'
+import type { ConnectionProfile, QueryResponse } from '../electron'
 import type { QueryRun } from '../components/results-panel'
 import type { HistoryItem } from '../components/history-view'
 import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
@@ -28,6 +28,8 @@ export class QueriesController implements ReactiveController {
   /** Guards against landing results on tabs closed mid-run. */
   private tabExists: (tabId: string) => boolean
   private timer: number | null = null
+  /** Bumped on reset(); a run started under an older value is stale. */
+  private generation = 0
 
   constructor(host: ReactiveControllerHost, tabExists: (tabId: string) => boolean) {
     this.host = host
@@ -63,6 +65,7 @@ export class QueriesController implements ReactiveController {
     sql: string
   }) {
     const { tabId, profile, childDb, contextKey, sql } = args
+    const gen = this.generation
     this.setRun(tabId, { phase: 'running' })
     const task: TaskItem = {
       id: crypto.randomUUID(),
@@ -78,7 +81,19 @@ export class QueriesController implements ReactiveController {
     this.ensureTimer()
     this.host.requestUpdate()
 
-    const response = await window.sqlkit.runQuery(profile.id, sql)
+    let response: QueryResponse
+    try {
+      response = await window.sqlkit.runQuery(profile.id, sql)
+    } catch (error) {
+      // A rejected IPC (channel error, main-side throw) would otherwise leave
+      // the run and its task stuck on 'running' forever.
+      response = { success: false, error: (error as Error).message }
+    }
+
+    // A workspace switch (reset) happened while this ran: the result belongs
+    // to the old workspace, so drop it instead of writing into the new one's
+    // freshly-cleared history/tasks.
+    if (this.generation !== gen) return
 
     this.setRun(
       tabId,
@@ -149,6 +164,9 @@ export class QueriesController implements ReactiveController {
 
   /** Workspace switch: results, tasks and history all belong to the old one. */
   reset() {
+    // Invalidate any in-flight execute() so its result can't land in the new
+    // workspace's state after this clears everything.
+    this.generation += 1
     this.runs = new Map()
     this.history = []
     this.tasks = []
