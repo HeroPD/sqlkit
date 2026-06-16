@@ -12,7 +12,7 @@ import {
 import { dirname, join, resolve } from 'node:path'
 import { mkdirSync, realpathSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const fsMkdir = (dir: string) => {
   try {
@@ -45,8 +45,27 @@ import type { ConnectionProfile, ConnectionStatus, DbObject, DbObjectKind, Table
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
+const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
 const workspacePaths = new Map<number, string>()
 const dbManagers = new Map<number, ConnectionManager>()
+
+// Only these schemes are ever handed to the OS; a renderer navigated somewhere
+// unexpected can't use this to launch arbitrary protocol handlers.
+const EXTERNAL_SCHEMES = new Set(['http:', 'https:', 'mailto:'])
+const openExternalSafely = (url: string) => {
+  try {
+    if (EXTERNAL_SCHEMES.has(new URL(url).protocol)) void shell.openExternal(url)
+  } catch {
+    // Unparseable URL — ignore.
+  }
+}
+
+// The app's own document: the dev server in dev, the built index.html in prod.
+// Navigation to anything else (including other file:// paths) is not the app.
+const isAppUrl = (url: string) =>
+  devServerUrl
+    ? url.startsWith(devServerUrl)
+    : url === appFileUrl || url.startsWith(`${appFileUrl}#`) || url.startsWith(`${appFileUrl}?`)
 
 const workspaceFor = (contents: WebContents) => workspacePaths.get(contents.id) ?? null
 const normalizeWorkspacePath = (wsPath: string) => {
@@ -121,18 +140,19 @@ function createWindow() {
   window.once('ready-to-show', () => window.show())
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    openExternalSafely(url)
     return { action: 'deny' }
   })
 
   window.webContents.on('will-navigate', (event, url) => {
     // Reloads of the app itself (Vite full-reload in dev, Cmd+R in prod) must
-    // stay in-window; only genuinely external URLs go to the browser.
-    const isAppUrl = url.startsWith('file://') || (devServerUrl !== undefined && url.startsWith(devServerUrl))
-    if (isAppUrl) return
+    // stay in-window; a navigation anywhere else is blocked and, when it's a
+    // real web link, handed to the browser. Pinning to the exact app URL stops
+    // a stray navigation to another file:// page from inheriting window.sqlkit.
+    if (isAppUrl(url)) return
 
     event.preventDefault()
-    void shell.openExternal(url)
+    openExternalSafely(url)
   })
 
   if (devServerUrl) {
