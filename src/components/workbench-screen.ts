@@ -362,14 +362,18 @@ export class WorkbenchScreen extends LitElement {
   // After a connect, the driver targets the discovery database; if the
   // context remembers a different child, point the driver at it (or follow
   // the driver when the remembered child no longer exists).
-  private async _alignActiveChild(profileId: string) {
-    if (this._activeDbId !== profileId || !this._activeChildDb) return
+  // Points profileId's driver at `childDb` (all-databases mode). Takes the
+  // target explicitly rather than reading this._activeChildDb, so a run that
+  // captured its context can align that exact child even after the active
+  // selection has drifted.
+  private async _alignActiveChild(profileId: string, childDb: string | null) {
+    if (!childDb) return
     const children = this._live.statuses[profileId]?.children ?? []
     if (children.length < 2) return
     const inUse = children.find((child) => child.inUse)?.name
-    if (inUse === this._activeChildDb) return
-    if (children.some((child) => child.name === this._activeChildDb)) {
-      await this._live.setActiveChild(profileId, this._activeChildDb)
+    if (inUse === childDb) return
+    if (children.some((child) => child.name === childDb)) {
+      await this._live.setActiveChild(profileId, childDb)
     } else if (inUse) {
       this._setActiveDb(profileId, inUse)
     }
@@ -573,6 +577,12 @@ export class WorkbenchScreen extends LitElement {
       return
     }
 
+    // Capture the context the run started in. The connect/align below await,
+    // and the user may switch child or profile meanwhile; the run must target
+    // and be logged under the context Run was pressed in, not the current one.
+    const childDb = this._activeChildDb
+    const runContextKey = contextKey(profile.id, childDb)
+
     if (this._live.phase(profile.id) !== 'connected') {
       this._queries.setRun(tabId, { phase: 'running', note: `Connecting to ${profile.name}…` })
       const connected = await this._live.connect(profile)
@@ -581,15 +591,15 @@ export class WorkbenchScreen extends LitElement {
         return
       }
     }
-    // The driver may be targeting the discovery database; the run belongs to
-    // the context's child.
-    await this._alignActiveChild(profile.id)
+    // The driver may be targeting the discovery database; point it at the
+    // captured child before running.
+    await this._alignActiveChild(profile.id, childDb)
 
     await this._queries.execute({
       tabId,
       profile,
-      childDb: this._activeChildDb,
-      contextKey: contextKey(profile.id, this._activeChildDb),
+      childDb,
+      contextKey: runContextKey,
       sql: sqlText,
     })
   }
@@ -1238,7 +1248,10 @@ export class WorkbenchScreen extends LitElement {
     // Failures surface through the status push (error dot + message).
     const result = await this._live.connect(connection)
     if (!result.success) return
-    await this._alignActiveChild(id)
+    // Preserve the original behavior: only align when reconnecting the
+    // already-active profile (its current child); a freshly-connected,
+    // not-yet-active profile is aligned by _setActiveDb below.
+    await this._alignActiveChild(id, this._activeDbId === id ? this._activeChildDb : null)
     // A successful connect becomes the in-use context, but stays on the
     // Databases view — no jumping to the Explorer uninvited.
     this._setActiveDb(id)
