@@ -200,9 +200,14 @@ function registerWorkspaceIpc() {
     return opened
   })
 
-  ipcMain.handle('workspace:close', (event) => {
+  ipcMain.handle('workspace:close', async (event) => {
     workspacePaths.delete(event.sender.id)
     stopWorkspaceWatcher(event.sender.id)
+    // Connections belong to the workspace they were opened from. The renderer
+    // disconnects on workspace change too, but main owns the boundary: a
+    // renderer that didn't (crash, failed IPC) must not leak pools or SSH
+    // tunnels. disconnectAll is idempotent, so the double call is harmless.
+    await dbManagers.get(event.sender.id)?.disconnectAll()
     BrowserWindow.fromWebContents(event.sender)?.setTitle('SqlKit')
   })
 
