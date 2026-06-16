@@ -38,11 +38,11 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   let pools: Map<string, pg.Pool> | null = null
   let childNames: string[] = []
   let active = ''
-  // Backends of in-flight user queries so cancel() can interrupt them. Two
+  // Backend PIDs of in-flight user queries so cancel() can interrupt them. Two
   // tabs can run on one connection at once, so this is a set rather than a
   // single slot — a single slot let a second run clobber the first's cancel
   // target, and the first's completion then cleared it.
-  const running = new Set<{ pid: number | null; pool: pg.Pool }>()
+  const running = new Set<{ pid: number | null }>()
   const ssl = sslOptions(profile)
 
   const makePool = (database: string) => {
@@ -110,7 +110,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // Checked out manually (not pool.query) so the backend PID is known
       // while the statement runs and cancel() has a target.
       const client = await pool.connect()
-      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null, pool }
+      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null }
       running.add(entry)
       try {
         const result = await streamQuery(client, sql, params, started)
@@ -158,13 +158,27 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
     async cancel() {
       // Interrupt every in-flight backend on this connection — the UI's Stop
-      // is per-connection. Each cancel is issued from a second pooled client;
-      // a backend that already finished just makes pg_cancel_backend a no-op.
-      const targets = [...running].filter((entry) => entry.pid)
-      if (!targets.length) return false
-      await Promise.all(
-        targets.map((entry) => entry.pool.query('select pg_cancel_backend($1)', [entry.pid]).catch(() => {})),
-      )
+      // is per-connection. Issue the cancels from a fresh out-of-band
+      // connection, not the pool the running queries occupy: with max:4 busy
+      // clients a pool-routed cancel would queue behind the very queries it is
+      // trying to interrupt. A backend that already finished is a no-op.
+      const pids = [...running].map((entry) => entry.pid).filter((pid): pid is number => pid !== null)
+      if (!pids.length) return false
+      const client = new pg.Client({
+        host: endpoint.host,
+        port: endpoint.port,
+        user: profile.username,
+        password: profile.password,
+        database: active,
+        ssl,
+        connectionTimeoutMillis: 8000,
+      })
+      try {
+        await client.connect()
+        await Promise.all(pids.map((pid) => client.query('select pg_cancel_backend($1)', [pid]).catch(() => {})))
+      } finally {
+        await client.end().catch(() => {})
+      }
       return true
     },
 
