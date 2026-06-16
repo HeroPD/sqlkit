@@ -1,6 +1,15 @@
 import { MSSQL, MySQL, PostgreSQL, SQLite, type SQLDialect } from '@codemirror/lang-sql'
+import type { Engine } from '../electron'
 
 export type SqlDialectName = 'postgres' | 'mssql' | 'sqlite' | 'mysql'
+
+/** The editor dialect (highlighting, parsing, completion) for a connection's engine. */
+export const dialectForEngine: Record<Engine, SqlDialectName> = {
+  postgresql: 'postgres',
+  sqlite: 'sqlite',
+  mysql: 'mysql',
+  sqlserver: 'mssql',
+}
 
 export type SqlDialectConfig = {
   dialect: SQLDialect

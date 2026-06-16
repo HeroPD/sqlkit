@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
-import type { ColumnRef, ConnectionProfile, InspectSection, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, InspectSection, QueryResult, TableRef } from '../../src/electron'
+import { MAX_RESULT_ROWS } from './driver'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 
@@ -109,15 +110,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const client = await pool.connect()
       running = { pid: (client as unknown as { processID?: number }).processID ?? null, pool }
       try {
-        // rowMode array keeps duplicate column names (select a.id, b.id) intact.
-        const result = await client.query({ text: sql, values: params, rowMode: 'array' })
+        const result = await streamQuery(client, sql, params, started)
         client.release()
-        return {
-          columns: result.fields.map((field) => field.name),
-          rows: result.rows,
-          rowCount: result.rowCount ?? result.rows.length,
-          durationMs: performance.now() - started,
-        }
+        return result
       } catch (error) {
         // Mirror pool.query: an errored client is destroyed, not reused.
         client.release(error as Error)
@@ -499,6 +494,34 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       return true
     },
   }
+}
+
+// Streams rows so a huge result can't OOM the main process: pg only buffers
+// when nothing listens for 'row'. rowMode array keeps duplicate column names.
+function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], started: number): Promise<QueryResult> {
+  return new Promise((resolve, reject) => {
+    const rows: unknown[][] = []
+    let total = 0
+    const config: pg.QueryArrayConfig = { text: sql, values: params, rowMode: 'array' }
+    const query = new pg.Query(config)
+    query.on('row', (row: unknown[]) => {
+      total += 1
+      if (rows.length < MAX_RESULT_ROWS) rows.push(row)
+    })
+    query.on('error', reject)
+    query.on('end', (result) => {
+      // Multi-statement queries resolve to an array; the last has the final columns.
+      const final = (Array.isArray(result) ? result[result.length - 1] : result) as pg.QueryArrayResult
+      resolve({
+        columns: final.fields.map((field) => field.name),
+        rows,
+        rowCount: final.rowCount ?? total,
+        durationMs: performance.now() - started,
+        truncated: total > MAX_RESULT_ROWS,
+      })
+    })
+    client.query(query)
+  })
 }
 
 /** "PostgreSQL 17.2 on aarch64-apple-darwin…" → "PostgreSQL 17.2". */

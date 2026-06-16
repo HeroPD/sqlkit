@@ -31,6 +31,7 @@ import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from '
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { QueriesController } from '../controllers/queries'
+import { dialectForEngine } from '../codemirror/dialects'
 import { stripExplain } from '../sql-types'
 import { TABLE_KIND_LABELS } from '../table-kinds'
 import type { SearchOpenDetail } from './search-view'
@@ -556,6 +557,8 @@ export class WorkbenchScreen extends LitElement {
     // tabs or contexts before it finishes.
     const tabId = this._activeTabId
     if (!tabId) return
+    // One run per tab: ignore re-triggers while this tab's query is in flight.
+    if (this._queries.runFor(tabId).phase === 'running') return
 
     const profile = this._activeProfile()
     if (!profile) {
@@ -1143,12 +1146,14 @@ export class WorkbenchScreen extends LitElement {
     if (activeTab?.kind === 'sql') {
       const tables = (this._activeDbId ? (this._live.tables[this._activeDbId] ?? []) : []).map((table) => table.name)
       const columns = this._activeDbId ? (this._live.columns[this._activeDbId] ?? null) : null
+      const dialect = dialectForEngine[this._activeProfile()?.engine ?? 'postgresql']
       return html`
         <div class="editor-content sql">
           <div class="editor-pane">
             <sql-editor
               .tabId=${activeTab.id}
               .value=${activeTab.content}
+              .dialect=${dialect}
               .tables=${tables}
               .columns=${columns}
             ></sql-editor>
