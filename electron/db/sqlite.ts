@@ -19,6 +19,9 @@ export function createSqliteDriver(profile: ConnectionProfile): Driver {
     async connect() {
       const file = profile.file.trim()
       if (!file) throw new Error('Choose a database file first.')
+      // A re-connect must close the previous handle first, or it leaks.
+      db?.close()
+      db = null
       // Opens (and creates, if missing) the file eagerly so a bad path fails
       // here rather than on the first query.
       db = new DatabaseSync(file)
@@ -148,13 +151,14 @@ function run(statement: StatementSync, params: Array<string | number | bigint | 
     return { columns: [], rows: [], rowCount: Number(info.changes) }
   }
 
-  // Stream rows (iterate, not all) so a huge result can't blow up memory; keep
-  // only what the renderer shows. Object rows collapse duplicate column names.
+  // Array rows (not objects) keep duplicate column names intact (select a.id,
+  // b.id); iterate (not all) bounds memory — keep only what the renderer shows.
+  statement.setReturnArrays(true)
   const rows: unknown[][] = []
   let total = 0
-  for (const row of statement.iterate(...params)) {
+  for (const row of statement.iterate(...params) as unknown as Iterable<unknown[]>) {
     total += 1
-    if (rows.length < MAX_RESULT_ROWS) rows.push(columns.map((column) => row[column]))
+    if (rows.length < MAX_RESULT_ROWS) rows.push(row)
   }
   return { columns, rows, rowCount: total, truncated: total > MAX_RESULT_ROWS }
 }
