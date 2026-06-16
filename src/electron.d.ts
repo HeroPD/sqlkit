@@ -78,6 +78,12 @@ export type WorkspaceConfig = {
 
 export type SaveResult = { success: true } | { success: false; error: string }
 
+export type WorkspaceConfigResult = {
+  config: WorkspaceConfig
+  /** Set when an existing config file couldn't be read/parsed; the file is left untouched. */
+  error?: string
+}
+
 // --- Live connections ---------------------------------------------------
 
 export type ConnectionPhase = 'connecting' | 'connected' | 'error'
@@ -199,7 +205,7 @@ export type SqlkitApi = {
   closeWorkspace: () => Promise<void>
   newWindow: () => Promise<void>
   getRecentWorkspaces: () => Promise<RecentWorkspace[]>
-  getWorkspaceConfig: () => Promise<WorkspaceConfig>
+  getWorkspaceConfig: () => Promise<WorkspaceConfigResult>
   saveWorkspaceConfig: (config: WorkspaceConfig) => Promise<SaveResult>
   testConnection: (profile: ConnectionProfile) => Promise<TestConnectionResult>
   testSshTunnel: (profile: ConnectionProfile) => Promise<TestSshResult>

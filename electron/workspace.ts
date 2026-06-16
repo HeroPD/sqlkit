@@ -1,7 +1,22 @@
 import { app, safeStorage } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { ConnectionProfile, RecentWorkspace, SaveResult, WorkspaceConfig, WorkspaceResult } from '../src/electron'
+import type {
+  ConnectionProfile,
+  RecentWorkspace,
+  SaveResult,
+  WorkspaceConfig,
+  WorkspaceConfigResult,
+  WorkspaceResult,
+} from '../src/electron'
+
+// temp+rename so a crash mid-write can't leave a half-written (and for the
+// workspace config, connection-wiping) file behind.
+const writeFileAtomic = (file: string, data: string) => {
+  const tmp = `${file}.tmp`
+  fs.writeFileSync(tmp, data)
+  fs.renameSync(tmp, file)
+}
 
 type GlobalConfig = {
   recentWorkspaces: RecentWorkspace[]
@@ -72,18 +87,45 @@ const mapSecrets = (connection: ConnectionProfile, map: (value: string) => strin
     : {}),
 })
 
-export function readWorkspaceConfig(workspacePath: string | null): WorkspaceConfig {
-  if (!workspacePath) return defaultWorkspaceConfig()
+type ConfigOutcome =
+  | { status: 'ok'; config: WorkspaceConfig }
+  | { status: 'missing' }
+  | { status: 'error'; error: string }
+
+// Reads and decrypts the on-disk config, separating "no config yet" (safe to
+// seed) from "config exists but is unreadable/corrupt" (must be preserved, not
+// silently replaced with defaults).
+function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
+  let raw: string
   try {
-    const raw = JSON.parse(fs.readFileSync(workspaceConfigPathFor(workspacePath), 'utf8')) as Partial<WorkspaceConfig>
-    return {
-      ...defaultWorkspaceConfig(),
-      ...raw,
-      connections: normalizeConnections(raw.connections ?? []).map((connection) => mapSecrets(connection, decryptSecret)),
-    }
-  } catch {
-    return defaultWorkspaceConfig()
+    raw = fs.readFileSync(workspaceConfigPathFor(workspacePath), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'missing' }
+    return { status: 'error', error: (error as Error).message }
   }
+  try {
+    const parsed = JSON.parse(raw) as Partial<WorkspaceConfig>
+    return {
+      status: 'ok',
+      config: {
+        ...defaultWorkspaceConfig(),
+        ...parsed,
+        connections: normalizeConnections(parsed.connections ?? []).map((connection) => mapSecrets(connection, decryptSecret)),
+      },
+    }
+  } catch (error) {
+    return { status: 'error', error: `${workspaceConfigPathFor(workspacePath)} is not valid JSON: ${(error as Error).message}` }
+  }
+}
+
+export function readWorkspaceConfig(workspacePath: string | null): WorkspaceConfigResult {
+  if (!workspacePath) return { config: defaultWorkspaceConfig() }
+  const outcome = loadWorkspaceConfig(workspacePath)
+  if (outcome.status === 'ok') return { config: outcome.config }
+  if (outcome.status === 'missing') return { config: defaultWorkspaceConfig() }
+  // Hand back empty connections so the UI still renders, but flag the error so
+  // it can warn rather than pretend the workspace has no connections.
+  return { config: defaultWorkspaceConfig(), error: outcome.error }
 }
 
 export function writeWorkspaceConfig(workspacePath: string | null, config: WorkspaceConfig): SaveResult {
@@ -99,7 +141,7 @@ export function writeWorkspaceConfig(workspacePath: string | null, config: Works
       ...normalized,
       connections: normalized.connections.map((connection) => mapSecrets(connection, encryptSecret)),
     }
-    fs.writeFileSync(workspaceConfigPathFor(workspacePath), JSON.stringify(stored, null, 2))
+    writeFileAtomic(workspaceConfigPathFor(workspacePath), JSON.stringify(stored, null, 2))
     return { success: true }
   } catch (error) {
     return { success: false, error: (error as Error).message }
@@ -117,7 +159,7 @@ export function readGlobalConfig(): GlobalConfig {
 }
 
 function writeGlobalConfig(config: GlobalConfig) {
-  fs.writeFileSync(globalConfigPath(), JSON.stringify(config, null, 2))
+  writeFileAtomic(globalConfigPath(), JSON.stringify(config, null, 2))
 }
 
 export function isDirectory(checkPath: string) {
@@ -137,9 +179,13 @@ export function openWorkspace(wsPath: string): WorkspaceResult {
   }
 
   const workspacePath = path.resolve(wsPath)
-  // Seeds the config when missing, and brings older configs up to date:
-  // assigns per-connection folders and creates them on disk.
-  writeWorkspaceConfig(workspacePath, readWorkspaceConfig(workspacePath))
+  // Seed a config only when none exists, and bring a readable one up to date
+  // (per-connection folders, re-encrypted secrets). A config that exists but
+  // won't parse is left untouched — re-seeding it would wipe every saved
+  // connection over a single hand-edit slip.
+  const outcome = loadWorkspaceConfig(workspacePath)
+  if (outcome.status === 'missing') writeWorkspaceConfig(workspacePath, defaultWorkspaceConfig())
+  else if (outcome.status === 'ok') writeWorkspaceConfig(workspacePath, outcome.config)
 
   const name = path.basename(workspacePath)
   const config = readGlobalConfig()

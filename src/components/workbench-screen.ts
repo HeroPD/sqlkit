@@ -260,7 +260,14 @@ export class WorkbenchScreen extends LitElement {
   // --- workspace config + context -----------------------------------------
 
   private async _loadConfig() {
-    const config = await window.sqlkit.getWorkspaceConfig()
+    const { config, error } = await window.sqlkit.getWorkspaceConfig()
+    if (error) {
+      this._notice(
+        'Workspace config could not be read',
+        `${error}\n\nThe file was left untouched, so your saved connections are still on disk. ` +
+          'Fix or restore .sqlkit/config.json and reopen the workspace — saving new connections now would overwrite it.',
+      )
+    }
     this._connections = config.connections
     // Restore the in-use context; default to the first profile so the
     // Explorer has a files folder to show right away.
