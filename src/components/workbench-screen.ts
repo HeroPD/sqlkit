@@ -223,6 +223,9 @@ export class WorkbenchScreen extends LitElement {
 
   /** App-menu items (File > …) arriving from the main process. */
   private _onMenuAction(action: MenuAction) {
+    // The workbench stays mounted (hidden) on the welcome screen; File-menu
+    // actions need an open workspace.
+    if (!this.workspace) return
     switch (action) {
       case 'new-query':
         this._newQuery()
@@ -398,6 +401,9 @@ export class WorkbenchScreen extends LitElement {
   // ⌘⇧P commands, ⌘P quick open, ⌘K database switch, ⌘B sidebar, ⌘N new
   // query, ⌘S save, ⌘↵ run. Pressing a palette's own shortcut again closes it.
   private _onGlobalKeydown = (event: KeyboardEvent) => {
+    // Mounted but hidden on the welcome screen; ignore global keys until a
+    // workspace is open.
+    if (!this.workspace) return
     // The editor's own keymap (Mod-Enter) prevents default when it handles a
     // chord; don't run it twice.
     if (event.defaultPrevented) return
