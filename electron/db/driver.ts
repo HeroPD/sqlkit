@@ -21,8 +21,8 @@ export type Driver = {
   /** Opens the connection; resolves with the server version string. */
   connect(): Promise<string>
   disconnect(): Promise<void>
-  /** Targets the active child database (all-databases mode) when present. */
-  query(sql: string, params?: unknown[]): Promise<QueryResult>
+  /** Runs in `childDb` when provided; otherwise uses the driver's active database. */
+  query(sql: string, params?: unknown[], childDb?: string | null): Promise<QueryResult>
   /** Cancels the in-flight query; false when nothing is running. Engines
    * without server-side cancellation (sqlite) leave it undefined. */
   cancel?(): Promise<boolean>

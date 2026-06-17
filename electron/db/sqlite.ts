@@ -34,7 +34,7 @@ export function createSqliteDriver(profile: ConnectionProfile): Driver {
       db = null
     },
 
-    async query(sql, params = []) {
+    async query(sql, params = [], _childDb = null) {
       const statement = open().prepare(sql)
       const started = performance.now()
       const result = run(statement, params as Array<string | number | bigint | null>)

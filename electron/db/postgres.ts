@@ -69,6 +69,13 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     return pool
   }
 
+  const poolForQuery = (childDb?: string | null) => {
+    if (!childDb) return activePool()
+    const pool = pools?.get(childDb)
+    if (!pool) throw new Error(`Database "${childDb}" is not available on this connection`)
+    return pool
+  }
+
   const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`
 
   return {
@@ -104,9 +111,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       await Promise.all([...closing.values()].map((pool) => pool.end().catch(() => {})))
     },
 
-    async query(sql, params = []) {
+    async query(sql, params = [], childDb = null) {
       const started = performance.now()
-      const pool = activePool()
+      const pool = poolForQuery(childDb)
       // Checked out manually (not pool.query) so the backend PID is known
       // while the statement runs and cancel() has a target.
       const client = await pool.connect()

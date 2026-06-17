@@ -16,8 +16,9 @@ const runArgs = { tabId: 't1', profile, childDb: null, contextKey: 'p1', sql: 'S
 function deferRunQuery() {
   let settle!: (response: QueryResponse) => void
   const pending = new Promise<QueryResponse>((res) => (settle = res))
-  ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery: () => pending }
-  return { settle }
+  const runQuery = vi.fn(() => pending)
+  ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
+  return { settle, runQuery }
 }
 
 afterEach(() => {
@@ -36,6 +37,17 @@ describe('QueriesController.execute', () => {
     expect(controller.runFor('t1')).toEqual({ phase: 'done', result })
     expect(controller.history).toHaveLength(1)
     expect(controller.tasks[0]?.status).toBe('done')
+  })
+
+  it('passes the captured child database to the query IPC', async () => {
+    const { settle, runQuery } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute({ ...runArgs, childDb: 'analytics', contextKey: 'p1:analytics' })
+    settle({ success: true, result })
+    await done
+
+    expect(runQuery).toHaveBeenCalledWith('p1', 'analytics', 'SELECT 1')
   })
 
   it('drops a result that resolves after a workspace switch (reset)', async () => {

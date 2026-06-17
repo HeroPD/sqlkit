@@ -120,11 +120,11 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     return active?.status.phase === 'connected' ? active.driver : null
   }
 
-  async function query(profileId: string, sql: string, params?: unknown[]): Promise<QueryResponse> {
+  async function query(profileId: string, childDb: string | null, sql: string, params?: unknown[]): Promise<QueryResponse> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
-      return { success: true, result: capResult(await driver.query(sql, params)) }
+      return { success: true, result: capResult(await driver.query(sql, params, childDb)) }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }

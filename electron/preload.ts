@@ -21,7 +21,7 @@ const api: SqlkitApi = {
     ipcRenderer.on('db:status', handler)
     return () => ipcRenderer.off('db:status', handler)
   },
-  runQuery: (profileId, sql, params) => ipcRenderer.invoke('db:query', profileId, sql, params),
+  runQuery: (profileId, childDb, sql, params) => ipcRenderer.invoke('db:query', profileId, childDb, sql, params),
   cancelQuery: (profileId) => ipcRenderer.invoke('db:cancel', profileId),
   createDatabase: (profileId, name) => ipcRenderer.invoke('db:create-database', profileId, name),
   dropDatabase: (profileId, name) => ipcRenderer.invoke('db:drop-database', profileId, name),

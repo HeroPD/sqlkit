@@ -217,7 +217,7 @@ export type SqlkitApi = {
   getConnectionStatuses: () => Promise<ConnectionStatus[]>
   /** Subscribes to status pushes from the main process; returns unsubscribe. */
   onConnectionStatus: (listener: (statuses: ConnectionStatus[]) => void) => () => void
-  runQuery: (profileId: string, sql: string, params?: unknown[]) => Promise<QueryResponse>
+  runQuery: (profileId: string, childDb: string | null, sql: string, params?: unknown[]) => Promise<QueryResponse>
   /** Cancels the profile's in-flight query; the pending runQuery rejects. */
   cancelQuery: (profileId: string) => Promise<{ success: boolean; error?: string }>
   /** Server-side CREATE DATABASE on a connected profile (postgres only). */

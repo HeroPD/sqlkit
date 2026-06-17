@@ -9,16 +9,24 @@ const toRelative = (root: string, absPath: string) => path.relative(root, absPat
 // realpath of the deepest existing ancestor with the not-yet-created tail
 // re-appended, so a path whose final segments don't exist yet (save/create)
 // still resolves through any symlinked parent.
-function realpathDeep(target: string): string {
+function realpathDeep(target: string): string | null {
   let current = target
   const tail: string[] = []
   for (;;) {
     try {
       const real = fs.realpathSync(current)
       return tail.length ? path.join(real, ...tail) : real
-    } catch {
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      try {
+        // realpathSync also fails for a broken symlink. That must not be
+        // treated like a missing future path, because writeFileSync would
+        // follow the symlink and create/write its outside target.
+        if (fs.lstatSync(current).isSymbolicLink()) return null
+      } catch {}
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return null
       const parent = path.dirname(current)
-      if (parent === current) return target
+      if (parent === current) return null
       tail.unshift(path.basename(current))
       current = parent
     }
@@ -33,7 +41,14 @@ function realpathDeep(target: string): string {
 function isInsideWorkspace(workspacePath: string, target: string): boolean {
   const root = realpathDeep(path.resolve(workspacePath))
   const real = realpathDeep(path.resolve(target))
+  if (!root || !real) return false
   return real === root || real.startsWith(root + path.sep)
+}
+
+function isWorkspaceRoot(workspacePath: string, target: string): boolean {
+  const root = realpathDeep(path.resolve(workspacePath))
+  const real = realpathDeep(path.resolve(target))
+  return root !== null && real !== null && real === root
 }
 
 // A context folder is one or two plain path segments inside the workspace:
@@ -79,6 +94,7 @@ export function listWorkspaceFiles(workspacePath: string | null, folder: string)
   // Context folders are created on first save; a missing one (or a child
   // folder that doesn't exist yet) just lists as empty.
   if (!fs.existsSync(root)) return { success: true, files: [] }
+  if (!isInsideWorkspace(workspacePath, root)) return { success: false, error: 'Database folder is outside the workspace' }
 
   try {
     const files = collectFiles(root, root, [])
@@ -184,10 +200,15 @@ export function renameWorkspaceFile(workspacePath: string | null, filePath: stri
 }
 
 /** Validates a workspace file/folder path for delete or open-external. */
-export function resolveWorkspaceItem(workspacePath: string | null, filePath: string): { path: string } | { error: string } {
+export function resolveWorkspaceItem(
+  workspacePath: string | null,
+  filePath: string,
+  options: { allowRoot?: boolean } = {},
+): { path: string } | { error: string } {
   if (!workspacePath) return { error: 'No workspace open' }
   const resolved = path.resolve(filePath)
   if (!isInsideWorkspace(workspacePath, resolved)) return { error: 'Path is outside the workspace' }
+  if (options.allowRoot === false && isWorkspaceRoot(workspacePath, resolved)) return { error: 'Cannot delete the workspace folder' }
   if (resolved.split(path.sep).includes('.sqlkit')) return { error: 'The .sqlkit folder is internal' }
   try {
     fs.statSync(resolved)

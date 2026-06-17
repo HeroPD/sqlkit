@@ -105,6 +105,9 @@ const NO_CONTEXT = '__none__'
 const contextKey = (profileId: string | null, childDb: string | null) =>
   profileId === null ? NO_CONTEXT : `${profileId}:${childDb ?? ''}`
 
+const tableContextKey = (profileId: string, childDb: string | null, table: TableRef) =>
+  `${profileId}:${childDb ?? ''}:${table.schema ?? ''}:${table.name}`
+
 // Child database names become folder segments (connection/child/file.sql);
 // strip anything that isn't a safe path character.
 const childFolderSegment = (name: string) => {
@@ -363,23 +366,27 @@ export class WorkbenchScreen extends LitElement {
   }
 
   // After a connect, the driver targets the discovery database; if the
-  // context remembers a different child, point the driver at it (or follow
-  // the driver when the remembered child no longer exists).
+  // context remembers a different child, point the driver at it.
   // Points profileId's driver at `childDb` (all-databases mode). Takes the
   // target explicitly rather than reading this._activeChildDb, so a run that
   // captured its context can align that exact child even after the active
   // selection has drifted.
-  private async _alignActiveChild(profileId: string, childDb: string | null) {
-    if (!childDb) return
+  private async _alignActiveChild(
+    profileId: string,
+    childDb: string | null,
+    options: { followMissing?: boolean } = {},
+  ): Promise<boolean> {
+    if (!childDb) return true
     const children = this._live.statuses[profileId]?.children ?? []
-    if (children.length < 2) return
+    if (children.length < 2) return true
     const inUse = children.find((child) => child.inUse)?.name
-    if (inUse === childDb) return
+    if (inUse === childDb) return true
     if (children.some((child) => child.name === childDb)) {
-      await this._live.setActiveChild(profileId, childDb)
-    } else if (inUse) {
+      return (await this._live.setActiveChild(profileId, childDb)).success
+    } else if (options.followMissing && inUse) {
       this._setActiveDb(profileId, inUse)
     }
+    return false
   }
 
   // ⌘K parent pick on a not-yet-connected connection: the palette stays open
@@ -599,7 +606,10 @@ export class WorkbenchScreen extends LitElement {
     }
     // The driver may be targeting the discovery database; point it at the
     // captured child before running.
-    await this._alignActiveChild(profile.id, childDb)
+    if (!(await this._alignActiveChild(profile.id, childDb))) {
+      this._queries.setRun(tabId, { phase: 'error', error: `Database "${childDb}" is not available on this connection` })
+      return
+    }
 
     await this._queries.execute({
       tabId,
@@ -624,7 +634,7 @@ export class WorkbenchScreen extends LitElement {
   private _browseTable(profile: ConnectionProfile, table: TableRef) {
     const sqlText = `SELECT * FROM ${quoteQualified(table)} LIMIT 200`
 
-    const id = `browse:${tableKey(profile.id, table)}`
+    const id = `browse:${tableContextKey(profile.id, this._activeChildDb, table)}`
     const existing = this._tabs.find((tab) => tab.id === id)
     if (!existing) {
       this._tabs = [
@@ -1257,7 +1267,7 @@ export class WorkbenchScreen extends LitElement {
     // Preserve the original behavior: only align when reconnecting the
     // already-active profile (its current child); a freshly-connected,
     // not-yet-active profile is aligned by _setActiveDb below.
-    await this._alignActiveChild(id, this._activeDbId === id ? this._activeChildDb : null)
+    await this._alignActiveChild(id, this._activeDbId === id ? this._activeChildDb : null, { followMissing: true })
     // A successful connect becomes the in-use context, but stays on the
     // Databases view — no jumping to the Explorer uninvited.
     this._setActiveDb(id)
@@ -1438,7 +1448,7 @@ export class WorkbenchScreen extends LitElement {
     const { table } = (event as CustomEvent<TableBrowseDetail>).detail
     const profile = this._activeProfile()
     if (!profile) return
-    const id = `inspect:${tableKey(profile.id, table)}`
+    const id = `inspect:${tableContextKey(profile.id, this._activeChildDb, table)}`
     if (!this._tabs.some((tab) => tab.id === id)) {
       this._tabs = [...this._tabs, { id, kind: 'inspect', profileId: profile.id, table }]
     }
@@ -1450,7 +1460,7 @@ export class WorkbenchScreen extends LitElement {
     const { object, objectKind } = (event as CustomEvent<ObjectInspectDetail>).detail
     const profile = this._activeProfile()
     if (!profile) return
-    const id = `inspect-object:${profile.id}:${object.schema ?? ''}:${objectKind}:${object.name}:${object.detail}`
+    const id = `inspect-object:${profile.id}:${this._activeChildDb ?? ''}:${object.schema ?? ''}:${objectKind}:${object.name}:${object.detail}`
     if (!this._tabs.some((tab) => tab.id === id)) {
       this._tabs = [...this._tabs, { id, kind: 'inspect-object', profileId: profile.id, object, objectKind }]
     }

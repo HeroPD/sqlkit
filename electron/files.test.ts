@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   createWorkspaceFile,
+  listWorkspaceFiles,
   readWorkspaceFile,
   resolveWorkspaceItem,
   saveWorkspaceFile,
@@ -65,12 +66,42 @@ describe('workspace file containment', () => {
     expect(fs.existsSync(path.join(outside, 'evil.sql'))).toBe(false)
   })
 
+  it('refuses to write through a broken symlink whose target would be outside', () => {
+    const { ws, outside } = setup()
+    const outsideTarget = path.join(outside, 'new.sql')
+    fs.symlinkSync(outsideTarget, path.join(ws, 'link.sql'))
+
+    const result = saveWorkspaceFile(ws, path.join(ws, 'link.sql'), 'pwned')
+
+    expect(result.success).toBe(false)
+    expect(fs.existsSync(outsideTarget)).toBe(false)
+  })
+
   it('refuses to create a file in a context folder that symlinks outside', () => {
     const { ws, outside } = setup()
     fs.symlinkSync(outside, path.join(ws, 'conn'))
     const result = createWorkspaceFile(ws, 'conn', 'new')
     expect(result.success).toBe(false)
     expect(fs.existsSync(path.join(outside, 'new.sql'))).toBe(false)
+  })
+
+  it('refuses to create through a broken symlinked context folder', () => {
+    const { ws, outside } = setup()
+    fs.symlinkSync(path.join(outside, 'missing-folder'), path.join(ws, 'conn'))
+
+    const result = createWorkspaceFile(ws, 'conn', 'new')
+
+    expect(result.success).toBe(false)
+    expect(fs.existsSync(path.join(outside, 'missing-folder', 'new.sql'))).toBe(false)
+  })
+
+  it('refuses to list a context folder symlinked outside the workspace', () => {
+    const { ws, outside } = setup()
+    fs.symlinkSync(outside, path.join(ws, 'conn'))
+
+    const result = listWorkspaceFiles(ws, 'conn')
+
+    expect(result.success).toBe(false)
   })
 
   it('resolves a real workspace item but rejects an escaping symlink', () => {
@@ -80,5 +111,12 @@ describe('workspace file containment', () => {
 
     fs.symlinkSync(path.join(outside, 'secret.sql'), path.join(ws, 'link.sql'))
     expect(resolveWorkspaceItem(ws, path.join(ws, 'link.sql'))).toHaveProperty('error')
+  })
+
+  it('can reject the workspace root for destructive operations', () => {
+    const { ws } = setup()
+
+    expect(resolveWorkspaceItem(ws, ws)).toHaveProperty('path')
+    expect(resolveWorkspaceItem(ws, ws, { allowRoot: false })).toHaveProperty('error')
   })
 })

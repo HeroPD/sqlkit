@@ -83,7 +83,7 @@ export class QueriesController implements ReactiveController {
 
     let response: QueryResponse
     try {
-      response = await window.sqlkit.runQuery(profile.id, sql)
+      response = await window.sqlkit.runQuery(profile.id, childDb, sql)
     } catch (error) {
       // A rejected IPC (channel error, main-side throw) would otherwise leave
       // the run and its task stuck on 'running' forever.

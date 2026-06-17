@@ -165,8 +165,11 @@ function createWindow() {
 }
 
 function registerWorkspaceIpc() {
-  const watchOpened = (contents: WebContents, opened: ReturnType<typeof openWorkspace>) => {
+  const watchOpened = async (contents: WebContents, opened: ReturnType<typeof openWorkspace>) => {
     if (!opened.success) return
+    // Opening/replacing a workspace in an existing window must tear down DBs
+    // from the old workspace even if the renderer did not explicitly close it.
+    await dbManagers.get(contents.id)?.disconnectAll()
     workspacePaths.set(contents.id, opened.path)
     startWorkspaceWatcher(contents.id, opened.path, () => {
       if (!contents.isDestroyed()) contents.send('workspace:files-changed')
@@ -187,16 +190,16 @@ function registerWorkspaceIpc() {
 
     const opened = openWorkspace(result.filePaths[0])
     if (opened.success) window.setTitle(`SqlKit — ${opened.name}`)
-    watchOpened(event.sender, opened)
+    await watchOpened(event.sender, opened)
     return opened
   })
 
-  ipcMain.handle('workspace:open-path', (event, wsPath: string) => {
+  ipcMain.handle('workspace:open-path', async (event, wsPath: string) => {
     if (focusExistingWorkspace(wsPath, event.sender.id)) return { success: false, canceled: true }
     const opened = openWorkspace(wsPath)
     const window = BrowserWindow.fromWebContents(event.sender)
     if (opened.success && window) window.setTitle(`SqlKit — ${opened.name}`)
-    watchOpened(event.sender, opened)
+    await watchOpened(event.sender, opened)
     return opened
   })
 
@@ -234,7 +237,7 @@ function registerWorkspaceIpc() {
   // Confirmation happens in the renderer (in-app modal); this just validates
   // and moves the target to the Trash.
   ipcMain.handle('file:delete', async (event, filePath: string) => {
-    const resolved = resolveWorkspaceItem(workspaceFor(event.sender), filePath)
+    const resolved = resolveWorkspaceItem(workspaceFor(event.sender), filePath, { allowRoot: false })
     if ('error' in resolved) return { success: false, error: resolved.error }
 
     try {
@@ -316,8 +319,8 @@ function registerDbIpc() {
     manager(event).setActiveChild(profileId, database),
   )
   ipcMain.handle('db:statuses', (event) => existingManager(event)?.statuses() ?? [])
-  ipcMain.handle('db:query', (event, profileId: string, sql: string, params?: unknown[]) =>
-    manager(event).query(profileId, sql, params),
+  ipcMain.handle('db:query', (event, profileId: string, childDb: string | null, sql: string, params?: unknown[]) =>
+    manager(event).query(profileId, childDb, sql, params),
   )
   ipcMain.handle('db:cancel', (event, profileId: string) => manager(event).cancelQuery(profileId))
   ipcMain.handle('db:create-database', (event, profileId: string, name: string) =>
