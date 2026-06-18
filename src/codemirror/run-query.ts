@@ -1,6 +1,7 @@
-import { Prec, type EditorState, type Extension, type Line, type Text } from '@codemirror/state'
+import { EditorState, Prec, type Extension, type Line, type Text } from '@codemirror/state'
 import { keymap, type EditorView } from '@codemirror/view'
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
+import { sql } from '@codemirror/lang-sql'
 import type { SyntaxNode, Tree } from '@lezer/common'
 
 export type RunQueryHandler = (sql: string, view: EditorView) => void
@@ -178,6 +179,13 @@ const closestQueryBlock = (state: EditorState, cursor: number) => {
 export const queryToRun = (state: EditorState) => {
   const { from, to, head } = state.selection.main
   return state.sliceDoc(from, to).trim() || closestQueryBlock(state, head)
+}
+
+// First runnable statement of a plain SQL string (same `;`/blank-line splitting as run-at-caret),
+// for callers without a live editor — e.g. re-running a stored tab minus its trailing half-written query.
+export const firstStatement = (text: string): string => {
+  const state = EditorState.create({ doc: text, extensions: [sql()] })
+  return closestQueryBlock(state, 0)
 }
 
 /** Binds Mod-Enter to run the selection, or the query block at/nearest the cursor. */

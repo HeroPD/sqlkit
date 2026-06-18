@@ -13,3 +13,7 @@ SQL desktop app: Electron main process + Lit renderer, bundled with Vite. Test v
 - `src/components/sql-editor.ts` — CodeMirror 6; completion merges dialect keywords (`src/codemirror/dialects.ts`), tables, and alias-resolved `table.column` from `listColumns()` metadata; EditorStates cached per tab (LRU 20) so undo/selection survive remounts.
 - Query flow: editor `run-query` event → `window.sqlkit.runQuery()` → manager → driver → `results-panel.ts`.
 - Theming: CSS variables in `src/index.css`.
+
+## Conventions
+
+- Comments: keep to a single line. Use two only when the explanation genuinely needs it; avoid longer multi-line blocks.

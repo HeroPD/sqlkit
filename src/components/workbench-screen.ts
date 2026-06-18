@@ -27,6 +27,7 @@ import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
 import type { PaletteEntry, PaletteMode } from './command-palette'
 import type { RunQueryDetail } from './sql-editor'
+import { firstStatement } from '../codemirror/run-query'
 import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
@@ -628,9 +629,8 @@ export class WorkbenchScreen extends LitElement {
     return false
   }
 
-  // Double-click browse (reference behavior): a query tab named after the
-  // table, pre-filled with a capped SELECT and run immediately. Browsing the
-  // same table again reuses its tab and re-runs whatever it now contains.
+  // Double-click browse: a tab named after the table, pre-filled with a capped SELECT and run.
+  // Re-browsing reuses the tab and runs its first statement, so trailing half-written SQL doesn't error.
   private _browseTable(profile: ConnectionProfile, table: TableRef) {
     const sqlText = `SELECT * FROM ${quoteQualified(table)} LIMIT 200`
 
@@ -643,7 +643,7 @@ export class WorkbenchScreen extends LitElement {
       ]
     }
     this._activeTabId = id
-    void this._runSql(existing?.kind === 'sql' ? existing.content : sqlText)
+    void this._runSql(existing?.kind === 'sql' ? firstStatement(existing.content) || sqlText : sqlText)
   }
 
   // --- command palette ---------------------------------------------------------
