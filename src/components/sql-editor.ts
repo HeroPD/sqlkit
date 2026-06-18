@@ -2,13 +2,15 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { codicons, scrollbars } from '../shared-styles'
 
-import { Compartment, EditorState } from '@codemirror/state'
+import { Compartment, EditorSelection, EditorState } from '@codemirror/state'
 import {
   EditorView,
   keymap,
   lineNumbers,
   highlightActiveLine,
   highlightActiveLineGutter,
+  drawSelection,
+  rectangularSelection,
 } from '@codemirror/view'
 import {
   defaultKeymap,
@@ -214,11 +216,38 @@ const baseExtensions = [
   bracketMatching(),
   closeBrackets(),
 
+  // Multi-cursor: allow >1 selection, draw each ourselves (native draws only one), and box-select on Shift+Alt-drag to match VS Code.
+  EditorState.allowMultipleSelections.of(true),
+  drawSelection(),
+  rectangularSelection({
+    eventFilter: (e) => e.altKey && e.shiftKey && e.button === 0,
+  }),
+
   search({ top: true, createPanel: createFindPanel }),
   highlightSelectionMatches(),
 ]
 
+// "Add cursor above/below" (Cmd/Ctrl-Alt-Up/Down): grow from the cursor furthest in the travel direction so presses stack one way; the new cursor is main, so the view follows it.
+function addCursorVertically(forward: boolean) {
+  return (view: EditorView): boolean => {
+    const ranges = view.state.selection.ranges
+    const edge = ranges.reduce((far, r) =>
+      (forward ? r.head > far.head : r.head < far.head) ? r : far,
+    )
+    const moved = view.moveVertically(edge, forward)
+    if (moved.head === edge.head) return false // already at the first/last line
+    view.dispatch({
+      selection: EditorSelection.create([...ranges, moved], ranges.length),
+      scrollIntoView: true,
+    })
+    return true
+  }
+}
+
 const baseKeymap = keymap.of([
+  { key: 'Mod-Alt-ArrowUp', run: addCursorVertically(false), preventDefault: true },
+  { key: 'Mod-Alt-ArrowDown', run: addCursorVertically(true), preventDefault: true },
+
   {
     key: 'Ctrl-Space',
     run: startCompletion,
