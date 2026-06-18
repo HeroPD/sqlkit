@@ -4,6 +4,11 @@ import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
 import { FilesController } from '../controllers/files'
+import { QueriesController } from '../controllers/queries'
+import { LayoutController } from '../controllers/layout'
+import { CommandPaletteController } from '../controllers/command-palette'
+import { DialogsController } from '../controllers/dialogs'
+import { ContextsController, type EditorTabState, type SqlTabState } from '../controllers/contexts'
 import type { ConnectionProfile, FileInfo, MenuAction, TableRef } from '../electron'
 import './activity-button'
 import './command-palette'
@@ -29,11 +34,6 @@ import { firstStatement } from '../codemirror/run-query'
 import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
-import { QueriesController } from '../controllers/queries'
-import { LayoutController } from '../controllers/layout'
-import { CommandPaletteController } from '../controllers/command-palette'
-import { DialogsController } from '../controllers/dialogs'
-import { ContextsController, type EditorTabState, type SqlTabState } from '../controllers/contexts'
 import { dialectForEngine } from '../codemirror/dialects'
 import { stripExplain } from '../sql-types'
 import { TABLE_KIND_LABELS } from '../table-kinds'
@@ -153,6 +153,7 @@ export class WorkbenchScreen extends LitElement {
       this._activeView = null
     },
     panelEl: () => this.shadowRoot?.querySelector<HTMLElement>('results-panel') ?? null,
+    editorPaneEl: () => this.shadowRoot?.querySelector<HTMLElement>('.editor-pane') ?? null,
   })
 
   // Modal confirm/prompt dialogs for destructive or input actions.
@@ -576,9 +577,6 @@ export class WorkbenchScreen extends LitElement {
                 aria-label="Resize sidebar"
                 title="Resize sidebar"
                 @pointerdown=${this._layout.onSidebarResizeStart}
-                @pointermove=${this._layout.onSidebarResizeMove}
-                @pointerup=${this._layout.onSidebarResizeEnd}
-                @pointercancel=${this._layout.onSidebarResizeEnd}
                 @dblclick=${this._layout.resetSidebarWidth}
               ></div>
             `
@@ -850,16 +848,13 @@ export class WorkbenchScreen extends LitElement {
             aria-label="Resize results panel"
             title="Resize results panel"
             @pointerdown=${this._layout.onPanelResizeStart}
-            @pointermove=${this._layout.onPanelResizeMove}
-            @pointerup=${this._layout.onPanelResizeEnd}
-            @pointercancel=${this._layout.onPanelResizeEnd}
             @dblclick=${this._layout.resetPanelHeight}
           ></div>
           <results-panel
             .run=${this._queries.runFor(this._ctx.activeTabId)}
             .canCancel=${this._activeProfile()?.engine === 'postgresql'}
             @cancel-query=${this._onCancelQuery}
-            style="height: ${this._layout.panelHeight === null ? '50%' : `${this._layout.panelHeight}px`}"
+            style="height: ${this._layout.panelHeight === null ? '70%' : `${this._layout.panelHeight}px`}"
           ></results-panel>
         </div>
       `
@@ -1260,8 +1255,6 @@ export class WorkbenchScreen extends LitElement {
   private _onCloseWorkspace() {
     this.dispatchEvent(new CustomEvent('close-workspace', { bubbles: true, composed: true }))
   }
-
-  // --- sidebar resize -----------------------------------------------------------
 
   static styles = [
     typography,
