@@ -10,7 +10,6 @@ import './command-palette'
 import './confirm-dialog'
 import './prompt-dialog'
 import './table-inspect'
-import type { PromptConfirmDetail } from './prompt-dialog'
 import './databases-view'
 import './db-config-form'
 import './editor-empty'
@@ -25,13 +24,15 @@ import './sql-editor'
 import './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
-import type { PaletteEntry, PaletteMode } from './command-palette'
 import type { RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { QueriesController } from '../controllers/queries'
+import { LayoutController } from '../controllers/layout'
+import { CommandPaletteController } from '../controllers/command-palette'
+import { DialogsController } from '../controllers/dialogs'
 import { dialectForEngine } from '../codemirror/dialects'
 import { stripExplain } from '../sql-types'
 import { TABLE_KIND_LABELS } from '../table-kinds'
@@ -164,48 +165,52 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _selectedTable: string | null = null
 
-  @state()
-  private _palette: PaletteMode | null = null
+  // ⌘⇧P / ⌘P / ⌘K palette: open/close state, entry list, and pick dispatch.
+  private _cmdPalette = new CommandPaletteController(this, {
+    live: this._live,
+    commands: COMMANDS,
+    files: () => this._workspaceFiles.files,
+    connections: () => this._connections,
+    activeProfile: () => this._activeProfile(),
+    activeDbId: () => this._activeDbId,
+    activeChildDb: () => this._activeChildDb,
+    openFile: (file) => void this._openFileTab(file),
+    openTable: (key) => this._openTableFromPalette(key),
+    setActiveDb: (profileId, childDb) => this._setActiveDb(profileId, childDb),
+    showView: (viewId) => {
+      this._activeView = viewId as ViewId
+    },
+    newQuery: () => this._newQuery(),
+    runActiveTab: () => {
+      const tab = this._activeSqlTab()
+      if (tab?.content.trim()) void this._runSql(tab.content.trim())
+    },
+    saveActiveTab: () => void this._saveActiveTab(),
+    addDatabase: () => this._onAddDatabase(),
+    refreshFiles: () => void this._workspaceFiles.reload(),
+    toggleSidebar: () => this._toggleSidebar(),
+    closeWorkspace: () => this._onCloseWorkspace(),
+  })
 
   // Query results, tasks, and history; re-renders us as runs progress.
   private _queries = new QueriesController(this, (tabId) => this._tabExists(tabId))
 
-  // null = the default split: results take half of the editor area.
-  @state()
-  private _panelHeight: number | null = null
+  // Sidebar width/collapse and results-panel height, with their drag handlers.
+  private _layout = new LayoutController(this, {
+    onSidebarCollapse: () => {
+      this._activeView = null
+    },
+    panelEl: () => this.shadowRoot?.querySelector<HTMLElement>('results-panel') ?? null,
+  })
 
-  @state()
-  private _panelResizing: { startY: number; startHeight: number } | null = null
-
-  @state()
-  private _confirm: { message: string; detail: string; confirmLabel: string; action: () => void } | null = null
-
-  @state()
-  private _prompt: {
-    message: string
-    detail: string
-    confirmLabel: string
-    placeholder: string
-    action: (value: string) => void
-  } | null = null
+  // Modal confirm/prompt dialogs for destructive or input actions.
+  private _dialogs = new DialogsController(this)
 
   @state()
   private _tabs: EditorTabState[] = []
 
   @state()
   private _activeTabId: string | null = null
-
-  @state()
-  private _sidebarWidth = 280
-
-  @state()
-  private _resizing: { startX: number; startWidth: number } | null = null
-
-  // True while a drag is below the collapse threshold: the sidebar hides live
-  // but the handle stays mounted so the drag (pointer capture) survives, and
-  // dragging back out restores it. Committed on release.
-  @state()
-  private _sidebarCollapsing = false
 
   // Stashed working instances of inactive contexts, keyed by profile id.
   private _instances = new Map<string, ContextInstance>()
@@ -253,7 +258,7 @@ export class WorkbenchScreen extends LitElement {
       this._connections = []
       this._activeDbId = null
       this._activeChildDb = null
-      this._palette = null
+      this._cmdPalette.close()
       this._selectedTable = null
       this._queries.reset()
       this._instances.clear()
@@ -269,7 +274,7 @@ export class WorkbenchScreen extends LitElement {
   private async _loadConfig() {
     const { config, error } = await window.sqlkit.getWorkspaceConfig()
     if (error) {
-      this._notice(
+      this._dialogs.notice(
         'Workspace config could not be read',
         `${error}\n\nThe file was left untouched, so your saved connections are still on disk. ` +
           'Fix or restore .sqlkit/config.json and reopen the workspace — saving new connections now would overwrite it.',
@@ -390,20 +395,6 @@ export class WorkbenchScreen extends LitElement {
     return false
   }
 
-  // ⌘K parent pick on a not-yet-connected connection: the palette stays open
-  // and shows the connecting spinner (status pushes drive it). Once live, an
-  // all-databases connection expands into its children in place for the real
-  // pick; a single-db connection becomes the context and the palette closes.
-  private async _connectFromPalette(profile: ConnectionProfile) {
-    const result = await this._live.connect(profile)
-    if (!result.success) return // the entry shows the error state
-    if (this._palette !== 'databases') return // closed meanwhile: treat as canceled
-    if (profile.databaseMode === 'all') return // children just appeared; keep picking
-
-    this._setActiveDb(profile.id)
-    this._palette = null
-  }
-
   // --- global shortcuts -----------------------------------------------------
 
   // ⌘⇧P commands, ⌘P quick open, ⌘K database switch, ⌘B sidebar, ⌘N new
@@ -420,13 +411,13 @@ export class WorkbenchScreen extends LitElement {
 
     if (key === 'p') {
       event.preventDefault()
-      this._togglePalette(event.shiftKey ? 'commands' : 'quick')
+      this._cmdPalette.toggle(event.shiftKey ? 'commands' : 'quick')
       return
     }
     if (event.shiftKey) return
     if (key === 'k') {
       event.preventDefault()
-      this._togglePalette('databases')
+      this._cmdPalette.toggle('databases')
       return
     }
     // Sublime-style tab switching: Mod+1..8 pick that tab, Mod+9 the last.
@@ -460,10 +451,6 @@ export class WorkbenchScreen extends LitElement {
         void this._runSql(tab.content.trim())
       }
     }
-  }
-
-  private _togglePalette(mode: PaletteMode) {
-    this._palette = this._palette === mode ? null : mode
   }
 
   private _toggleSidebar() {
@@ -531,7 +518,7 @@ export class WorkbenchScreen extends LitElement {
   private _requestCloseTab(id: string) {
     const tab = this._tabs.find((entry) => entry.id === id)
     if (tab?.kind === 'sql' && tab.content !== tab.savedContent) {
-      this._confirm = {
+      this._dialogs.confirm = {
         message: `Close "${tab.name}" without saving?`,
         detail: 'Unsaved changes will be lost.',
         confirmLabel: 'Close Without Saving',
@@ -646,192 +633,16 @@ export class WorkbenchScreen extends LitElement {
     void this._runSql(existing?.kind === 'sql' ? firstStatement(existing.content) || sqlText : sqlText)
   }
 
-  // --- command palette ---------------------------------------------------------
-
-  private _paletteEntries(): PaletteEntry[] {
-    if (this._palette === 'commands') return [...COMMANDS]
-
-    if (this._palette === 'quick') {
-      const files = this._workspaceFiles.files
-        .filter((file) => file.type === 'file')
-        .map((file) => ({ id: `file:${file.relativePath}`, label: file.name, detail: file.relativePath, icon: 'codicon-file-code' }))
-
-      // Tables of the in-use context only — ⌘P must not mix databases;
-      // switching context is ⌘K's job.
-      const context = this._activeProfile()
-      const tables =
-        context && this._live.phase(context.id) === 'connected'
-          ? (this._live.tables[context.id] ?? []).map((table) => ({
-              id: `table:${tableKey(context.id, table)}`,
-              label: table.name,
-              detail: table.schema ?? '',
-              icon: 'codicon-table',
-            }))
-          : []
-
-      return [...files, ...tables]
-    }
-
-    if (this._palette === 'databases') {
-      return this._connections.flatMap((connection) => {
-        const phase = this._live.phase(connection.id)
-        const children = this._live.statuses[connection.id]?.children ?? []
-
-        // An all-databases connection with discovered children: the parent
-        // stays visible as a group header (it isn't a single database, so it
-        // can't be picked) and its children nest underneath as the pickable
-        // contexts.
-        if (children.length > 1) {
-          return [
-            {
-              id: `hdr:${connection.id}`,
-              label: connection.name,
-              detail: `${connection.engine} · Connected`,
-              icon: 'codicon-database',
-              header: true,
-            },
-            ...children.map((child) => ({
-              id: `child:${connection.id}:${child.name}`,
-              label: child.name,
-              detail: this._activeDbId === connection.id && this._activeChildDb === child.name ? 'In use' : '',
-              icon: 'codicon-symbol-namespace',
-              indent: true,
-            })),
-          ]
-        }
-
-        const label =
-          phase === 'connected'
-            ? 'Connected'
-            : phase === 'connecting'
-              ? 'Connecting…'
-              : phase === 'error'
-                ? `Error — ${this._live.statuses[connection.id]?.error ?? ''}`
-                : 'Disconnected'
-        const parts = [connection.engine, label]
-        if (this._activeDbId === connection.id) parts.push('In use')
-        // The children of a disconnected all-databases connection aren't
-        // known yet; picking it connects and discovers them.
-        if (connection.databaseMode === 'all' && phase !== 'connected' && phase !== 'connecting') {
-          parts.push('connect to list databases')
-        }
-        return [
-          {
-            id: `db:${connection.id}`,
-            label: connection.name,
-            detail: parts.join(' · '),
-            icon: phase === 'connecting' ? 'codicon-loading codicon-modifier-spin' : 'codicon-database',
-          },
-        ]
-      })
-    }
-
-    return []
-  }
-
-  private _onPalettePick(event: Event) {
-    const { mode, id } = (event as CustomEvent<{ mode: PaletteMode; id: string }>).detail
-
-    if (mode === 'commands') {
-      this._palette = null
-      this._runCommand(id)
-      return
-    }
-    if (mode === 'quick') {
-      this._palette = null
-      if (id.startsWith('file:')) {
-        const relativePath = id.slice('file:'.length)
-        const file = this._workspaceFiles.files.find((entry) => entry.type === 'file' && entry.relativePath === relativePath)
-        if (file) void this._openFileTab(file)
-        return
-      }
-      // Reveal the picked table in the Explorer and open its browse tab —
-      // same as double-clicking it in the sidebar. Entries are scoped to the
-      // in-use context, so the _setActiveDb below is normally a no-op.
-      const key = id.slice('table:'.length)
-      this._selectedTable = key
-      const profileId = key.split(':')[0]
-      if (profileId) this._setActiveDb(profileId)
-      this._activeView = 'explorer'
-      const profile = this._connections.find((connection) => connection.id === profileId)
-      const table = (this._live.tables[profileId] ?? []).find((entry) => tableKey(profileId, entry) === key)
-      if (profile && table) this._browseTable(profile, table)
-      return
-    }
-
-    // databases mode: a child pick switches the active child database; a
-    // parent pick is a whole single-db connection, or a not-yet-connected one
-    // that keeps the palette open while it loads.
-    if (id.startsWith('child:')) {
-      const body = id.slice('child:'.length)
-      const separator = body.indexOf(':')
-      const profileId = body.slice(0, separator)
-      const database = body.slice(separator + 1)
-      this._palette = null
-      this._setActiveDb(profileId, database)
-      void this._live.setActiveChild(profileId, database)
-      return
-    }
-
-    const profileId = id.slice('db:'.length)
+  // Quick-open table pick: reveal it in the Explorer (switching context if
+  // needed) and open its browse tab, as if double-clicked in the sidebar.
+  private _openTableFromPalette(key: string) {
+    this._selectedTable = key
+    const profileId = key.split(':')[0]
+    if (profileId) this._setActiveDb(profileId)
+    this._activeView = 'explorer'
     const profile = this._connections.find((connection) => connection.id === profileId)
-    if (!profile) {
-      this._palette = null
-      return
-    }
-    const phase = this._live.phase(profileId)
-    if (phase === 'connecting') return // already loading; stay open
-    if (phase === 'connected') {
-      // Single-db connection (connected all-mode ones render as children).
-      this._palette = null
-      this._setActiveDb(profileId)
-      return
-    }
-    void this._connectFromPalette(profile)
-  }
-
-  private _runCommand(id: string) {
-    if (id.startsWith('show-')) {
-      this._activeView = id.slice('show-'.length) as ViewId
-      return
-    }
-    switch (id) {
-      case 'new-query':
-        this._newQuery()
-        break
-      case 'new-window':
-        void window.sqlkit.newWindow()
-        break
-      case 'run-query': {
-        const tab = this._activeSqlTab()
-        if (tab?.content.trim()) void this._runSql(tab.content.trim())
-        break
-      }
-      case 'save-file':
-        void this._saveActiveTab()
-        break
-      case 'quick-open':
-        this._palette = 'quick'
-        break
-      case 'switch-database':
-        this._palette = 'databases'
-        break
-      case 'add-database':
-        this._onAddDatabase()
-        break
-      case 'disconnect-all':
-        void this._live.disconnectAll()
-        break
-      case 'refresh-files':
-        void this._workspaceFiles.reload()
-        break
-      case 'toggle-sidebar':
-        this._toggleSidebar()
-        break
-      case 'close-workspace':
-        this._onCloseWorkspace()
-        break
-    }
+    const table = (this._live.tables[profileId] ?? []).find((entry) => tableKey(profileId, entry) === key)
+    if (profile && table) this._browseTable(profile, table)
   }
 
   // --- render -------------------------------------------------------------------
@@ -886,7 +697,7 @@ export class WorkbenchScreen extends LitElement {
 
         ${activeView
           ? html`
-              <aside class="sidebar ${this._sidebarCollapsing ? 'collapsed' : ''}" style="width: ${this._sidebarWidth}px">
+              <aside class="sidebar ${this._layout.sidebarCollapsing ? 'collapsed' : ''}" style="width: ${this._layout.sidebarWidth}px">
                 <div class="sidebar-title">
                   <span>${activeView.title}</span>
                   ${this._renderTitleActions(activeView)}
@@ -894,15 +705,15 @@ export class WorkbenchScreen extends LitElement {
                 ${this._renderSidebarView(activeView)}
               </aside>
               <div
-                class="sidebar-resize ${this._resizing ? 'active' : ''}"
+                class="sidebar-resize ${this._layout.resizing ? 'active' : ''}"
                 role="separator"
                 aria-label="Resize sidebar"
                 title="Resize sidebar"
-                @pointerdown=${this._onResizeStart}
-                @pointermove=${this._onResizeMove}
-                @pointerup=${this._onResizeEnd}
-                @pointercancel=${this._onResizeEnd}
-                @dblclick=${() => (this._sidebarWidth = 280)}
+                @pointerdown=${this._layout.onSidebarResizeStart}
+                @pointermove=${this._layout.onSidebarResizeMove}
+                @pointerup=${this._layout.onSidebarResizeEnd}
+                @pointercancel=${this._layout.onSidebarResizeEnd}
+                @dblclick=${this._layout.resetSidebarWidth}
               ></div>
             `
           : ''}
@@ -929,33 +740,33 @@ export class WorkbenchScreen extends LitElement {
       </div>
 
       <command-palette
-        .open=${this._palette !== null}
-        .mode=${this._palette ?? 'commands'}
-        .entries=${this._paletteEntries()}
-        @palette-close=${() => (this._palette = null)}
-        @palette-pick=${this._onPalettePick}
+        .open=${this._cmdPalette.mode !== null}
+        .mode=${this._cmdPalette.mode ?? 'commands'}
+        .entries=${this._cmdPalette.entries()}
+        @palette-close=${() => this._cmdPalette.close()}
+        @palette-pick=${this._cmdPalette.onPick}
       ></command-palette>
 
-      ${this._confirm
+      ${this._dialogs.confirm
         ? html`
             <confirm-dialog
-              .message=${this._confirm.message}
-              .detail=${this._confirm.detail}
-              .confirmLabel=${this._confirm.confirmLabel}
-              @dialog-cancel=${() => (this._confirm = null)}
-              @dialog-confirm=${this._onConfirmAccept}
+              .message=${this._dialogs.confirm.message}
+              .detail=${this._dialogs.confirm.detail}
+              .confirmLabel=${this._dialogs.confirm.confirmLabel}
+              @dialog-cancel=${() => (this._dialogs.confirm = null)}
+              @dialog-confirm=${this._dialogs.acceptConfirm}
             ></confirm-dialog>
           `
         : ''}
-      ${this._prompt
+      ${this._dialogs.prompt
         ? html`
             <prompt-dialog
-              .message=${this._prompt.message}
-              .detail=${this._prompt.detail}
-              .confirmLabel=${this._prompt.confirmLabel}
-              .placeholder=${this._prompt.placeholder}
-              @dialog-cancel=${() => (this._prompt = null)}
-              @dialog-confirm=${this._onPromptAccept}
+              .message=${this._dialogs.prompt.message}
+              .detail=${this._dialogs.prompt.detail}
+              .confirmLabel=${this._dialogs.prompt.confirmLabel}
+              .placeholder=${this._dialogs.prompt.placeholder}
+              @dialog-cancel=${() => (this._dialogs.prompt = null)}
+              @dialog-confirm=${this._dialogs.acceptPrompt}
             ></prompt-dialog>
           `
         : ''}
@@ -1192,21 +1003,21 @@ export class WorkbenchScreen extends LitElement {
             ></sql-editor>
           </div>
           <div
-            class="panel-resize ${this._panelResizing ? 'active' : ''}"
+            class="panel-resize ${this._layout.panelResizing ? 'active' : ''}"
             role="separator"
             aria-label="Resize results panel"
             title="Resize results panel"
-            @pointerdown=${this._onPanelResizeStart}
-            @pointermove=${this._onPanelResizeMove}
-            @pointerup=${this._onPanelResizeEnd}
-            @pointercancel=${this._onPanelResizeEnd}
-            @dblclick=${() => (this._panelHeight = null)}
+            @pointerdown=${this._layout.onPanelResizeStart}
+            @pointermove=${this._layout.onPanelResizeMove}
+            @pointerup=${this._layout.onPanelResizeEnd}
+            @pointercancel=${this._layout.onPanelResizeEnd}
+            @dblclick=${this._layout.resetPanelHeight}
           ></div>
           <results-panel
             .run=${this._queries.runFor(this._activeTabId)}
             .canCancel=${this._activeProfile()?.engine === 'postgresql'}
             @cancel-query=${this._onCancelQuery}
-            style="height: ${this._panelHeight === null ? '50%' : `${this._panelHeight}px`}"
+            style="height: ${this._layout.panelHeight === null ? '50%' : `${this._layout.panelHeight}px`}"
           ></results-panel>
         </div>
       `
@@ -1229,9 +1040,9 @@ export class WorkbenchScreen extends LitElement {
   private _onEmptyAction(event: Event) {
     const { action } = (event as CustomEvent<{ action: EmptyAction }>).detail
     if (action === 'new-query') this._newQuery()
-    if (action === 'quick-open') this._palette = 'quick'
-    if (action === 'switch-database') this._palette = 'databases'
-    if (action === 'command-palette') this._palette = 'commands'
+    if (action === 'quick-open') this._cmdPalette.open('quick')
+    if (action === 'switch-database') this._cmdPalette.open('databases')
+    if (action === 'command-palette') this._cmdPalette.open('commands')
     if (action === 'add-database') this._onAddDatabase()
     if (action === 'close-workspace') this._onCloseWorkspace()
   }
@@ -1280,7 +1091,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _onDbCreateDatabase(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
-    this._prompt = {
+    this._dialogs.prompt = {
       message: 'Create Database',
       detail: 'Name of the new database on this server.',
       confirmLabel: 'Create',
@@ -1291,12 +1102,12 @@ export class WorkbenchScreen extends LitElement {
 
   private async _createDatabase(id: string, name: string) {
     const result = await window.sqlkit.createDatabase(id, name)
-    if (!result.success) this._notice(`Could not create "${name}"`, result.error ?? 'Unknown error')
+    if (!result.success) this._dialogs.notice(`Could not create "${name}"`, result.error ?? 'Unknown error')
   }
 
   private _onDbDropDatabase(event: Event) {
     const { id, database } = (event as CustomEvent<{ id: string; database: string }>).detail
-    this._confirm = {
+    this._dialogs.confirm = {
       message: `Drop database "${database}"?`,
       detail: 'All data in it is permanently deleted on the server. This cannot be undone.',
       confirmLabel: 'Drop Database',
@@ -1307,7 +1118,7 @@ export class WorkbenchScreen extends LitElement {
   private async _dropDatabase(id: string, database: string) {
     const result = await window.sqlkit.dropDatabase(id, database)
     if (!result.success) {
-      this._notice(`Could not drop "${database}"`, result.error ?? 'Unknown error')
+      this._dialogs.notice(`Could not drop "${database}"`, result.error ?? 'Unknown error')
       return
     }
 
@@ -1333,7 +1144,7 @@ export class WorkbenchScreen extends LitElement {
     const { id } = (event as CustomEvent<{ id: string }>).detail
     const profile = this._connections.find((connection) => connection.id === id)
     if (!profile) return
-    this._confirm = {
+    this._dialogs.confirm = {
       message: `Remove "${profile.name.trim() || 'New Database'}"?`,
       detail: 'The connection is removed from this workspace. Its files folder stays on disk.',
       confirmLabel: 'Remove',
@@ -1410,7 +1221,7 @@ export class WorkbenchScreen extends LitElement {
       foreign: 'DROP FOREIGN TABLE',
     }
     const statement = `${verbs[table.kind]} ${quoteQualified(table)};`
-    this._confirm = {
+    this._dialogs.confirm = {
       message: `Drop ${TABLE_KIND_LABELS[table.kind]} "${table.name}"?`,
       detail: 'It is permanently deleted on the server. This cannot be undone.',
       confirmLabel: 'Drop',
@@ -1431,7 +1242,7 @@ export class WorkbenchScreen extends LitElement {
       profile.engine === 'sqlite'
         ? `DELETE FROM ${quoteQualified(table)};`
         : `TRUNCATE TABLE ${quoteQualified(table)};`
-    this._confirm = {
+    this._dialogs.confirm = {
       message: `Truncate "${table.name}"?`,
       detail: `All rows are permanently deleted (${statement}). This cannot be undone.`,
       confirmLabel: 'Truncate',
@@ -1527,7 +1338,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _onFileDelete(event: Event) {
     const { path: targetPath, name } = (event as CustomEvent<FileDeleteDetail>).detail
-    this._confirm = {
+    this._dialogs.confirm = {
       message: `Delete "${name}"?`,
       detail: 'It will be moved to the Trash.',
       confirmLabel: 'Move to Trash',
@@ -1551,24 +1362,6 @@ export class WorkbenchScreen extends LitElement {
       this._activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
     }
     void this._workspaceFiles.reload()
-  }
-
-  private _onConfirmAccept = () => {
-    const action = this._confirm?.action
-    this._confirm = null
-    action?.()
-  }
-
-  private _onPromptAccept = (event: Event) => {
-    const { value } = (event as CustomEvent<PromptConfirmDetail>).detail
-    const action = this._prompt?.action
-    this._prompt = null
-    action?.(value)
-  }
-
-  /** Error notice via the confirm dialog, with only an acknowledge action. */
-  private _notice(message: string, detail: string) {
-    this._confirm = { message, detail, confirmLabel: 'OK', action: () => {} }
   }
 
   private _onEditorChange(event: Event) {
@@ -1644,60 +1437,6 @@ export class WorkbenchScreen extends LitElement {
   }
 
   // --- sidebar resize -----------------------------------------------------------
-
-  private _onResizeStart(event: PointerEvent) {
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-    this._resizing = { startX: event.clientX, startWidth: this._sidebarWidth }
-    event.preventDefault()
-  }
-
-  private _onResizeMove(event: PointerEvent) {
-    if (!this._resizing) return
-    const raw = this._resizing.startWidth + (event.clientX - this._resizing.startX)
-
-    // Dragged under the minimum with a little intent margin: snap closed.
-    // Dragging back out reopens at the minimum.
-    if (raw < 110) {
-      this._sidebarCollapsing = true
-      return
-    }
-
-    this._sidebarCollapsing = false
-    this._sidebarWidth = Math.max(170, Math.min(500, raw))
-  }
-
-  private _onResizeEnd(event: PointerEvent) {
-    if (!this._resizing) return
-    this._resizing = null
-    ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
-
-    if (this._sidebarCollapsing) {
-      this._sidebarCollapsing = false
-      this._activeView = null
-      this._sidebarWidth = 280
-    }
-  }
-
-  private _onPanelResizeStart(event: PointerEvent) {
-    const panel = this.shadowRoot?.querySelector<HTMLElement>('results-panel')
-    if (!panel) return
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-    this._panelResizing = { startY: event.clientY, startHeight: panel.offsetHeight }
-    event.preventDefault()
-  }
-
-  private _onPanelResizeMove(event: PointerEvent) {
-    if (!this._panelResizing) return
-    // Dragging up grows the panel.
-    const raw = this._panelResizing.startHeight - (event.clientY - this._panelResizing.startY)
-    this._panelHeight = Math.max(80, Math.min(600, raw))
-  }
-
-  private _onPanelResizeEnd(event: PointerEvent) {
-    if (!this._panelResizing) return
-    this._panelResizing = null
-    ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
-  }
 
   static styles = [
     typography,
