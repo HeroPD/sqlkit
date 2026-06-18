@@ -4,7 +4,7 @@ import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
 import { FilesController } from '../controllers/files'
-import type { ConnectionProfile, DbObject, DbObjectKind, FileInfo, FileSaveResult, MenuAction, TableRef } from '../electron'
+import type { ConnectionProfile, FileInfo, MenuAction, TableRef } from '../electron'
 import './activity-button'
 import './command-palette'
 import './confirm-dialog'
@@ -33,6 +33,7 @@ import { QueriesController } from '../controllers/queries'
 import { LayoutController } from '../controllers/layout'
 import { CommandPaletteController } from '../controllers/command-palette'
 import { DialogsController } from '../controllers/dialogs'
+import { ContextsController, type EditorTabState, type SqlTabState } from '../controllers/contexts'
 import { dialectForEngine } from '../codemirror/dialects'
 import { stripExplain } from '../sql-types'
 import { TABLE_KIND_LABELS } from '../table-kinds'
@@ -51,29 +52,6 @@ const VIEWS = [
 
 type ViewId = (typeof VIEWS)[number]['id']
 
-// An editor tab: a connection-config form (the tab owns the unsaved draft, so
-// edits survive switching tabs) or a SQL editor over a workspace file —
-// path is null for untitled queries until the first save.
-type SqlTabState = {
-  id: string
-  kind: 'sql'
-  name: string
-  path: string | null
-  content: string
-  savedContent: string
-  /**
-   * VS Code-style preview tab: single-click opens recycle it instead of
-   * stacking tabs. Editing or double-clicking promotes it to permanent.
-   */
-  preview?: boolean
-}
-
-type EditorTabState =
-  | { id: string; kind: 'config'; profile: ConnectionProfile }
-  | { id: string; kind: 'inspect'; profileId: string; table: TableRef }
-  | { id: string; kind: 'inspect-object'; profileId: string; object: DbObject; objectKind: DbObjectKind }
-  | SqlTabState
-
 const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`
 const quoteQualified = (table: TableRef) =>
   table.schema ? `${quoteIdent(table.schema)}.${quoteIdent(table.name)}` : quoteIdent(table.name)
@@ -83,19 +61,6 @@ const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'inspect') return `${tab.table.name} · info`
   if (tab.kind === 'inspect-object') return `${tab.object.name} · info`
   return tab.content === tab.savedContent ? tab.name : `${tab.name} •`
-}
-
-// Every database context (⌘K) is its own working instance: open tabs, the
-// active tab, and the Explorer's table selection. A context is a connection
-// *and* its child database (all-databases mode) — x1/analytics and
-// x1/billing are separate instances. Switching contexts stashes the live
-// fields here and restores the target's. Query results live in the
-// QueriesController, keyed by tab id, so they follow their tab through any
-// switch.
-type ContextInstance = {
-  tabs: EditorTabState[]
-  activeTabId: string | null
-  selectedTable: string | null
 }
 
 /** Instance bucket for tabs opened before any context exists. */
@@ -152,19 +117,6 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _connections: ConnectionProfile[] = []
 
-  // The database context in use (⌘K): queries run against it, and the
-  // Explorer shows its folder + tables.
-  @state()
-  private _activeDbId: string | null = null
-
-  // The child database of the active context (all-databases mode); part of
-  // the context's identity.
-  @state()
-  private _activeChildDb: string | null = null
-
-  @state()
-  private _selectedTable: string | null = null
-
   // ⌘⇧P / ⌘P / ⌘K palette: open/close state, entry list, and pick dispatch.
   private _cmdPalette = new CommandPaletteController(this, {
     live: this._live,
@@ -172,17 +124,17 @@ export class WorkbenchScreen extends LitElement {
     files: () => this._workspaceFiles.files,
     connections: () => this._connections,
     activeProfile: () => this._activeProfile(),
-    activeDbId: () => this._activeDbId,
-    activeChildDb: () => this._activeChildDb,
+    activeDbId: () => this._ctx.activeDbId,
+    activeChildDb: () => this._ctx.activeChildDb,
     openFile: (file) => void this._openFileTab(file),
     openTable: (key) => this._openTableFromPalette(key),
     setActiveDb: (profileId, childDb) => this._setActiveDb(profileId, childDb),
     showView: (viewId) => {
       this._activeView = viewId as ViewId
     },
-    newQuery: () => this._newQuery(),
+    newQuery: () => this._ctx.newQuery(),
     runActiveTab: () => {
-      const tab = this._activeSqlTab()
+      const tab = this._ctx.activeSqlTab()
       if (tab?.content.trim()) void this._runSql(tab.content.trim())
     },
     saveActiveTab: () => void this._saveActiveTab(),
@@ -193,7 +145,7 @@ export class WorkbenchScreen extends LitElement {
   })
 
   // Query results, tasks, and history; re-renders us as runs progress.
-  private _queries = new QueriesController(this, (tabId) => this._tabExists(tabId))
+  private _queries = new QueriesController(this, (tabId) => this._ctx.tabExists(tabId))
 
   // Sidebar width/collapse and results-panel height, with their drag handlers.
   private _layout = new LayoutController(this, {
@@ -206,14 +158,13 @@ export class WorkbenchScreen extends LitElement {
   // Modal confirm/prompt dialogs for destructive or input actions.
   private _dialogs = new DialogsController(this)
 
-  @state()
-  private _tabs: EditorTabState[] = []
-
-  @state()
-  private _activeTabId: string | null = null
-
-  // Stashed working instances of inactive contexts, keyed by profile id.
-  private _instances = new Map<string, ContextInstance>()
+  // Per-context working state: open tabs, the active tab, the in-use context
+  // (⌘K profile + child db), the Explorer's selected table, and the stash of
+  // inactive contexts. Query results follow their tab via the QueriesController.
+  private _ctx = new ContextsController(this, {
+    contextKey,
+    dropQuery: (tabId) => this._queries.dropTab(tabId),
+  })
 
   private _unsubscribeMenu: (() => void) | null = null
 
@@ -237,7 +188,7 @@ export class WorkbenchScreen extends LitElement {
     if (!this.workspace) return
     switch (action) {
       case 'new-query':
-        this._newQuery()
+        this._ctx.newQuery()
         break
       case 'save':
         void this._saveActiveTab()
@@ -246,22 +197,17 @@ export class WorkbenchScreen extends LitElement {
         void this._saveActiveTabAs()
         break
       case 'close-tab':
-        if (this._activeTabId) this._requestCloseTab(this._activeTabId)
+        if (this._ctx.activeTabId) this._requestCloseTab(this._ctx.activeTabId)
         break
     }
   }
 
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('workspace')) {
-      this._tabs = []
-      this._activeTabId = null
+      this._ctx.reset()
       this._connections = []
-      this._activeDbId = null
-      this._activeChildDb = null
       this._cmdPalette.close()
-      this._selectedTable = null
       this._queries.reset()
-      this._instances.clear()
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
       void this._live.disconnectAll()
@@ -288,7 +234,7 @@ export class WorkbenchScreen extends LitElement {
         ? config.activeDbId
         : (config.connections[0]?.id ?? null)
     const restoredProfile = restored ? (config.connections.find((c) => c.id === restored) ?? null) : null
-    this._switchInstance(restored, restoredProfile ? this._defaultChild(restoredProfile) : null)
+    this._ctx.switchInstance(restored, restoredProfile ? this._defaultChild(restoredProfile) : null)
     this._workspaceFiles.setFolder(this._contextFolder())
   }
 
@@ -305,7 +251,7 @@ export class WorkbenchScreen extends LitElement {
   private _contextFolder(): string | null {
     const folder = this._activeProfile()?.folder
     if (!folder) return null
-    return this._activeChildDb ? `${folder}/${childFolderSegment(this._activeChildDb)}` : folder
+    return this._ctx.activeChildDb ? `${folder}/${childFolderSegment(this._ctx.activeChildDb)}` : folder
   }
 
   /** The child the connection currently targets, when it has several. */
@@ -315,37 +261,16 @@ export class WorkbenchScreen extends LitElement {
     return children.find((child) => child.inUse)?.name ?? null
   }
 
-  // Swaps the working instance: stashes the live tabs/result/selection under
-  // the outgoing context and restores (or initializes) the incoming one.
-  private _switchInstance(profileId: string | null, childDb: string | null) {
-    const fromKey = contextKey(this._activeDbId, this._activeChildDb)
-    const toKey = contextKey(profileId, childDb)
-    if (fromKey === toKey) return
-
-    this._instances.set(fromKey, {
-      tabs: this._tabs,
-      activeTabId: this._activeTabId,
-      selectedTable: this._selectedTable,
-    })
-
-    this._activeDbId = profileId
-    this._activeChildDb = childDb
-    const incoming = this._instances.get(toKey)
-    this._tabs = incoming?.tabs ?? []
-    this._activeTabId = incoming?.activeTabId ?? null
-    this._selectedTable = incoming?.selectedTable ?? null
-  }
-
   /** The profile of the in-use database context (⌘K). */
   private _activeProfile(): ConnectionProfile | null {
-    return this._connections.find((connection) => connection.id === this._activeDbId) ?? null
+    return this._connections.find((connection) => connection.id === this._ctx.activeDbId) ?? null
   }
 
   private _persistConfig() {
     void window.sqlkit.saveWorkspaceConfig({
       version: 1,
       connections: this._connections,
-      activeDbId: this._activeDbId,
+      activeDbId: this._ctx.activeDbId,
     })
   }
 
@@ -357,7 +282,7 @@ export class WorkbenchScreen extends LitElement {
     if (!profile) return
     const child = childDb === undefined ? this._defaultChild(profile) : childDb
 
-    if (this._activeDbId === profileId && this._activeChildDb === child) return
+    if (this._ctx.activeDbId === profileId && this._ctx.activeChildDb === child) return
 
     // Remember the pick so reopening the workspace lands on the same child.
     if (child && profile.lastChildDb !== child) {
@@ -366,7 +291,7 @@ export class WorkbenchScreen extends LitElement {
       )
     }
 
-    this._switchInstance(profileId, child)
+    this._ctx.switchInstance(profileId, child)
     this._workspaceFiles.setFolder(this._contextFolder())
     this._persistConfig()
   }
@@ -374,7 +299,7 @@ export class WorkbenchScreen extends LitElement {
   // After a connect, the driver targets the discovery database; if the
   // context remembers a different child, point the driver at it.
   // Points profileId's driver at `childDb` (all-databases mode). Takes the
-  // target explicitly rather than reading this._activeChildDb, so a run that
+  // target explicitly rather than reading this._ctx.activeChildDb, so a run that
   // captured its context can align that exact child even after the active
   // selection has drifted.
   private async _alignActiveChild(
@@ -422,10 +347,10 @@ export class WorkbenchScreen extends LitElement {
     }
     // Sublime-style tab switching: Mod+1..8 pick that tab, Mod+9 the last.
     if (key >= '1' && key <= '9') {
-      const tab = key === '9' ? this._tabs[this._tabs.length - 1] : this._tabs[Number(key) - 1]
+      const tab = key === '9' ? this._ctx.tabs[this._ctx.tabs.length - 1] : this._ctx.tabs[Number(key) - 1]
       if (tab) {
         event.preventDefault()
-        this._activeTabId = tab.id
+        this._ctx.activeTabId = tab.id
       }
       return
     }
@@ -436,7 +361,7 @@ export class WorkbenchScreen extends LitElement {
     }
     if (key === 'n') {
       event.preventDefault()
-      this._newQuery()
+      this._ctx.newQuery()
       return
     }
     if (key === 's') {
@@ -445,7 +370,7 @@ export class WorkbenchScreen extends LitElement {
       return
     }
     if (key === 'enter') {
-      const tab = this._activeSqlTab()
+      const tab = this._ctx.activeSqlTab()
       if (tab?.content.trim()) {
         event.preventDefault()
         void this._runSql(tab.content.trim())
@@ -459,78 +384,39 @@ export class WorkbenchScreen extends LitElement {
 
   // --- tabs ------------------------------------------------------------------
 
-  private _activeSqlTab(): SqlTabState | null {
-    const tab = this._tabs.find((entry) => entry.id === this._activeTabId)
-    return tab?.kind === 'sql' ? tab : null
-  }
-
-  private _openConfigTab(profile: ConnectionProfile) {
-    if (!this._tabs.some((tab) => tab.id === profile.id)) {
-      this._tabs = [...this._tabs, { id: profile.id, kind: 'config', profile: { ...profile } }]
-    }
-    this._activeTabId = profile.id
-  }
-
   private async _openFileTab(file: FileInfo) {
     // Keyed by absolute path: same-named files in different database
     // folders are distinct tabs.
     const id = `file:${file.path}`
-    if (!this._tabs.some((tab) => tab.id === id)) {
-      const result = await window.sqlkit.readFile(file.path)
-      if (!result.success) {
-        console.error('Failed to read file:', result.error)
-        return
-      }
-      this._tabs = [
-        ...this._tabs,
-        { id, kind: 'sql', name: file.name, path: file.path, content: result.content, savedContent: result.content },
-      ]
+    if (this._ctx.tabs.some((tab) => tab.id === id)) {
+      this._ctx.activeTabId = id
+      return
     }
-    this._activeTabId = id
-  }
-
-  private _newQuery() {
-    const untitled = this._tabs.filter((tab) => tab.kind === 'sql' && tab.path === null).length
-    const tab: SqlTabState = {
-      id: crypto.randomUUID(),
-      kind: 'sql',
-      name: `Untitled-${untitled + 1}`,
-      path: null,
-      content: '',
-      savedContent: '',
+    const result = await window.sqlkit.readFile(file.path)
+    if (!result.success) {
+      console.error('Failed to read file:', result.error)
+      return
     }
-    this._tabs = [...this._tabs, tab]
-    this._activeTabId = tab.id
-  }
-
-  private _closeTab(id: string) {
-    const index = this._tabs.findIndex((tab) => tab.id === id)
-    if (index < 0) return
-
-    this._tabs = this._tabs.filter((tab) => tab.id !== id)
-    this._queries.dropTab(id)
-    if (this._activeTabId === id) {
-      this._activeTabId = this._tabs[Math.min(index, this._tabs.length - 1)]?.id ?? null
-    }
+    this._ctx.addTab({ id, kind: 'sql', name: file.name, path: file.path, content: result.content, savedContent: result.content })
   }
 
   // Close via ⌘W, the tab ✕, etc.: dirty editors get a confirmation first.
   private _requestCloseTab(id: string) {
-    const tab = this._tabs.find((entry) => entry.id === id)
+    const tab = this._ctx.tabs.find((entry) => entry.id === id)
     if (tab?.kind === 'sql' && tab.content !== tab.savedContent) {
       this._dialogs.confirm = {
         message: `Close "${tab.name}" without saving?`,
         detail: 'Unsaved changes will be lost.',
         confirmLabel: 'Close Without Saving',
-        action: () => this._closeTab(id),
+        action: () => this._ctx.closeTab(id),
       }
       return
     }
-    this._closeTab(id)
+    this._ctx.closeTab(id)
   }
 
   private async _saveActiveTab() {
-    const tab = this._activeSqlTab()
+    const tab = this._ctx.activeSqlTab()
     if (!tab) return
 
     // Untitled queries go through the native dialog, defaulting into the
@@ -538,27 +424,15 @@ export class WorkbenchScreen extends LitElement {
     const result = tab.path
       ? await window.sqlkit.saveFile(tab.path, tab.content)
       : await window.sqlkit.saveFileAs(this._contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
-    this._applySaveResult(tab, result)
+    this._ctx.applySaveResult(tab, result)
   }
 
   // File > Save As…: always the dialog, even for files that have a path.
   private async _saveActiveTabAs() {
-    const tab = this._activeSqlTab()
+    const tab = this._ctx.activeSqlTab()
     if (!tab) return
     const result = await window.sqlkit.saveFileAs(this._contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
-    this._applySaveResult(tab, result)
-  }
-
-  private _applySaveResult(tab: SqlTabState, result: FileSaveResult) {
-    if (!result.success) {
-      if (!result.canceled) console.error('Save failed:', result.error)
-      return
-    }
-    this._tabs = this._tabs.map((entry) =>
-      entry.id === tab.id && entry.kind === 'sql'
-        ? { ...entry, path: result.path, name: result.name, savedContent: tab.content }
-        : entry,
-    )
+    this._ctx.applySaveResult(tab, result)
   }
 
   // --- query running ----------------------------------------------------------
@@ -567,7 +441,7 @@ export class WorkbenchScreen extends LitElement {
   private async _runSql(sqlText: string) {
     // The run belongs to the tab it started from, even if the user switches
     // tabs or contexts before it finishes.
-    const tabId = this._activeTabId
+    const tabId = this._ctx.activeTabId
     if (!tabId) return
     // One run per tab: ignore re-triggers while this tab's query is in flight.
     if (this._queries.runFor(tabId).phase === 'running') return
@@ -581,7 +455,7 @@ export class WorkbenchScreen extends LitElement {
     // Capture the context the run started in. The connect/align below await,
     // and the user may switch child or profile meanwhile; the run must target
     // and be logged under the context Run was pressed in, not the current one.
-    const childDb = this._activeChildDb
+    const childDb = this._ctx.activeChildDb
     const runContextKey = contextKey(profile.id, childDb)
 
     if (this._live.phase(profile.id) !== 'connected') {
@@ -608,35 +482,27 @@ export class WorkbenchScreen extends LitElement {
     })
   }
 
-  private _tabExists(id: string): boolean {
-    if (this._tabs.some((tab) => tab.id === id)) return true
-    for (const instance of this._instances.values()) {
-      if (instance.tabs.some((tab) => tab.id === id)) return true
-    }
-    return false
-  }
-
   // Double-click browse: a tab named after the table, pre-filled with a capped SELECT and run.
   // Re-browsing reuses the tab and runs its first statement, so trailing half-written SQL doesn't error.
   private _browseTable(profile: ConnectionProfile, table: TableRef) {
     const sqlText = `SELECT * FROM ${quoteQualified(table)} LIMIT 200`
 
-    const id = `browse:${tableContextKey(profile.id, this._activeChildDb, table)}`
-    const existing = this._tabs.find((tab) => tab.id === id)
+    const id = `browse:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
+    const existing = this._ctx.tabs.find((tab) => tab.id === id)
     if (!existing) {
-      this._tabs = [
-        ...this._tabs,
+      this._ctx.tabs = [
+        ...this._ctx.tabs,
         { id, kind: 'sql', name: `${table.name}.sql`, path: null, content: sqlText, savedContent: sqlText },
       ]
     }
-    this._activeTabId = id
+    this._ctx.activeTabId = id
     void this._runSql(existing?.kind === 'sql' ? firstStatement(existing.content) || sqlText : sqlText)
   }
 
   // Quick-open table pick: reveal it in the Explorer (switching context if
   // needed) and open its browse tab, as if double-clicked in the sidebar.
   private _openTableFromPalette(key: string) {
-    this._selectedTable = key
+    this._ctx.selectedTable = key
     const profileId = key.split(':')[0]
     if (profileId) this._setActiveDb(profileId)
     this._activeView = 'explorer'
@@ -719,15 +585,15 @@ export class WorkbenchScreen extends LitElement {
           : ''}
 
         <div class="editor-area">
-          ${this._tabs.length
+          ${this._ctx.tabs.length
             ? html`
                 <div class="tab-bar">
-                  ${this._tabs.map(
+                  ${this._ctx.tabs.map(
                     (tab) => html`
                       <editor-tab
                         tabId=${tab.id}
                         name=${tabTitle(tab)}
-                        .active=${tab.id === this._activeTabId}
+                        .active=${tab.id === this._ctx.activeTabId}
                         .preview=${tab.kind === 'sql' && (tab.preview ?? false)}
                       ></editor-tab>
                     `,
@@ -783,7 +649,7 @@ export class WorkbenchScreen extends LitElement {
   private _contextLabel() {
     const profile = this._activeProfile()
     if (!profile) return ''
-    return this._activeChildDb ? `${profile.name} · ${this._activeChildDb}` : profile.name
+    return this._ctx.activeChildDb ? `${profile.name} · ${this._ctx.activeChildDb}` : profile.name
   }
 
   private _connectedName() {
@@ -795,7 +661,7 @@ export class WorkbenchScreen extends LitElement {
   // View-specific actions level with the sidebar title (reference layout).
   private _renderTitleActions(view: (typeof VIEWS)[number]) {
     if (view.id === 'history') {
-      const key = contextKey(this._activeDbId, this._activeChildDb)
+      const key = contextKey(this._ctx.activeDbId, this._ctx.activeChildDb)
       const count = this._queries.history.filter((item) => item.contextKey === key).length
       return html`
         <button
@@ -836,12 +702,12 @@ export class WorkbenchScreen extends LitElement {
         <databases-view
           .connections=${this._connections}
           .statuses=${this._live.statuses}
-          .activeTabId=${this._activeTabId}
+          .activeTabId=${this._ctx.activeTabId}
         ></databases-view>
       `
     }
     if (view.id === 'explorer') {
-      const activeTab = this._tabs.find((tab) => tab.id === this._activeTabId)
+      const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
       const context = this._activeProfile()
       const connected = context !== null && this._live.phase(context.id) === 'connected'
       const children = connected && context ? (this._live.statuses[context.id]?.children ?? []) : []
@@ -857,7 +723,7 @@ export class WorkbenchScreen extends LitElement {
           .columns=${connected && context ? (this._live.columns[context.id] ?? null) : null}
           .objects=${connected && context ? (this._live.objects[context.id] ?? null) : null}
           .activeChildName=${activeChild}
-          .selectedTable=${this._selectedTable}
+          .selectedTable=${this._ctx.selectedTable}
         ></explorer-view>
       `
     }
@@ -865,7 +731,7 @@ export class WorkbenchScreen extends LitElement {
       return html`<search-view .files=${this._workspaceFiles.files}></search-view>`
     }
     if (view.id === 'history') {
-      const key = contextKey(this._activeDbId, this._activeChildDb)
+      const key = contextKey(this._ctx.activeDbId, this._ctx.activeChildDb)
       return html`
         <history-view
           .items=${this._queries.history.filter((item) => item.contextKey === key)}
@@ -890,7 +756,7 @@ export class WorkbenchScreen extends LitElement {
   // browsing history doesn't stack tabs). Never auto-runs.
   private _onHistoryOpen(event: Event) {
     const { sql } = (event as CustomEvent<HistoryOpenDetail>).detail
-    this._openPreviewTab(sql)
+    this._ctx.openPreview(sql)
   }
 
   // Right-click explain: the prefixed statement lands in the preview tab and
@@ -901,42 +767,18 @@ export class WorkbenchScreen extends LitElement {
     if (!profile) return
     const prefix = profile.engine === 'sqlite' ? 'explain query plan ' : analyze ? 'explain analyze ' : 'explain '
     const statement = prefix + stripExplain(sql)
-    this._openPreviewTab(statement)
+    this._ctx.openPreview(statement)
     void this._runSql(statement)
-  }
-
-  private _openPreviewTab(sql: string) {
-    const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview)
-
-    if (preview) {
-      this._tabs = this._tabs.map((tab) =>
-        tab.id === preview.id && tab.kind === 'sql' ? { ...tab, content: sql, savedContent: sql } : tab,
-      )
-      this._activeTabId = preview.id
-      return
-    }
-
-    const tab: SqlTabState = {
-      id: crypto.randomUUID(),
-      kind: 'sql',
-      name: 'History.sql',
-      path: null,
-      content: sql,
-      savedContent: sql,
-      preview: true,
-    }
-    this._tabs = [...this._tabs, tab]
-    this._activeTabId = tab.id
   }
 
   // Double click: pin it. The preceding single clicks already recycled the
   // preview to this SQL, so promotion is just clearing the flag.
   private _onHistoryOpenPermanent(event: Event) {
     const { sql } = (event as CustomEvent<HistoryOpenDetail>).detail
-    const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview && tab.content === sql)
+    const preview = this._ctx.tabs.find((tab) => tab.kind === 'sql' && tab.preview && tab.content === sql)
     if (preview) {
-      this._tabs = this._tabs.map((tab) => (tab.id === preview.id ? { ...tab, preview: false } : tab))
-      this._activeTabId = preview.id
+      this._ctx.tabs = this._ctx.tabs.map((tab) => (tab.id === preview.id ? { ...tab, preview: false } : tab))
+      this._ctx.activeTabId = preview.id
       return
     }
     const tab: SqlTabState = {
@@ -947,16 +789,16 @@ export class WorkbenchScreen extends LitElement {
       content: sql,
       savedContent: sql,
     }
-    this._tabs = [...this._tabs, tab]
-    this._activeTabId = tab.id
+    this._ctx.tabs = [...this._ctx.tabs, tab]
+    this._ctx.activeTabId = tab.id
   }
 
   private _onHistoryClear() {
-    this._queries.clearHistory(contextKey(this._activeDbId, this._activeChildDb))
+    this._queries.clearHistory(contextKey(this._ctx.activeDbId, this._ctx.activeChildDb))
   }
 
   private _renderEditorContent() {
-    const activeTab = this._tabs.find((tab) => tab.id === this._activeTabId)
+    const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
     if (activeTab?.kind === 'config') {
       return html`
         <div class="editor-content form">
@@ -988,8 +830,8 @@ export class WorkbenchScreen extends LitElement {
       `
     }
     if (activeTab?.kind === 'sql') {
-      const tables = (this._activeDbId ? (this._live.tables[this._activeDbId] ?? []) : []).map((table) => table.name)
-      const columns = this._activeDbId ? (this._live.columns[this._activeDbId] ?? null) : null
+      const tables = (this._ctx.activeDbId ? (this._live.tables[this._ctx.activeDbId] ?? []) : []).map((table) => table.name)
+      const columns = this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? null) : null
       const dialect = dialectForEngine[this._activeProfile()?.engine ?? 'postgresql']
       return html`
         <div class="editor-content sql">
@@ -1014,7 +856,7 @@ export class WorkbenchScreen extends LitElement {
             @dblclick=${this._layout.resetPanelHeight}
           ></div>
           <results-panel
-            .run=${this._queries.runFor(this._activeTabId)}
+            .run=${this._queries.runFor(this._ctx.activeTabId)}
             .canCancel=${this._activeProfile()?.engine === 'postgresql'}
             @cancel-query=${this._onCancelQuery}
             style="height: ${this._layout.panelHeight === null ? '50%' : `${this._layout.panelHeight}px`}"
@@ -1039,7 +881,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _onEmptyAction(event: Event) {
     const { action } = (event as CustomEvent<{ action: EmptyAction }>).detail
-    if (action === 'new-query') this._newQuery()
+    if (action === 'new-query') this._ctx.newQuery()
     if (action === 'quick-open') this._cmdPalette.open('quick')
     if (action === 'switch-database') this._cmdPalette.open('databases')
     if (action === 'command-palette') this._cmdPalette.open('commands')
@@ -1048,7 +890,7 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onAddDatabase() {
-    this._openConfigTab({
+    this._ctx.openConfigTab({
       id: crypto.randomUUID(),
       name: '',
       engine: 'postgresql',
@@ -1065,7 +907,7 @@ export class WorkbenchScreen extends LitElement {
   private _onDbSelect(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
     const connection = this._connections.find((profile) => profile.id === id)
-    if (connection) this._openConfigTab(connection)
+    if (connection) this._ctx.openConfigTab(connection)
   }
 
   private async _onDbConnect(event: Event) {
@@ -1078,7 +920,7 @@ export class WorkbenchScreen extends LitElement {
     // Preserve the original behavior: only align when reconnecting the
     // already-active profile (its current child); a freshly-connected,
     // not-yet-active profile is aligned by _setActiveDb below.
-    await this._alignActiveChild(id, this._activeDbId === id ? this._activeChildDb : null, { followMissing: true })
+    await this._alignActiveChild(id, this._ctx.activeDbId === id ? this._ctx.activeChildDb : null, { followMissing: true })
     // A successful connect becomes the in-use context, but stays on the
     // Databases view — no jumping to the Explorer uninvited.
     this._setActiveDb(id)
@@ -1123,7 +965,7 @@ export class WorkbenchScreen extends LitElement {
     }
 
     // The dropped child's working context is gone with it.
-    this._instances.delete(contextKey(id, database))
+    this._ctx.dropInstance(contextKey(id, database))
     this._queries.sweepOrphans()
     if (this._connections.some((connection) => connection.id === id && connection.lastChildDb === database)) {
       this._connections = this._connections.map((connection) =>
@@ -1135,7 +977,7 @@ export class WorkbenchScreen extends LitElement {
     }
     // If the user was working in the dropped child, follow the driver's
     // in-use child instead of pointing at a database that no longer exists.
-    if (this._activeDbId === id && this._activeChildDb === database) {
+    if (this._ctx.activeDbId === id && this._ctx.activeChildDb === database) {
       this._setActiveDb(id, this._inUseChild(id) ?? undefined)
     }
   }
@@ -1156,28 +998,15 @@ export class WorkbenchScreen extends LitElement {
     await this._live.disconnect(id)
 
     // Leave the context first so _switchInstance doesn't re-stash it below.
-    if (this._activeDbId === id) {
+    if (this._ctx.activeDbId === id) {
       const next = this._connections.find((connection) => connection.id !== id) ?? null
-      this._switchInstance(next?.id ?? null, next ? this._defaultChild(next) : null)
+      this._ctx.switchInstance(next?.id ?? null, next ? this._defaultChild(next) : null)
     }
 
     this._connections = this._connections.filter((connection) => connection.id !== id)
 
-    // Purge the profile's stashed contexts, then its config tab wherever it
-    // is open — live tab strip or another context's stash.
-    for (const key of [...this._instances.keys()]) {
-      if (key.startsWith(`${id}:`)) this._instances.delete(key)
-    }
-    this._tabs = this._tabs.filter((tab) => tab.id !== id)
-    if (this._activeTabId === id) this._activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
-    for (const [key, instance] of this._instances) {
-      if (!instance.tabs.some((tab) => tab.id === id)) continue
-      this._instances.set(key, {
-        ...instance,
-        tabs: instance.tabs.filter((tab) => tab.id !== id),
-        activeTabId: instance.activeTabId === id ? null : instance.activeTabId,
-      })
-    }
+    // Drop the profile's stashed contexts and its config tab wherever it's open.
+    this._ctx.removeProfile(id)
     this._queries.sweepOrphans()
 
     this._workspaceFiles.setFolder(this._contextFolder())
@@ -1191,7 +1020,7 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onTableSelect(event: Event) {
-    this._selectedTable = (event as CustomEvent<TableSelectDetail>).detail.key
+    this._ctx.selectedTable = (event as CustomEvent<TableSelectDetail>).detail.key
   }
 
   private _onTableBrowse(event: Event) {
@@ -1206,7 +1035,7 @@ export class WorkbenchScreen extends LitElement {
   private _onMatviewRefresh(event: Event) {
     const { table } = (event as CustomEvent<TableBrowseDetail>).detail
     const statement = `REFRESH MATERIALIZED VIEW ${quoteQualified(table)};`
-    this._openPreviewTab(statement)
+    this._ctx.openPreview(statement)
     void this._runSql(statement)
   }
 
@@ -1226,7 +1055,7 @@ export class WorkbenchScreen extends LitElement {
       detail: 'It is permanently deleted on the server. This cannot be undone.',
       confirmLabel: 'Drop',
       action: () => {
-        this._openPreviewTab(statement)
+        this._ctx.openPreview(statement)
         // The schema changed: re-fetch tables/columns once the drop lands.
         void this._runSql(statement).then(() => this._live.refresh(profile.id))
       },
@@ -1247,7 +1076,7 @@ export class WorkbenchScreen extends LitElement {
       detail: `All rows are permanently deleted (${statement}). This cannot be undone.`,
       confirmLabel: 'Truncate',
       action: () => {
-        this._openPreviewTab(statement)
+        this._ctx.openPreview(statement)
         void this._runSql(statement)
       },
     }
@@ -1259,11 +1088,11 @@ export class WorkbenchScreen extends LitElement {
     const { table } = (event as CustomEvent<TableBrowseDetail>).detail
     const profile = this._activeProfile()
     if (!profile) return
-    const id = `inspect:${tableContextKey(profile.id, this._activeChildDb, table)}`
-    if (!this._tabs.some((tab) => tab.id === id)) {
-      this._tabs = [...this._tabs, { id, kind: 'inspect', profileId: profile.id, table }]
+    const id = `inspect:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
+    if (!this._ctx.tabs.some((tab) => tab.id === id)) {
+      this._ctx.tabs = [...this._ctx.tabs, { id, kind: 'inspect', profileId: profile.id, table }]
     }
-    this._activeTabId = id
+    this._ctx.activeTabId = id
   }
 
   // Same for functions/types; detail (identity args) keeps overloads apart.
@@ -1271,11 +1100,11 @@ export class WorkbenchScreen extends LitElement {
     const { object, objectKind } = (event as CustomEvent<ObjectInspectDetail>).detail
     const profile = this._activeProfile()
     if (!profile) return
-    const id = `inspect-object:${profile.id}:${this._activeChildDb ?? ''}:${object.schema ?? ''}:${objectKind}:${object.name}:${object.detail}`
-    if (!this._tabs.some((tab) => tab.id === id)) {
-      this._tabs = [...this._tabs, { id, kind: 'inspect-object', profileId: profile.id, object, objectKind }]
+    const id = `inspect-object:${profile.id}:${this._ctx.activeChildDb ?? ''}:${object.schema ?? ''}:${objectKind}:${object.name}:${object.detail}`
+    if (!this._ctx.tabs.some((tab) => tab.id === id)) {
+      this._ctx.tabs = [...this._ctx.tabs, { id, kind: 'inspect-object', profileId: profile.id, object, objectKind }]
     }
-    this._activeTabId = id
+    this._ctx.activeTabId = id
   }
 
   // A search match opens the file and lands the cursor on the matched line.
@@ -1328,11 +1157,11 @@ export class WorkbenchScreen extends LitElement {
     // Retarget any open tab; tab ids are keyed by absolute path.
     const oldId = `file:${file.path}`
     const newId = `file:${result.path}`
-    this._tabs = this._tabs.map((tab) =>
+    this._ctx.tabs = this._ctx.tabs.map((tab) =>
       tab.id === oldId && tab.kind === 'sql' ? { ...tab, id: newId, name: result.name, path: result.path } : tab,
     )
     this._queries.renameTab(oldId, newId)
-    if (this._activeTabId === oldId) this._activeTabId = newId
+    if (this._ctx.activeTabId === oldId) this._ctx.activeTabId = newId
     void this._workspaceFiles.reload()
   }
 
@@ -1354,23 +1183,19 @@ export class WorkbenchScreen extends LitElement {
     }
 
     // Close tabs of the deleted file — or of everything under a deleted folder.
-    this._tabs = this._tabs.filter(
+    this._ctx.tabs = this._ctx.tabs.filter(
       (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
     )
     this._queries.sweepOrphans()
-    if (this._activeTabId && !this._tabs.some((tab) => tab.id === this._activeTabId)) {
-      this._activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
+    if (this._ctx.activeTabId && !this._ctx.tabs.some((tab) => tab.id === this._ctx.activeTabId)) {
+      this._ctx.activeTabId = this._ctx.tabs[this._ctx.tabs.length - 1]?.id ?? null
     }
     void this._workspaceFiles.reload()
   }
 
   private _onEditorChange(event: Event) {
     const { value } = (event as CustomEvent<{ value: string }>).detail
-    // Editing a preview tab promotes it to permanent (VS Code behavior) —
-    // a later history pick must not recycle away someone's edits.
-    this._tabs = this._tabs.map((tab) =>
-      tab.id === this._activeTabId && tab.kind === 'sql' ? { ...tab, content: value, preview: false } : tab,
-    )
+    this._ctx.setActiveContent(value)
   }
 
   private _onRunQuery(event: Event) {
@@ -1394,7 +1219,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _onTabSelect(event: Event) {
     const { tabId } = (event as CustomEvent<{ tabId: string }>).detail
-    this._activeTabId = tabId
+    this._ctx.activeTabId = tabId
   }
 
   private _onTabClose(event: Event) {
@@ -1404,7 +1229,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _onConfigChange(event: Event) {
     const { profile } = (event as CustomEvent<{ profile: ConnectionProfile }>).detail
-    this._tabs = this._tabs.map((tab) => (tab.kind === 'config' && tab.id === profile.id ? { ...tab, profile } : tab))
+    this._ctx.tabs = this._ctx.tabs.map((tab) => (tab.kind === 'config' && tab.id === profile.id ? { ...tab, profile } : tab))
   }
 
   private async _onConfigSave(event: Event) {
@@ -1415,7 +1240,7 @@ export class WorkbenchScreen extends LitElement {
         ? this._connections.map((connection) => (connection.id === profile.id ? profile : connection))
         : [...this._connections, profile]
 
-    const result = await window.sqlkit.saveWorkspaceConfig({ version: 1, connections, activeDbId: this._activeDbId })
+    const result = await window.sqlkit.saveWorkspaceConfig({ version: 1, connections, activeDbId: this._ctx.activeDbId })
     if (!result.success) {
       console.error('Failed to save workspace config:', result.error)
       return
@@ -1424,12 +1249,12 @@ export class WorkbenchScreen extends LitElement {
     // Re-read rather than trusting the local copy: the save assigned the
     // profile's files folder (and created it on disk).
     await this._loadConfig()
-    this._closeTab(profile.id)
+    this._ctx.closeTab(profile.id)
     this._activeView = 'databases'
   }
 
   private _onConfigCancel() {
-    if (this._activeTabId) this._closeTab(this._activeTabId)
+    if (this._ctx.activeTabId) this._ctx.closeTab(this._ctx.activeTabId)
   }
 
   private _onCloseWorkspace() {
