@@ -4,7 +4,9 @@
 
 const cellText = (value: unknown): string => {
   if (value === null || value === undefined) return ''
-  return typeof value === 'object' ? JSON.stringify(value) : String(value)
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean') return String(value)
+  return JSON.stringify(value)
 }
 
 const delimitedField = (value: unknown, delimiter: string): string => {

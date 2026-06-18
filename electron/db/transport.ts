@@ -40,7 +40,7 @@ export async function resolveEndpoint(
     try {
       tunnel = await openSshTunnel(profile.ssh!, host, port, onTunnelError)
     } catch (error) {
-      throw new Error(`SSH tunnel failed: ${(error as Error).message}`)
+      throw new Error(`SSH tunnel failed: ${(error as Error).message}`, { cause: error })
     }
     return { host: '127.0.0.1', port: tunnel.localPort, tunnel }
   }

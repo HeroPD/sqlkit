@@ -405,7 +405,7 @@ function buildAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
-app.whenReady().then(() => {
+void app.whenReady().then(() => {
   buildAppMenu()
   registerWorkspaceIpc()
   registerDbIpc()

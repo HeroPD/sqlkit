@@ -29,7 +29,7 @@ function buildConnectConfig(ssh: SshConfig): ConnectConfig {
     try {
       config.privateKey = fs.readFileSync(keyPath)
     } catch (error) {
-      throw new Error(`Failed to read SSH key at ${keyPath}: ${(error as Error).message}`)
+      throw new Error(`Failed to read SSH key at ${keyPath}: ${(error as Error).message}`, { cause: error })
     }
     if (ssh.passphrase) config.passphrase = ssh.passphrase
   } else {

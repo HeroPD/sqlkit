@@ -196,7 +196,7 @@ export class CommandPalette extends LitElement {
       if (!filtered.length) return
       const step = event.key === 'ArrowDown' ? 1 : -1
       this._active = pickable(filtered, active + step, step)
-      this.updateComplete.then(() => {
+      void this.updateComplete.then(() => {
         this.shadowRoot?.querySelector('.row.active')?.scrollIntoView({ block: 'nearest' })
       })
       return

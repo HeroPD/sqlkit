@@ -12,7 +12,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // Opens completion at the end of `doc` and returns the option labels.
 async function completionsAt(doc: string) {
-  const el = document.createElement('sql-editor') as SqlEditor
+  const el = document.createElement('sql-editor')
   el.tabId = `completion:${doc}`
   el.value = doc
   el.tables = ['postings', 'users']
@@ -55,7 +55,7 @@ test('ambiguous or unknown prefix completes nothing', async () => {
 const text = (el: SqlEditor) => el.shadowRoot!.querySelector('.cm-content')!.textContent ?? ''
 
 async function mount(tabId: string, value: string) {
-  const el = document.createElement('sql-editor') as SqlEditor
+  const el = document.createElement('sql-editor')
   el.tabId = tabId
   el.value = value
   document.body.append(el)

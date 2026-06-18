@@ -5,7 +5,7 @@ import type { ConnectionProfile, QueryResponse } from '../electron'
 import { QueriesController } from './queries'
 
 const host = (): ReactiveControllerHost =>
-  ({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) }) as unknown as ReactiveControllerHost
+  ({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
 
 const profile = { id: 'p1', name: 'Local' } as ConnectionProfile
 const result = { columns: ['n'], rows: [[1]], rowCount: 1, durationMs: 3 }

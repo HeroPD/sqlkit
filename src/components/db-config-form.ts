@@ -208,7 +208,9 @@ export class DbConfigForm extends LitElement {
       if (!(target instanceof HTMLSelectElement)) return
       event.preventDefault()
       const picker = target as HTMLSelectElement & { showPicker?: () => void }
-      picker.showPicker?.() ?? target.click()
+      // showPicker() returns void, so `?? click()` would fire both; branch instead.
+      if (picker.showPicker) picker.showPicker()
+      else target.click()
       return
     }
 

@@ -23,7 +23,7 @@ function realpathDeep(target: string): string | null {
         // treated like a missing future path, because writeFileSync would
         // follow the symlink and create/write its outside target.
         if (fs.lstatSync(current).isSymbolicLink()) return null
-      } catch {}
+      } catch { /* lstat failed — nothing to resolve here; fall through */ }
       if (code !== 'ENOENT' && code !== 'ENOTDIR') return null
       const parent = path.dirname(current)
       if (parent === current) return null

@@ -137,7 +137,7 @@ export class ResultsPanel extends LitElement {
   // the DOM table coordinates (# column shifts data columns right by one).
   private _onTableContextMenu(event: MouseEvent) {
     if (this.run.phase !== 'done') return
-    const cell = (event.target as HTMLElement).closest('td, th') as HTMLTableCellElement | null
+    const cell = (event.target as HTMLElement).closest<HTMLTableCellElement>('td, th')
     if (!cell) return
     event.preventDefault()
     const rowEl = cell.closest('tr') as HTMLTableRowElement

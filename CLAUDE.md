@@ -17,3 +17,4 @@ SQL desktop app: Electron main process + Lit renderer, bundled with Vite. Test v
 ## Conventions
 
 - Comments: keep to a single line. Use two only when the explanation genuinely needs it; avoid longer multi-line blocks.
+- Lint: `npm run lint` (ESLint flat config in `eslint.config.js`, type-aware). `npm run lint:fix` auto-fixes — but run `tsc -b` after, since `no-unnecessary-type-assertion --fix` can strip load-bearing assertions on generic DOM methods (e.g. `closest`).

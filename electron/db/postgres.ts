@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
-import type { ColumnRef, ConnectionProfile, InspectSection, QueryResult, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, TableRef } from '../../src/electron'
 import { MAX_RESULT_ROWS } from './driver'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -21,7 +21,7 @@ function sslOptions(profile: ConnectionProfile): boolean | ConnectionOptions {
     try {
       options.ca = readFileSync(expandHome(caPath), 'utf8')
     } catch (error) {
-      throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`)
+      throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`, { cause: error })
     }
   }
   if (ssl.mode === 'verify-ca') options.checkServerIdentity = () => undefined
@@ -83,8 +83,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const discovery = profile.database.trim() || 'postgres'
       pools = new Map([[discovery, makePool(discovery)]])
 
-      const result = await pools.get(discovery)!.query('select version()')
-      const version = shortVersion(result.rows[0].version as string)
+      const result = await pools.get(discovery)!.query<{ version: string }>('select version()')
+      const version = shortVersion(result.rows[0].version)
 
       if (profile.databaseMode === 'all') {
         const listed = await pools.get(discovery)!.query(
@@ -264,7 +264,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const [functions, types] = await Promise.all([
         // Plain functions and procedures; aggregates/window functions are
         // rarely user-authored and would mostly be noise.
-        pool.query(
+        pool.query<DbObject>(
           `select n.nspname as schema, p.proname as name,
                   pg_catalog.pg_get_function_identity_arguments(p.oid) as detail
            from pg_catalog.pg_proc p
@@ -276,7 +276,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         // Standalone user types: enums, domains, ranges, and CREATE TYPE AS
         // composites — every table also has an implicit composite type, so
         // 'c' is restricted to relkind 'c'.
-        pool.query(
+        pool.query<DbObject>(
           `select n.nspname as schema, t.typname as name,
                   case t.typtype
                     when 'e' then 'enum' when 'd' then 'domain'
@@ -338,7 +338,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       if (objectKind === 'function') {
         // detail carries the identity arguments, which is what distinguishes
         // overloads sharing a name.
-        const result = await pool.query(
+        const result = await pool.query<{ definition: string }>(
           `select pg_catalog.pg_get_functiondef(p.oid) as definition
            from pg_catalog.pg_proc p
            join pg_catalog.pg_namespace n on n.oid = p.pronamespace
@@ -401,7 +401,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       }
 
       if (typeRow.typtype === 'r') {
-        const range = await pool.query(
+        const range = await pool.query<{ subtype: string }>(
           'select pg_catalog.format_type(rngsubtype, null) as subtype from pg_catalog.pg_range where rngtypid = $1',
           [typeRow.oid],
         )
@@ -414,7 +414,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       }
 
       // Domain: base type, nullability, default, then its CHECK constraints.
-      const checks = await pool.query(
+      const checks = await pool.query<{ name: string; definition: string }>(
         `select conname as name, pg_catalog.pg_get_constraintdef(oid, true) as definition
          from pg_catalog.pg_constraint where contypid = $1 order by conname`,
         [typeRow.oid],
@@ -433,7 +433,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const schema = table.schema ?? 'public'
       const args = [schema, table.name]
       type Row = { name: string; definition: string }
-      const rows = async (sql: string): Promise<Row[]> => (await pool.query(sql, args)).rows
+      const rows = async (sql: string): Promise<Row[]> => (await pool.query<Row>(sql, args)).rows
 
       const [columns, constraints, indexes, partitions, triggers, rules, policies] = await Promise.all([
         pool.query(
