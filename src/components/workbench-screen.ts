@@ -9,11 +9,12 @@ import { LayoutController } from '../controllers/layout'
 import { CommandPaletteController } from '../controllers/command-palette'
 import { DialogsController } from '../controllers/dialogs'
 import { ContextsController, type EditorTabState, type SqlTabState } from '../controllers/contexts'
-import type { ConnectionProfile, FileInfo, MenuAction, TableRef } from '../electron'
+import type { ColumnRef, ConnectionProfile, FileInfo, MenuAction, QueryResult, TableRef } from '../electron'
 import './activity-button'
 import './command-palette'
 import './confirm-dialog'
 import './prompt-dialog'
+import './review-query-dialog'
 import './table-inspect'
 import './databases-view'
 import './db-config-form'
@@ -35,10 +36,12 @@ import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from '
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
+import { buildBatchUpdate, buildUpdate, quoteQualified, type BatchUpdateEdit } from '../sql-write'
 import { stripExplain } from '../sql-types'
 import { TABLE_KIND_LABELS } from '../table-kinds'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
+import type { CellCoord } from './results-panel'
 
 const VIEWS = [
   { id: 'explorer', title: 'Explorer', icon: 'codicon-files', hint: 'No files yet.' },
@@ -51,10 +54,6 @@ const VIEWS = [
 
 
 type ViewId = (typeof VIEWS)[number]['id']
-
-const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`
-const quoteQualified = (table: TableRef) =>
-  table.schema ? `${quoteIdent(table.schema)}.${quoteIdent(table.name)}` : quoteIdent(table.name)
 
 const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'config') return tab.profile.name.trim() || 'New Database'
@@ -493,7 +492,7 @@ export class WorkbenchScreen extends LitElement {
     if (!existing) {
       this._ctx.tabs = [
         ...this._ctx.tabs,
-        { id, kind: 'sql', name: `${table.name}.sql`, path: null, content: sqlText, savedContent: sqlText },
+        { id, kind: 'sql', name: `${table.name}.sql`, path: null, content: sqlText, savedContent: sqlText, table },
       ]
     }
     this._ctx.activeTabId = id
@@ -629,9 +628,21 @@ export class WorkbenchScreen extends LitElement {
               .detail=${this._dialogs.prompt.detail}
               .confirmLabel=${this._dialogs.prompt.confirmLabel}
               .placeholder=${this._dialogs.prompt.placeholder}
+              .allowEmpty=${this._dialogs.prompt.allowEmpty ?? false}
+              .trim=${this._dialogs.prompt.trim ?? true}
               @dialog-cancel=${() => (this._dialogs.prompt = null)}
               @dialog-confirm=${this._dialogs.acceptPrompt}
             ></prompt-dialog>
+          `
+        : ''}
+      ${this._dialogs.review
+        ? html`
+            <review-query-dialog
+              .sql=${this._dialogs.review.sql}
+              .params=${this._dialogs.review.params}
+              @dialog-cancel=${() => (this._dialogs.review = null)}
+              @dialog-confirm=${this._dialogs.acceptReview}
+            ></review-query-dialog>
           `
         : ''}
 
@@ -853,8 +864,11 @@ export class WorkbenchScreen extends LitElement {
           <results-panel
             .run=${this._queries.runFor(this._ctx.activeTabId)}
             .canCancel=${this._activeProfile()?.engine === 'postgresql'}
+            .editable=${this._editContext() !== null}
             @cancel-query=${this._onCancelQuery}
             @load-more=${this._onLoadMore}
+            @cell-edit=${this._onCellEdit}
+            @cells-edit=${this._onCellsEdit}
             style="height: ${this._layout.panelHeight === null ? '70%' : `${this._layout.panelHeight}px`}"
           ></results-panel>
         </div>
@@ -1209,6 +1223,99 @@ export class WorkbenchScreen extends LitElement {
   // The results grid scrolled near the end of what's loaded: page in more rows.
   private _onLoadMore() {
     if (this._ctx.activeTabId) void this._queries.loadMore(this._ctx.activeTabId)
+  }
+
+  // A result is editable only when it's a single-table browse whose primary key
+  // is present in the columns — enough to build a one-row `UPDATE … WHERE pk`.
+  private _editContext(): { table: TableRef; columns: ColumnRef[]; result: QueryResult } | null {
+    const tab = this._ctx.activeSqlTab()
+    const profileId = this._ctx.activeDbId
+    if (!tab?.table || !profileId) return null
+    const { table } = tab
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    if (run.phase !== 'done') return null
+    const columns = (this._live.columns[profileId] ?? []).filter((c) => c.schema === table.schema && c.table === table.name)
+    const pk = columns.filter((c) => c.primaryKey)
+    if (!pk.length || !pk.every((p) => run.result.columns.includes(p.name))) return null
+    return { table, columns, result: run.result }
+  }
+
+  private _editSpecs(ctx: { columns: ColumnRef[]; result: QueryResult }, cells: CellCoord[], value: string): BatchUpdateEdit[] | null {
+    const specs: BatchUpdateEdit[] = []
+    const pkColumns = ctx.columns.filter((c) => c.primaryKey)
+    for (const cell of cells) {
+      const columnName = ctx.result.columns[cell.col]
+      const columnMeta = ctx.columns.find((c) => c.name === columnName)
+      if (columnName === undefined || !columnMeta) {
+        this._dialogs.notice('Cannot edit this column', `"${columnName ?? ''}" is not a column of the browsed table.`)
+        return null
+      }
+      const row = ctx.result.rows[cell.row]
+      if (!row) {
+        this._dialogs.notice('Cannot edit this row', 'It is no longer loaded in the current result.')
+        return null
+      }
+      const pks = pkColumns.map((pk) => ({ name: pk.name, value: row[ctx.result.columns.indexOf(pk.name)] }))
+      if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
+        this._dialogs.notice('Cannot edit this row', 'Its primary key value is missing from the result.')
+        return null
+      }
+      specs.push({ column: columnName, columnMeta, value, pks })
+    }
+    return specs
+  }
+
+  // A cell was edited inline: build the parameterized UPDATE and pop the review
+  // dialog. Running it is deferred to the dialog's confirm.
+  private _onCellEdit(event: Event) {
+    const { row, col, value } = (event as CustomEvent<{ row: number; col: number; value: string }>).detail
+    const ctx = this._editContext()
+    const profile = this._activeProfile()
+    if (!ctx || !profile) return
+    const [spec] = this._editSpecs(ctx, [{ row, col }], value) ?? []
+    if (!spec) return
+    const { sql, params } = buildUpdate({ table: ctx.table, ...spec, dialect: profile.engine })
+    this._dialogs.review = { sql, params, run: () => void this._runWrite(profile, sql, params) }
+  }
+
+  // The selected cells are edited to one value from a context-menu action.
+  private _onCellsEdit(event: Event) {
+    const { cells } = (event as CustomEvent<{ cells: CellCoord[] }>).detail
+    if (!cells.length) return
+    this._dialogs.prompt = {
+      message: cells.length === 1 ? 'Edit Cell' : `Edit ${cells.length} Cells`,
+      detail: 'Enter the value to write. Empty writes NULL for nullable columns.',
+      confirmLabel: 'Review Update',
+      placeholder: 'new value',
+      allowEmpty: true,
+      trim: false,
+      action: (value) => this._reviewCellsEdit(cells, value),
+    }
+  }
+
+  private _reviewCellsEdit(cells: CellCoord[], value: string) {
+    const ctx = this._editContext()
+    const profile = this._activeProfile()
+    if (!ctx || !profile) return
+    const edits = this._editSpecs(ctx, cells, value)
+    if (!edits?.length) return
+    const { sql, params } = buildBatchUpdate({ table: ctx.table, edits, dialect: profile.engine })
+    this._dialogs.review = { sql, params, run: () => void this._runWrite(profile, sql, params) }
+  }
+
+  private async _runWrite(profile: ConnectionProfile, sql: string, params: unknown[]) {
+    const response = await window.sqlkit.runQuery(profile.id, this._ctx.activeChildDb, sql, params)
+    if (!response.success) {
+      this._dialogs.notice('Update failed', response.error)
+      return
+    }
+    if (response.result.rowCount === 0) {
+      this._dialogs.notice('No rows updated', 'The row may have changed or been removed.')
+      return
+    }
+    // Re-run the browse SELECT so the grid reflects the write (and any triggers).
+    const tab = this._ctx.activeSqlTab()
+    if (tab) void this._runSql(firstStatement(tab.content) || tab.content)
   }
 
   // Stop from the Tasks view: targets the task's own connection, which may

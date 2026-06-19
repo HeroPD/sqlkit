@@ -16,6 +16,8 @@ export type QueryRun =
   | { phase: 'done'; result: QueryResult }
   | { phase: 'error'; error: string }
 
+export type CellCoord = { row: number; col: number }
+
 const NUM_COL_WIDTH = 48
 // Rows rendered beyond the viewport on each side — covers fast scrolls and the
 // sticky header's overlap without exact offset math.
@@ -77,6 +79,15 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   canCancel = false
 
+  /** When true, double-clicking a cell edits it (single-table browse with a PK).
+   * The owner builds/reviews/runs the UPDATE from the emitted `cell-edit`. */
+  @property({ attribute: false })
+  editable = false
+
+  /** The cell currently being edited inline (absolute data indices). */
+  @state()
+  private _editing: { row: number; col: number } | null = null
+
   /** Cell the context menu was opened on: row/col index into the result
    * (col -1 on the # column, row -1 on the header row). */
   @state()
@@ -103,6 +114,7 @@ export class ResultsPanel extends LitElement {
   private _scrollRaf = 0
   private _resizeObs: ResizeObserver | null = null
   private _dragging = false
+  private _editFocusPending = false
 
   // Widths measured once per result, keyed by session so appends don't reflow.
   private _widthsCache: { key: unknown; widths: number[] } | null = null
@@ -113,6 +125,7 @@ export class ResultsPanel extends LitElement {
     if (key === this._lastKey) return // an append to the same result, not a new one
     this._lastKey = key
     this._sel = null
+    this._editing = null
     this._scrollTop = 0
     this._resetScroll = true
   }
@@ -134,6 +147,14 @@ export class ResultsPanel extends LitElement {
       this._resetScroll = false
       const body = this._bodyEl()
       if (body) body.scrollTop = 0
+    }
+    if (this._editFocusPending) {
+      const input = this.shadowRoot?.querySelector<HTMLInputElement>('.cell-edit')
+      if (input) {
+        this._editFocusPending = false
+        input.focus()
+        input.select()
+      }
     }
     this._measureRowHeight()
     this._maybeLoadMore()
@@ -262,14 +283,20 @@ export class ResultsPanel extends LitElement {
     event.preventDefault()
     const dataRow = cell.closest('tr')?.getAttribute('data-row')
     const row = cell.tagName === 'TH' || dataRow === null || dataRow === undefined ? -1 : Number(dataRow)
-    this._menu = { x: event.clientX, y: event.clientY, row, col: cell.cellIndex - 1 }
+    const col = cell.cellIndex - 1
+    if (row >= 0 && col >= 0 && !this._isSelected(row, col)) this._sel = { r0: row, c0: col, r1: row, c1: col }
+    this._menu = { x: event.clientX, y: event.clientY, row, col }
   }
 
   private _renderMenu() {
     const menu = this._menu
     if (!menu || this.run.phase !== 'done') return ''
     const { result } = this.run
+    const editCells = this.editable ? this._cellsForMenu(menu) : []
     const items: MenuItem[] = [
+      ...(editCells.length
+        ? [{ id: 'edit-cells', label: editCells.length === 1 ? 'Edit Cell…' : `Edit ${editCells.length} Selected Cells…` }]
+        : []),
       ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'copy-cell', label: 'Copy Cell' }] : []),
       ...(menu.row >= 0 ? [{ id: 'copy-row', label: 'Copy Row' }] : []),
       ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: 'Copy Column Name' }] : []),
@@ -302,6 +329,12 @@ export class ResultsPanel extends LitElement {
     if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
     if (action === 'copy-json') copy(toJson(result.columns, await this._allRows(result)))
     if (action === 'export') this._exportOpen = true
+    if (action === 'edit-cells') {
+      const cells = this._cellsForMenu(at)
+      if (cells.length) {
+        this.dispatchEvent(new CustomEvent('cells-edit', { detail: { cells }, bubbles: true, composed: true }))
+      }
+    }
   }
 
   // --- cell selection ---------------------------------------------------------
@@ -330,8 +363,25 @@ export class ResultsPanel extends LitElement {
     )
   }
 
+  private _cellsForMenu(at: { row: number; col: number }): CellCoord[] {
+    if (this.run.phase !== 'done' || at.row < 0 || at.col < 0) return []
+    const { rows, columns } = this.run.result
+    const bounds = this._sel && this._isSelected(at.row, at.col) ? this._sel : { r0: at.row, c0: at.col, r1: at.row, c1: at.col }
+    const r0 = Math.max(0, Math.min(bounds.r0, bounds.r1))
+    const r1 = Math.min(rows.length - 1, Math.max(bounds.r0, bounds.r1))
+    const c0 = Math.max(0, Math.min(bounds.c0, bounds.c1))
+    const c1 = Math.min(columns.length - 1, Math.max(bounds.c0, bounds.c1))
+    const cells: CellCoord[] = []
+    for (let row = r0; row <= r1; row += 1) {
+      for (let col = c0; col <= c1; col += 1) cells.push({ row, col })
+    }
+    return cells
+  }
+
   private _onCellPointerDown = (event: PointerEvent) => {
     if (event.button !== 0) return // leave right-click to the context menu
+    // Clicking inside the inline editor must not re-select or steal its focus.
+    if ((event.target as HTMLElement).closest('.cell-edit')) return
     const hit = this._dataCellAt(event.target as Element)
     if (!hit) return
     ;(event.currentTarget as HTMLElement).focus() // so Cmd/Ctrl-C reaches us
@@ -364,6 +414,52 @@ export class ResultsPanel extends LitElement {
     window.removeEventListener('pointermove', this._onDragMove)
     window.removeEventListener('pointerup', this._endDrag)
     window.removeEventListener('pointercancel', this._endDrag)
+  }
+
+  // --- cell editing -----------------------------------------------------------
+
+  private _onCellDblClick = (event: MouseEvent) => {
+    if (!this.editable) return
+    // Double-clicking inside the editor (e.g. to select a word) must not reset it.
+    if ((event.target as HTMLElement).closest('.cell-edit')) return
+    const hit = this._dataCellAt(event.target as Element)
+    if (!hit) return
+    this._editing = hit
+    this._editFocusPending = true
+  }
+
+  private _onEditKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      this._commitEdit(event.target as HTMLInputElement)
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      this._editing = null
+    }
+    // Don't let Cmd/Ctrl-C etc. bubble to the grid's copy handler while typing.
+    event.stopPropagation()
+  }
+
+  // Enter commits: emit the new value for the owner to turn into an UPDATE (it
+  // pops the review dialog). Unchanged values are a no-op.
+  private _commitEdit(input: HTMLInputElement) {
+    const editing = this._editing
+    this._editing = null
+    if (!editing || this.run.phase !== 'done') return
+    const original = this.run.result.rows[editing.row]?.[editing.col]
+    const originalText = original === null || original === undefined ? '' : formatCell(original)
+    if (input.value === originalText) return
+    this.dispatchEvent(
+      new CustomEvent('cell-edit', {
+        detail: { row: editing.row, col: editing.col, value: input.value },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+  }
+
+  private _cancelEdit = () => {
+    this._editing = null
   }
 
   private _onGridKeydown = (event: KeyboardEvent) => {
@@ -439,6 +535,7 @@ export class ResultsPanel extends LitElement {
         tabindex="0"
         @contextmenu=${this._onTableContextMenu}
         @pointerdown=${this._onCellPointerDown}
+        @dblclick=${this._onCellDblClick}
         @keydown=${this._onGridKeydown}
       >
         <colgroup>
@@ -460,6 +557,17 @@ export class ResultsPanel extends LitElement {
                 <td class="num">${absRow + 1}</td>
                 ${row.map((cell, col) => {
                   const sel = this._isSelected(absRow, col) ? 'selected' : ''
+                  if (this._editing?.row === absRow && this._editing.col === col) {
+                    const initial = cell === null || cell === undefined ? '' : formatCell(cell)
+                    return html`<td class=${sel}>
+                      <input
+                        class="cell-edit"
+                        .value=${initial}
+                        @keydown=${this._onEditKeydown}
+                        @blur=${this._cancelEdit}
+                      />
+                    </td>`
+                  }
                   if (cell === null || cell === undefined) return html`<td class=${sel}><span class="null">NULL</span></td>`
                   const text = formatCell(cell)
                   return html`<td class=${sel} title=${text}>${text}</td>`
@@ -668,6 +776,20 @@ export class ResultsPanel extends LitElement {
       .null {
         color: var(--text-3);
         font-style: italic;
+      }
+
+      /* Inline cell editor: fills the cell so editing feels in-place. */
+      .cell-edit {
+        width: 100%;
+        box-sizing: border-box;
+        margin: -3px 0;
+        padding: 2px 9px;
+        font: inherit;
+        color: var(--input-fg);
+        background: var(--input-bg);
+        border: 1px solid var(--focus-border);
+        border-radius: 2px;
+        outline: none;
       }
 
       /* Cell selection — wins over zebra striping and cell hover. */

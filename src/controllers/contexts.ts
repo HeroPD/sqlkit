@@ -14,6 +14,9 @@ export type SqlTabState = {
   // VS Code-style preview tab: single-click opens recycle it instead of
   // stacking tabs. Editing or double-clicking promotes it to permanent.
   preview?: boolean
+  // Source table of a double-click "browse" tab — its result is editable
+  // (cell edits build an UPDATE against this table). Absent for hand-written SQL.
+  table?: TableRef
 }
 
 export type EditorTabState =

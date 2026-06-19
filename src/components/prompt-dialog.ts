@@ -21,6 +21,12 @@ export class PromptDialog extends LitElement {
   @property()
   placeholder = ''
 
+  @property({ type: Boolean })
+  allowEmpty = false
+
+  @property({ type: Boolean })
+  trim = true
+
   connectedCallback() {
     super.connectedCallback()
     window.addEventListener('keydown', this._onKeydown)
@@ -77,8 +83,9 @@ export class PromptDialog extends LitElement {
   }
 
   private _confirm() {
-    const value = this.shadowRoot?.querySelector('input')?.value.trim() ?? ''
-    if (!value) return
+    const raw = this.shadowRoot?.querySelector('input')?.value ?? ''
+    const value = this.trim ? raw.trim() : raw
+    if (!this.allowEmpty && !value) return
     this.dispatchEvent(
       new CustomEvent<PromptConfirmDetail>('dialog-confirm', { detail: { value }, bubbles: true, composed: true }),
     )

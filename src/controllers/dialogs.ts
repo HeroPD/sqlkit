@@ -7,8 +7,12 @@ type PromptConfig = {
   detail: string
   confirmLabel: string
   placeholder: string
+  allowEmpty?: boolean
+  trim?: boolean
   action: (value: string) => void
 }
+// A generated write statement awaiting the user's review before it runs.
+type ReviewConfig = { sql: string; params: unknown[]; run: () => void }
 
 // Owns the modal confirm/prompt dialogs the workbench pops for destructive or
 // input actions. The dialog views are their own components; this holds which
@@ -17,6 +21,7 @@ type PromptConfig = {
 export class DialogsController implements ReactiveController {
   private _confirm: ConfirmConfig | null = null
   private _prompt: PromptConfig | null = null
+  private _review: ReviewConfig | null = null
   private host: ReactiveControllerHost
 
   constructor(host: ReactiveControllerHost) {
@@ -27,6 +32,7 @@ export class DialogsController implements ReactiveController {
   hostDisconnected() {
     this._confirm = null
     this._prompt = null
+    this._review = null
   }
 
   get confirm() {
@@ -42,6 +48,14 @@ export class DialogsController implements ReactiveController {
   }
   set prompt(config: PromptConfig | null) {
     this._prompt = config
+    this.host.requestUpdate()
+  }
+
+  get review() {
+    return this._review
+  }
+  set review(config: ReviewConfig | null) {
+    this._review = config
     this.host.requestUpdate()
   }
 
@@ -61,5 +75,11 @@ export class DialogsController implements ReactiveController {
     const action = this._prompt?.action
     this.prompt = null
     action?.(value)
+  }
+
+  acceptReview = () => {
+    const run = this._review?.run
+    this.review = null
+    run?.()
   }
 }
