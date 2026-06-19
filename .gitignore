@@ -13,6 +13,11 @@ dist-electron
 dist-ssr
 *.local
 
+# Local environment (integration test DB URL, etc.) — never commit secrets
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
