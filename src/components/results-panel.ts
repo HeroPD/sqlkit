@@ -18,7 +18,8 @@ export type QueryRun =
 
 export type CellCoord = { row: number; col: number }
 
-const NUM_COL_WIDTH = 48
+const NUM_COL_MIN_WIDTH = 30
+const NUM_COL_MAX_WIDTH = 96
 // Rows rendered beyond the viewport on each side — covers fast scrolls and the
 // sticky header's overlap without exact offset math.
 const OVERSCAN = 8
@@ -28,6 +29,11 @@ const ESTIMATED_ROW_HEIGHT = 22
 const formatCell = (value: unknown) => {
   if (typeof value === 'object' && value !== null) return JSON.stringify(value)
   return String(value)
+}
+
+const numberColumnWidth = (result: QueryResult) => {
+  const maxRow = Math.max(1, result.bufferedRowCount ?? result.rowCount ?? result.rows.length)
+  return Math.min(NUM_COL_MAX_WIDTH, Math.max(NUM_COL_MIN_WIDTH, String(maxRow).length * 8 + 20))
 }
 
 // Results-table column sizing (reference approach): measure the header and
@@ -104,6 +110,7 @@ export class ResultsPanel extends LitElement {
   // Virtualization: only rows in [first, last) of the loaded set are in the DOM.
   @state() private _scrollTop = 0
   @state() private _viewportH = 0
+  @state() private _viewportW = 0
   @state() private _rowHeight = 0 // measured from the first real row; 0 = estimate
 
   // Identity of the shown result, so a new query (reset scroll + selection) is
@@ -134,9 +141,11 @@ export class ResultsPanel extends LitElement {
     const body = this._bodyEl()
     if (!body) return
     this._viewportH = body.clientHeight
+    this._viewportW = body.clientWidth
     // The panel height changes when the user drags the results divider.
     this._resizeObs = new ResizeObserver(() => {
       this._viewportH = body.clientHeight
+      this._viewportW = body.clientWidth
       this._maybeLoadMore()
     })
     this._resizeObs.observe(body)
@@ -196,6 +205,7 @@ export class ResultsPanel extends LitElement {
       if (!body) return
       this._scrollTop = body.scrollTop
       this._viewportH = body.clientHeight
+      this._viewportW = body.clientWidth
       this._maybeLoadMore()
     })
   }
@@ -522,7 +532,11 @@ export class ResultsPanel extends LitElement {
     // auto the browser falls back to AUTO layout and the colgroup widths
     // become minimums a long nowrap cell can blow past. min-width: 100% in
     // the CSS still stretches the columns when they underfill the panel.
-    const tableWidth = NUM_COL_WIDTH + widths.reduce((sum, width) => sum + width, 0)
+    const numColWidth = numberColumnWidth(result)
+    const baseTableWidth = numColWidth + widths.reduce((sum, width) => sum + width, 0)
+    const fill = widths.length && this._viewportW > baseTableWidth ? this._viewportW - baseTableWidth : 0
+    const tableWidth = baseTableWidth + fill
+    const displayWidths = fill ? widths.map((width, index) => (index === widths.length - 1 ? width + fill : width)) : widths
     // Only the visible window of loaded rows is in the DOM; spacer rows above
     // and below stand in for the rest so the scrollbar reflects the full set.
     const { first, last, rowH } = this._window()
@@ -539,12 +553,12 @@ export class ResultsPanel extends LitElement {
         @keydown=${this._onGridKeydown}
       >
         <colgroup>
-          <col style="width: ${NUM_COL_WIDTH}px" />
-          ${widths.map((width) => html`<col style="width: ${width}px" />`)}
+          <col style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px" />
+          ${displayWidths.map((width) => html`<col style="width: ${width}px" />`)}
         </colgroup>
         <thead>
           <tr>
-            <th class="num">#</th>
+            <th class="num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">#</th>
             ${result.columns.map((column) => html`<th>${column}</th>`)}
           </tr>
         </thead>
@@ -554,7 +568,7 @@ export class ResultsPanel extends LitElement {
             const absRow = first + i
             return html`
               <tr data-row=${absRow} class=${absRow % 2 ? 'alt' : ''}>
-                <td class="num">${absRow + 1}</td>
+                <td class="num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">${absRow + 1}</td>
                 ${row.map((cell, col) => {
                   const sel = this._isSelected(absRow, col) ? 'selected' : ''
                   if (this._editing?.row === absRow && this._editing.col === col) {
