@@ -15,8 +15,8 @@
     "electron": "npm run build && electron .",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder"
+    "pack": "npm run build && dotenv -e .env -- electron-builder --dir",
+    "dist": "npm run build && dotenv -e .env -- electron-builder"
   },
   "devDependencies": {
     "@codemirror/lang-sql": "^6.10.0",
@@ -25,8 +25,10 @@
     "@types/pg": "^8.20.0",
     "@types/ssh2": "^1.15.5",
     "codemirror": "^6.0.2",
+    "dotenv-cli": "^11.0.0",
     "electron": "^42.3.3",
     "electron-builder": "^26.15.2",
+    "dotenv-cli": "^11.0.0",
     "eslint": "^10.5.0",
     "eslint-plugin-lit": "^2.3.1",
     "eslint-plugin-wc": "^3.1.0",

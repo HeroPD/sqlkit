@@ -5,6 +5,11 @@ directories:
   output: release
   buildResources: build
 
+# ssh2 pulls optional cpu-features, a native optimization addon that does not
+# build against Electron 42's V8 headers. ssh2 catches its absence/failure, and
+# the app's required runtime deps are pure JS, so skip native rebuilds.
+npmRebuild: false
+
 # Only the compiled output goes into the asar. Renderer dependencies (lit)
 # are bundled by Vite, so they live in devDependencies and are not packed.
 files:
