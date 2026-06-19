@@ -5,6 +5,7 @@ import type {
   ConnectionStatus,
   DbObject,
   DbObjectKind,
+  FetchRowsResult,
   InspectResult,
   ObjectsResult,
   QueryResponse,
@@ -13,7 +14,8 @@ import type {
   TablesResult,
   TestConnectionResult,
 } from '../../src/electron'
-import { capResult, createDriver, type Driver } from './driver'
+import { createDriver, type Driver } from './driver'
+import { PAGE_SIZE, ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
 
 type Active = {
@@ -33,6 +35,8 @@ export type ConnectionManager = ReturnType<typeof createConnectionManager>
 // until the user reconnects or disconnects.
 export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]) => void) {
   const connections = new Map<string, Active>()
+  // Buffered result rows the renderer pages through; freed on disconnect.
+  const sessions = new ResultSessionStore()
 
   const statuses = () => [...connections.values()].map((active) => active.status)
 
@@ -49,6 +53,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     const active = connections.get(profileId)
     if (!active) return
     remove(profileId)
+    sessions.closeProfile(profileId)
     await active.driver?.disconnect().catch(() => {})
     await active.tunnel?.close().catch(() => {})
   }
@@ -124,11 +129,28 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
-      return { success: true, result: capResult(await driver.query(sql, params, childDb)) }
+      const raw = await driver.query(sql, params, childDb)
+      // Disconnected mid-query: don't register a buffer no one can page or free
+      // (disconnect already swept this profile's sessions). Return a single
+      // page, sessionless, so it can't leak.
+      if (!connectedDriver(profileId)) return { success: true, result: { ...raw, rows: raw.rows.slice(0, PAGE_SIZE) } }
+      // The driver buffers up to MAX_BUFFERED_ROWS; open() keeps that buffer and
+      // returns just the first page (with a sessionId) so a big result doesn't
+      // cross IPC all at once. The renderer pages the rest via fetchRows.
+      return { success: true, result: sessions.open(profileId, raw) }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
   }
+
+  // A page of a buffered result; fails when the session is gone (evicted or its
+  // connection dropped) so the renderer can fall back instead of seeing 0 rows.
+  function fetchRows(sessionId: string, offset: number, limit: number): FetchRowsResult {
+    const rows = sessions.fetch(sessionId, offset, limit)
+    return rows === null ? { success: false, error: 'Result buffer expired' } : { success: true, rows }
+  }
+
+  const closeSession = (sessionId: string) => sessions.close(sessionId)
 
   async function cancelQuery(profileId: string): Promise<{ success: boolean; error?: string }> {
     const driver = connectedDriver(profileId)
@@ -245,6 +267,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     disconnectAll,
     statuses,
     query,
+    fetchRows,
+    closeSession,
     cancelQuery,
     listTables,
     listColumns,

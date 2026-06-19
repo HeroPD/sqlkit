@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, TableRef } from '../../src/electron'
-import { MAX_RESULT_ROWS } from './driver'
+import { MAX_BUFFERED_ROWS } from './driver'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 
@@ -533,7 +533,7 @@ function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], star
     const query = new pg.Query(config)
     query.on('row', (row: unknown[]) => {
       total += 1
-      if (rows.length < MAX_RESULT_ROWS) rows.push(row)
+      if (rows.length < MAX_BUFFERED_ROWS) rows.push(row)
     })
     query.on('error', reject)
     query.on('end', (result) => {
@@ -544,7 +544,7 @@ function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], star
         rows,
         rowCount: final.rowCount ?? total,
         durationMs: performance.now() - started,
-        truncated: total > MAX_RESULT_ROWS,
+        truncated: total > MAX_BUFFERED_ROWS,
       })
     })
     client.query(query)

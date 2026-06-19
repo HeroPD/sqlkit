@@ -52,15 +52,11 @@ export type DriverEvents = {
   onError(message: string): void
 }
 
-/** Rows shipped to the renderer per query; the rest never cross IPC. */
-export const MAX_RESULT_ROWS = 1000
-
-// Caps rows at the IPC boundary so a stray `select *` on a huge table can't
-// flood the renderer. rowCount keeps the full count for the status line.
-export function capResult(result: QueryResult): QueryResult {
-  if (result.rows.length <= MAX_RESULT_ROWS) return result
-  return { ...result, rows: result.rows.slice(0, MAX_RESULT_ROWS), truncated: true }
-}
+// Rows a query buffers in the main process; the renderer pages through these on
+// demand (see result-sessions.ts) instead of receiving them all at once.
+// rowCount still reports the true count; `truncated` flags a result larger than
+// this cap, which the buffer can't reach.
+export const MAX_BUFFERED_ROWS = 50_000
 
 // The endpoint carries the host/port the driver should actually dial — the
 // transport layer has already rewritten it to a tunnel's local port when the

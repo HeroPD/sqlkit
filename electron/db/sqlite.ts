@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type { ColumnRef, ConnectionProfile, InspectSection, QueryResult, TableRef } from '../../src/electron'
-import { MAX_RESULT_ROWS } from './driver'
+import { MAX_BUFFERED_ROWS } from './driver'
 import type { Driver } from './driver'
 
 // SQLite via the node:sqlite module built into Electron's Node — no native
@@ -158,7 +158,7 @@ function run(statement: StatementSync, params: Array<string | number | bigint | 
   let total = 0
   for (const row of statement.iterate(...params) as unknown as Iterable<unknown[]>) {
     total += 1
-    if (rows.length < MAX_RESULT_ROWS) rows.push(row)
+    if (rows.length < MAX_BUFFERED_ROWS) rows.push(row)
   }
-  return { columns, rows, rowCount: total, truncated: total > MAX_RESULT_ROWS }
+  return { columns, rows, rowCount: total, truncated: total > MAX_BUFFERED_ROWS }
 }

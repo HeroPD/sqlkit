@@ -9,6 +9,9 @@ const MAX_HISTORY = 200
 
 const MAX_TASKS = 50
 
+// Rows pulled per lazy fetch as the grid scrolls into not-yet-loaded territory.
+const FETCH_PAGE = 200
+
 // Owns everything a query run produces: the per-tab results (switching tabs
 // brings a tab's result back), the cross-connection task list with its live
 // ticker, and per-context history. The workbench decides what to run and
@@ -30,6 +33,8 @@ export class QueriesController implements ReactiveController {
   private timer: number | null = null
   /** Bumped on reset(); a run started under an older value is stale. */
   private generation = 0
+  /** Tabs with a fetch-more page in flight, so scroll spam can't double-fetch. */
+  private fetching = new Set<string>()
 
   constructor(host: ReactiveControllerHost, tabExists: (tabId: string) => boolean) {
     this.host = host
@@ -66,6 +71,8 @@ export class QueriesController implements ReactiveController {
   }) {
     const { tabId, profile, childDb, contextKey, sql } = args
     const gen = this.generation
+    // A new query supersedes the tab's old buffered result.
+    this.closeRunSession(this.runs.get(tabId))
     this.setRun(tabId, { phase: 'running' })
     const task: TaskItem = {
       id: crypto.randomUUID(),
@@ -92,8 +99,12 @@ export class QueriesController implements ReactiveController {
 
     // A workspace switch (reset) happened while this ran: the result belongs
     // to the old workspace, so drop it instead of writing into the new one's
-    // freshly-cleared history/tasks.
-    if (this.generation !== gen) return
+    // freshly-cleared history/tasks. Free its main-process buffer too — reset()
+    // never saw this run, so it couldn't close the session itself.
+    if (this.generation !== gen) {
+      if (response.success && response.result.sessionId) void window.sqlkit.closeSession(response.result.sessionId)
+      return
+    }
 
     this.setRun(
       tabId,
@@ -141,9 +152,53 @@ export class QueriesController implements ReactiveController {
     this.host.requestUpdate()
   }
 
+  // Pulls the next page of a paged result from the main-process buffer and
+  // appends it. Called as the grid scrolls toward the end of what's loaded.
+  async loadMore(tabId: string) {
+    const run = this.runs.get(tabId)
+    if (run?.phase !== 'done') return
+    const { result } = run
+    if (result.sessionId === undefined || result.bufferedRowCount === undefined) return
+    if (result.rows.length >= result.bufferedRowCount || this.fetching.has(tabId)) return
+
+    this.fetching.add(tabId)
+    const gen = this.generation
+    try {
+      const response = await window.sqlkit.fetchRows(result.sessionId, result.rows.length, FETCH_PAGE)
+      if (this.generation !== gen) return
+      // The run may have been superseded (new query) while fetching; only touch
+      // it when it's still the same buffered result.
+      const current = this.runs.get(tabId)
+      if (current?.phase !== 'done' || current.result.sessionId !== result.sessionId) return
+
+      // Buffer gone (evicted / disconnected) or nothing more came back: pin
+      // bufferedRowCount to what's loaded so the grid stops asking.
+      if (!response.success || response.rows.length === 0) {
+        if (current.result.bufferedRowCount !== current.result.rows.length) {
+          this.setRun(tabId, { phase: 'done', result: { ...current.result, bufferedRowCount: current.result.rows.length } })
+        }
+        return
+      }
+      this.setRun(tabId, {
+        phase: 'done',
+        result: { ...current.result, rows: [...current.result.rows, ...response.rows] },
+      })
+    } finally {
+      this.fetching.delete(tabId)
+    }
+  }
+
+  // Frees a run's main-process row buffer, if it has one.
+  private closeRunSession(run: QueryRun | undefined) {
+    if (run?.phase === 'done' && run.result.sessionId) {
+      void window.sqlkit.closeSession(run.result.sessionId)
+    }
+  }
+
   // --- tab lifecycle hooks, called by the workbench's tab management -------
 
   dropTab(tabId: string) {
+    this.closeRunSession(this.runs.get(tabId))
     this.runs.delete(tabId)
   }
 
@@ -158,7 +213,10 @@ export class QueriesController implements ReactiveController {
   /** Drops runs whose tabs are gone (folder deletes, context removals). */
   sweepOrphans() {
     for (const id of [...this.runs.keys()]) {
-      if (!this.tabExists(id)) this.runs.delete(id)
+      if (!this.tabExists(id)) {
+        this.closeRunSession(this.runs.get(id))
+        this.runs.delete(id)
+      }
     }
   }
 
@@ -167,6 +225,7 @@ export class QueriesController implements ReactiveController {
     // Invalidate any in-flight execute() so its result can't land in the new
     // workspace's state after this clears everything.
     this.generation += 1
+    for (const run of this.runs.values()) this.closeRunSession(run)
     this.runs = new Map()
     this.history = []
     this.tasks = []

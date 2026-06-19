@@ -854,6 +854,7 @@ export class WorkbenchScreen extends LitElement {
             .run=${this._queries.runFor(this._ctx.activeTabId)}
             .canCancel=${this._activeProfile()?.engine === 'postgresql'}
             @cancel-query=${this._onCancelQuery}
+            @load-more=${this._onLoadMore}
             style="height: ${this._layout.panelHeight === null ? '70%' : `${this._layout.panelHeight}px`}"
           ></results-panel>
         </div>
@@ -1203,6 +1204,11 @@ export class WorkbenchScreen extends LitElement {
   private _onCancelQuery() {
     const profile = this._activeProfile()
     if (profile) void window.sqlkit.cancelQuery(profile.id)
+  }
+
+  // The results grid scrolled near the end of what's loaded: page in more rows.
+  private _onLoadMore() {
+    if (this._ctx.activeTabId) void this._queries.loadMore(this._ctx.activeTabId)
   }
 
   // Stop from the Tasks view: targets the task's own connection, which may

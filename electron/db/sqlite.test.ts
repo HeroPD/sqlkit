@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ConnectionProfile } from '../../src/electron'
-import { MAX_RESULT_ROWS } from './driver'
+import { MAX_BUFFERED_ROWS } from './driver'
 import { createSqliteDriver } from './sqlite'
 
 // Fields the sqlite driver reads; the rest of the profile is filler so the type compiles.
@@ -129,31 +129,31 @@ describe('sqlite driver: query', () => {
     expect(result.rows).toEqual([[1, 2]])
   })
 
-  it('caps retained rows at MAX_RESULT_ROWS but counts them all', async () => {
+  it('caps retained rows at MAX_BUFFERED_ROWS but counts them all', async () => {
     const driver = await memoryDriver()
     await driver.query('create table nums(n)')
     await driver.query(
-      `with recursive seq(n) as (select 1 union all select n + 1 from seq where n < ${MAX_RESULT_ROWS + 25})
+      `with recursive seq(n) as (select 1 union all select n + 1 from seq where n < ${MAX_BUFFERED_ROWS + 25})
        insert into nums select n from seq`,
     )
 
     const result = await driver.query('select n from nums')
-    expect(result.rows).toHaveLength(MAX_RESULT_ROWS)
-    expect(result.rowCount).toBe(MAX_RESULT_ROWS + 25)
+    expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
+    expect(result.rowCount).toBe(MAX_BUFFERED_ROWS + 25)
     expect(result.truncated).toBe(true)
   })
 
-  it('does not flag exactly MAX_RESULT_ROWS as truncated', async () => {
+  it('does not flag exactly MAX_BUFFERED_ROWS as truncated', async () => {
     const driver = await memoryDriver()
     await driver.query('create table nums(n)')
     await driver.query(
-      `with recursive seq(n) as (select 1 union all select n + 1 from seq where n < ${MAX_RESULT_ROWS})
+      `with recursive seq(n) as (select 1 union all select n + 1 from seq where n < ${MAX_BUFFERED_ROWS})
        insert into nums select n from seq`,
     )
 
     const result = await driver.query('select n from nums')
-    expect(result.rows).toHaveLength(MAX_RESULT_ROWS)
-    expect(result.rowCount).toBe(MAX_RESULT_ROWS)
+    expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
+    expect(result.rowCount).toBe(MAX_BUFFERED_ROWS)
     expect(result.truncated).toBe(false)
   })
 

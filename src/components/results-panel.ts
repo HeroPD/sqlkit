@@ -1,4 +1,4 @@
-import { LitElement, css, html } from 'lit'
+import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { isMac } from '../platform'
@@ -16,8 +16,12 @@ export type QueryRun =
   | { phase: 'done'; result: QueryResult }
   | { phase: 'error'; error: string }
 
-const MAX_DISPLAY_ROWS = 500
 const NUM_COL_WIDTH = 48
+// Rows rendered beyond the viewport on each side — covers fast scrolls and the
+// sticky header's overlap without exact offset math.
+const OVERSCAN = 8
+// Row height used before the first real row is measured (rows are uniform).
+const ESTIMATED_ROW_HEIGHT = 22
 
 const formatCell = (value: unknown) => {
   if (typeof value === 'object' && value !== null) return JSON.stringify(value)
@@ -81,8 +85,111 @@ export class ResultsPanel extends LitElement {
   @state()
   private _exportOpen = false
 
-  // Widths are measured once per result set; re-renders reuse the memo.
-  private _widthsCache: { result: QueryResult; widths: number[] } | null = null
+  /** Selected cell rectangle: anchor (r0,c0) → focus (r1,c1), 0-based data
+   * indices. A single cell when anchor === focus; null when nothing selected. */
+  @state()
+  private _sel: { r0: number; c0: number; r1: number; c1: number } | null = null
+
+  // Virtualization: only rows in [first, last) of the loaded set are in the DOM.
+  @state() private _scrollTop = 0
+  @state() private _viewportH = 0
+  @state() private _rowHeight = 0 // measured from the first real row; 0 = estimate
+
+  // Identity of the shown result, so a new query (reset scroll + selection) is
+  // told apart from a lazy append (which keeps both). sessionId is stable across
+  // a result's pages; a fresh query gets a new one.
+  private _lastKey: unknown = null
+  private _resetScroll = false
+  private _scrollRaf = 0
+  private _resizeObs: ResizeObserver | null = null
+  private _dragging = false
+
+  // Widths measured once per result, keyed by session so appends don't reflow.
+  private _widthsCache: { key: unknown; widths: number[] } | null = null
+
+  protected willUpdate(changed: PropertyValues) {
+    if (!changed.has('run')) return
+    const key = this.run.phase === 'done' ? (this.run.result.sessionId ?? this.run.result) : this.run.phase
+    if (key === this._lastKey) return // an append to the same result, not a new one
+    this._lastKey = key
+    this._sel = null
+    this._scrollTop = 0
+    this._resetScroll = true
+  }
+
+  firstUpdated() {
+    const body = this._bodyEl()
+    if (!body) return
+    this._viewportH = body.clientHeight
+    // The panel height changes when the user drags the results divider.
+    this._resizeObs = new ResizeObserver(() => {
+      this._viewportH = body.clientHeight
+      this._maybeLoadMore()
+    })
+    this._resizeObs.observe(body)
+  }
+
+  protected updated() {
+    if (this._resetScroll) {
+      this._resetScroll = false
+      const body = this._bodyEl()
+      if (body) body.scrollTop = 0
+    }
+    this._measureRowHeight()
+    this._maybeLoadMore()
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback()
+    this._resizeObs?.disconnect()
+    if (this._scrollRaf) cancelAnimationFrame(this._scrollRaf)
+    this._endDrag()
+  }
+
+  private _bodyEl() {
+    return this.shadowRoot?.querySelector<HTMLElement>('.body') ?? null
+  }
+
+  // Rows are uniform height; measure one real row, then reuse it.
+  private _measureRowHeight() {
+    if (this._rowHeight) return
+    const height = this.shadowRoot?.querySelector<HTMLElement>('tbody tr[data-row]')?.offsetHeight ?? 0
+    if (height > 0) this._rowHeight = height
+  }
+
+  // The slice of loaded rows to render for the current scroll position.
+  private _window() {
+    const loaded = this.run.phase === 'done' ? this.run.result.rows.length : 0
+    const rowH = this._rowHeight || ESTIMATED_ROW_HEIGHT
+    const viewport = this._viewportH || 400
+    const first = Math.max(0, Math.floor(this._scrollTop / rowH) - OVERSCAN)
+    const last = Math.min(loaded, Math.ceil((this._scrollTop + viewport) / rowH) + OVERSCAN)
+    return { first, last, rowH, loaded }
+  }
+
+  private _onScroll = () => {
+    if (this._scrollRaf) return
+    this._scrollRaf = requestAnimationFrame(() => {
+      this._scrollRaf = 0
+      const body = this._bodyEl()
+      if (!body) return
+      this._scrollTop = body.scrollTop
+      this._viewportH = body.clientHeight
+      this._maybeLoadMore()
+    })
+  }
+
+  // Asks the owner for the next page once the window reaches the end of what's
+  // loaded and the main-process buffer still has more.
+  private _maybeLoadMore() {
+    if (this.run.phase !== 'done') return
+    const { result } = this.run
+    if (result.sessionId === undefined || result.bufferedRowCount === undefined) return
+    if (result.rows.length >= result.bufferedRowCount) return
+    if (this._window().last >= result.rows.length) {
+      this.dispatchEvent(new CustomEvent('load-more', { bubbles: true, composed: true }))
+    }
+  }
 
   private _cancel() {
     this.dispatchEvent(new CustomEvent('cancel-query', { bubbles: true, composed: true }))
@@ -107,12 +214,12 @@ export class ResultsPanel extends LitElement {
             `
           : ''}
       </div>
-      <div class="body">${this._renderBody()}</div>
+      <div class="body" @scroll=${this._onScroll}>${this._renderBody()}</div>
       ${this._renderMenu()}
       ${this._exportOpen && this.run.phase === 'done'
         ? html`
             <export-dialog
-              .total=${this.run.result.rows.length}
+              .total=${this.run.result.bufferedRowCount ?? this.run.result.rows.length}
               .truncated=${this.run.result.truncated ?? false}
               @dialog-cancel=${() => (this._exportOpen = false)}
               @export-confirm=${this._onExportConfirm}
@@ -122,26 +229,39 @@ export class ResultsPanel extends LitElement {
     `
   }
 
-  private _onExportConfirm = (event: CustomEvent<ExportConfirmDetail>) => {
+  private _onExportConfirm = async (event: CustomEvent<ExportConfirmDetail>) => {
     this._exportOpen = false
     if (this.run.phase !== 'done') return
     const { format, rows } = event.detail
     const { result } = this.run
-    const slice = result.rows.slice(0, rows)
+    const slice = (await this._allRows(result, rows)).slice(0, rows)
     const content =
       format === 'json' ? toJson(result.columns, slice) : toDelimited(result.columns, slice, format === 'tsv' ? '\t' : ',')
     void window.sqlkit.exportFile(`results.${format}`, content)
   }
 
-  // One delegated listener instead of one per cell; indexes recovered from
-  // the DOM table coordinates (# column shifts data columns right by one).
+  // Buffered rows up to `limit` (default: all) — the loaded prefix plus
+  // whatever pages haven't been scrolled into yet — so export / copy-all aren't
+  // limited to what's on screen. Exporting N rows only pulls N, not the whole
+  // buffer. Falls back to the loaded rows if the buffer has expired.
+  private async _allRows(result: QueryResult, limit?: number): Promise<unknown[][]> {
+    const total = result.bufferedRowCount ?? result.rows.length
+    const need = Math.min(limit ?? total, total)
+    if (result.sessionId === undefined || result.rows.length >= need) return result.rows
+    const response = await window.sqlkit.fetchRows(result.sessionId, 0, need)
+    return response.success ? response.rows : result.rows
+  }
+
+  // One delegated listener instead of one per cell. The data row index is read
+  // from the row's data-row (sectionRowIndex would be wrong under windowing);
+  // the # column shifts data columns right by one.
   private _onTableContextMenu(event: MouseEvent) {
     if (this.run.phase !== 'done') return
     const cell = (event.target as HTMLElement).closest<HTMLTableCellElement>('td, th')
     if (!cell) return
     event.preventDefault()
-    const rowEl = cell.closest('tr') as HTMLTableRowElement
-    const row = cell.tagName === 'TH' ? -1 : rowEl.sectionRowIndex
+    const dataRow = cell.closest('tr')?.getAttribute('data-row')
+    const row = cell.tagName === 'TH' || dataRow === null || dataRow === undefined ? -1 : Number(dataRow)
     this._menu = { x: event.clientX, y: event.clientY, row, col: cell.cellIndex - 1 }
   }
 
@@ -163,13 +283,13 @@ export class ResultsPanel extends LitElement {
         .x=${menu.x}
         .y=${menu.y}
         .items=${items}
-        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onMenuPick(e.detail.id, result, menu)}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => void this._onMenuPick(e.detail.id, result, menu)}
         @menu-close=${() => (this._menu = null)}
       ></context-menu>
     `
   }
 
-  private _onMenuPick(action: string, result: QueryResult, at: { row: number; col: number }) {
+  private async _onMenuPick(action: string, result: QueryResult, at: { row: number; col: number }) {
     const copy = (text: string) => void navigator.clipboard.writeText(text)
     if (action === 'copy-cell') {
       const value = result.rows[at.row]?.[at.col]
@@ -177,20 +297,104 @@ export class ResultsPanel extends LitElement {
     }
     if (action === 'copy-row') copy(rowToTsv(result.rows[at.row] ?? []))
     if (action === 'copy-column-name') copy(result.columns[at.col] ?? '')
-    if (action === 'copy-csv') copy(toDelimited(result.columns, result.rows, ','))
-    if (action === 'copy-tsv') copy(toDelimited(result.columns, result.rows, '\t'))
-    if (action === 'copy-json') copy(toJson(result.columns, result.rows))
+    // Copy-all / export cover every buffered row, not just what's loaded on screen.
+    if (action === 'copy-csv') copy(toDelimited(result.columns, await this._allRows(result), ','))
+    if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
+    if (action === 'copy-json') copy(toJson(result.columns, await this._allRows(result)))
     if (action === 'export') this._exportOpen = true
+  }
+
+  // --- cell selection ---------------------------------------------------------
+
+  // Data-cell coordinates for a DOM node: the absolute row from data-row (not
+  // sectionRowIndex, which shifts with windowing's spacer rows), null for the
+  // # column / header / spacers.
+  private _dataCellAt(node: Element | null): { row: number; col: number } | null {
+    const cell = node?.closest<HTMLTableCellElement>('td')
+    if (!cell || cell.classList.contains('num')) return null
+    const dataRow = cell.closest('tr')?.getAttribute('data-row')
+    if (dataRow === null || dataRow === undefined) return null
+    const col = cell.cellIndex - 1
+    if (col < 0) return null
+    return { row: Number(dataRow), col }
+  }
+
+  private _isSelected(row: number, col: number): boolean {
+    const s = this._sel
+    if (!s) return false
+    return (
+      row >= Math.min(s.r0, s.r1) &&
+      row <= Math.max(s.r0, s.r1) &&
+      col >= Math.min(s.c0, s.c1) &&
+      col <= Math.max(s.c0, s.c1)
+    )
+  }
+
+  private _onCellPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0) return // leave right-click to the context menu
+    const hit = this._dataCellAt(event.target as Element)
+    if (!hit) return
+    ;(event.currentTarget as HTMLElement).focus() // so Cmd/Ctrl-C reaches us
+
+    // Shift-click extends the rectangle from the anchor; a plain press starts a
+    // drag. Both just set _sel — only the ~viewport rows re-render, so it's
+    // cheap and stays declarative (the cell class is bound to _isSelected).
+    if (event.shiftKey && this._sel) {
+      this._sel = { ...this._sel, r1: hit.row, c1: hit.col }
+      return
+    }
+    this._sel = { r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col }
+    this._dragging = true
+    window.addEventListener('pointermove', this._onDragMove)
+    window.addEventListener('pointerup', this._endDrag)
+    window.addEventListener('pointercancel', this._endDrag)
+  }
+
+  private _onDragMove = (event: PointerEvent) => {
+    if (!this._dragging || !this._sel) return
+    // elementFromPoint must go through the shadow root to see inside it.
+    const hit = this._dataCellAt(this.shadowRoot?.elementFromPoint(event.clientX, event.clientY) ?? null)
+    if (!hit || (hit.row === this._sel.r1 && hit.col === this._sel.c1)) return
+    this._sel = { ...this._sel, r1: hit.row, c1: hit.col }
+  }
+
+  private _endDrag = () => {
+    if (!this._dragging) return
+    this._dragging = false
+    window.removeEventListener('pointermove', this._onDragMove)
+    window.removeEventListener('pointerup', this._endDrag)
+    window.removeEventListener('pointercancel', this._endDrag)
+  }
+
+  private _onGridKeydown = (event: KeyboardEvent) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
+      if (!this._sel || this.run.phase !== 'done') return
+      event.preventDefault()
+      const { rows } = this.run.result
+      const s = this._sel
+      const lines: string[] = []
+      for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r += 1) {
+        const cells: string[] = []
+        for (let c = Math.min(s.c0, s.c1); c <= Math.max(s.c0, s.c1); c += 1) {
+          const value = rows[r]?.[c]
+          cells.push(value === null || value === undefined ? '' : formatCell(value))
+        }
+        lines.push(cells.join('\t'))
+      }
+      void navigator.clipboard.writeText(lines.join('\n'))
+    }
   }
 
   private _status() {
     if (this.run.phase !== 'done') return ''
     const { result } = this.run
-    const rows = `${result.rowCount} row${result.rowCount === 1 ? '' : 's'}`
-    const shown = Math.min(result.rows.length, MAX_DISPLAY_ROWS)
-    const truncated = result.truncated || shown < result.rows.length ? ` (showing first ${shown})` : ''
+    const rows = `${result.rowCount.toLocaleString()} row${result.rowCount === 1 ? '' : 's'}`
+    // Only a result past the buffer cap is partial; everything else is fully
+    // scrollable (paged in on demand), so no "showing first N" caveat.
+    const capped =
+      result.truncated && result.bufferedRowCount !== undefined ? ` · first ${result.bufferedRowCount.toLocaleString()} loaded` : ''
     const pace = result.durationMs < 500 ? 'fast' : result.durationMs < 2000 ? 'medium' : 'slow'
-    return html`${rows}${truncated} · <span class="duration ${pace}">${Math.max(1, Math.round(result.durationMs))} ms</span>`
+    return html`${rows}${capped} · <span class="duration ${pace}">${Math.max(1, Math.round(result.durationMs))} ms</span>`
   }
 
   private _renderBody() {
@@ -223,8 +427,20 @@ export class ResultsPanel extends LitElement {
     // become minimums a long nowrap cell can blow past. min-width: 100% in
     // the CSS still stretches the columns when they underfill the panel.
     const tableWidth = NUM_COL_WIDTH + widths.reduce((sum, width) => sum + width, 0)
+    // Only the visible window of loaded rows is in the DOM; spacer rows above
+    // and below stand in for the rest so the scrollbar reflects the full set.
+    const { first, last, rowH } = this._window()
+    const colSpan = result.columns.length + 1
+    const topPad = first * rowH
+    const bottomPad = Math.max(0, (result.rows.length - last) * rowH)
     return html`
-      <table style="width: ${tableWidth}px" @contextmenu=${this._onTableContextMenu}>
+      <table
+        style="width: ${tableWidth}px"
+        tabindex="0"
+        @contextmenu=${this._onTableContextMenu}
+        @pointerdown=${this._onCellPointerDown}
+        @keydown=${this._onGridKeydown}
+      >
         <colgroup>
           <col style="width: ${NUM_COL_WIDTH}px" />
           ${widths.map((width) => html`<col style="width: ${width}px" />`)}
@@ -236,26 +452,33 @@ export class ResultsPanel extends LitElement {
           </tr>
         </thead>
         <tbody>
-          ${result.rows.slice(0, MAX_DISPLAY_ROWS).map(
-            (row, index) => html`
-              <tr>
-                <td class="num">${index + 1}</td>
-                ${row.map((cell) =>
-                  cell === null || cell === undefined
-                    ? html`<td><span class="null">NULL</span></td>`
-                    : html`<td title=${formatCell(cell)}>${formatCell(cell)}</td>`,
-                )}
+          ${topPad > 0 ? html`<tr class="spacer" style="height: ${topPad}px"><td colspan=${colSpan}></td></tr>` : ''}
+          ${result.rows.slice(first, last).map((row, i) => {
+            const absRow = first + i
+            return html`
+              <tr data-row=${absRow} class=${absRow % 2 ? 'alt' : ''}>
+                <td class="num">${absRow + 1}</td>
+                ${row.map((cell, col) => {
+                  const sel = this._isSelected(absRow, col) ? 'selected' : ''
+                  if (cell === null || cell === undefined) return html`<td class=${sel}><span class="null">NULL</span></td>`
+                  const text = formatCell(cell)
+                  return html`<td class=${sel} title=${text}>${text}</td>`
+                })}
               </tr>
-            `,
-          )}
+            `
+          })}
+          ${bottomPad > 0 ? html`<tr class="spacer" style="height: ${bottomPad}px"><td colspan=${colSpan}></td></tr>` : ''}
         </tbody>
       </table>
     `
   }
 
+  // Measured once per result (keyed by session so lazily-appended pages reuse
+  // the widths rather than reflowing). The first page is a fair sample.
   private _columnWidths(result: QueryResult): number[] {
-    if (this._widthsCache?.result !== result) {
-      this._widthsCache = { result, widths: measureColumnWidths(result.columns, result.rows.slice(0, MAX_DISPLAY_ROWS)) }
+    const key = result.sessionId ?? result
+    if (this._widthsCache?.key !== key) {
+      this._widthsCache = { key, widths: measureColumnWidths(result.columns, result.rows) }
     }
     return this._widthsCache.widths
   }
@@ -375,6 +598,13 @@ export class ResultsPanel extends LitElement {
         table-layout: fixed;
         font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
         font-size: 12px;
+        /* Selection is cell-based (drag a rectangle); suppress native text
+           selection, which spans whole rows. */
+        user-select: none;
+      }
+
+      table:focus {
+        outline: none;
       }
 
       th,
@@ -406,11 +636,21 @@ export class ResultsPanel extends LitElement {
         color: var(--text);
       }
 
-      tbody tr:nth-child(even) td {
+      /* Zebra by absolute row index (set as a class) — nth-child would flip
+         parity as the windowing spacer rows come and go. */
+      tbody tr.alt td {
         background: var(--row-alt);
       }
 
-      tbody tr:hover td {
+      /* Windowing spacers stand in for off-screen rows: no grid lines, inert. */
+      tbody tr.spacer td {
+        padding: 0;
+        border: 0;
+        pointer-events: none;
+      }
+
+      /* Hover highlights the single cell under the pointer, not the whole row. */
+      tbody tr:not(.spacer) td:not(.num):hover {
         background: var(--row-hover);
       }
 
@@ -421,14 +661,20 @@ export class ResultsPanel extends LitElement {
         user-select: none;
       }
 
-      td.num,
-      tbody tr:hover td.num {
+      td.num {
         background: var(--row-num-bg);
       }
 
       .null {
         color: var(--text-3);
         font-style: italic;
+      }
+
+      /* Cell selection — wins over zebra striping and cell hover. */
+      tbody tr td.selected,
+      tbody tr:hover td.selected {
+        background: color-mix(in srgb, var(--accent) 28%, transparent);
+        color: var(--text);
       }
     `,
   ]

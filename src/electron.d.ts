@@ -110,15 +110,22 @@ export type TestSshResult = { success: true; tookMs: number } | { success: false
 
 export type QueryResult = {
   columns: string[]
+  /** The first page when a session exists (paged via fetchRows); all buffered rows otherwise. */
   rows: unknown[][]
   /** Rows returned for reads, rows affected for writes. */
   rowCount: number
   durationMs: number
-  /** Rows were capped before crossing IPC; rowCount still reports the full count. */
+  /** Result exceeded the buffer cap; rowCount still reports the full count. */
   truncated?: boolean
+  /** Set when more rows are buffered in the main process than were sent; page them via fetchRows. */
+  sessionId?: string
+  /** Total rows buffered in the main process (>= rows.length); present with sessionId. */
+  bufferedRowCount?: number
 }
 
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
+
+export type FetchRowsResult = { success: true; rows: unknown[][] } | { success: false; error: string }
 
 /** Partitioned tables count as plain tables — partitioning is hidden anyway. */
 export type TableKind = 'table' | 'view' | 'matview' | 'foreign'
@@ -218,6 +225,10 @@ export type SqlkitApi = {
   /** Subscribes to status pushes from the main process; returns unsubscribe. */
   onConnectionStatus: (listener: (statuses: ConnectionStatus[]) => void) => () => void
   runQuery: (profileId: string, childDb: string | null, sql: string, params?: unknown[]) => Promise<QueryResponse>
+  /** A page of a buffered result; rows beyond the first page are pulled on demand. */
+  fetchRows: (sessionId: string, offset: number, limit: number) => Promise<FetchRowsResult>
+  /** Releases a result's main-process buffer (tab closed / superseded). */
+  closeSession: (sessionId: string) => Promise<void>
   /** Cancels the profile's in-flight query; the pending runQuery rejects. */
   cancelQuery: (profileId: string) => Promise<{ success: boolean; error?: string }>
   /** Server-side CREATE DATABASE on a connected profile (postgres only). */

@@ -322,6 +322,10 @@ function registerDbIpc() {
   ipcMain.handle('db:query', (event, profileId: string, childDb: string | null, sql: string, params?: unknown[]) =>
     manager(event).query(profileId, childDb, sql, params),
   )
+  ipcMain.handle('db:fetch-rows', (event, sessionId: string, offset: number, limit: number) =>
+    existingManager(event)?.fetchRows(sessionId, offset, limit) ?? { success: false as const, error: 'No active session' },
+  )
+  ipcMain.handle('db:close-session', (event, sessionId: string) => existingManager(event)?.closeSession(sessionId))
   ipcMain.handle('db:cancel', (event, profileId: string) => manager(event).cancelQuery(profileId))
   ipcMain.handle('db:create-database', (event, profileId: string, name: string) =>
     manager(event).createDatabase(profileId, name),
