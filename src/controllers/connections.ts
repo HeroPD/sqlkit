@@ -46,8 +46,13 @@ export class ConnectionsController implements ReactiveController {
     return Object.values(this.statuses).filter((status) => status.phase === 'connected')
   }
 
-  connect(profile: ConnectionProfile) {
-    return window.sqlkit.connectDatabase(profile)
+  async connect(profile: ConnectionProfile) {
+    const result = await window.sqlkit.connectDatabase(profile)
+    // The status push (with the connection's child databases) is a separate
+    // IPC message that may not have landed when this resolves; pull the fresh
+    // statuses so a caller that aligns the active child right after sees them.
+    if (result.success) this.apply(await window.sqlkit.getConnectionStatuses())
+    return result
   }
 
   disconnect(profileId: string) {

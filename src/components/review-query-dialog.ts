@@ -41,6 +41,7 @@ export function sqlPreviewParts(sql: string): SqlPreviewPart[] {
   const parts: SqlPreviewPart[] = []
   for (let i = 0; i < sql.length;) {
     const ch = sql[i]
+    if (ch === undefined) break
     if (ch === "'") {
       let end = i + 1
       while (end < sql.length) {

@@ -133,5 +133,5 @@ export function inferEditableTable(sql: string, tables: TableRef[]): TableRef | 
   if (!parsed || hasForbiddenTopLevelSource(masked, parsed.end)) return null
 
   const matches = tables.filter((table) => identEqual(table.name, parsed.name) && (parsed.schema === null || identEqual(table.schema, parsed.schema)))
-  return matches.length === 1 ? matches[0] : null
+  return matches.length === 1 ? (matches[0] ?? null) : null
 }

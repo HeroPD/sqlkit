@@ -38,11 +38,11 @@ describe('results-panel editability', () => {
     const el = await mount()
     const cells = el.shadowRoot!.querySelectorAll<HTMLTableCellElement>('tbody tr[data-row] td:not(.num)')
 
-    cells[1].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    cells[1]!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector<HTMLInputElement>('.cell-edit')?.value).toBe('locked')
 
-    cells[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    cells[0]!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector<HTMLInputElement>('.cell-edit')?.value).toBe('old')
     el.remove()

@@ -182,6 +182,26 @@ export class ContextsController {
     }
   }
 
+  // A renamed workspace file: retarget its open tab (ids are keyed by path)
+  // and the active pointer. The caller moves the matching query result.
+  retargetFileTab(oldId: string, newId: string, name: string, path: string) {
+    this.tabs = this._tabs.map((tab) =>
+      tab.id === oldId && tab.kind === 'sql' ? { ...tab, id: newId, name, path } : tab,
+    )
+    if (this._activeTabId === oldId) this.activeTabId = newId
+  }
+
+  // A deleted file or folder: close its tab and every tab beneath it, then
+  // reassign the active tab if it was one of them.
+  closeFilesUnder(targetPath: string) {
+    this.tabs = this._tabs.filter(
+      (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
+    )
+    if (this._activeTabId && !this._tabs.some((tab) => tab.id === this._activeTabId)) {
+      this.activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
+    }
+  }
+
   applySaveResult(tab: SqlTabState, result: FileSaveResult) {
     if (!result.success) {
       if (!result.canceled) console.error('Save failed:', result.error)

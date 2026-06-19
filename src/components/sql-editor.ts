@@ -309,9 +309,11 @@ const ALIAS_STOPWORDS = new Set([
 function findAliasTarget(sql: string, alias: string): string | null {
   const pattern = /\b(?:from|join|update|into|,)\s*([a-z_][\w$]*(?:\.[a-z_][\w$]*)?)\s+(?:as\s+)?([a-z_][\w$]*)/gi
   for (const match of sql.matchAll(pattern)) {
-    const candidate = match[2].toLowerCase()
+    const target = match[1]
+    const candidate = match[2]?.toLowerCase()
+    if (target === undefined || candidate === undefined) continue
     if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
-    const table = match[1].toLowerCase()
+    const table = target.toLowerCase()
     const dot = table.lastIndexOf('.')
     return dot >= 0 ? table.slice(dot + 1) : table
   }
@@ -593,7 +595,8 @@ export class SqlEditor extends LitElement {
           }
           if (!tableColumns) {
             const candidates = [...columnsByTable.keys()].filter((table) => table.startsWith(prefix))
-            if (candidates.length === 1) tableColumns = columnsByTable.get(candidates[0])
+            const onlyMatch = candidates.length === 1 ? candidates[0] : undefined
+            if (onlyMatch) tableColumns = columnsByTable.get(onlyMatch)
           }
           if (!tableColumns) return null
           const typedColumn = dotted.text.slice(dot + 1).toLowerCase()

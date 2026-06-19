@@ -185,10 +185,11 @@ function registerWorkspaceIpc() {
       title: 'Open Workspace Folder',
       buttonLabel: 'Open',
     })
-    if (result.canceled) return { success: false, canceled: true }
-    if (focusExistingWorkspace(result.filePaths[0], event.sender.id)) return { success: false, canceled: true }
+    const [folder] = result.filePaths
+    if (result.canceled || !folder) return { success: false, canceled: true }
+    if (focusExistingWorkspace(folder, event.sender.id)) return { success: false, canceled: true }
 
-    const opened = openWorkspace(result.filePaths[0])
+    const opened = openWorkspace(folder)
     if (opened.success) window.setTitle(`SqlKit — ${opened.name}`)
     await watchOpened(event.sender, opened)
     return opened

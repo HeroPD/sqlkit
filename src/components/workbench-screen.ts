@@ -9,6 +9,9 @@ import { LayoutController } from '../controllers/layout'
 import { CommandPaletteController } from '../controllers/command-palette'
 import { DialogsController } from '../controllers/dialogs'
 import { ResultEditingController } from '../controllers/result-editing'
+import { SchemaOpsController } from '../controllers/schema-ops'
+import { ConfigController } from '../controllers/config'
+import { FileOpsController } from '../controllers/file-ops'
 import { ContextsController, type EditorTabState, type SqlTabState } from '../controllers/contexts'
 import type { ConnectionProfile, FileInfo, MenuAction, TableRef } from '../electron'
 import './activity-button'
@@ -39,7 +42,6 @@ import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
 import { quoteQualified } from '../sql-write'
 import { stripExplain } from '../sql-types'
-import { TABLE_KIND_LABELS } from '../table-kinds'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 import type { CellCoord } from './results-panel'
@@ -62,10 +64,6 @@ const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'inspect-object') return `${tab.object.name} · info`
   return tab.content === tab.savedContent ? tab.name : `${tab.name} •`
 }
-
-/** Instance bucket for tabs opened before any context exists. */
-// Browse/history tab names already end in .sql; don't double it.
-const suggestedSqlName = (tabName: string) => `${tabName.replace(/\.sql$/i, '')}.sql`
 
 const NO_CONTEXT = '__none__'
 
@@ -114,19 +112,16 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _activeView: ViewId | null = 'explorer'
 
-  @state()
-  private _connections: ConnectionProfile[] = []
-
   // ⌘⇧P / ⌘P / ⌘K palette: open/close state, entry list, and pick dispatch.
   private _cmdPalette = new CommandPaletteController(this, {
     live: this._live,
     commands: COMMANDS,
     files: () => this._workspaceFiles.files,
-    connections: () => this._connections,
-    activeProfile: () => this._activeProfile(),
+    connections: () => this._config.connections,
+    activeProfile: () => this._config.activeProfile(),
     activeDbId: () => this._ctx.activeDbId,
     activeChildDb: () => this._ctx.activeChildDb,
-    openFile: (file) => void this._openFileTab(file),
+    openFile: (file) => void this._fileOps.openFile(file),
     openTable: (key) => this._openTableFromPalette(key),
     setActiveDb: (profileId, childDb) => this._setActiveDb(profileId, childDb),
     showView: (viewId) => {
@@ -137,7 +132,7 @@ export class WorkbenchScreen extends LitElement {
       const tab = this._ctx.activeSqlTab()
       if (tab?.content.trim()) void this._runSql(tab.content.trim())
     },
-    saveActiveTab: () => void this._saveActiveTab(),
+    saveActiveTab: () => void this._fileOps.saveActive(),
     addDatabase: () => this._onAddDatabase(),
     refreshFiles: () => void this._workspaceFiles.reload(),
     toggleSidebar: () => this._toggleSidebar(),
@@ -167,16 +162,43 @@ export class WorkbenchScreen extends LitElement {
     dropQuery: (tabId) => this._queries.dropTab(tabId),
   })
 
+  // Saved connection profiles and the workspace config file (.sqlkit/config.json).
+  private _config = new ConfigController(this, {
+    live: this._live,
+    dialogs: this._dialogs,
+    activeDbId: () => this._ctx.activeDbId,
+  })
+
+  // Workspace-file actions: open into a tab, save, create/rename/delete.
+  private _fileOps = new FileOpsController({
+    ctx: this._ctx,
+    files: this._workspaceFiles,
+    queries: this._queries,
+    dialogs: this._dialogs,
+    contextFolder: () => this._contextFolder(),
+  })
+
   private _resultEditing = new ResultEditingController({
     activeTab: () => this._ctx.activeSqlTab(),
     activeDbId: () => this._ctx.activeDbId,
     activeChildDb: () => this._ctx.activeChildDb,
-    activeProfile: () => this._activeProfile(),
+    activeProfile: () => this._config.activeProfile(),
     run: () => this._queries.runFor(this._ctx.activeTabId),
     tables: () => (this._ctx.activeDbId ? (this._live.tables[this._ctx.activeDbId] ?? []) : []),
     columns: () => (this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? []) : []),
     dialogs: this._dialogs,
     runSql: (sql) => this._runSql(sql),
+  })
+
+  // Server-side schema mutations (drop/truncate/matview refresh, create/drop
+  // database): builds the DDL and routes it through the dialogs and query path.
+  private _schemaOps = new SchemaOpsController({
+    activeProfile: () => this._config.activeProfile(),
+    dialogs: this._dialogs,
+    openPreview: (sql) => this._ctx.openPreview(sql),
+    runSql: (sql) => this._runSql(sql),
+    refresh: (profileId) => this._live.refresh(profileId),
+    onDatabaseDropped: (profileId, database) => this._onDatabaseDropped(profileId, database),
   })
 
   private _unsubscribeMenu: (() => void) | null = null
@@ -204,10 +226,10 @@ export class WorkbenchScreen extends LitElement {
         this._ctx.newQuery()
         break
       case 'save':
-        void this._saveActiveTab()
+        void this._fileOps.saveActive()
         break
       case 'save-as':
-        void this._saveActiveTabAs()
+        void this._fileOps.saveActiveAs()
         break
       case 'close-tab':
         if (this._ctx.activeTabId) this._requestCloseTab(this._ctx.activeTabId)
@@ -218,7 +240,7 @@ export class WorkbenchScreen extends LitElement {
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('workspace')) {
       this._ctx.reset()
-      this._connections = []
+      this._config.reset()
       this._cmdPalette.close()
       this._queries.reset()
       this._workspaceFiles.setFolder(null)
@@ -231,82 +253,48 @@ export class WorkbenchScreen extends LitElement {
   // --- workspace config + context -----------------------------------------
 
   private async _loadConfig() {
-    const { config, error } = await window.sqlkit.getWorkspaceConfig()
-    if (error) {
-      this._dialogs.notice(
-        'Workspace config could not be read',
-        `${error}\n\nThe file was left untouched, so your saved connections are still on disk. ` +
-          'Fix or restore .sqlkit/config.json and reopen the workspace — saving new connections now would overwrite it.',
-      )
-    }
-    this._connections = config.connections
-    // Restore the in-use context; default to the first profile so the
-    // Explorer has a files folder to show right away.
-    const restored =
-      config.activeDbId && config.connections.some((connection) => connection.id === config.activeDbId)
-        ? config.activeDbId
-        : (config.connections[0]?.id ?? null)
-    const restoredProfile = restored ? (config.connections.find((c) => c.id === restored) ?? null) : null
-    this._ctx.switchInstance(restored, restoredProfile ? this._defaultChild(restoredProfile) : null)
+    // Restore the in-use context; the config controller defaults to the first
+    // profile so the Explorer has a files folder to show right away.
+    const { profileId, child } = await this._config.load()
+    this._ctx.switchInstance(profileId, child)
     this._workspaceFiles.setFolder(this._contextFolder())
-  }
-
-  // An all-databases context always resolves to a child — the parent folder
-  // never holds files. Preference order: the connection's live child, the
-  // last child the user worked in, then the discovery database.
-  private _defaultChild(profile: ConnectionProfile): string | null {
-    if ((profile.databaseMode ?? 'single') !== 'all') return null
-    return this._inUseChild(profile.id) ?? profile.lastChildDb ?? (profile.database.trim() || 'postgres')
   }
 
   // Files nest per context: connection-folder/child-folder for all-databases
   // children, just the connection folder otherwise.
   private _contextFolder(): string | null {
-    const folder = this._activeProfile()?.folder
+    const folder = this._config.activeProfile()?.folder
     if (!folder) return null
     return this._ctx.activeChildDb ? `${folder}/${childFolderSegment(this._ctx.activeChildDb)}` : folder
   }
 
-  /** The child the connection currently targets, when it has several. */
-  private _inUseChild(profileId: string): string | null {
-    const children = this._live.statuses[profileId]?.children ?? []
-    if (children.length < 2) return null
-    return children.find((child) => child.inUse)?.name ?? null
+  /** The in-use profile when it is live-connected, else null. */
+  private _connectedProfile(): ConnectionProfile | null {
+    const profile = this._config.activeProfile()
+    return profile && this._live.phase(profile.id) === 'connected' ? profile : null
   }
 
-  /** The profile of the in-use database context (⌘K). */
-  private _activeProfile(): ConnectionProfile | null {
-    return this._connections.find((connection) => connection.id === this._ctx.activeDbId) ?? null
-  }
-
-  private _persistConfig() {
-    void window.sqlkit.saveWorkspaceConfig({
-      version: 1,
-      connections: this._connections,
-      activeDbId: this._ctx.activeDbId,
-    })
+  /** Context key of the in-use database (⌘K) — history and stash lookups. */
+  private _activeContextKey() {
+    return contextKey(this._ctx.activeDbId, this._ctx.activeChildDb)
   }
 
   // Without an explicit child, a profile-level switch (⌘P table pick,
   // single-db connect) resolves the default child so all-databases contexts
   // never land on the parent folder.
   private _setActiveDb(profileId: string, childDb?: string | null) {
-    const profile = this._connections.find((connection) => connection.id === profileId)
+    const profile = this._config.byId(profileId)
     if (!profile) return
-    const child = childDb === undefined ? this._defaultChild(profile) : childDb
+    const child = childDb === undefined ? this._config.defaultChild(profile) : childDb
 
     if (this._ctx.activeDbId === profileId && this._ctx.activeChildDb === child) return
 
     // Remember the pick so reopening the workspace lands on the same child.
-    if (child && profile.lastChildDb !== child) {
-      this._connections = this._connections.map((connection) =>
-        connection.id === profileId ? { ...connection, lastChildDb: child } : connection,
-      )
-    }
+    if (child) this._config.setLastChildDb(profileId, child)
 
     this._ctx.switchInstance(profileId, child)
     this._workspaceFiles.setFolder(this._contextFolder())
-    this._persistConfig()
+    this._config.persist()
   }
 
   // After a connect, the driver targets the discovery database; if the
@@ -379,7 +367,7 @@ export class WorkbenchScreen extends LitElement {
     }
     if (key === 's') {
       event.preventDefault()
-      void this._saveActiveTab()
+      void this._fileOps.saveActive()
       return
     }
     if (key === 'enter') {
@@ -397,22 +385,6 @@ export class WorkbenchScreen extends LitElement {
 
   // --- tabs ------------------------------------------------------------------
 
-  private async _openFileTab(file: FileInfo) {
-    // Keyed by absolute path: same-named files in different database
-    // folders are distinct tabs.
-    const id = `file:${file.path}`
-    if (this._ctx.tabs.some((tab) => tab.id === id)) {
-      this._ctx.activeTabId = id
-      return
-    }
-    const result = await window.sqlkit.readFile(file.path)
-    if (!result.success) {
-      console.error('Failed to read file:', result.error)
-      return
-    }
-    this._ctx.addTab({ id, kind: 'sql', name: file.name, path: file.path, content: result.content, savedContent: result.content })
-  }
-
   // Close via ⌘W, the tab ✕, etc.: dirty editors get a confirmation first.
   private _requestCloseTab(id: string) {
     const tab = this._ctx.tabs.find((entry) => entry.id === id)
@@ -428,26 +400,6 @@ export class WorkbenchScreen extends LitElement {
     this._ctx.closeTab(id)
   }
 
-  private async _saveActiveTab() {
-    const tab = this._ctx.activeSqlTab()
-    if (!tab) return
-
-    // Untitled queries go through the native dialog, defaulting into the
-    // active context's folder.
-    const result = tab.path
-      ? await window.sqlkit.saveFile(tab.path, tab.content)
-      : await window.sqlkit.saveFileAs(this._contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
-    this._ctx.applySaveResult(tab, result)
-  }
-
-  // File > Save As…: always the dialog, even for files that have a path.
-  private async _saveActiveTabAs() {
-    const tab = this._ctx.activeSqlTab()
-    if (!tab) return
-    const result = await window.sqlkit.saveFileAs(this._contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
-    this._ctx.applySaveResult(tab, result)
-  }
-
   // --- query running ----------------------------------------------------------
 
   // Runs against the in-use context (⌘K), connecting it first if needed.
@@ -459,7 +411,7 @@ export class WorkbenchScreen extends LitElement {
     // One run per tab: ignore re-triggers while this tab's query is in flight.
     if (this._queries.runFor(tabId).phase === 'running') return
 
-    const profile = this._activeProfile()
+    const profile = this._config.activeProfile()
     if (!profile) {
       this._queries.setRun(tabId, { phase: 'error', error: `No database selected — press ${mod('K')} to pick one.` })
       return
@@ -501,14 +453,10 @@ export class WorkbenchScreen extends LitElement {
     const sqlText = `SELECT * FROM ${quoteQualified(table)} LIMIT 200`
 
     const id = `browse:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
+    // Capture the existing tab's content before addTab activates it: re-browse
+    // re-runs that tab's first statement, leaving any trailing edits untouched.
     const existing = this._ctx.tabs.find((tab) => tab.id === id)
-    if (!existing) {
-      this._ctx.tabs = [
-        ...this._ctx.tabs,
-        { id, kind: 'sql', name: `${table.name}.sql`, path: null, content: sqlText, savedContent: sqlText, table },
-      ]
-    }
-    this._ctx.activeTabId = id
+    this._ctx.addTab({ id, kind: 'sql', name: `${table.name}.sql`, path: null, content: sqlText, savedContent: sqlText, table })
     void this._runSql(existing?.kind === 'sql' ? firstStatement(existing.content) || sqlText : sqlText)
   }
 
@@ -517,9 +465,10 @@ export class WorkbenchScreen extends LitElement {
   private _openTableFromPalette(key: string) {
     this._ctx.selectedTable = key
     const profileId = key.split(':')[0]
-    if (profileId) this._setActiveDb(profileId)
+    if (!profileId) return
+    this._setActiveDb(profileId)
     this._activeView = 'explorer'
-    const profile = this._connections.find((connection) => connection.id === profileId)
+    const profile = this._config.byId(profileId)
     const table = (this._live.tables[profileId] ?? []).find((entry) => tableKey(profileId, entry) === key)
     if (profile && table) this._browseTable(profile, table)
   }
@@ -669,21 +618,21 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _contextLabel() {
-    const profile = this._activeProfile()
+    const profile = this._config.activeProfile()
     if (!profile) return ''
     return this._ctx.activeChildDb ? `${profile.name} · ${this._ctx.activeChildDb}` : profile.name
   }
 
   private _connectedName() {
-    const connected = this._live.connected()
-    if (connected.length !== 1) return ''
-    return this._connections.find((profile) => profile.id === connected[0].profileId)?.name ?? ''
+    const [only, ...rest] = this._live.connected()
+    if (!only || rest.length) return ''
+    return this._config.byId(only.profileId)?.name ?? ''
   }
 
   // View-specific actions level with the sidebar title (reference layout).
   private _renderTitleActions(view: (typeof VIEWS)[number]) {
     if (view.id === 'history') {
-      const key = contextKey(this._ctx.activeDbId, this._ctx.activeChildDb)
+      const key = this._activeContextKey()
       const count = this._queries.history.filter((item) => item.contextKey === key).length
       return html`
         <button
@@ -722,7 +671,7 @@ export class WorkbenchScreen extends LitElement {
     if (view.id === 'databases') {
       return html`
         <databases-view
-          .connections=${this._connections}
+          .connections=${this._config.connections}
           .statuses=${this._live.statuses}
           .activeTabId=${this._ctx.activeTabId}
         ></databases-view>
@@ -730,9 +679,9 @@ export class WorkbenchScreen extends LitElement {
     }
     if (view.id === 'explorer') {
       const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
-      const context = this._activeProfile()
-      const connected = context !== null && this._live.phase(context.id) === 'connected'
-      const children = connected && context ? (this._live.statuses[context.id]?.children ?? []) : []
+      const context = this._config.activeProfile()
+      const live = this._connectedProfile()
+      const children = live ? (this._live.statuses[live.id]?.children ?? []) : []
       const activeChild = children.length > 1 ? (children.find((child) => child.inUse)?.name ?? null) : null
       return html`
         <explorer-view
@@ -741,11 +690,12 @@ export class WorkbenchScreen extends LitElement {
           .contextName=${context ? this._contextLabel() : null}
           .profileId=${context?.id ?? null}
           .engine=${context?.engine ?? null}
-          .tables=${connected && context ? (this._live.tables[context.id] ?? []) : null}
-          .columns=${connected && context ? (this._live.columns[context.id] ?? null) : null}
-          .objects=${connected && context ? (this._live.objects[context.id] ?? null) : null}
+          .tables=${live ? (this._live.tables[live.id] ?? []) : null}
+          .columns=${live ? (this._live.columns[live.id] ?? null) : null}
+          .objects=${live ? (this._live.objects[live.id] ?? null) : null}
           .activeChildName=${activeChild}
           .selectedTable=${this._ctx.selectedTable}
+          .profileIds=${this._config.connections.map((connection) => connection.id)}
         ></explorer-view>
       `
     }
@@ -753,11 +703,11 @@ export class WorkbenchScreen extends LitElement {
       return html`<search-view .files=${this._workspaceFiles.files}></search-view>`
     }
     if (view.id === 'history') {
-      const key = contextKey(this._ctx.activeDbId, this._ctx.activeChildDb)
+      const key = this._activeContextKey()
       return html`
         <history-view
           .items=${this._queries.history.filter((item) => item.contextKey === key)}
-          .engine=${this._activeProfile()?.engine ?? null}
+          .engine=${this._config.activeProfile()?.engine ?? null}
           @history-open=${this._onHistoryOpen}
           @history-open-permanent=${this._onHistoryOpenPermanent}
           @history-explain=${this._onHistoryExplain}
@@ -769,9 +719,7 @@ export class WorkbenchScreen extends LitElement {
       return html`<tasks-view .items=${this._queries.tasks} @task-stop=${this._onTaskStop}></tasks-view>`
     }
     // Every view id is handled above; 'server' is the last one.
-    const context = this._activeProfile()
-    const connected = context !== null && this._live.phase(context.id) === 'connected'
-    return html`<server-view .profileId=${connected && context ? context.id : null}></server-view>`
+    return html`<server-view .profileId=${this._connectedProfile()?.id ?? null}></server-view>`
   }
 
   // Single click: open the SQL in the preview tab (recycled across picks, so
@@ -785,7 +733,7 @@ export class WorkbenchScreen extends LitElement {
   // runs immediately, so the plan arrives with its SQL visible.
   private _onHistoryExplain(event: Event) {
     const { sql, analyze } = (event as CustomEvent<HistoryExplainDetail>).detail
-    const profile = this._activeProfile()
+    const profile = this._config.activeProfile()
     if (!profile) return
     const prefix = profile.engine === 'sqlite' ? 'explain query plan ' : analyze ? 'explain analyze ' : 'explain '
     const statement = prefix + stripExplain(sql)
@@ -816,7 +764,7 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onHistoryClear() {
-    this._queries.clearHistory(contextKey(this._ctx.activeDbId, this._ctx.activeChildDb))
+    this._queries.clearHistory(this._activeContextKey())
   }
 
   private _renderEditorContent() {
@@ -834,7 +782,7 @@ export class WorkbenchScreen extends LitElement {
           <table-inspect
             .profileId=${activeTab.profileId}
             .table=${activeTab.table}
-            .engine=${this._connections.find((connection) => connection.id === activeTab.profileId)?.engine ?? null}
+            .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
           ></table-inspect>
         </div>
       `
@@ -846,7 +794,7 @@ export class WorkbenchScreen extends LitElement {
             .profileId=${activeTab.profileId}
             .object=${activeTab.object}
             .objectKind=${activeTab.objectKind}
-            .engine=${this._connections.find((connection) => connection.id === activeTab.profileId)?.engine ?? null}
+            .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
           ></table-inspect>
         </div>
       `
@@ -854,7 +802,7 @@ export class WorkbenchScreen extends LitElement {
     if (activeTab?.kind === 'sql') {
       const tables = (this._ctx.activeDbId ? (this._live.tables[this._ctx.activeDbId] ?? []) : []).map((table) => table.name)
       const columns = this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? null) : null
-      const dialect = dialectForEngine[this._activeProfile()?.engine ?? 'postgresql']
+      const dialect = dialectForEngine[this._config.activeProfile()?.engine ?? 'postgresql']
       return html`
         <div class="editor-content sql">
           <div class="editor-pane">
@@ -876,7 +824,7 @@ export class WorkbenchScreen extends LitElement {
           ></div>
           <results-panel
             .run=${this._queries.runFor(this._ctx.activeTabId)}
-            .canCancel=${this._activeProfile()?.engine === 'postgresql'}
+            .canCancel=${this._config.activeProfile()?.engine === 'postgresql'}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
             @cancel-query=${this._onCancelQuery}
@@ -916,29 +864,18 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onAddDatabase() {
-    this._ctx.openConfigTab({
-      id: crypto.randomUUID(),
-      name: '',
-      engine: 'postgresql',
-      host: 'localhost',
-      port: '5432',
-      username: '',
-      password: '',
-      database: '',
-      file: '',
-      folder: '',
-    })
+    this._ctx.openConfigTab(this._config.newProfile())
   }
 
   private _onDbSelect(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
-    const connection = this._connections.find((profile) => profile.id === id)
+    const connection = this._config.byId(id)
     if (connection) this._ctx.openConfigTab(connection)
   }
 
   private async _onDbConnect(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
-    const connection = this._connections.find((profile) => profile.id === id)
+    const connection = this._config.byId(id)
     if (!connection) return
     // Failures surface through the status push (error dot + message).
     const result = await this._live.connect(connection)
@@ -959,58 +896,30 @@ export class WorkbenchScreen extends LitElement {
 
   private _onDbCreateDatabase(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
-    this._dialogs.prompt = {
-      message: 'Create Database',
-      detail: 'Name of the new database on this server.',
-      confirmLabel: 'Create',
-      placeholder: 'my_database',
-      action: (name) => void this._createDatabase(id, name),
-    }
-  }
-
-  private async _createDatabase(id: string, name: string) {
-    const result = await window.sqlkit.createDatabase(id, name)
-    if (!result.success) this._dialogs.notice(`Could not create "${name}"`, result.error ?? 'Unknown error')
+    this._schemaOps.createDatabase(id)
   }
 
   private _onDbDropDatabase(event: Event) {
     const { id, database } = (event as CustomEvent<{ id: string; database: string }>).detail
-    this._dialogs.confirm = {
-      message: `Drop database "${database}"?`,
-      detail: 'All data in it is permanently deleted on the server. This cannot be undone.',
-      confirmLabel: 'Drop Database',
-      action: () => void this._dropDatabase(id, database),
-    }
+    this._schemaOps.dropDatabase(id, database)
   }
 
-  private async _dropDatabase(id: string, database: string) {
-    const result = await window.sqlkit.dropDatabase(id, database)
-    if (!result.success) {
-      this._dialogs.notice(`Could not drop "${database}"`, result.error ?? 'Unknown error')
-      return
-    }
-
+  // Workbench cleanup after a child database is dropped on the server.
+  private _onDatabaseDropped(id: string, database: string) {
     // The dropped child's working context is gone with it.
     this._ctx.dropInstance(contextKey(id, database))
     this._queries.sweepOrphans()
-    if (this._connections.some((connection) => connection.id === id && connection.lastChildDb === database)) {
-      this._connections = this._connections.map((connection) =>
-        connection.id === id && connection.lastChildDb === database
-          ? { ...connection, lastChildDb: undefined }
-          : connection,
-      )
-      this._persistConfig()
-    }
+    if (this._config.clearLastChildDb(id, database)) this._config.persist()
     // If the user was working in the dropped child, follow the driver's
     // in-use child instead of pointing at a database that no longer exists.
     if (this._ctx.activeDbId === id && this._ctx.activeChildDb === database) {
-      this._setActiveDb(id, this._inUseChild(id) ?? undefined)
+      this._setActiveDb(id, this._config.inUseChild(id) ?? undefined)
     }
   }
 
   private _onDbRemove(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
-    const profile = this._connections.find((connection) => connection.id === id)
+    const profile = this._config.byId(id)
     if (!profile) return
     this._dialogs.confirm = {
       message: `Remove "${profile.name.trim() || 'New Database'}"?`,
@@ -1025,23 +934,23 @@ export class WorkbenchScreen extends LitElement {
 
     // Leave the context first so _switchInstance doesn't re-stash it below.
     if (this._ctx.activeDbId === id) {
-      const next = this._connections.find((connection) => connection.id !== id) ?? null
-      this._ctx.switchInstance(next?.id ?? null, next ? this._defaultChild(next) : null)
+      const next = this._config.connections.find((connection) => connection.id !== id) ?? null
+      this._ctx.switchInstance(next?.id ?? null, next ? this._config.defaultChild(next) : null)
     }
 
-    this._connections = this._connections.filter((connection) => connection.id !== id)
+    this._config.remove(id)
 
     // Drop the profile's stashed contexts and its config tab wherever it's open.
     this._ctx.removeProfile(id)
     this._queries.sweepOrphans()
 
     this._workspaceFiles.setFolder(this._contextFolder())
-    this._persistConfig()
+    this._config.persist()
   }
 
 
   private _onTablesRefresh() {
-    const profile = this._activeProfile()
+    const profile = this._config.activeProfile()
     if (profile) this._live.refresh(profile.id)
   }
 
@@ -1051,68 +960,27 @@ export class WorkbenchScreen extends LitElement {
 
   private _onTableBrowse(event: Event) {
     const { table } = (event as CustomEvent<TableBrowseDetail>).detail
-    const profile = this._activeProfile()
+    const profile = this._config.activeProfile()
     if (profile) this._browseTable(profile, table)
   }
 
-  // Refresh runs as a visible statement: it lands in the preview tab and
-  // through the normal query path, so it shows in results, Tasks (matview
-  // refreshes are classic long-runners), and history.
   private _onMatviewRefresh(event: Event) {
-    const { table } = (event as CustomEvent<TableBrowseDetail>).detail
-    const statement = `REFRESH MATERIALIZED VIEW ${quoteQualified(table)};`
-    this._ctx.openPreview(statement)
-    void this._runSql(statement)
+    this._schemaOps.refreshMatview((event as CustomEvent<TableBrowseDetail>).detail.table)
   }
 
   private _onTableDrop(event: Event) {
-    const { table } = (event as CustomEvent<TableBrowseDetail>).detail
-    const profile = this._activeProfile()
-    if (!profile) return
-    const verbs: Record<TableRef['kind'], string> = {
-      table: 'DROP TABLE',
-      view: 'DROP VIEW',
-      matview: 'DROP MATERIALIZED VIEW',
-      foreign: 'DROP FOREIGN TABLE',
-    }
-    const statement = `${verbs[table.kind]} ${quoteQualified(table)};`
-    this._dialogs.confirm = {
-      message: `Drop ${TABLE_KIND_LABELS[table.kind]} "${table.name}"?`,
-      detail: 'It is permanently deleted on the server. This cannot be undone.',
-      confirmLabel: 'Drop',
-      action: () => {
-        this._ctx.openPreview(statement)
-        // The schema changed: re-fetch tables/columns once the drop lands.
-        void this._runSql(statement).then(() => this._live.refresh(profile.id))
-      },
-    }
+    this._schemaOps.dropTable((event as CustomEvent<TableBrowseDetail>).detail.table)
   }
 
   private _onTableTruncate(event: Event) {
-    const { table } = (event as CustomEvent<TableBrowseDetail>).detail
-    const profile = this._activeProfile()
-    if (!profile) return
-    // SQLite has no TRUNCATE; an unqualified DELETE is its idiom.
-    const statement =
-      profile.engine === 'sqlite'
-        ? `DELETE FROM ${quoteQualified(table)};`
-        : `TRUNCATE TABLE ${quoteQualified(table)};`
-    this._dialogs.confirm = {
-      message: `Truncate "${table.name}"?`,
-      detail: `All rows are permanently deleted (${statement}). This cannot be undone.`,
-      confirmLabel: 'Truncate',
-      action: () => {
-        this._ctx.openPreview(statement)
-        void this._runSql(statement)
-      },
-    }
+    this._schemaOps.truncateTable((event as CustomEvent<TableBrowseDetail>).detail.table)
   }
 
   // Inspect opens (or revisits) the table's structure tab — columns,
   // constraints, indexes and friends; table-inspect fetches its own data.
   private _onTableInspect(event: Event) {
     const { table } = (event as CustomEvent<TableBrowseDetail>).detail
-    const profile = this._activeProfile()
+    const profile = this._config.activeProfile()
     if (!profile) return
     const id = `inspect:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
     if (!this._ctx.tabs.some((tab) => tab.id === id)) {
@@ -1124,7 +992,7 @@ export class WorkbenchScreen extends LitElement {
   // Same for functions/types; detail (identity args) keeps overloads apart.
   private _onObjectInspect(event: Event) {
     const { object, objectKind } = (event as CustomEvent<ObjectInspectDetail>).detail
-    const profile = this._activeProfile()
+    const profile = this._config.activeProfile()
     if (!profile) return
     const id = `inspect-object:${profile.id}:${this._ctx.activeChildDb ?? ''}:${object.schema ?? ''}:${objectKind}:${object.name}:${object.detail}`
     if (!this._ctx.tabs.some((tab) => tab.id === id)) {
@@ -1134,9 +1002,10 @@ export class WorkbenchScreen extends LitElement {
   }
 
   // A search match opens the file and lands the cursor on the matched line.
+  // A search match opens the file and lands the cursor on the matched line.
   private async _onSearchOpen(event: Event) {
     const { file, line } = (event as CustomEvent<SearchOpenDetail>).detail
-    await this._openFileTab(file)
+    await this._fileOps.openFile(file)
     await this.updateComplete
     const editor = this.shadowRoot?.querySelector('sql-editor')
     if (!editor) return
@@ -1145,78 +1014,22 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onFileOpen(event: Event) {
-    const { file } = (event as CustomEvent<{ file: FileInfo }>).detail
-    // Only .sql opens in the editor; spreadsheets, exports etc. go to the
-    // system default app.
-    if (file.name.toLowerCase().endsWith('.sql')) {
-      void this._openFileTab(file)
-      return
-    }
-    void window.sqlkit.openExternal(file.path).then((result) => {
-      if (!result.success) console.error('Open failed:', result.error)
-    })
+    this._fileOps.openFileOrExternal((event as CustomEvent<{ file: FileInfo }>).detail.file)
   }
 
-  private async _onFileCreate(event: Event) {
+  private _onFileCreate(event: Event) {
     const { parent, name } = (event as CustomEvent<FileCreateDetail>).detail
-    const folder = this._contextFolder()
-    if (!folder) return
-
-    const result = await window.sqlkit.createFile(folder, parent ? `${parent}/${name}` : name)
-    if (!result.success) {
-      console.error('Create failed:', result.error)
-      return
-    }
-    await this._workspaceFiles.reload()
-    const created = this._workspaceFiles.files.find((file) => file.path === result.path)
-    if (created) void this._openFileTab(created)
+    void this._fileOps.create(parent, name)
   }
 
-  private async _onFileRename(event: Event) {
+  private _onFileRename(event: Event) {
     const { file, newName } = (event as CustomEvent<FileRenameDetail>).detail
-    const result = await window.sqlkit.renameFile(file.path, newName)
-    if (!result.success) {
-      console.error('Rename failed:', result.error)
-      return
-    }
-
-    // Retarget any open tab; tab ids are keyed by absolute path.
-    const oldId = `file:${file.path}`
-    const newId = `file:${result.path}`
-    this._ctx.tabs = this._ctx.tabs.map((tab) =>
-      tab.id === oldId && tab.kind === 'sql' ? { ...tab, id: newId, name: result.name, path: result.path } : tab,
-    )
-    this._queries.renameTab(oldId, newId)
-    if (this._ctx.activeTabId === oldId) this._ctx.activeTabId = newId
-    void this._workspaceFiles.reload()
+    void this._fileOps.rename(file, newName)
   }
 
   private _onFileDelete(event: Event) {
-    const { path: targetPath, name } = (event as CustomEvent<FileDeleteDetail>).detail
-    this._dialogs.confirm = {
-      message: `Delete "${name}"?`,
-      detail: 'It will be moved to the Trash.',
-      confirmLabel: 'Move to Trash',
-      action: () => void this._performDelete(targetPath),
-    }
-  }
-
-  private async _performDelete(targetPath: string) {
-    const result = await window.sqlkit.deleteFile(targetPath)
-    if (!result.success) {
-      console.error('Delete failed:', result.error)
-      return
-    }
-
-    // Close tabs of the deleted file — or of everything under a deleted folder.
-    this._ctx.tabs = this._ctx.tabs.filter(
-      (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
-    )
-    this._queries.sweepOrphans()
-    if (this._ctx.activeTabId && !this._ctx.tabs.some((tab) => tab.id === this._ctx.activeTabId)) {
-      this._ctx.activeTabId = this._ctx.tabs[this._ctx.tabs.length - 1]?.id ?? null
-    }
-    void this._workspaceFiles.reload()
+    const { path, name } = (event as CustomEvent<FileDeleteDetail>).detail
+    this._fileOps.requestDelete(path, name)
   }
 
   private _onEditorChange(event: Event) {
@@ -1232,7 +1045,7 @@ export class WorkbenchScreen extends LitElement {
   // The pending runQuery settles on its own with "Query cancelled." — this
   // only asks the server to interrupt the backend.
   private _onCancelQuery() {
-    const profile = this._activeProfile()
+    const profile = this._config.activeProfile()
     if (profile) void window.sqlkit.cancelQuery(profile.id)
   }
 
@@ -1284,17 +1097,7 @@ export class WorkbenchScreen extends LitElement {
 
   private async _onConfigSave(event: Event) {
     const { profile } = (event as CustomEvent<{ profile: ConnectionProfile }>).detail
-    const existing = this._connections.findIndex((connection) => connection.id === profile.id)
-    const connections =
-      existing >= 0
-        ? this._connections.map((connection) => (connection.id === profile.id ? profile : connection))
-        : [...this._connections, profile]
-
-    const result = await window.sqlkit.saveWorkspaceConfig({ version: 1, connections, activeDbId: this._ctx.activeDbId })
-    if (!result.success) {
-      console.error('Failed to save workspace config:', result.error)
-      return
-    }
+    if (!(await this._config.save(profile))) return
 
     // Re-read rather than trusting the local copy: the save assigned the
     // profile's files folder (and created it on disk).

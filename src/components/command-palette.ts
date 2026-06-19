@@ -44,6 +44,7 @@ function filterEntries(query: string, entries: PaletteEntry[]): PaletteEntry[] {
   let index = 0
   while (index < entries.length) {
     const entry = entries[index]
+    if (!entry) break
     if (!entry.header) {
       if (matches(query, entry)) visible.push(entry)
       index += 1
@@ -52,8 +53,10 @@ function filterEntries(query: string, entries: PaletteEntry[]): PaletteEntry[] {
 
     const children: PaletteEntry[] = []
     let next = index + 1
-    while (next < entries.length && !entries[next].header) {
-      children.push(entries[next])
+    while (next < entries.length) {
+      const child = entries[next]
+      if (!child || child.header) break
+      children.push(child)
       next += 1
     }
     const kept = matches(query, entry) ? children : children.filter((child) => matches(query, child))

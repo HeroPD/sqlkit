@@ -128,6 +128,7 @@ export class SearchView extends LitElement {
       const matches: Match[] = []
       for (let index = 0; index < lines.length && !capped; index++) {
         const line = lines[index]
+        if (line === undefined) continue
         const at = line.toLowerCase().indexOf(needle)
         if (at < 0) continue
         const start = Math.max(0, at - CONTEXT_CHARS)

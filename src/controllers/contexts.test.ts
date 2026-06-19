@@ -51,7 +51,7 @@ describe('ContextsController.closeTab', () => {
     ctrl.newQuery()
     const [a, b, c] = ctrl.tabs.map((t) => t.id)
 
-    ctrl.closeTab(c) // closing the active (last) tab
+    ctrl.closeTab(c!) // closing the active (last) tab
     expect(dropQuery).toHaveBeenCalledWith(c)
     expect(ctrl.tabs.map((t) => t.id)).toEqual([a, b])
     expect(ctrl.activeTabId).toBe(b)
@@ -62,9 +62,9 @@ describe('ContextsController.closeTab', () => {
     ctrl.newQuery()
     ctrl.newQuery()
     const [a, b] = ctrl.tabs.map((t) => t.id)
-    ctrl.activeTabId = b
+    ctrl.activeTabId = b!
 
-    ctrl.closeTab(a)
+    ctrl.closeTab(a!)
     expect(ctrl.activeTabId).toBe(b)
   })
 })

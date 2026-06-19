@@ -10,7 +10,7 @@ import type { Endpoint } from './transport'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
-function sslOptions(profile: ConnectionProfile): boolean | ConnectionOptions {
+export function sslOptions(profile: ConnectionProfile): boolean | ConnectionOptions {
   const ssl = profile.ssl
   if (!ssl || ssl.mode === 'disable') return false
   if (ssl.mode === 'require') return { rejectUnauthorized: false }
@@ -84,7 +84,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       pools = new Map([[discovery, makePool(discovery)]])
 
       const result = await pools.get(discovery)!.query<{ version: string }>('select version()')
-      const version = shortVersion(result.rows[0].version)
+      const version = shortVersion(result.rows[0]?.version ?? '')
 
       if (profile.databaseMode === 'all') {
         const listed = await pools.get(discovery)!.query(
@@ -100,7 +100,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       }
 
       // Prefer the configured database, otherwise the first discovered one.
-      active = childNames.includes(discovery) ? discovery : childNames[0]
+      active = childNames.includes(discovery) ? discovery : (childNames[0] ?? discovery)
       return version
     },
 
@@ -589,6 +589,6 @@ async function columnSourcesForFields(
 }
 
 /** "PostgreSQL 17.2 on aarch64-apple-darwin…" → "PostgreSQL 17.2". */
-function shortVersion(version: string) {
+export function shortVersion(version: string) {
   return version.split(' on ')[0] ?? version
 }

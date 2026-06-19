@@ -66,6 +66,10 @@ export class ExplorerView extends LitElement {
   @property()
   selectedTable: string | null = null
 
+  /** Every known connection id; removed profiles' collapse/expand state is pruned. */
+  @property({ attribute: false })
+  profileIds: string[] = []
+
   @state()
   private _filesCollapsed = false
 
@@ -101,6 +105,18 @@ export class ExplorerView extends LitElement {
   private _objectMenu: { x: number; y: number; object: DbObject; objectKind: DbObjectKind } | null = null
 
   protected willUpdate(changed: PropertyValues) {
+    // Drop collapse/expand state for profiles that no longer exist — every key
+    // is prefixed with its profile id, which is a colon-free UUID.
+    if (changed.has('profileIds')) {
+      const valid = new Set(this.profileIds)
+      const prune = (keys: Set<string>) => {
+        const next = new Set([...keys].filter((key) => valid.has(key.split(':')[0] ?? '')))
+        return next.size === keys.size ? keys : next
+      }
+      this._collapsedSchemas = prune(this._collapsedSchemas)
+      this._expandedTables = prune(this._expandedTables)
+      this._expandedObjectGroups = prune(this._expandedObjectGroups)
+    }
     // A selection arriving from outside (⌘P table pick) must be visible:
     // expand the Tables section and the schema group holding it.
     if (changed.has('selectedTable') && this.selectedTable) {

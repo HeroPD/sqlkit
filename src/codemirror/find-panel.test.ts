@@ -74,7 +74,7 @@ test('replace row replaces the current match', () => {
 
   const widget = view.dom.querySelector('.find-widget')!
   ;(widget.querySelector('.toggle-replace') as HTMLButtonElement).click()
-  const replaceInput = widget.querySelectorAll('input')[1]
+  const replaceInput = widget.querySelectorAll('input')[1]!
   type(replaceInput, 'SELECT')
 
   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
