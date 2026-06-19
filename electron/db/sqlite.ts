@@ -156,13 +156,19 @@ function run(statement: StatementSync, params: Array<string | number | bigint | 
   }
 
   // Array rows (not objects) keep duplicate column names intact (select a.id,
-  // b.id); iterate (not all) bounds memory — keep only what the renderer shows.
+  // b.id). Iteration is synchronous on the main thread, so stop at the buffer
+  // cap plus one probe row: scanning a huge result just to count it would freeze
+  // the whole UI. A truncated result reports the cap as a floor (the renderer
+  // shows "N+ rows") rather than an exact total we'd have to scan for.
   statement.setReturnArrays(true)
   const rows: unknown[][] = []
-  let total = 0
+  let truncated = false
   for (const row of statement.iterate(...params) as unknown as Iterable<unknown[]>) {
-    total += 1
-    if (rows.length < MAX_BUFFERED_ROWS) rows.push(row)
+    if (rows.length >= MAX_BUFFERED_ROWS) {
+      truncated = true
+      break
+    }
+    rows.push(row)
   }
-  return { columns, columnSources, rows, rowCount: total, truncated: total > MAX_BUFFERED_ROWS }
+  return { columns, columnSources, rows, rowCount: rows.length, truncated }
 }

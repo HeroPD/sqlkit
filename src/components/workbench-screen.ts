@@ -34,7 +34,7 @@ import './sql-editor'
 import './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
-import type { RunQueryDetail } from './sql-editor'
+import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
@@ -243,6 +243,7 @@ export class WorkbenchScreen extends LitElement {
       this._config.reset()
       this._cmdPalette.close()
       this._queries.reset()
+      clearEditorStateCache()
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
       void this._live.disconnectAll()
@@ -1046,7 +1047,14 @@ export class WorkbenchScreen extends LitElement {
   // only asks the server to interrupt the backend.
   private _onCancelQuery() {
     const profile = this._config.activeProfile()
-    if (profile) void window.sqlkit.cancelQuery(profile.id)
+    if (profile) void this._cancelQuery(profile.id)
+  }
+
+  // Stop is best-effort: a query still spinning up has no backend PID to target
+  // yet, so the cancel reports why instead of looking like a silent no-op.
+  private async _cancelQuery(profileId: string) {
+    const result = await window.sqlkit.cancelQuery(profileId)
+    if (!result.success && result.error) console.warn(`Cancel: ${result.error}`)
   }
 
   // The results grid scrolled near the end of what's loaded: page in more rows.
@@ -1077,7 +1085,7 @@ export class WorkbenchScreen extends LitElement {
   // not be the active context.
   private _onTaskStop(event: Event) {
     const { profileId } = (event as CustomEvent<TaskStopDetail>).detail
-    void window.sqlkit.cancelQuery(profileId)
+    void this._cancelQuery(profileId)
   }
 
   private _onTabSelect(event: Event) {
@@ -1099,10 +1107,13 @@ export class WorkbenchScreen extends LitElement {
     const { profile } = (event as CustomEvent<{ profile: ConnectionProfile }>).detail
     if (!(await this._config.save(profile))) return
 
+    // Close the config tab before _loadConfig switches context — otherwise
+    // switchInstance stashes the live tabs (still holding this config tab) under
+    // the old context and the tab resurfaces on switch-back.
+    this._ctx.closeConfigTab(profile.id)
     // Re-read rather than trusting the local copy: the save assigned the
     // profile's files folder (and created it on disk).
     await this._loadConfig()
-    this._ctx.closeTab(profile.id)
     this._activeView = 'databases'
   }
 

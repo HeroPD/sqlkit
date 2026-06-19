@@ -23,9 +23,12 @@ export type Driver = {
   disconnect(): Promise<void>
   /** Runs in `childDb` when provided; otherwise uses the driver's active database. */
   query(sql: string, params?: unknown[], childDb?: string | null): Promise<QueryResult>
-  /** Cancels the in-flight query; false when nothing is running. Engines
-   * without server-side cancellation (sqlite) leave it undefined. */
-  cancel?(): Promise<boolean>
+  /** Interrupts in-flight queries. Reports how many were `running` and how many
+   * could be `cancelled` — a query whose backend PID isn't known yet can't be
+   * targeted, so the caller can tell "nothing running" (running 0) from "running
+   * but un-cancellable" (running > 0, cancelled 0). Engines without server-side
+   * cancellation (sqlite) leave it undefined. */
+  cancel?(): Promise<{ running: number; cancelled: number }>
   listTables(): Promise<TableRef[]>
   /** Columns of every listed table, in table order then column position. */
   listColumns(): Promise<ColumnRef[]>

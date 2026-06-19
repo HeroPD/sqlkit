@@ -122,17 +122,19 @@ describeDb('postgres driver (integration)', () => {
       // handler the instant it fires (no transient unhandled rejection).
       const cancelled = expect(running).rejects.toThrow('Query cancelled.')
       await new Promise((resolve) => setTimeout(resolve, 400))
-      expect(await driver.cancel?.()).toBe(true)
+      const outcome = await driver.cancel?.()
+      expect(outcome?.running).toBeGreaterThanOrEqual(1)
+      expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
       await cancelled
     } finally {
       await driver.disconnect()
     }
   }, 20000)
 
-  it('returns false from cancel when nothing is running', async () => {
+  it('reports nothing running when cancel finds no in-flight query', async () => {
     const driver = await connectDriver()
     try {
-      expect(await driver.cancel?.()).toBe(false)
+      expect(await driver.cancel?.()).toEqual({ running: 0, cancelled: 0 })
     } finally {
       await driver.disconnect()
     }

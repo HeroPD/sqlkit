@@ -196,6 +196,13 @@ export type RunQueryDetail = { sql: string }
 const stateCache = new Map<string, EditorState>()
 const MAX_CACHED_STATES = 20
 
+// Workspace close drops every tab; clear the cache too, or EditorStates (each
+// holding a full document + undo history) from the closed workspace linger in
+// the LRU until 20 newer states evict them.
+export function clearEditorStateCache() {
+  stateCache.clear()
+}
+
 // Compartments are lookup keys, shared by all states so a state restored
 // across component instances can still be reconfigured.
 const languageCompartment = new Compartment()

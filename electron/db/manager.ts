@@ -156,7 +156,12 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     const driver = connectedDriver(profileId)
     if (!driver?.cancel) return { success: false, error: 'Cancel is not supported on this connection' }
     try {
-      return { success: await driver.cancel() }
+      const { running, cancelled } = await driver.cancel()
+      if (cancelled > 0) return { success: true }
+      if (running > 0) {
+        return { success: false, error: 'The query is starting up and could not be cancelled yet — try again in a moment.' }
+      }
+      return { success: false, error: 'No query is currently running.' }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }

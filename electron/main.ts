@@ -48,6 +48,7 @@ const devServerUrl = process.env.VITE_DEV_SERVER_URL
 const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
 const workspacePaths = new Map<number, string>()
 const dbManagers = new Map<number, ConnectionManager>()
+let quitting = false
 
 // Only these schemes are ever handed to the OS; a renderer navigated somewhere
 // unexpected can't use this to launch arbitrary protocol handlers.
@@ -361,10 +362,18 @@ function registerDbIpc() {
     return result.canceled ? null : result.filePaths[0]
   })
 
-  app.on('before-quit', () => {
-    // Window 'closed' cleanup normally handles this; keep this belt-and-suspenders path for quit races.
+  app.on('before-quit', (event) => {
+    // Window 'closed' cleanup normally handles this; this belt-and-suspenders
+    // path covers quit races. Hold the quit until pools/tunnels actually close
+    // (graceful Postgres Terminate, SSH teardown) so the remote backend isn't
+    // orphaned — but cap the wait so a hung disconnect can't block quit forever.
+    if (quitting) return
+    quitting = true
+    event.preventDefault()
     stopWorkspaceWatcher()
-    void Promise.all([...dbManagers.values()].map((active) => active.disconnectAll()))
+    const closed = Promise.all([...dbManagers.values()].map((active) => active.disconnectAll().catch(() => {})))
+    const deadline = new Promise<void>((resolve) => setTimeout(resolve, 3000))
+    void Promise.race([closed, deadline]).finally(() => app.quit())
   })
 }
 

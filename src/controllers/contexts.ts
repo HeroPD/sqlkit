@@ -182,6 +182,22 @@ export class ContextsController {
     }
   }
 
+  // A saved config tab (id === profileId) is done with; scrub it from the live
+  // strip and every stashed context, keeping the contexts themselves. Must run
+  // before a switchInstance stashes the live tabs, or the stale tab rides along
+  // into the stash and reappears when the user switches back.
+  closeConfigTab(profileId: string) {
+    if (this._tabs.some((tab) => tab.id === profileId)) this.closeTab(profileId)
+    for (const [key, instance] of this._instances) {
+      if (!instance.tabs.some((tab) => tab.id === profileId)) continue
+      this._instances.set(key, {
+        ...instance,
+        tabs: instance.tabs.filter((tab) => tab.id !== profileId),
+        activeTabId: instance.activeTabId === profileId ? null : instance.activeTabId,
+      })
+    }
+  }
+
   // A renamed workspace file: retarget its open tab (ids are keyed by path)
   // and the active pointer. The caller moves the matching query result.
   retargetFileTab(oldId: string, newId: string, name: string, path: string) {

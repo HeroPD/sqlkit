@@ -169,8 +169,11 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // connection, not the pool the running queries occupy: with max:4 busy
       // clients a pool-routed cancel would queue behind the very queries it is
       // trying to interrupt. A backend that already finished is a no-op.
-      const pids = [...running].map((entry) => entry.pid).filter((pid): pid is number => pid !== null)
-      if (!pids.length) return false
+      const entries = [...running]
+      const pids = entries.map((entry) => entry.pid).filter((pid): pid is number => pid !== null)
+      // Nothing running, or running but no PID captured yet (queued checkout):
+      // either way there's nothing to target, so report it honestly.
+      if (!pids.length) return { running: entries.length, cancelled: 0 }
       const client = new pg.Client({
         host: endpoint.host,
         port: endpoint.port,
@@ -182,11 +185,20 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       })
       try {
         await client.connect()
-        await Promise.all(pids.map((pid) => client.query('select pg_cancel_backend($1)', [pid]).catch(() => {})))
+        // pg_cancel_backend returns false for a PID that's already gone or that
+        // we lack permission to signal; count only the ones it actually hit.
+        const sent = await Promise.all(
+          pids.map((pid) =>
+            client
+              .query<{ ok: boolean }>('select pg_cancel_backend($1) as ok', [pid])
+              .then((result) => result.rows[0]?.ok === true)
+              .catch(() => false),
+          ),
+        )
+        return { running: entries.length, cancelled: sent.filter(Boolean).length }
       } finally {
         await client.end().catch(() => {})
       }
-      return true
     },
 
     async listTables() {

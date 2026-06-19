@@ -129,7 +129,7 @@ describe('sqlite driver: query', () => {
     expect(result.rows).toEqual([[1, 2]])
   })
 
-  it('caps retained rows at MAX_BUFFERED_ROWS but counts them all', async () => {
+  it('caps retained rows at MAX_BUFFERED_ROWS and stops scanning once over', async () => {
     const driver = await memoryDriver()
     await driver.query('create table nums(n)')
     await driver.query(
@@ -139,7 +139,9 @@ describe('sqlite driver: query', () => {
 
     const result = await driver.query('select n from nums')
     expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
-    expect(result.rowCount).toBe(MAX_BUFFERED_ROWS + 25)
+    // Truncated: counting the true total would mean scanning every row
+    // synchronously on the main thread, so rowCount reports the cap as a floor.
+    expect(result.rowCount).toBe(MAX_BUFFERED_ROWS)
     expect(result.truncated).toBe(true)
   })
 

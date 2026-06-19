@@ -537,11 +537,18 @@ export class ResultsPanel extends LitElement {
   private _status() {
     if (this.run.phase !== 'done') return ''
     const { result } = this.run
-    const rows = `${result.rowCount.toLocaleString()} row${result.rowCount === 1 ? '' : 's'}`
+    const buffered = result.bufferedRowCount
+    // A truncated result whose driver couldn't report the true total (sqlite,
+    // which would have to scan every row) shows the loaded count as a floor
+    // ("N+ rows"); when the total is known (postgres) show it with a caveat.
+    const totalKnown = !result.truncated || buffered === undefined || result.rowCount > buffered
+    const rows = totalKnown
+      ? `${result.rowCount.toLocaleString()} row${result.rowCount === 1 ? '' : 's'}`
+      : `${buffered.toLocaleString()}+ rows`
     // Only a result past the buffer cap is partial; everything else is fully
     // scrollable (paged in on demand), so no "showing first N" caveat.
     const capped =
-      result.truncated && result.bufferedRowCount !== undefined ? ` · first ${result.bufferedRowCount.toLocaleString()} loaded` : ''
+      result.truncated && totalKnown && buffered !== undefined ? ` · first ${buffered.toLocaleString()} loaded` : ''
     const pace = result.durationMs < 500 ? 'fast' : result.durationMs < 2000 ? 'medium' : 'slow'
     return html`${rows}${capped} · <span class="duration ${pace}">${Math.max(1, Math.round(result.durationMs))} ms</span>`
   }
