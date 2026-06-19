@@ -36,7 +36,15 @@ import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from '
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
-import { buildBatchUpdate, buildUpdate, quoteQualified, type BatchUpdateEdit } from '../sql-write'
+import {
+  buildBatchUpdate,
+  buildDeleteRows,
+  buildInsertDefault,
+  buildUpdate,
+  quoteQualified,
+  type BatchUpdateEdit,
+  type RowKey,
+} from '../sql-write'
 import { stripExplain } from '../sql-types'
 import { TABLE_KIND_LABELS } from '../table-kinds'
 import type { SearchOpenDetail } from './search-view'
@@ -869,6 +877,8 @@ export class WorkbenchScreen extends LitElement {
             @load-more=${this._onLoadMore}
             @cell-edit=${this._onCellEdit}
             @cells-edit=${this._onCellsEdit}
+            @add-row=${this._onAddRow}
+            @delete-rows=${this._onDeleteRows}
             style="height: ${this._layout.panelHeight === null ? '70%' : `${this._layout.panelHeight}px`}"
           ></results-panel>
         </div>
@@ -1255,7 +1265,7 @@ export class WorkbenchScreen extends LitElement {
         this._dialogs.notice('Cannot edit this row', 'It is no longer loaded in the current result.')
         return null
       }
-      const pks = pkColumns.map((pk) => ({ name: pk.name, value: row[ctx.result.columns.indexOf(pk.name)] }))
+      const pks = this._rowKey(ctx, cell.row, pkColumns)
       if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
         this._dialogs.notice('Cannot edit this row', 'Its primary key value is missing from the result.')
         return null
@@ -1263,6 +1273,29 @@ export class WorkbenchScreen extends LitElement {
       specs.push({ column: columnName, columnMeta, value, pks })
     }
     return specs
+  }
+
+  private _rowKey(ctx: { result: QueryResult }, rowIndex: number, pkColumns: ColumnRef[]): RowKey {
+    const row = ctx.result.rows[rowIndex]
+    return pkColumns.map((pk) => ({ name: pk.name, value: row?.[ctx.result.columns.indexOf(pk.name)] }))
+  }
+
+  private _rowKeys(ctx: { columns: ColumnRef[]; result: QueryResult }, rows: number[]): RowKey[] | null {
+    const pkColumns = ctx.columns.filter((c) => c.primaryKey)
+    const keys: RowKey[] = []
+    for (const rowIndex of rows) {
+      if (!ctx.result.rows[rowIndex]) {
+        this._dialogs.notice('Cannot delete this row', 'It is no longer loaded in the current result.')
+        return null
+      }
+      const pks = this._rowKey(ctx, rowIndex, pkColumns)
+      if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
+        this._dialogs.notice('Cannot delete this row', 'Its primary key value is missing from the result.')
+        return null
+      }
+      keys.push(pks)
+    }
+    return keys
   }
 
   // A cell was edited inline: build the parameterized UPDATE and pop the review
@@ -1303,14 +1336,33 @@ export class WorkbenchScreen extends LitElement {
     this._dialogs.review = { sql, params, run: () => void this._runWrite(profile, sql, params) }
   }
 
+  private _onAddRow() {
+    const ctx = this._editContext()
+    const profile = this._activeProfile()
+    if (!ctx || !profile) return
+    const { sql, params } = buildInsertDefault(ctx.table)
+    this._dialogs.review = { sql, params, run: () => void this._runWrite(profile, sql, params) }
+  }
+
+  private _onDeleteRows(event: Event) {
+    const { rows } = (event as CustomEvent<{ rows: number[] }>).detail
+    const ctx = this._editContext()
+    const profile = this._activeProfile()
+    if (!ctx || !profile || !rows.length) return
+    const keys = this._rowKeys(ctx, rows)
+    if (!keys?.length) return
+    const { sql, params } = buildDeleteRows({ table: ctx.table, rows: keys, dialect: profile.engine })
+    this._dialogs.review = { sql, params, run: () => void this._runWrite(profile, sql, params) }
+  }
+
   private async _runWrite(profile: ConnectionProfile, sql: string, params: unknown[]) {
     const response = await window.sqlkit.runQuery(profile.id, this._ctx.activeChildDb, sql, params)
     if (!response.success) {
-      this._dialogs.notice('Update failed', response.error)
+      this._dialogs.notice('Write failed', response.error)
       return
     }
     if (response.result.rowCount === 0) {
-      this._dialogs.notice('No rows updated', 'The row may have changed or been removed.')
+      this._dialogs.notice('No rows changed', 'The selected row may have changed or been removed.')
       return
     }
     // Re-run the browse SELECT so the grid reflects the write (and any triggers).

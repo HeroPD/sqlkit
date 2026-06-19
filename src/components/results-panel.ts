@@ -226,11 +226,40 @@ export class ResultsPanel extends LitElement {
     this.dispatchEvent(new CustomEvent('cancel-query', { bubbles: true, composed: true }))
   }
 
+  private _addRow = () => {
+    this.dispatchEvent(new CustomEvent('add-row', { bubbles: true, composed: true }))
+  }
+
+  private _deleteRows(rows: number[]) {
+    if (!rows.length) return
+    this.dispatchEvent(new CustomEvent('delete-rows', { detail: { rows }, bubbles: true, composed: true }))
+  }
+
   render() {
     const exportable = this.run.phase === 'done' && this.run.result.columns.length > 0
+    const showRowTools = this.editable && exportable
+    const selectedRows = showRowTools ? this._selectedRows() : []
     return html`
       <div class="head">
         <span>Results</span>
+        ${showRowTools
+          ? html`
+              <div class="toolbar" aria-label="Result row actions">
+                <button class="head-action" title="Add row" aria-label="Add row" @click=${this._addRow}>
+                  <i class="codicon codicon-add" aria-hidden="true"></i>
+                </button>
+                <button
+                  class="head-action danger"
+                  title="Delete selected rows"
+                  aria-label="Delete selected rows"
+                  ?disabled=${selectedRows.length === 0}
+                  @click=${() => this._deleteRows(selectedRows)}
+                >
+                  <i class="codicon codicon-remove" aria-hidden="true"></i>
+                </button>
+              </div>
+            `
+          : ''}
         <span class="status">${this._status()}</span>
         ${exportable
           ? html`
@@ -386,6 +415,16 @@ export class ResultsPanel extends LitElement {
       for (let col = c0; col <= c1; col += 1) cells.push({ row, col })
     }
     return cells
+  }
+
+  private _selectedRows(): number[] {
+    if (this.run.phase !== 'done' || !this._sel) return []
+    const max = this.run.result.rows.length - 1
+    const r0 = Math.max(0, Math.min(this._sel.r0, this._sel.r1))
+    const r1 = Math.min(max, Math.max(this._sel.r0, this._sel.r1))
+    const rows: number[] = []
+    for (let row = r0; row <= r1; row += 1) rows.push(row)
+    return rows
   }
 
   private _onCellPointerDown = (event: PointerEvent) => {
@@ -646,9 +685,24 @@ export class ResultsPanel extends LitElement {
         cursor: pointer;
       }
 
-      .head-action:hover {
+      .head-action:hover:not(:disabled) {
         color: var(--text);
         background: var(--list-hover);
+      }
+
+      .head-action.danger:hover:not(:disabled) {
+        color: var(--status-dot-error);
+      }
+
+      .head-action:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 4px;
       }
 
       .status {

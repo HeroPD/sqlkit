@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ColumnRef, TableRef } from './electron'
-import { buildBatchUpdate, buildUpdate, coerceValue, quoteQualified } from './sql-write'
+import { buildBatchUpdate, buildDeleteRows, buildInsertDefault, buildUpdate, coerceValue, quoteQualified } from './sql-write'
 
 const users: TableRef = { schema: 'public', name: 'users', kind: 'table' }
 const col = (over: Partial<ColumnRef>): ColumnRef => ({
@@ -142,5 +142,40 @@ describe('buildBatchUpdate', () => {
         dialect: 'postgresql',
       }),
     ).toThrow()
+  })
+})
+
+describe('buildInsertDefault', () => {
+  it('builds an INSERT DEFAULT VALUES statement', () => {
+    expect(buildInsertDefault(users)).toEqual({ sql: 'INSERT INTO "public"."users" DEFAULT VALUES', params: [] })
+  })
+})
+
+describe('buildDeleteRows', () => {
+  it('builds a Postgres DELETE for selected row keys', () => {
+    const { sql, params } = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: 1 }], [{ name: 'id', value: 2 }]],
+      dialect: 'postgresql',
+    })
+
+    expect(sql).toBe('DELETE FROM "public"."users"\n WHERE ("id" = $1) OR ("id" = $2)')
+    expect(params).toEqual([1, 2])
+  })
+
+  it('supports SQLite placeholders and composite primary keys', () => {
+    const { sql, params } = buildDeleteRows({
+      table: { schema: null, name: 'line_items', kind: 'table' },
+      rows: [[{ name: 'order_id', value: 10 }, { name: 'sku', value: 'A1' }]],
+      dialect: 'sqlite',
+    })
+
+    expect(sql).toBe('DELETE FROM "line_items"\n WHERE ("order_id" = ? AND "sku" = ?)')
+    expect(params).toEqual([10, 'A1'])
+  })
+
+  it('throws without rows or primary keys', () => {
+    expect(() => buildDeleteRows({ table: users, rows: [], dialect: 'postgresql' })).toThrow()
+    expect(() => buildDeleteRows({ table: users, rows: [[]], dialect: 'postgresql' })).toThrow()
   })
 })

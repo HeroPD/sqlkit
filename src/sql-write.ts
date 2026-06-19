@@ -49,6 +49,14 @@ export type BatchUpdateSpec = {
   dialect: Engine
 }
 
+export type RowKey = { name: string; value: unknown }[]
+
+export type DeleteRowsSpec = {
+  table: TableRef
+  rows: RowKey[]
+  dialect: Engine
+}
+
 // Builds a single-row parameterized UPDATE. Placeholders are $1.. for Postgres,
 // ? otherwise (SQLite). Params are [newValue, ...pkValues] in placeholder order.
 export function buildUpdate(spec: UpdateSpec): { sql: string; params: unknown[] } {
@@ -88,4 +96,23 @@ export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: 
   const where = spec.edits.map((edit) => `(${condition(edit.pks)})`).join(' OR ')
 
   return { sql: `UPDATE ${quoteQualified(spec.table)}\n   SET\n${set}\n WHERE ${where}`, params }
+}
+
+export function buildInsertDefault(table: TableRef): { sql: string; params: unknown[] } {
+  return { sql: `INSERT INTO ${quoteQualified(table)} DEFAULT VALUES`, params: [] }
+}
+
+export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: unknown[] } {
+  if (spec.rows.length === 0) throw new Error('Cannot build a DELETE without rows')
+  const params: unknown[] = []
+  const bind = (value: unknown) => {
+    params.push(value)
+    return spec.dialect === 'postgresql' ? `$${params.length}` : '?'
+  }
+  const condition = (pks: RowKey) => {
+    if (pks.length === 0) throw new Error('Cannot build a DELETE without a primary key')
+    return pks.map((pk) => `${quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
+  }
+  const where = spec.rows.map((pks) => `(${condition(pks)})`).join(' OR ')
+  return { sql: `DELETE FROM ${quoteQualified(spec.table)}\n WHERE ${where}`, params }
 }
