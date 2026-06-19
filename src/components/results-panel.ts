@@ -533,8 +533,9 @@ export class ResultsPanel extends LitElement {
     // become minimums a long nowrap cell can blow past. min-width: 100% in
     // the CSS still stretches the columns when they underfill the panel.
     const numColWidth = numberColumnWidth(result)
+    const viewportWidth = Math.max(0, this._viewportW - 1)
     const baseTableWidth = numColWidth + widths.reduce((sum, width) => sum + width, 0)
-    const fill = widths.length && this._viewportW > baseTableWidth ? this._viewportW - baseTableWidth : 0
+    const fill = widths.length && viewportWidth > baseTableWidth ? viewportWidth - baseTableWidth : 0
     const tableWidth = baseTableWidth + fill
     const displayWidths = fill ? widths.map((width, index) => (index === widths.length - 1 ? width + fill : width)) : widths
     // Only the visible window of loaded rows is in the DOM; spacer rows above
@@ -715,7 +716,6 @@ export class ResultsPanel extends LitElement {
       /* Reference-style grid: fixed layout with measured colgroup widths,
          uppercase UI-font headers, mono cells, zebra rows, row hover. */
       table {
-        min-width: 100%;
         border-collapse: collapse;
         table-layout: fixed;
         font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
