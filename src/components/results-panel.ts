@@ -848,10 +848,10 @@ export class ResultsPanel extends LitElement {
 
       /* Inline cell editor: fills the cell so editing feels in-place. */
       .cell-edit {
-        width: 100%;
+        width: calc(100% + 12px);
         box-sizing: border-box;
-        margin: -3px 0;
-        padding: 2px 9px;
+        margin: -3px -6px;
+        padding: 2px 4px;
         font: inherit;
         color: var(--input-fg);
         background: var(--input-bg);
