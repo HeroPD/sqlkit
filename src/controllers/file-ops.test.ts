@@ -17,6 +17,12 @@ const contextKey = (profileId: string | null, childDb: string | null) =>
 const fileInfo = (path: string, name = path.split('/').pop() ?? path): FileInfo =>
   ({ type: 'file', name, path, relativePath: name })
 
+const defer = <T>() => {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => (resolve = res))
+  return { promise, resolve }
+}
+
 const make = (over: { contextFolder?: string | null; listing?: FileInfo[] } = {}) => {
   const folder = 'contextFolder' in over ? (over.contextFolder ?? null) : '/ws/ctx'
   const ctx = new ContextsController(host(), { contextKey, dropQuery: vi.fn() })
@@ -87,6 +93,23 @@ describe('FileOpsController.openFile', () => {
     await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
     expect(ctx.tabs).toEqual([])
   })
+
+  it('opens a file in the context where the request started after a context switch', async () => {
+    const read = defer<{ success: true; content: string }>()
+    stubSqlkit({ readFile: vi.fn(() => read.promise) })
+    const { ctrl, ctx } = make()
+    ctx.switchInstance('p1', 'db_a')
+
+    const opened = ctrl.openFile(fileInfo('/ws/a/q.sql'))
+    ctx.switchInstance('p1', 'db_b')
+    read.resolve({ success: true, content: 'select 42' })
+    await opened
+
+    expect(ctx.tabs).toEqual([])
+    ctx.switchInstance('p1', 'db_a')
+    expect(ctx.tabs[0]).toMatchObject({ id: 'file:/ws/a/q.sql', content: 'select 42' })
+    expect(ctx.activeTabId).toBe('file:/ws/a/q.sql')
+  })
 })
 
 describe('FileOpsController.openFileOrExternal', () => {
@@ -123,6 +146,23 @@ describe('FileOpsController.saveActive', () => {
     ctx.newQuery()
     await ctrl.saveActive()
     expect(api.saveFileAs).toHaveBeenCalledWith('/ws/ctx', 'Untitled-1.sql', '')
+  })
+
+  it('marks the original context tab clean when save finishes after a context switch', async () => {
+    const saved = defer<{ success: true; path: string; name: string }>()
+    stubSqlkit({ saveFile: vi.fn(() => saved.promise) })
+    const { ctrl, ctx } = make()
+    ctx.switchInstance('p1', 'db_a')
+    ctx.addTab({ id: 'file:/ws/a/q.sql', kind: 'sql', name: 'q.sql', path: '/ws/a/q.sql', content: 'select 2', savedContent: 'select 1' })
+
+    const saving = ctrl.saveActive()
+    ctx.switchInstance('p1', 'db_b')
+    saved.resolve({ success: true, path: '/ws/a/q.sql', name: 'q.sql' })
+    await saving
+
+    expect(ctx.tabs).toEqual([])
+    ctx.switchInstance('p1', 'db_a')
+    expect(ctx.activeSqlTab()?.savedContent).toBe('select 2')
   })
 })
 

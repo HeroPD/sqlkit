@@ -19,6 +19,8 @@ const fileTabId = (path: string) => `file:${path}`
 // Browse/history tab names already end in .sql; don't double it.
 const suggestedSqlName = (tabName: string) => `${tabName.replace(/\.sql$/i, '')}.sql`
 
+type ContextRef = { profileId: string | null; childDb: string | null }
+
 // Owns workspace-file actions: opening a file into an editor tab, saving the
 // active tab, and create/rename/delete — keeping the open tabs, their query
 // results, and the file listing in step. Pure file I/O is in the main process.
@@ -29,10 +31,14 @@ export class FileOpsController {
     this.deps = deps
   }
 
-  async openFile(file: FileInfo) {
+  private currentContext(): ContextRef {
+    return { profileId: this.deps.ctx.activeDbId, childDb: this.deps.ctx.activeChildDb }
+  }
+
+  async openFile(file: FileInfo, context = this.currentContext()) {
     const id = fileTabId(file.path)
-    if (this.deps.ctx.tabs.some((tab) => tab.id === id)) {
-      this.deps.ctx.activeTabId = id
+    if (this.deps.ctx.tabExistsInContext(context.profileId, context.childDb, id)) {
+      this.deps.ctx.activateTabInContext(context.profileId, context.childDb, id)
       return
     }
     const result = await window.sqlkit.readFile(file.path)
@@ -40,7 +46,14 @@ export class FileOpsController {
       console.error('Failed to read file:', result.error)
       return
     }
-    this.deps.ctx.addTab({ id, kind: 'sql', name: file.name, path: file.path, content: result.content, savedContent: result.content })
+    this.deps.ctx.addTabToContext(context.profileId, context.childDb, {
+      id,
+      kind: 'sql',
+      name: file.name,
+      path: file.path,
+      content: result.content,
+      savedContent: result.content,
+    })
   }
 
   // Only .sql opens in the editor; spreadsheets, exports etc. go to the
@@ -77,14 +90,20 @@ export class FileOpsController {
   async create(parent: string, name: string) {
     const folder = this.deps.contextFolder()
     if (!folder) return
+    const context = this.currentContext()
     const result = await window.sqlkit.createFile(folder, parent ? `${parent}/${name}` : name)
     if (!result.success) {
       console.error('Create failed:', result.error)
       return
     }
     await this.deps.files.reload()
-    const created = this.deps.files.files.find((file) => file.path === result.path)
-    if (created) void this.openFile(created)
+    const created = this.deps.files.files.find((file) => file.path === result.path) ?? {
+      type: 'file' as const,
+      name: result.name,
+      path: result.path,
+      relativePath: result.name,
+    }
+    void this.openFile(created, context)
   }
 
   async rename(file: FileInfo, newName: string) {

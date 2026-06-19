@@ -155,6 +155,34 @@ export class ContextsController {
     this.activeTabId = tab.id
   }
 
+  tabExistsInContext(profileId: string | null, childDb: string | null, id: string): boolean {
+    const key = this.deps.contextKey(profileId, childDb)
+    if (key === this.deps.contextKey(this._activeDbId, this._activeChildDb)) return this._tabs.some((tab) => tab.id === id)
+    return this._instances.get(key)?.tabs.some((tab) => tab.id === id) ?? false
+  }
+
+  activateTabInContext(profileId: string | null, childDb: string | null, id: string) {
+    const key = this.deps.contextKey(profileId, childDb)
+    if (key === this.deps.contextKey(this._activeDbId, this._activeChildDb)) {
+      this.activeTabId = id
+      return
+    }
+    const instance = this._instances.get(key)
+    if (!instance?.tabs.some((tab) => tab.id === id)) return
+    this._instances.set(key, { ...instance, activeTabId: id })
+  }
+
+  addTabToContext(profileId: string | null, childDb: string | null, tab: EditorTabState) {
+    const key = this.deps.contextKey(profileId, childDb)
+    if (key === this.deps.contextKey(this._activeDbId, this._activeChildDb)) {
+      this.addTab(tab)
+      return
+    }
+    const instance = this._instances.get(key) ?? { tabs: [], activeTabId: null, selectedTable: null }
+    const tabs = instance.tabs.some((entry) => entry.id === tab.id) ? instance.tabs : [...instance.tabs, tab]
+    this._instances.set(key, { ...instance, tabs, activeTabId: tab.id })
+  }
+
   openConfigTab(profile: ConnectionProfile) {
     this.addTab({ id: profile.id, kind: 'config', profile: { ...profile } })
   }
@@ -205,6 +233,14 @@ export class ContextsController {
       tab.id === oldId && tab.kind === 'sql' ? { ...tab, id: newId, name, path } : tab,
     )
     if (this._activeTabId === oldId) this.activeTabId = newId
+    for (const [key, instance] of this._instances) {
+      if (!instance.tabs.some((tab) => tab.id === oldId && tab.kind === 'sql')) continue
+      this._instances.set(key, {
+        ...instance,
+        tabs: instance.tabs.map((tab) => (tab.id === oldId && tab.kind === 'sql' ? { ...tab, id: newId, name, path } : tab)),
+        activeTabId: instance.activeTabId === oldId ? newId : instance.activeTabId,
+      })
+    }
   }
 
   // A deleted file or folder: close its tab and every tab beneath it, then
@@ -215,6 +251,14 @@ export class ContextsController {
     )
     if (this._activeTabId && !this._tabs.some((tab) => tab.id === this._activeTabId)) {
       this.activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
+    }
+    for (const [key, instance] of this._instances) {
+      const tabs = instance.tabs.filter(
+        (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
+      )
+      if (tabs.length === instance.tabs.length) continue
+      const activeTabId = instance.activeTabId && tabs.some((tab) => tab.id === instance.activeTabId) ? instance.activeTabId : (tabs.at(-1)?.id ?? null)
+      this._instances.set(key, { ...instance, tabs, activeTabId })
     }
   }
 
@@ -228,6 +272,17 @@ export class ContextsController {
         ? { ...entry, path: result.path, name: result.name, savedContent: tab.content }
         : entry,
     )
+    for (const [key, instance] of this._instances) {
+      if (!instance.tabs.some((entry) => entry.id === tab.id && entry.kind === 'sql')) continue
+      this._instances.set(key, {
+        ...instance,
+        tabs: instance.tabs.map((entry) =>
+          entry.id === tab.id && entry.kind === 'sql'
+            ? { ...entry, path: result.path, name: result.name, savedContent: tab.content }
+            : entry,
+        ),
+      })
+    }
   }
 
   // Editing promotes a preview tab to permanent (VS Code behavior) — a later

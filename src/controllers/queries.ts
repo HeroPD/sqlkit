@@ -112,20 +112,18 @@ export class QueriesController implements ReactiveController {
       return
     }
 
+    if (!this.tabExists(tabId)) {
+      if (response.success && response.result.sessionId) void window.sqlkit.closeSession(response.result.sessionId)
+      this.finishTask(task.id, response, task.startedAt)
+      this.host.requestUpdate()
+      return
+    }
+
     this.setRun(
       tabId,
       response.success ? { phase: 'done', result: response.result, sql } : { phase: 'error', error: response.error },
     )
-    this.tasks = this.tasks.map((entry) =>
-      entry.id === task.id
-        ? {
-            ...entry,
-            status: response.success ? 'done' : response.error === 'Query cancelled.' ? 'cancelled' : 'error',
-            durationMs: response.success ? response.result.durationMs : Date.now() - task.startedAt,
-            rowCount: response.success ? response.result.rowCount : null,
-          }
-        : entry,
-    )
+    this.finishTask(task.id, response, task.startedAt)
     this.history = [
       {
         id: crypto.randomUUID(),
@@ -140,6 +138,19 @@ export class QueriesController implements ReactiveController {
       ...this.history,
     ].slice(0, MAX_HISTORY)
     this.host.requestUpdate()
+  }
+
+  private finishTask(taskId: string, response: QueryResponse, startedAt: number) {
+    this.tasks = this.tasks.map((entry) =>
+      entry.id === taskId
+        ? {
+            ...entry,
+            status: response.success ? 'done' : response.error === 'Query cancelled.' ? 'cancelled' : 'error',
+            durationMs: response.success ? response.result.durationMs : Date.now() - startedAt,
+            rowCount: response.success ? response.result.rowCount : null,
+          }
+        : entry,
+    )
   }
 
   /** Running queries past the threshold — the Tasks activity-bar badge. */

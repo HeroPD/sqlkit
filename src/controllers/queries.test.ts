@@ -173,6 +173,24 @@ describe('QueriesController paging', () => {
     expect(api.closeSession).toHaveBeenCalledWith('sess1')
   })
 
+  it('closes the buffer of a response that lands after its tab was closed', async () => {
+    let settle!: (response: QueryResponse) => void
+    const pending = new Promise<QueryResponse>((res) => (settle = res))
+    const api = stubSqlkit({ runQuery: vi.fn(() => pending) })
+    const tabs = new Set(['t1'])
+    const controller = new QueriesController(host(), (tabId) => tabs.has(tabId))
+
+    const done = controller.execute(runArgs)
+    tabs.delete('t1')
+    controller.dropTab('t1')
+    settle({ success: true, result: paged })
+    await done
+
+    expect(api.closeSession).toHaveBeenCalledWith('sess1')
+    expect(controller.runFor('t1')).toEqual({ phase: 'idle' })
+    expect(controller.tasks[0]?.status).toBe('done')
+  })
+
   it('stops paging once the buffer has expired', async () => {
     const api = stubSqlkit({ fetchRows: vi.fn(() => Promise.resolve({ success: false, error: 'Result buffer expired' })) })
     const controller = new QueriesController(host(), () => true)
