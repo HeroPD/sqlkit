@@ -106,6 +106,16 @@ describe('workspace config: credential round-trip', () => {
     expect(result.config.connections[0]?.password).toBe('')
   })
 
+  it('does not overwrite undecryptable encrypted secrets when opening the workspace', () => {
+    const foreign = `enc:v1:${Buffer.from('from-another-keychain').toString('base64')}`
+    writeRawConfig({ version: 1, connections: [{ ...profile(), password: foreign }] })
+
+    expect(openWorkspace(workspaceDir).success).toBe(true)
+
+    const stored = JSON.parse(rawConfig()) as { connections: { password: string }[] }
+    expect(stored.connections[0]?.password).toBe(foreign)
+  })
+
   it('does not wrap an already-encrypted secret a second time', () => {
     writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'twice' })] })
     const encrypted = (JSON.parse(rawConfig()) as { connections: { password: string }[] }).connections[0]?.password ?? ''

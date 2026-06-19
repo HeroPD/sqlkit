@@ -423,9 +423,10 @@ export class WorkbenchScreen extends LitElement {
     // and be logged under the context Run was pressed in, not the current one.
     const childDb = this._ctx.activeChildDb
     const runContextKey = contextKey(profile.id, childDb)
+    const phase = this._live.phase(profile.id)
+    this._queries.beginRun(tabId, phase === 'connected' ? undefined : `Connecting to ${profile.name}…`)
 
-    if (this._live.phase(profile.id) !== 'connected') {
-      this._queries.setRun(tabId, { phase: 'running', note: `Connecting to ${profile.name}…` })
+    if (phase !== 'connected') {
       const connected = await this._live.connect(profile)
       if (!connected.success) {
         this._queries.setRun(tabId, { phase: 'error', error: connected.error })

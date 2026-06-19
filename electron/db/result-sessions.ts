@@ -50,10 +50,12 @@ export class ResultSessionStore {
   fetch(id: string, offset: number, limit: number): unknown[][] | null {
     const session = this.sessions.get(id)
     if (!session) return null
+    const safeOffset = Math.max(0, Math.trunc(offset) || 0)
+    const safeLimit = Math.min(PAGE_SIZE, Math.max(0, Math.trunc(limit) || 0))
     // Touch for LRU: most-recently-fetched sessions evict last.
     this.sessions.delete(id)
     this.sessions.set(id, session)
-    return session.rows.slice(offset, offset + limit)
+    return session.rows.slice(safeOffset, safeOffset + safeLimit)
   }
 
   close(id: string) {

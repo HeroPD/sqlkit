@@ -61,6 +61,12 @@ export class QueriesController implements ReactiveController {
     this.host.requestUpdate()
   }
 
+  /** Marks a tab as running before connection/child alignment awaits. */
+  beginRun(tabId: string, note?: string) {
+    this.closeRunSession(this.runs.get(tabId))
+    this.setRun(tabId, note ? { phase: 'running', note } : { phase: 'running' })
+  }
+
   /** Runs the SQL on an already-connected profile and records the outcome. */
   async execute(args: {
     tabId: string

@@ -51,7 +51,7 @@ export function singleTableEditContext(input: ResultEditInput): SingleTableEditC
   if (!table) return null
   if (run.result.columnSources?.some((source) => source.table !== null && !tableMatchesSource(table, source))) return null
   const columns = columnsForTable(input.columns, table)
-  const pkIndexes = primaryKeyIndexes(run.result, table, columns, true)
+  const pkIndexes = primaryKeyIndexes(run.result, table, columns, true, run.sql ?? tab.content)
   return pkIndexes.length ? { table, columns, result: run.result, pkIndexes } : null
 }
 
@@ -75,7 +75,7 @@ export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEd
   if (!table) return null
   const columns = columnsForTable(input.columns, table)
   const columnMeta = columns.find((column) => column.name.toLowerCase() === source.column!.toLowerCase())
-  const pkIndexes = primaryKeyIndexes(input.run.result, table, columns, false)
+  const pkIndexes = primaryKeyIndexes(input.run.result, table, columns, false, input.run.sql ?? input.tab?.content ?? '')
   return columnMeta && pkIndexes.length ? { table, columns, result: input.run.result, pkIndexes, columnName: columnMeta.name, columnMeta } : null
 }
 
@@ -123,7 +123,7 @@ function sameTable(a: TableRef, b: TableRef) {
   return a.name === b.name && a.schema === b.schema
 }
 
-function primaryKeyIndexes(result: QueryResult, table: TableRef, columns: ColumnRef[], allowNameFallback: boolean): Array<{ name: string; index: number }> {
+function primaryKeyIndexes(result: QueryResult, table: TableRef, columns: ColumnRef[], allowNameFallback: boolean, sql: string): Array<{ name: string; index: number }> {
   const pk = columns.filter((column) => column.primaryKey)
   if (!pk.length) return []
   const hasSources = result.columnSources !== undefined
@@ -131,10 +131,44 @@ function primaryKeyIndexes(result: QueryResult, table: TableRef, columns: Column
     const sourceIndex = result.columnSources?.findIndex(
       (source) => tableMatchesSource(table, source) && source.column?.toLowerCase() === column.name.toLowerCase(),
     )
-    const index = sourceIndex !== undefined && sourceIndex >= 0 ? sourceIndex : !hasSources && allowNameFallback ? result.columns.indexOf(column.name) : -1
+    const fallbackIndex = !hasSources && allowNameFallback ? simpleColumnProjectionIndex(result.columns, sql, column.name) : -1
+    const index = sourceIndex !== undefined && sourceIndex >= 0 ? sourceIndex : fallbackIndex
     return { name: column.name, index }
   })
   return indexes.every((entry) => entry.index >= 0) ? indexes : []
+}
+
+function simpleColumnProjectionIndex(resultColumns: string[], sql: string, columnName: string) {
+  const index = resultColumns.findIndex((column) => column.toLowerCase() === columnName.toLowerCase())
+  if (index < 0) return -1
+  const projections = selectProjections(sql)
+  return projectionIsSimpleColumn(projections[index] ?? '', columnName) ? index : -1
+}
+
+function selectProjections(sql: string) {
+  const match = /^\s*select\s+([\s\S]+?)\s+from\s/i.exec(sql)
+  if (!match?.[1]) return []
+  const parts: string[] = []
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < match[1].length; i += 1) {
+    if (match[1][i] === '(') depth += 1
+    else if (match[1][i] === ')') depth = Math.max(0, depth - 1)
+    else if (match[1][i] === ',' && depth === 0) {
+      parts.push(match[1].slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  parts.push(match[1].slice(start).trim())
+  return parts
+}
+
+function projectionIsSimpleColumn(projection: string, columnName: string) {
+  const expression = projection.replace(/\s+as\s+"?[A-Za-z_][\w$]*"?\s*$/i, '').trim()
+  const match = /^(?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))*$/.exec(expression)
+  if (!match) return false
+  const last = expression.split('.').at(-1)?.trim().replace(/^"|"$/g, '')
+  return last?.toLowerCase() === columnName.toLowerCase()
 }
 
 function rowKey(result: QueryResult, rowIndex: number, pkIndexes: Array<{ name: string; index: number }>): RowKey {

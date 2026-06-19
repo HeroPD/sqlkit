@@ -100,4 +100,18 @@ describe('result edit context', () => {
       value: { table: accounts, edits: [{ column: 'name', pks: [{ name: 'id', value: 1 }] }] },
     })
   })
+
+  it('does not infer editability from source-less computed columns aliased as table columns', () => {
+    const sql = "select 1 as id, 'x' as name from public.accounts"
+    const result: QueryResult = {
+      columns: ['id', 'name'],
+      rows: [[1, 'x']],
+      rowCount: 1,
+      durationMs: 1,
+    }
+    const editInput = input(result, sql)
+
+    expect(singleTableEditContext(editInput)).toBeNull()
+    expect(buildEditSpecs(editInput, [{ row: 0, col: 1 }], 'Grace')).toMatchObject({ ok: false })
+  })
 })

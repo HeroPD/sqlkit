@@ -104,6 +104,16 @@ describe('workspace file containment', () => {
     expect(result.success).toBe(false)
   })
 
+  it('refuses to list or resolve a context folder symlinked into .sqlkit', () => {
+    const { ws } = setup()
+    fs.mkdirSync(path.join(ws, '.sqlkit'))
+    fs.writeFileSync(path.join(ws, '.sqlkit', 'config.json'), '{}')
+    fs.symlinkSync(path.join(ws, '.sqlkit'), path.join(ws, 'conn'))
+
+    expect(listWorkspaceFiles(ws, 'conn')).toEqual({ success: false, error: 'The .sqlkit folder is internal' })
+    expect(resolveWorkspaceItem(ws, path.join(ws, 'conn', 'config.json'))).toHaveProperty('error', 'The .sqlkit folder is internal')
+  })
+
   it('resolves a real workspace item but rejects an escaping symlink', () => {
     const { ws, outside } = setup()
     fs.writeFileSync(path.join(ws, 'real.sql'), 'x')

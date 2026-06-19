@@ -1,6 +1,9 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectionStatus, DbObjects, TableRef } from '../electron'
 
+const activeChildName = (status: ConnectionStatus | undefined): string | null =>
+  status?.phase === 'connected' ? (status.children?.find((child) => child.inUse)?.name ?? null) : null
+
 // Owns the live-connection picture pushed from the main process: statuses by
 // profile id, and the table/column metadata of every connected database
 // (fetched once per connection). Pure data + IPC wrappers — what to render
@@ -73,15 +76,7 @@ export class ConnectionsController implements ReactiveController {
   async setActiveChild(profileId: string, database: string) {
     const result = await window.sqlkit.setActiveChildDb(profileId, database)
     if (result.success) {
-      const tables = { ...this.tables }
-      delete tables[profileId]
-      this.tables = tables
-      const columns = { ...this.columns }
-      delete columns[profileId]
-      this.columns = columns
-      const objects = { ...this.objects }
-      delete objects[profileId]
-      this.objects = objects
+      this.invalidateMetadata(profileId)
       this.host.requestUpdate()
       void this.loadTables(profileId)
     }
@@ -89,8 +84,19 @@ export class ConnectionsController implements ReactiveController {
   }
 
   private apply(statuses: ConnectionStatus[]) {
+    const previous = this.statuses
     const byId: Record<string, ConnectionStatus> = {}
     for (const status of statuses) byId[status.profileId] = status
+
+    const childChanged = new Set<string>()
+    for (const status of statuses) {
+      const prev = previous[status.profileId]
+      if (prev?.phase === 'connected' && status.phase === 'connected' && activeChildName(prev) !== activeChildName(status)) {
+        this.bumpMetadataGeneration(status.profileId)
+        childChanged.add(status.profileId)
+      }
+    }
+
     this.statuses = byId
 
     // Keep metadata only for still-connected databases, and fetch for
@@ -99,13 +105,13 @@ export class ConnectionsController implements ReactiveController {
     const columns: Record<string, ColumnRef[]> = {}
     const objects: Record<string, DbObjects> = {}
     for (const [id, list] of Object.entries(this.tables)) {
-      if (byId[id]?.phase === 'connected') tables[id] = list
+      if (byId[id]?.phase === 'connected' && !childChanged.has(id)) tables[id] = list
     }
     for (const [id, list] of Object.entries(this.columns)) {
-      if (byId[id]?.phase === 'connected') columns[id] = list
+      if (byId[id]?.phase === 'connected' && !childChanged.has(id)) columns[id] = list
     }
     for (const [id, list] of Object.entries(this.objects)) {
-      if (byId[id]?.phase === 'connected') objects[id] = list
+      if (byId[id]?.phase === 'connected' && !childChanged.has(id)) objects[id] = list
     }
     this.tables = tables
     this.columns = columns
@@ -134,5 +140,22 @@ export class ConnectionsController implements ReactiveController {
     if (columns.success) this.columns = { ...this.columns, [profileId]: columns.columns }
     if (objects.success) this.objects = { ...this.objects, [profileId]: objects.objects }
     if (tables.success || columns.success || objects.success) this.host.requestUpdate()
+  }
+
+  private bumpMetadataGeneration(profileId: string) {
+    this.metaGen[profileId] = (this.metaGen[profileId] ?? 0) + 1
+  }
+
+  private invalidateMetadata(profileId: string) {
+    this.bumpMetadataGeneration(profileId)
+    const tables = { ...this.tables }
+    delete tables[profileId]
+    this.tables = tables
+    const columns = { ...this.columns }
+    delete columns[profileId]
+    this.columns = columns
+    const objects = { ...this.objects }
+    delete objects[profileId]
+    this.objects = objects
   }
 }

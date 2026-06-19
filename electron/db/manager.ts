@@ -133,7 +133,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       // Disconnected mid-query: don't register a buffer no one can page or free
       // (disconnect already swept this profile's sessions). Return a single
       // page, sessionless, so it can't leak.
-      if (!connectedDriver(profileId)) return { success: true, result: { ...raw, rows: raw.rows.slice(0, PAGE_SIZE) } }
+      if (connectedDriver(profileId) !== driver) return { success: true, result: { ...raw, rows: raw.rows.slice(0, PAGE_SIZE) } }
       // The driver buffers up to MAX_BUFFERED_ROWS; open() keeps that buffer and
       // returns just the first page (with a sessionId) so a big result doesn't
       // cross IPC all at once. The renderer pages the rest via fetchRows.

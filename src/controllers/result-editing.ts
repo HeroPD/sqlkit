@@ -43,7 +43,7 @@ export class ResultEditingController {
     const profile = this.activeProfileForWrite()
     if (!profile) return
     const { sql, params } = buildUpdate({ table: built.value.table, ...spec, dialect: profile.engine })
-    this.deps.dialogs.review = { sql, params, run: () => void this.runWrite(profile, sql, params) }
+    this.reviewWrite(profile, sql, params)
   }
 
   promptCellsEdit(cells: CellCoord[]) {
@@ -64,7 +64,7 @@ export class ResultEditingController {
     const profile = this.activeProfileForWrite()
     if (!ctx || !profile) return
     const { sql, params } = buildInsertDefault(ctx.table)
-    this.deps.dialogs.review = { sql, params, run: () => void this.runWrite(profile, sql, params) }
+    this.reviewWrite(profile, sql, params)
   }
 
   deleteRows(rows: number[]) {
@@ -74,7 +74,7 @@ export class ResultEditingController {
     const keys = rowKeysForDelete(ctx, rows)
     if (!keys.ok) return this.notice(keys.issue)
     const { sql, params } = buildDeleteRows({ table: ctx.table, rows: keys.value, dialect: profile.engine })
-    this.deps.dialogs.review = { sql, params, run: () => void this.runWrite(profile, sql, params) }
+    this.reviewWrite(profile, sql, params)
   }
 
   private reviewCellsEdit(cells: CellCoord[], value: string) {
@@ -83,11 +83,24 @@ export class ResultEditingController {
     const profile = this.activeProfileForWrite()
     if (!profile) return
     const { sql, params } = buildBatchUpdate({ table: built.value.table, edits: built.value.edits, dialect: profile.engine })
-    this.deps.dialogs.review = { sql, params, run: () => void this.runWrite(profile, sql, params) }
+    this.reviewWrite(profile, sql, params)
   }
 
-  private async runWrite(profile: ConnectionProfile, sql: string, params: unknown[]) {
-    const response = await window.sqlkit.runQuery(profile.id, this.deps.activeChildDb(), sql, params)
+  private reviewWrite(profile: ConnectionProfile, sql: string, params: unknown[]) {
+    const childDb = this.deps.activeChildDb()
+    const tab = this.deps.activeTab()
+    const refreshSql = tab ? firstStatement(tab.content) || tab.content : null
+    this.deps.dialogs.review = { sql, params, run: () => void this.runWrite(profile, childDb, sql, params, tab?.id ?? null, refreshSql) }
+  }
+
+  private async runWrite(profile: ConnectionProfile, childDb: string | null, sql: string, params: unknown[], tabId: string | null, refreshSql: string | null) {
+    let response
+    try {
+      response = await window.sqlkit.runQuery(profile.id, childDb, sql, params)
+    } catch (error) {
+      this.deps.dialogs.notice('Write failed', (error as Error).message)
+      return
+    }
     if (!response.success) {
       this.deps.dialogs.notice('Write failed', response.error)
       return
@@ -96,8 +109,7 @@ export class ResultEditingController {
       this.deps.dialogs.notice('No rows changed', 'The selected row may have changed or been removed.')
       return
     }
-    const tab = this.deps.activeTab()
-    if (tab) void this.deps.runSql(firstStatement(tab.content) || tab.content)
+    if (refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)
   }
 
   private input() {

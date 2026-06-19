@@ -51,6 +51,14 @@ function isWorkspaceRoot(workspacePath: string, target: string): boolean {
   return root !== null && real !== null && real === root
 }
 
+function isInternalWorkspacePath(workspacePath: string, target: string): boolean {
+  const resolved = path.resolve(target)
+  if (resolved.split(path.sep).includes('.sqlkit')) return true
+  const internal = realpathDeep(path.join(workspacePath, '.sqlkit'))
+  const real = realpathDeep(resolved)
+  return internal !== null && real !== null && (real === internal || real.startsWith(internal + path.sep))
+}
+
 // A context folder is one or two plain path segments inside the workspace:
 // the connection's folder, optionally followed by a child-database folder
 // (all-databases mode) — connection/child/file.sql.
@@ -95,6 +103,7 @@ export function listWorkspaceFiles(workspacePath: string | null, folder: string)
   // folder that doesn't exist yet) just lists as empty.
   if (!fs.existsSync(root)) return { success: true, files: [] }
   if (!isInsideWorkspace(workspacePath, root)) return { success: false, error: 'Database folder is outside the workspace' }
+  if (isInternalWorkspacePath(workspacePath, root)) return { success: false, error: 'The .sqlkit folder is internal' }
 
   try {
     const files = collectFiles(root, root, [])
@@ -134,7 +143,7 @@ export function saveWorkspaceFile(workspacePath: string | null, filePath: string
   if (!isInsideWorkspace(workspacePath, resolved)) {
     return { success: false, error: 'Files must stay inside the workspace' }
   }
-  if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
   if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be saved' }
 
   try {
@@ -157,7 +166,7 @@ export function createWorkspaceFile(workspacePath: string | null, folder: string
   // Lexical check keeps relativePath inside this context folder; the realpath
   // check below additionally blocks escapes through a symlinked folder.
   if (!resolved.startsWith(root + path.sep)) return { success: false, error: 'Files must stay inside the database folder' }
-  if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
 
   const target = isSqlFile(resolved) ? resolved : `${resolved}.sql`
   if (!isInsideWorkspace(workspacePath, target)) return { success: false, error: 'Files must stay inside the database folder' }
@@ -180,7 +189,7 @@ export function renameWorkspaceFile(workspacePath: string | null, filePath: stri
 
   const resolved = path.resolve(filePath)
   if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: 'File is outside the workspace' }
-  if (resolved.split(path.sep).includes('.sqlkit')) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
 
   const trimmed = newName.trim()
   if (!trimmed || trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('.')) {
@@ -209,7 +218,7 @@ export function resolveWorkspaceItem(
   const resolved = path.resolve(filePath)
   if (!isInsideWorkspace(workspacePath, resolved)) return { error: 'Path is outside the workspace' }
   if (options.allowRoot === false && isWorkspaceRoot(workspacePath, resolved)) return { error: 'Cannot delete the workspace folder' }
-  if (resolved.split(path.sep).includes('.sqlkit')) return { error: 'The .sqlkit folder is internal' }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { error: 'The .sqlkit folder is internal' }
   try {
     fs.statSync(resolved)
     return { path: resolved }

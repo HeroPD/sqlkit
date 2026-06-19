@@ -70,15 +70,6 @@ const encryptSecret = (value: string): string => {
   return SECRET_PREFIX + safeStorage.encryptString(value).toString('base64')
 }
 
-const decryptSecret = (value: string): string => {
-  if (!value.startsWith(SECRET_PREFIX)) return value
-  try {
-    return safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), 'base64'))
-  } catch {
-    return ''
-  }
-}
-
 const mapSecrets = (connection: ConnectionProfile, map: (value: string) => string): ConnectionProfile => ({
   ...connection,
   password: map(connection.password ?? ''),
@@ -88,7 +79,7 @@ const mapSecrets = (connection: ConnectionProfile, map: (value: string) => strin
 })
 
 type ConfigOutcome =
-  | { status: 'ok'; config: WorkspaceConfig }
+  | { status: 'ok'; config: WorkspaceConfig; decryptFailed: boolean }
   | { status: 'missing' }
   | { status: 'error'; error: string }
 
@@ -105,12 +96,24 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
   }
   try {
     const parsed = JSON.parse(raw) as Partial<WorkspaceConfig>
+    let decryptFailed = false
+    const decryptTracked = (value: string): string => {
+      if (!value.startsWith(SECRET_PREFIX)) return value
+      try {
+        return safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), 'base64'))
+      } catch {
+        decryptFailed = true
+        return ''
+      }
+    }
+    const connections = normalizeConnections(parsed.connections ?? []).map((connection) => mapSecrets(connection, decryptTracked))
     return {
       status: 'ok',
+      decryptFailed,
       config: {
         ...defaultWorkspaceConfig(),
         ...parsed,
-        connections: normalizeConnections(parsed.connections ?? []).map((connection) => mapSecrets(connection, decryptSecret)),
+        connections,
       },
     }
   } catch (error) {
@@ -185,7 +188,7 @@ export function openWorkspace(wsPath: string): WorkspaceResult {
   // connection over a single hand-edit slip.
   const outcome = loadWorkspaceConfig(workspacePath)
   if (outcome.status === 'missing') writeWorkspaceConfig(workspacePath, defaultWorkspaceConfig())
-  else if (outcome.status === 'ok') writeWorkspaceConfig(workspacePath, outcome.config)
+  else if (outcome.status === 'ok' && !outcome.decryptFailed) writeWorkspaceConfig(workspacePath, outcome.config)
 
   const name = path.basename(workspacePath)
   const config = readGlobalConfig()

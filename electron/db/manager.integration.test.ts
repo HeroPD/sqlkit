@@ -3,10 +3,16 @@ import type { ConnectionStatus } from '../../src/electron'
 import type { ConnectionManager } from './manager'
 import { createConnectionManager, testConnection } from './manager'
 import { PAGE_SIZE } from './result-sessions'
-import { profileFromUrl, testDatabaseUrl } from './test-db'
+import { adminPool, profileFromUrl, testDatabaseUrl } from './test-db'
 
 const url = testDatabaseUrl()
 const describeDb = url ? describe : describe.skip
+
+const databaseUrl = (base: string, database: string) => {
+  const parsed = new URL(base)
+  parsed.pathname = `/${database}`
+  return parsed.toString()
+}
 
 // Drives the connection lifecycle (connect/disconnect/supersede/cancel and the
 // buffered-result paging) through the manager against a real Postgres. Skips
@@ -152,6 +158,56 @@ describeDb('connection manager (integration)', () => {
     const dropped = await manager.dropDatabase(profile.id, name)
     expect(dropped.success).toBe(true)
     expect(manager.statuses().find((s) => s.profileId === profile.id)?.children?.some((c) => c.name === name)).toBe(false)
+  }, 20000)
+
+  it('lists functions from the active child database only in all-databases mode', async () => {
+    const manager = makeManager()
+    const admin = adminPool(dbUrl)
+    const dbA = 'sqlkit_mgr_scope_a'
+    const dbB = 'sqlkit_mgr_scope_b'
+    const drop = (database: string) => admin.query(`drop database if exists ${database}`).catch(() => {})
+    const seed = async (database: string, functionName: string) => {
+      const pool = adminPool(databaseUrl(dbUrl, database))
+      try {
+        await pool.query('create schema sqlkit_scope')
+        await pool.query(`create function sqlkit_scope.${functionName}() returns text language sql as $$ select '${functionName}' $$`)
+      } finally {
+        await pool.end().catch(() => {})
+      }
+    }
+
+    try {
+      await drop(dbA)
+      await drop(dbB)
+      await admin.query(`create database ${dbA}`)
+      await admin.query(`create database ${dbB}`)
+      await seed(dbA, 'fn_only_in_a')
+      await seed(dbB, 'fn_only_in_b')
+
+      const profile = profileFromUrl(dbUrl, { database: dbA, databaseMode: 'all' })
+      expect((await manager.connect(profile)).success).toBe(true)
+
+      expect(manager.setActiveChild(profile.id, dbA)).toEqual({ success: true })
+      const fromA = await manager.listObjects(profile.id)
+      expect(fromA.success).toBe(true)
+      if (!fromA.success) return
+      const namesA = fromA.objects.functions.map((fn) => fn.name)
+      expect(namesA).toContain('fn_only_in_a')
+      expect(namesA).not.toContain('fn_only_in_b')
+
+      expect(manager.setActiveChild(profile.id, dbB)).toEqual({ success: true })
+      const fromB = await manager.listObjects(profile.id)
+      expect(fromB.success).toBe(true)
+      if (!fromB.success) return
+      const namesB = fromB.objects.functions.map((fn) => fn.name)
+      expect(namesB).toContain('fn_only_in_b')
+      expect(namesB).not.toContain('fn_only_in_a')
+    } finally {
+      await manager.disconnectAll()
+      await drop(dbB)
+      await drop(dbA)
+      await admin.end().catch(() => {})
+    }
   }, 20000)
 
   it('testConnection succeeds against a reachable database', async () => {

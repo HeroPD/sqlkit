@@ -59,6 +59,16 @@ describe('ResultSessionStore.fetch', () => {
     expect(store.fetch(out.sessionId!, 0, 10)).toBeNull()
     expect(store.fetch('nope', 0, 10)).toBeNull()
   })
+
+  it('clamps negative offsets and oversized limits to one page', () => {
+    const store = new ResultSessionStore(seqIds())
+    const out = store.open('p1', result(PAGE_SIZE * 3))
+
+    const rows = store.fetch(out.sessionId!, -10, PAGE_SIZE * 10)
+
+    expect(rows).toHaveLength(PAGE_SIZE)
+    expect(rows?.[0]).toEqual([0])
+  })
 })
 
 describe('ResultSessionStore lifecycle', () => {

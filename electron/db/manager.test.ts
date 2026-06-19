@@ -231,6 +231,27 @@ describe('connection manager: query + paging', () => {
     expect(response.result.sessionId).toBeUndefined() // no buffer registered that nobody could free
   })
 
+  it('does not attach an old query result after reconnecting the same profile', async () => {
+    let release!: (result: QueryResult) => void
+    const pending = new Promise<QueryResult>((resolve) => (release = resolve))
+    const firstDriver = fakeDriver({ query: vi.fn(() => pending) })
+    const secondDriver = fakeDriver()
+    const drivers = [firstDriver, secondDriver]
+    hoisted.createImpl = () => drivers.shift()!
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+
+    const queryPromise = manager.query('p1', null, 'select * from old_driver')
+    await manager.disconnect('p1')
+    await manager.connect(profile())
+    release(rowsResult(PAGE_SIZE + 100))
+    const response = await queryPromise
+
+    if (!response.success) throw new Error(response.error)
+    expect(response.result.rows).toHaveLength(PAGE_SIZE)
+    expect(response.result.sessionId).toBeUndefined()
+  })
+
   it('fetchRows fails for an unknown or evicted session', () => {
     const manager = createConnectionManager(vi.fn())
     expect(manager.fetchRows('gone', 0, 10)).toEqual({ success: false, error: expect.stringContaining('expired') })
