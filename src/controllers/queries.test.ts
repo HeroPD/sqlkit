@@ -48,7 +48,7 @@ describe('QueriesController.execute', () => {
     settle({ success: true, result })
     await done
 
-    expect(controller.runFor('t1')).toEqual({ phase: 'done', result })
+    expect(controller.runFor('t1')).toEqual({ phase: 'done', result, sql: 'SELECT 1' })
     expect(controller.history).toHaveLength(1)
     expect(controller.tasks[0]?.status).toBe('done')
   })

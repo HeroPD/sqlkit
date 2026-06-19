@@ -108,7 +108,7 @@ export class QueriesController implements ReactiveController {
 
     this.setRun(
       tabId,
-      response.success ? { phase: 'done', result: response.result } : { phase: 'error', error: response.error },
+      response.success ? { phase: 'done', result: response.result, sql } : { phase: 'error', error: response.error },
     )
     this.tasks = this.tasks.map((entry) =>
       entry.id === task.id
@@ -175,13 +175,14 @@ export class QueriesController implements ReactiveController {
       // bufferedRowCount to what's loaded so the grid stops asking.
       if (!response.success || response.rows.length === 0) {
         if (current.result.bufferedRowCount !== current.result.rows.length) {
-          this.setRun(tabId, { phase: 'done', result: { ...current.result, bufferedRowCount: current.result.rows.length } })
+          this.setRun(tabId, { phase: 'done', result: { ...current.result, bufferedRowCount: current.result.rows.length }, sql: current.sql })
         }
         return
       }
       this.setRun(tabId, {
         phase: 'done',
         result: { ...current.result, rows: [...current.result.rows, ...response.rows] },
+        sql: current.sql,
       })
     } finally {
       this.fetching.delete(tabId)

@@ -539,15 +539,52 @@ function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], star
     query.on('end', (result) => {
       // Multi-statement queries resolve to an array; the last has the final columns.
       const final = (Array.isArray(result) ? result[result.length - 1] : result) as pg.QueryArrayResult
-      resolve({
-        columns: final.fields.map((field) => field.name),
-        rows,
-        rowCount: final.rowCount ?? total,
-        durationMs: performance.now() - started,
-        truncated: total > MAX_BUFFERED_ROWS,
-      })
+      void columnSourcesForFields(client, final.fields)
+        .then((columnSources) =>
+          resolve({
+            columns: final.fields.map((field) => field.name),
+            columnSources,
+            rows,
+            rowCount: final.rowCount ?? total,
+            durationMs: performance.now() - started,
+            truncated: total > MAX_BUFFERED_ROWS,
+          }),
+        )
+        .catch(reject)
     })
     client.query(query)
+  })
+}
+
+async function columnSourcesForFields(
+  client: pg.PoolClient,
+  fields: pg.FieldDef[],
+): Promise<QueryResult['columnSources'] | undefined> {
+  const keyed = new Map<string, { tableID: number; columnID: number }>()
+  for (const field of fields) {
+    if (field.tableID && field.columnID) keyed.set(`${field.tableID}:${field.columnID}`, { tableID: field.tableID, columnID: field.columnID })
+  }
+  if (!keyed.size) return undefined
+
+  const params: number[] = []
+  const where = [...keyed.values()]
+    .map((ref) => {
+      params.push(ref.tableID, ref.columnID)
+      return `(a.attrelid = $${params.length - 1}::oid AND a.attnum = $${params.length}::int)`
+    })
+    .join(' OR ')
+  const found = await client.query<{ table_id: string; column_id: number; schema: string; table: string; column: string }>(
+    `select a.attrelid::text as table_id, a.attnum::int as column_id, n.nspname as schema, c.relname as table, a.attname as column
+       from pg_attribute a
+       join pg_class c on c.oid = a.attrelid
+       join pg_namespace n on n.oid = c.relnamespace
+      where ${where}`,
+    params,
+  )
+  const byKey = new Map(found.rows.map((row) => [`${row.table_id}:${row.column_id}`, row]))
+  return fields.map((field) => {
+    const source = byKey.get(`${field.tableID}:${field.columnID}`)
+    return source ? { schema: source.schema, table: source.table, column: source.column } : { schema: null, table: null, column: null }
   })
 }
 

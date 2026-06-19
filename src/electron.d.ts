@@ -110,6 +110,8 @@ export type TestSshResult = { success: true; tookMs: number } | { success: false
 
 export type QueryResult = {
   columns: string[]
+  /** Origin of each result column when the driver can identify it; nulls are expressions. */
+  columnSources?: Array<{ schema: string | null; table: string | null; column: string | null }>
   /** The first page when a session exists (paged via fetchRows); all buffered rows otherwise. */
   rows: unknown[][]
   /** Rows returned for reads, rows affected for writes. */

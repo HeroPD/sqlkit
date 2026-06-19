@@ -13,7 +13,7 @@ import type { ExportConfirmDetail } from './export-dialog'
 export type QueryRun =
   | { phase: 'idle' }
   | { phase: 'running'; note?: string }
-  | { phase: 'done'; result: QueryResult }
+  | { phase: 'done'; result: QueryResult; sql?: string }
   | { phase: 'error'; error: string }
 
 export type CellCoord = { row: number; col: number }
@@ -85,10 +85,14 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   canCancel = false
 
-  /** When true, double-clicking a cell edits it (single-table browse with a PK).
-   * The owner builds/reviews/runs the UPDATE from the emitted `cell-edit`. */
+  /** When true, double-clicking a cell opens inline editing for text selection/copy.
+   * The owner may reject impossible writes after a changed value is submitted. */
   @property({ attribute: false })
   editable = false
+
+  /** Row-level toolbar actions need one unambiguous source table for the whole result. */
+  @property({ attribute: false })
+  rowEditable = false
 
   /** The cell currently being edited inline (absolute data indices). */
   @state()
@@ -237,7 +241,7 @@ export class ResultsPanel extends LitElement {
 
   render() {
     const exportable = this.run.phase === 'done' && this.run.result.columns.length > 0
-    const showRowTools = this.editable && exportable
+    const showRowTools = this.rowEditable && exportable
     const selectedRows = showRowTools ? this._selectedRows() : []
     return html`
       <div class="head">

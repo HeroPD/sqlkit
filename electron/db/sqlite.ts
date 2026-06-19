@@ -142,7 +142,11 @@ export function createSqliteDriver(profile: ConnectionProfile): Driver {
 }
 
 function run(statement: StatementSync, params: Array<string | number | bigint | null>): Omit<QueryResult, 'durationMs'> {
-  const columns = statement.columns().map((column) => column.name)
+  const metadata = statement.columns()
+  const columns = metadata.map((column) => column.name)
+  const columnSources = metadata.some((column) => column.table !== null && column.column !== null)
+    ? metadata.map((column) => ({ schema: null, table: column.table, column: column.column }))
+    : undefined
 
   // No result columns means a write/DDL statement: execute and report the
   // affected-row count instead of an empty row set.
@@ -160,5 +164,5 @@ function run(statement: StatementSync, params: Array<string | number | bigint | 
     total += 1
     if (rows.length < MAX_BUFFERED_ROWS) rows.push(row)
   }
-  return { columns, rows, rowCount: total, truncated: total > MAX_BUFFERED_ROWS }
+  return { columns, columnSources, rows, rowCount: total, truncated: total > MAX_BUFFERED_ROWS }
 }
