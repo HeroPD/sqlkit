@@ -9,7 +9,7 @@ export const quoteQualified = (table: TableRef) =>
 // declared type: empty + nullable → NULL; numeric/boolean parsed; anything else
 // passed as text for the engine to cast. Unparseable input falls back to text
 // so a typo surfaces as a DB error rather than a silent wrong value.
-export function coerceValue(value: string, column: ColumnRef | undefined): unknown {
+export function coerceValue(value: string, column: ColumnRef | undefined, dialect?: Engine): unknown {
   if (value === '' && (column?.nullable ?? true)) return null
   const type = column?.dataType?.toLowerCase() ?? ''
   if (/int|serial|numeric|decimal|real|double|float|money/.test(type)) {
@@ -21,8 +21,11 @@ export function coerceValue(value: string, column: ColumnRef | undefined): unkno
     return Number.isFinite(n) && String(n) === trimmed ? n : value
   }
   if (/bool/.test(type)) {
-    if (/^(t|true|1|yes|y)$/i.test(value)) return true
-    if (/^(f|false|0|no|n)$/i.test(value)) return false
+    const truthy = /^(t|true|1|yes|y)$/i.test(value)
+    const falsy = /^(f|false|0|no|n)$/i.test(value)
+    // SQLite has no boolean type and rejects a JS boolean bind, so store 1/0;
+    // Postgres takes the real boolean. An unrecognized token falls through to text.
+    if (truthy || falsy) return dialect === 'sqlite' ? (truthy ? 1 : 0) : truthy
   }
   return value
 }
@@ -68,7 +71,7 @@ export function buildUpdate(spec: UpdateSpec): { sql: string; params: unknown[] 
   const placeholder = (index: number) => (spec.dialect === 'postgresql' ? `$${index}` : '?')
   const where = spec.pks.map((pk, i) => `${quoteIdent(pk.name)} = ${placeholder(i + 2)}`).join(' AND ')
   const sql = `UPDATE ${quoteQualified(spec.table)}\n   SET ${quoteIdent(spec.column)} = ${placeholder(1)}\n WHERE ${where}`
-  return { sql, params: [coerceValue(spec.value, spec.columnMeta), ...spec.pks.map((pk) => pk.value)] }
+  return { sql, params: [coerceValue(spec.value, spec.columnMeta, spec.dialect), ...spec.pks.map((pk) => pk.value)] }
 }
 
 // Builds one atomic UPDATE for multiple cells. Each target column gets a CASE
@@ -90,7 +93,7 @@ export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: 
   const byColumn = new Map<string, string[]>()
   for (const edit of spec.edits) {
     const cases = byColumn.get(edit.column) ?? []
-    cases.push(`WHEN ${condition(edit.pks)} THEN ${bind(coerceValue(edit.value, edit.columnMeta))}`)
+    cases.push(`WHEN ${condition(edit.pks)} THEN ${bind(coerceValue(edit.value, edit.columnMeta, spec.dialect))}`)
     byColumn.set(edit.column, cases)
   }
 

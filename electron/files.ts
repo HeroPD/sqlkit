@@ -208,6 +208,32 @@ export function renameWorkspaceFile(workspacePath: string | null, filePath: stri
   }
 }
 
+// open-external hands the file to the OS default app, so restrict it to
+// documents/data/images. Executables, scripts and HTML are refused: a workspace
+// opened from an untrusted source must not run code on a single click.
+const OPENABLE_EXTERNALLY = new Set([
+  '.csv', '.tsv', '.txt', '.json', '.jsonl', '.ndjson', '.md', '.markdown', '.log', '.xml', '.yaml', '.yml',
+  '.pdf', '.xlsx', '.xls', '.ods', '.docx', '.doc', '.rtf', '.odt', '.parquet',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff',
+])
+
+// open: hand the file to the OS default app. reveal: show it in the file
+// manager (never open). reject: refuse. Directories are only ever revealed —
+// shell.openPath would LAUNCH a macOS package like malicious.app, so a
+// directory must not reach openPath.
+export type ExternalOpenAction = 'open' | 'reveal' | 'reject'
+
+export function externalOpenAction(resolvedPath: string): ExternalOpenAction {
+  let stat: fs.Stats
+  try {
+    stat = fs.statSync(resolvedPath)
+  } catch {
+    return 'reject'
+  }
+  if (stat.isDirectory()) return 'reveal'
+  return OPENABLE_EXTERNALLY.has(path.extname(resolvedPath).toLowerCase()) ? 'open' : 'reject'
+}
+
 /** Validates a workspace file/folder path for delete or open-external. */
 export function resolveWorkspaceItem(
   workspacePath: string | null,

@@ -295,6 +295,83 @@ describe('sqlite driver: query', () => {
   })
 })
 
+describe('sqlite driver: multi-statement', () => {
+  it('runs every statement of a script, not just the first', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table t(a)')
+    await driver.query('insert into t values (1); insert into t values (2); insert into t values (3)')
+    expect((await driver.query('select count(*) c from t')).rows).toEqual([[3]])
+  })
+
+  it('returns the last statement’s result and applies earlier schema changes', async () => {
+    const driver = await memoryDriver()
+    const result = await driver.query('create table m(a); insert into m values (5); insert into m values (6); select a from m order by a')
+    expect(result.columns).toEqual(['a'])
+    expect(result.rows).toEqual([[5], [6]])
+  })
+
+  it('does not split on a semicolon inside a string literal', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table notes(body)')
+    await driver.query("insert into notes values ('a; b; c')")
+    expect((await driver.query('select body from notes')).rows).toEqual([['a; b; c']])
+  })
+
+  it('ignores trailing comments after a statement terminator', async () => {
+    const driver = await memoryDriver()
+    const result = await driver.query('select 1 as n; -- trailing note')
+    expect(result.columns).toEqual(['n'])
+    expect(result.rows).toEqual([[1]])
+  })
+
+  it('treats comment-only scripts as a no-op', async () => {
+    const driver = await memoryDriver()
+    const result = await driver.query('-- just a note\n/* and a block */')
+    expect(result.columns).toEqual([])
+    expect(result.rows).toEqual([])
+    expect(result.rowCount).toBe(0)
+  })
+
+  it('runs a CREATE TRIGGER script (semicolons in the body) via exec', async () => {
+    const driver = await memoryDriver()
+    const result = await driver.query(
+      `create table t(a);
+       create table log(n);
+       create trigger trg after insert on t begin insert into log values (1); end;
+       insert into t values (10);
+       insert into t values (20)`,
+    )
+    // Script ends with a write, so no rows — but every statement ran and the trigger fired.
+    expect(result.rows).toEqual([])
+    expect((await driver.query('select count(*) c from log')).rows).toEqual([[2]])
+    expect((await driver.query('select count(*) c from t')).rows).toEqual([[2]])
+  })
+
+  it('shows the trailing verification SELECT of a CREATE TRIGGER script', async () => {
+    const driver = await memoryDriver()
+    const result = await driver.query(
+      `create table t(a);
+       create table log(n);
+       create trigger trg after insert on t begin insert into log values (1); end;
+       insert into t values (10);
+       insert into t values (20);
+       select count(*) as logged from log`,
+    )
+    // Trigger fired on both inserts; the trailing SELECT is re-run to show rows.
+    expect(result.columns).toEqual(['logged'])
+    expect(result.rows).toEqual([[2]])
+  })
+
+  it('creates a standalone trigger and fires it on later inserts', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table t(a)')
+    await driver.query('create table log(n)')
+    await driver.query('create trigger trg after insert on t begin insert into log values (1); end')
+    await driver.query('insert into t values (1)')
+    expect((await driver.query('select count(*) c from log')).rows).toEqual([[1]])
+  })
+})
+
 describe('sqlite driver: listTables', () => {
   it('is empty for a fresh database', async () => {
     const driver = await memoryDriver()

@@ -30,6 +30,7 @@ import {
 } from './workspace'
 import {
   createWorkspaceFile,
+  externalOpenAction,
   listWorkspaceFiles,
   readWorkspaceFile,
   renameWorkspaceFile,
@@ -132,6 +133,10 @@ function createWindow() {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Explicit, not just the modern default: the renderer runs user SQL and
+      // renders DB cells, so keep it in the OS sandbox even if a default changes.
+      // The preload is CJS and uses only contextBridge/ipcRenderer, both sandbox-safe.
+      sandbox: true,
     },
   })
 
@@ -250,10 +255,22 @@ function registerWorkspaceIpc() {
     }
   })
 
-  // Non-.sql files (spreadsheets, exports…) open with the system default app.
+  // Non-.sql files (spreadsheets, exports…) open with the system default app —
+  // but only safe document/data types, never an executable or script a stray
+  // workspace could use to run code on one click.
   ipcMain.handle('file:open-external', async (event, filePath: string) => {
     const resolved = resolveWorkspaceItem(workspaceFor(event.sender), filePath)
     if ('error' in resolved) return { success: false, error: resolved.error }
+    const action = externalOpenAction(resolved.path)
+    if (action === 'reject') {
+      return { success: false, error: "For safety, SqlKit won't open this file type in an external app. Open it from your file manager if you trust it." }
+    }
+    // Directories (incl. macOS .app packages) are revealed, never opened —
+    // shell.openPath would launch a package; showItemInFolder only selects it.
+    if (action === 'reveal') {
+      shell.showItemInFolder(resolved.path)
+      return { success: true }
+    }
     const error = await shell.openPath(resolved.path)
     return error ? { success: false, error } : { success: true }
   })

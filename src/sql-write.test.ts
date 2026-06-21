@@ -39,6 +39,15 @@ describe('coerceValue', () => {
     expect(coerceValue('N/A', col({ dataType: 'integer' }))).toBe('N/A')
   })
 
+  it('binds booleans as 1/0 for SQLite and as JS booleans for Postgres', () => {
+    expect(coerceValue('true', col({ dataType: 'boolean' }), 'sqlite')).toBe(1)
+    expect(coerceValue('0', col({ dataType: 'boolean' }), 'sqlite')).toBe(0)
+    expect(coerceValue('no', col({ dataType: 'boolean' }), 'sqlite')).toBe(0)
+    expect(coerceValue('true', col({ dataType: 'boolean' }), 'postgresql')).toBe(true)
+    // Unrecognized boolean token still falls back to the raw text.
+    expect(coerceValue('maybe', col({ dataType: 'boolean' }), 'sqlite')).toBe('maybe')
+  })
+
   it('keeps bigint and high-scale numerics as exact strings (no Number() rounding)', () => {
     // 9007199254740993 = 2^53 + 1, the first integer a double cannot represent.
     expect(coerceValue('9007199254740993', col({ dataType: 'bigint' }))).toBe('9007199254740993')
@@ -94,6 +103,18 @@ describe('buildUpdate', () => {
     })
     expect(sql).toContain('WHERE "order_id" = $2 AND "sku" = $3')
     expect(params).toEqual([5, 10, 'A1'])
+  })
+
+  it('coerces a boolean cell to 1/0 for a SQLite UPDATE', () => {
+    const { params } = buildUpdate({
+      table: { schema: null, name: 'flags', kind: 'table' },
+      column: 'active',
+      columnMeta: col({ schema: null, table: 'flags', name: 'active', dataType: 'boolean' }),
+      value: 'true',
+      pks: [{ name: 'id', value: 1 }],
+      dialect: 'sqlite',
+    })
+    expect(params).toEqual([1, 1])
   })
 
   it('throws without a primary key', () => {

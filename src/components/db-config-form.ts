@@ -175,10 +175,17 @@ export class DbConfigForm extends LitElement {
               <option value="verify-full" ?selected=${ssl.mode === 'verify-full'}>Verify full</option>
             </select>
           `,
-          ssl.mode === 'require'
-            ? 'Encrypted, but the server certificate is not verified.'
-            : 'Verify full validates both the certificate chain and hostname.',
+          ssl.mode === 'require' ? '' : 'Verify full validates both the certificate chain and hostname.',
         )}
+        ${ssl.mode === 'require'
+          ? html`<p class="ssl-warning" role="alert">
+              <span aria-hidden="true">⚠</span>
+              <span
+                ><strong>“Require” encrypts but does not verify the server’s certificate</strong>, so it can’t stop a
+                man-in-the-middle on an untrusted network. Use <strong>Verify full</strong> for that.</span
+              >
+            </p>`
+          : ''}
         ${ssl.mode === 'verify-ca' || ssl.mode === 'verify-full'
           ? this._field('CA certificate', this._sslInput(ssl, 'ca'), 'Optional path to a custom root CA certificate. System roots are used when empty.')
           : ''}
@@ -513,6 +520,23 @@ export class DbConfigForm extends LitElement {
 
       .test-result.error {
         color: var(--status-dot-error);
+      }
+
+      .ssl-warning {
+        display: flex;
+        gap: 8px;
+        margin: 0;
+        padding: 8px 11px;
+        font-size: var(--font-size-sm);
+        line-height: 1.45;
+        color: var(--status-dot-warning);
+        background: color-mix(in srgb, var(--status-dot-warning) 12%, transparent);
+        border: 1px solid color-mix(in srgb, var(--status-dot-warning) 35%, transparent);
+        border-radius: 4px;
+      }
+
+      .ssl-warning strong {
+        font-weight: 600;
       }
     `,
   ]

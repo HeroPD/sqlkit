@@ -18,10 +18,43 @@ export const serverVersion = (db: DatabaseSync): string => {
 }
 
 export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam[] = []): QueryResult {
-  const statement = db.prepare(sql)
   const started = performance.now()
-  const result = run(statement, params)
-  return { ...result, durationMs: performance.now() - started }
+  const stamp = (result: Omit<QueryResult, 'durationMs'>): QueryResult => ({ ...result, durationMs: performance.now() - started })
+
+  const masked = maskSqlite(sql)
+  const statements = splitStatements(sql, masked)
+
+  if (statements.length === 0) return stamp({ columns: [], rows: [], rowCount: 0 })
+
+  // Single statement (the run-at-caret case): prepare and run, binding params.
+  if (statements.length === 1) return stamp(run(db.prepare(statements[0]!), params))
+
+  // CREATE TRIGGER bodies carry their own semicolons that a top-level split
+  // would break, so let exec run the whole script authoritatively. exec returns
+  // no rows; if the script ends with a read (a verification SELECT), re-run just
+  // that statement to surface its result — safe because reads have no side
+  // effects, so running it a second time can't change anything.
+  if (/\bcreate\s+(?:temp(?:orary)?\s+)?trigger\b/i.test(masked)) {
+    db.exec(sql)
+    const tail = statements[statements.length - 1]
+    if (tail && /^(?:select|values|explain)\b/i.test(tail)) {
+      try {
+        return stamp(run(db.prepare(tail), []))
+      } catch {
+        // Tail wasn't a runnable standalone statement; fall through to empty.
+      }
+    }
+    return stamp({ columns: [], rows: [], rowCount: 0 })
+  }
+
+  // node:sqlite's prepare runs only the first statement, so run each in order
+  // (preparing against the schema left by the previous one) and return the last
+  // result — matching Postgres, where the final statement supplies the columns.
+  // Params aren't bound to multi-statement runs. A mid-script error throws and
+  // surfaces as the query error, leaving earlier statements applied once.
+  let result: Omit<QueryResult, 'durationMs'> = { columns: [], rows: [], rowCount: 0 }
+  for (const statement of statements) result = run(db.prepare(statement), [])
+  return stamp(result)
 }
 
 export function listTables(db: DatabaseSync): TableRef[] {
@@ -119,6 +152,66 @@ export function inspectTable(db: DatabaseSync, table: TableRef): TableInspection
     })),
     sections: sections.filter((section) => section.rows.length),
   }
+}
+
+// Blanks the contents of strings, quoted identifiers and comments (preserving
+// length) so a `;` or keyword inside them isn't mistaken for a statement
+// boundary. SQLite has no dollar-quoting; quoting forms are '' "" `` [].
+function maskSqlite(sql: string): string {
+  let out = ''
+  let i = 0
+  const blank = (from: number, to: number) => ' '.repeat(to - from)
+  const scanQuote = (close: string, doubled: boolean) => {
+    let j = i + 1
+    while (j < sql.length) {
+      if (doubled && sql[j] === close && sql[j + 1] === close) {
+        j += 2
+        continue
+      }
+      if (sql[j] === close) return j + 1
+      j += 1
+    }
+    return sql.length
+  }
+  while (i < sql.length) {
+    const ch = sql[i]
+    let end: number
+    if (ch === '-' && sql[i + 1] === '-') {
+      const nl = sql.indexOf('\n', i + 2)
+      end = nl < 0 ? sql.length : nl
+    } else if (ch === '/' && sql[i + 1] === '*') {
+      const close = sql.indexOf('*/', i + 2)
+      end = close < 0 ? sql.length : close + 2
+    } else if (ch === "'" || ch === '"' || ch === '`') {
+      end = scanQuote(ch, true)
+    } else if (ch === '[') {
+      const close = sql.indexOf(']', i + 1)
+      end = close < 0 ? sql.length : close + 1
+    } else {
+      out += ch
+      i += 1
+      continue
+    }
+    out += blank(i, end)
+    i = end
+  }
+  return out
+}
+
+// Splits at top-level semicolons located in the masked copy, slicing the
+// original. Trailing `;`, comments and whitespace yield no extra statement.
+function splitStatements(sql: string, masked: string): string[] {
+  const parts: string[] = []
+  let start = 0
+  for (let i = 0; i < masked.length; i += 1) {
+    if (masked[i] !== ';') continue
+    const piece = sql.slice(start, i).trim()
+    if (masked.slice(start, i).trim()) parts.push(piece)
+    start = i + 1
+  }
+  const tail = sql.slice(start).trim()
+  if (masked.slice(start).trim()) parts.push(tail)
+  return parts
 }
 
 function run(statement: StatementSync, params: SqliteParam[]): Omit<QueryResult, 'durationMs'> {

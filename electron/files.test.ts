@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   createWorkspaceFile,
+  externalOpenAction,
   listWorkspaceFiles,
   readWorkspaceFile,
   resolveWorkspaceItem,
@@ -128,5 +129,36 @@ describe('workspace file containment', () => {
 
     expect(resolveWorkspaceItem(ws, ws)).toHaveProperty('path')
     expect(resolveWorkspaceItem(ws, ws, { allowRoot: false })).toHaveProperty('error')
+  })
+})
+
+describe('open-external safety', () => {
+  it('opens safe document, data and image files', () => {
+    const { ws } = setup()
+    for (const name of ['export.csv', 'notes.txt', 'data.json', 'sheet.xlsx', 'chart.png', 'report.pdf']) {
+      fs.writeFileSync(path.join(ws, name), '')
+      expect(externalOpenAction(path.join(ws, name))).toBe('open')
+    }
+  })
+
+  it('rejects executables, scripts and HTML', () => {
+    const { ws } = setup()
+    for (const name of ['run.command', 'install.sh', 'macro.scpt', 'page.html', 'tool.exe', 'app.desktop', 'x.js']) {
+      fs.writeFileSync(path.join(ws, name), '')
+      expect(externalOpenAction(path.join(ws, name))).toBe('reject')
+    }
+  })
+
+  it('reveals directories rather than opening them, so a .app bundle is never launched', () => {
+    const { ws } = setup()
+    fs.mkdirSync(path.join(ws, 'plain'))
+    fs.mkdirSync(path.join(ws, 'malicious.app'))
+    expect(externalOpenAction(path.join(ws, 'plain'))).toBe('reveal')
+    expect(externalOpenAction(path.join(ws, 'malicious.app'))).toBe('reveal')
+  })
+
+  it('rejects a path that does not exist', () => {
+    const { ws } = setup()
+    expect(externalOpenAction(path.join(ws, 'gone.csv'))).toBe('reject')
   })
 })
