@@ -239,18 +239,20 @@ export type SqlkitApi = {
   createDatabase: (profileId: string, name: string) => Promise<{ success: boolean; error?: string }>
   /** Server-side DROP DATABASE; refuses the connection's in-use child. */
   dropDatabase: (profileId: string, name: string) => Promise<{ success: boolean; error?: string }>
-  listTables: (profileId: string) => Promise<TablesResult>
-  /** Columns of every table in the connected database, one round trip. */
-  listColumns: (profileId: string) => Promise<ColumnsResult>
+  // Metadata is scoped to a specific child database (all-databases mode), like
+  // runQuery — pass null to target the connection's active child.
+  listTables: (profileId: string, childDb: string | null) => Promise<TablesResult>
+  /** Columns of every table in the database, one round trip. */
+  listColumns: (profileId: string, childDb: string | null) => Promise<ColumnsResult>
   /** Structure of one table: columns, constraints, indexes, triggers, …. */
-  inspectTable: (profileId: string, table: TableRef) => Promise<InspectResult>
+  inspectTable: (profileId: string, childDb: string | null, table: TableRef) => Promise<InspectResult>
   /** Schema-scoped objects (functions, types) for the explorer. */
-  listObjects: (profileId: string) => Promise<ObjectsResult>
+  listObjects: (profileId: string, childDb: string | null) => Promise<ObjectsResult>
   /** Structure of one function/type: definition, values, attributes. Reuses
    * the table-inspection shape (columns for composites, sections for the rest). */
-  inspectObject: (profileId: string, object: DbObject, objectKind: DbObjectKind) => Promise<InspectResult>
+  inspectObject: (profileId: string, childDb: string | null, object: DbObject, objectKind: DbObjectKind) => Promise<InspectResult>
   /** Server/cluster-scoped reference: extensions, roles, tablespaces, settings. */
-  inspectServer: (profileId: string) => Promise<ServerInfoResult>
+  inspectServer: (profileId: string, childDb: string | null) => Promise<ServerInfoResult>
   pickSqliteFile: () => Promise<string | null>
   /** Lists the .sql files of one database context's workspace subfolder. */
   listFiles: (folder: string) => Promise<FilesResult>

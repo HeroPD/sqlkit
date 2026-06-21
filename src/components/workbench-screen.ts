@@ -12,7 +12,7 @@ import { ResultEditingController } from '../controllers/result-editing'
 import { SchemaOpsController } from '../controllers/schema-ops'
 import { ConfigController } from '../controllers/config'
 import { FileOpsController } from '../controllers/file-ops'
-import { ContextsController, type EditorTabState, type SqlTabState } from '../controllers/contexts'
+import { ContextsController, type EditorTabState } from '../controllers/contexts'
 import type { ConnectionProfile, FileInfo, MenuAction, TableRef } from '../electron'
 import './activity-button'
 import './command-palette'
@@ -721,7 +721,7 @@ export class WorkbenchScreen extends LitElement {
       return html`<tasks-view .items=${this._queries.tasks} @task-stop=${this._onTaskStop}></tasks-view>`
     }
     // Every view id is handled above; 'server' is the last one.
-    return html`<server-view .profileId=${this._connectedProfile()?.id ?? null}></server-view>`
+    return html`<server-view .profileId=${this._connectedProfile()?.id ?? null} .childDb=${this._ctx.activeChildDb}></server-view>`
   }
 
   // Single click: open the SQL in the preview tab (recycled across picks, so
@@ -743,26 +743,8 @@ export class WorkbenchScreen extends LitElement {
     void this._runSql(statement)
   }
 
-  // Double click: pin it. The preceding single clicks already recycled the
-  // preview to this SQL, so promotion is just clearing the flag.
   private _onHistoryOpenPermanent(event: Event) {
-    const { sql } = (event as CustomEvent<HistoryOpenDetail>).detail
-    const preview = this._ctx.tabs.find((tab) => tab.kind === 'sql' && tab.preview && tab.content === sql)
-    if (preview) {
-      this._ctx.tabs = this._ctx.tabs.map((tab) => (tab.id === preview.id ? { ...tab, preview: false } : tab))
-      this._ctx.activeTabId = preview.id
-      return
-    }
-    const tab: SqlTabState = {
-      id: crypto.randomUUID(),
-      kind: 'sql',
-      name: 'History.sql',
-      path: null,
-      content: sql,
-      savedContent: sql,
-    }
-    this._ctx.tabs = [...this._ctx.tabs, tab]
-    this._ctx.activeTabId = tab.id
+    this._ctx.openPermanent((event as CustomEvent<HistoryOpenDetail>).detail.sql)
   }
 
   private _onHistoryClear() {
@@ -783,6 +765,7 @@ export class WorkbenchScreen extends LitElement {
         <div class="editor-content inspect">
           <table-inspect
             .profileId=${activeTab.profileId}
+            .childDb=${this._ctx.activeChildDb}
             .table=${activeTab.table}
             .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
           ></table-inspect>
@@ -794,6 +777,7 @@ export class WorkbenchScreen extends LitElement {
         <div class="editor-content inspect">
           <table-inspect
             .profileId=${activeTab.profileId}
+            .childDb=${this._ctx.activeChildDb}
             .object=${activeTab.object}
             .objectKind=${activeTab.objectKind}
             .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
@@ -985,10 +969,7 @@ export class WorkbenchScreen extends LitElement {
     const profile = this._config.activeProfile()
     if (!profile) return
     const id = `inspect:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
-    if (!this._ctx.tabs.some((tab) => tab.id === id)) {
-      this._ctx.tabs = [...this._ctx.tabs, { id, kind: 'inspect', profileId: profile.id, table }]
-    }
-    this._ctx.activeTabId = id
+    this._ctx.addTab({ id, kind: 'inspect', profileId: profile.id, table })
   }
 
   // Same for functions/types; detail (identity args) keeps overloads apart.
@@ -997,10 +978,7 @@ export class WorkbenchScreen extends LitElement {
     const profile = this._config.activeProfile()
     if (!profile) return
     const id = `inspect-object:${profile.id}:${this._ctx.activeChildDb ?? ''}:${object.schema ?? ''}:${objectKind}:${object.name}:${object.detail}`
-    if (!this._ctx.tabs.some((tab) => tab.id === id)) {
-      this._ctx.tabs = [...this._ctx.tabs, { id, kind: 'inspect-object', profileId: profile.id, object, objectKind }]
-    }
-    this._ctx.activeTabId = id
+    this._ctx.addTab({ id, kind: 'inspect-object', profileId: profile.id, object, objectKind })
   }
 
   // A search match opens the file and lands the cursor on the matched line.
@@ -1055,7 +1033,9 @@ export class WorkbenchScreen extends LitElement {
   // yet, so the cancel reports why instead of looking like a silent no-op.
   private async _cancelQuery(profileId: string) {
     const result = await window.sqlkit.cancelQuery(profileId)
-    if (!result.success && result.error) console.warn(`Cancel: ${result.error}`)
+    // A failed cancel must not be silent — the user thinks the query stopped and
+    // keeps waiting. Surface why (backend still starting up, nothing running, …).
+    if (!result.success && result.error) this._dialogs.notice('Could not cancel query', result.error)
   }
 
   // The results grid scrolled near the end of what's loaded: page in more rows.

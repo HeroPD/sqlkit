@@ -33,6 +33,10 @@ export class TableInspect extends LitElement {
   @property()
   profileId = ''
 
+  /** Child database this inspect tab belongs to (all-databases mode); null otherwise. */
+  @property()
+  childDb: string | null = null
+
   @property({ attribute: false })
   table: TableRef | null = null
 
@@ -55,20 +59,40 @@ export class TableInspect extends LitElement {
   private _menu: { x: number; y: number; name: string; definition: string | null } | null = null
 
   protected willUpdate(changed: PropertyValues) {
-    if (changed.has('profileId') || changed.has('table') || changed.has('object')) void this._load()
+    if (
+      changed.has('profileId') ||
+      changed.has('childDb') ||
+      changed.has('table') ||
+      changed.has('object') ||
+      changed.has('objectKind')
+    ) {
+      void this._load()
+    }
   }
 
   private async _load() {
+    const profileId = this.profileId
+    const childDb = this.childDb
     const table = this.table
     const object = this.object
-    if (!this.profileId || (!table && !object)) return
+    const objectKind = this.objectKind
+    if (!profileId || (!table && !object)) return
     this._state = { phase: 'loading' }
     const result =
-      object && this.objectKind
-        ? await window.sqlkit.inspectObject(this.profileId, object, this.objectKind)
-        : await window.sqlkit.inspectTable(this.profileId, table!)
-    // Stale guard: the tab may have been retargeted while this was in flight.
-    if (this.table !== table || this.object !== object) return
+      object && objectKind
+        ? await window.sqlkit.inspectObject(profileId, childDb, object, objectKind)
+        : await window.sqlkit.inspectTable(profileId, childDb, table!)
+    // Stale guard: the tab may have been retargeted (profile, child, or target)
+    // while this was in flight.
+    if (
+      this.profileId !== profileId ||
+      this.childDb !== childDb ||
+      this.table !== table ||
+      this.object !== object ||
+      this.objectKind !== objectKind
+    ) {
+      return
+    }
     this._state = result.success ? { phase: 'done', inspection: result.inspection } : { phase: 'error', error: result.error }
   }
 

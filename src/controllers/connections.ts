@@ -129,10 +129,13 @@ export class ConnectionsController implements ReactiveController {
     // same profile supersedes it, so a slower earlier response can't overwrite
     // the newer child's metadata.
     const gen = (this.metaGen[profileId] = (this.metaGen[profileId] ?? 0) + 1)
+    // Pin the fetch to the child we believe is active, so a concurrent child
+    // switch can't make the main process answer for a different database.
+    const childDb = activeChildName(this.statuses[profileId])
     const [tables, columns, objects] = await Promise.all([
-      window.sqlkit.listTables(profileId),
-      window.sqlkit.listColumns(profileId),
-      window.sqlkit.listObjects(profileId),
+      window.sqlkit.listTables(profileId, childDb),
+      window.sqlkit.listColumns(profileId, childDb),
+      window.sqlkit.listObjects(profileId, childDb),
     ])
     if (this.metaGen[profileId] !== gen) return
     if (this.statuses[profileId]?.phase !== 'connected') return

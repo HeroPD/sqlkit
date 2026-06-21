@@ -181,6 +181,36 @@ describe('connection manager: disconnect', () => {
   })
 })
 
+describe('connection manager: metadata is child-scoped', () => {
+  it('forwards the requested childDb to the driver instead of relying on the active child', async () => {
+    const listTables = vi.fn(() => Promise.resolve([]))
+    const listColumns = vi.fn(() => Promise.resolve([]))
+    const inspectTable = vi.fn(() => Promise.resolve({ columns: [], sections: [] }))
+    const listObjects = vi.fn(() => Promise.resolve({ functions: [], types: [] }))
+    const inspectObject = vi.fn(() => Promise.resolve({ columns: [], sections: [] }))
+    const inspectServer = vi.fn(() => Promise.resolve([]))
+    hoisted.driver = fakeDriver({ listTables, listColumns, inspectTable, listObjects, inspectObject, inspectServer })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+
+    const table = { schema: 'public', name: 't', kind: 'table' as const }
+    const object = { schema: 'public', name: 'f', detail: '' }
+    await manager.listTables('p1', 'billing')
+    await manager.listColumns('p1', 'billing')
+    await manager.inspectTable('p1', table, 'billing')
+    await manager.listObjects('p1', 'billing')
+    await manager.inspectObject('p1', object, 'function', 'billing')
+    await manager.inspectServer('p1', 'billing')
+
+    expect(listTables).toHaveBeenCalledWith('billing')
+    expect(listColumns).toHaveBeenCalledWith('billing')
+    expect(inspectTable).toHaveBeenCalledWith(table, 'billing')
+    expect(listObjects).toHaveBeenCalledWith('billing')
+    expect(inspectObject).toHaveBeenCalledWith(object, 'function', 'billing')
+    expect(inspectServer).toHaveBeenCalledWith('billing')
+  })
+})
+
 describe('connection manager: query + paging', () => {
   it('rejects a query when the profile is not connected', async () => {
     const manager = createConnectionManager(vi.fn())

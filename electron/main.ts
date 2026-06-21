@@ -394,16 +394,24 @@ function registerDbIpc() {
   ipcMain.handle('db:drop-database', (event, profileId: string, name: string) =>
     manager(event).dropDatabase(profileId, name),
   )
-  ipcMain.handle('db:list-tables', (event, profileId: string) => manager(event).listTables(profileId))
-  ipcMain.handle('db:list-columns', (event, profileId: string) => manager(event).listColumns(profileId))
-  ipcMain.handle('db:inspect-table', (event, profileId: string, table: TableRef) =>
-    manager(event).inspectTable(profileId, table),
+  ipcMain.handle('db:list-tables', (event, profileId: string, childDb: string | null) =>
+    manager(event).listTables(profileId, childDb),
   )
-  ipcMain.handle('db:list-objects', (event, profileId: string) => manager(event).listObjects(profileId))
-  ipcMain.handle('db:inspect-object', (event, profileId: string, object: DbObject, objectKind: DbObjectKind) =>
-    manager(event).inspectObject(profileId, object, objectKind),
+  ipcMain.handle('db:list-columns', (event, profileId: string, childDb: string | null) =>
+    manager(event).listColumns(profileId, childDb),
   )
-  ipcMain.handle('db:inspect-server', (event, profileId: string) => manager(event).inspectServer(profileId))
+  ipcMain.handle('db:inspect-table', (event, profileId: string, childDb: string | null, table: TableRef) =>
+    manager(event).inspectTable(profileId, table, childDb),
+  )
+  ipcMain.handle('db:list-objects', (event, profileId: string, childDb: string | null) =>
+    manager(event).listObjects(profileId, childDb),
+  )
+  ipcMain.handle('db:inspect-object', (event, profileId: string, childDb: string | null, object: DbObject, objectKind: DbObjectKind) =>
+    manager(event).inspectObject(profileId, object, objectKind, childDb),
+  )
+  ipcMain.handle('db:inspect-server', (event, profileId: string, childDb: string | null) =>
+    manager(event).inspectServer(profileId, childDb),
+  )
 
   ipcMain.handle('db:pick-sqlite-file', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)

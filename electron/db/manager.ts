@@ -203,64 +203,69 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   const dropDatabase = (profileId: string, name: string) =>
     mutateDatabase(profileId, (driver) => driver.dropDatabase?.(name))
 
-  async function listTables(profileId: string): Promise<TablesResult> {
+  async function listTables(profileId: string, childDb: string | null = null): Promise<TablesResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
-      return { success: true, tables: await driver.listTables() }
+      return { success: true, tables: await driver.listTables(childDb) }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
   }
 
-  async function listObjects(profileId: string): Promise<ObjectsResult> {
+  async function listObjects(profileId: string, childDb: string | null = null): Promise<ObjectsResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
       // Engines without schema objects (sqlite) just have empty lists.
-      return { success: true, objects: (await driver.listObjects?.()) ?? { functions: [], types: [] } }
+      return { success: true, objects: (await driver.listObjects?.(childDb)) ?? { functions: [], types: [] } }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
   }
 
-  async function inspectObject(profileId: string, object: DbObject, objectKind: DbObjectKind): Promise<InspectResult> {
+  async function inspectObject(
+    profileId: string,
+    object: DbObject,
+    objectKind: DbObjectKind,
+    childDb: string | null = null,
+  ): Promise<InspectResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     if (!driver.inspectObject) return { success: false, error: 'Not supported for this engine' }
     try {
-      return { success: true, inspection: await driver.inspectObject(object, objectKind) }
+      return { success: true, inspection: await driver.inspectObject(object, objectKind, childDb) }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
   }
 
-  async function inspectServer(profileId: string): Promise<ServerInfoResult> {
+  async function inspectServer(profileId: string, childDb: string | null = null): Promise<ServerInfoResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     if (!driver.inspectServer) return { success: false, error: 'No server info for this engine' }
     try {
-      return { success: true, sections: await driver.inspectServer() }
+      return { success: true, sections: await driver.inspectServer(childDb) }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
   }
 
-  async function inspectTable(profileId: string, table: TableRef): Promise<InspectResult> {
+  async function inspectTable(profileId: string, table: TableRef, childDb: string | null = null): Promise<InspectResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
-      return { success: true, inspection: await driver.inspectTable(table) }
+      return { success: true, inspection: await driver.inspectTable(table, childDb) }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
   }
 
-  async function listColumns(profileId: string): Promise<ColumnsResult> {
+  async function listColumns(profileId: string, childDb: string | null = null): Promise<ColumnsResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
-      return { success: true, columns: await driver.listColumns() }
+      return { success: true, columns: await driver.listColumns(childDb) }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }

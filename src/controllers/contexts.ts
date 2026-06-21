@@ -187,6 +187,19 @@ export class ContextsController {
     this.addTab({ id: profile.id, kind: 'config', profile: { ...profile } })
   }
 
+  // History double-click: pin the SQL. A preceding single-click recycles the
+  // preview tab to this SQL, so if that preview is still open just clear its
+  // flag; otherwise open a fresh permanent tab.
+  openPermanent(sql: string) {
+    const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview && tab.content === sql)
+    if (preview) {
+      this.tabs = this._tabs.map((tab) => (tab.id === preview.id ? { ...tab, preview: false } : tab))
+      this.activeTabId = preview.id
+      return
+    }
+    this.addTab({ id: crypto.randomUUID(), kind: 'sql', name: 'History.sql', path: null, content: sql, savedContent: sql })
+  }
+
   newQuery() {
     const untitled = this._tabs.filter((tab) => tab.kind === 'sql' && tab.path === null).length
     this.addTab({

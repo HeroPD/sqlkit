@@ -14,6 +14,10 @@ export class ServerView extends LitElement {
   @property()
   profileId: string | null = null
 
+  /** Active child database (all-databases mode); null otherwise. */
+  @property()
+  childDb: string | null = null
+
   @state()
   private _state:
     | { phase: 'idle' }
@@ -25,18 +29,20 @@ export class ServerView extends LitElement {
   private _expanded = new Set<string>()
 
   protected willUpdate(changed: PropertyValues) {
-    if (changed.has('profileId')) void this._load()
+    if (changed.has('profileId') || changed.has('childDb')) void this._load()
   }
 
   private async _load() {
     const profileId = this.profileId
+    const childDb = this.childDb
     if (!profileId) {
       this._state = { phase: 'idle' }
       return
     }
     this._state = { phase: 'loading' }
-    const result = await window.sqlkit.inspectServer(profileId)
-    if (this.profileId !== profileId) return
+    const result = await window.sqlkit.inspectServer(profileId, childDb)
+    // Stale guard: profile or child may have changed while this was in flight.
+    if (this.profileId !== profileId || this.childDb !== childDb) return
     this._state = result.success ? { phase: 'done', sections: result.sections } : { phase: 'error', error: result.error }
   }
 

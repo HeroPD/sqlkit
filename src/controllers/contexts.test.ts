@@ -96,6 +96,28 @@ describe('ContextsController preview tabs', () => {
   })
 })
 
+describe('ContextsController.openPermanent', () => {
+  it('promotes the matching preview tab in place instead of opening a new one', () => {
+    const { ctrl } = make()
+    ctrl.openPreview('select 1')
+    const id = ctrl.activeTabId
+    expect(ctrl.activeSqlTab()?.preview).toBe(true)
+
+    ctrl.openPermanent('select 1')
+    expect(ctrl.tabs).toHaveLength(1)
+    expect(ctrl.activeTabId).toBe(id)
+    expect(ctrl.activeSqlTab()?.preview).toBe(false)
+  })
+
+  it('opens a fresh permanent tab when no preview holds the sql', () => {
+    const { ctrl } = make()
+    ctrl.openPermanent('select 42')
+    expect(ctrl.tabs).toHaveLength(1)
+    expect(ctrl.activeSqlTab()?.content).toBe('select 42')
+    expect(ctrl.activeSqlTab()?.preview).toBeFalsy()
+  })
+})
+
 describe('ContextsController.removeProfile', () => {
   it('scrubs the profile config tab from the live strip and stashes', () => {
     const { ctrl } = make()

@@ -29,17 +29,20 @@ export type Driver = {
    * but un-cancellable" (running > 0, cancelled 0). Engines without server-side
    * cancellation (sqlite) leave it undefined. */
   cancel?(): Promise<{ running: number; cancelled: number }>
-  listTables(): Promise<TableRef[]>
+  // Metadata methods target `childDb` when given, else the active child — same
+  // contract as query(), so listings never silently follow a different child
+  // than the one the caller asked for.
+  listTables(childDb?: string | null): Promise<TableRef[]>
   /** Columns of every listed table, in table order then column position. */
-  listColumns(): Promise<ColumnRef[]>
+  listColumns(childDb?: string | null): Promise<ColumnRef[]>
   /** One table's structure: columns plus engine-specific sections. */
-  inspectTable(table: TableRef): Promise<TableInspection>
+  inspectTable(table: TableRef, childDb?: string | null): Promise<TableInspection>
   /** Schema-scoped functions/types; undefined when the engine has none. */
-  listObjects?(): Promise<DbObjects>
+  listObjects?(childDb?: string | null): Promise<DbObjects>
   /** One function/type's structure, in the table-inspection shape. */
-  inspectObject?(object: DbObject, objectKind: DbObjectKind): Promise<TableInspection>
+  inspectObject?(object: DbObject, objectKind: DbObjectKind, childDb?: string | null): Promise<TableInspection>
   /** Server-scoped reference (extensions, roles, …) for the Server view. */
-  inspectServer?(): Promise<InspectSection[]>
+  inspectServer?(childDb?: string | null): Promise<InspectSection[]>
   /** Child databases; undefined for engines without all-databases support. */
   children?(): ChildDb[]
   /** Server-side CREATE DATABASE; undefined for file-based engines. */

@@ -201,13 +201,13 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       }
     },
 
-    async listTables() {
+    async listTables(childDb = null) {
       // pg_class instead of information_schema.tables so partition children
       // can be excluded — only the partitioned parent is listed (querying it
       // covers all partitions). relkinds: ordinary/partitioned tables, views,
       // materialized views, foreign tables — information_schema.tables would
       // miss matviews entirely.
-      const result = await activePool().query(
+      const result = await poolForQuery(childDb).query(
         `select n.nspname as table_schema, c.relname as table_name, c.relkind as relkind
          from pg_catalog.pg_class c
          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -227,10 +227,10 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       )
     },
 
-    async listColumns() {
+    async listColumns(childDb = null) {
       // Same relation filter as listTables, joined to attributes; primary-key
       // membership comes from the table's primary index.
-      const result = await activePool().query(
+      const result = await poolForQuery(childDb).query(
         `select n.nspname as table_schema, c.relname as table_name, a.attname as column_name,
                 pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type,
                 not a.attnotnull as nullable,
@@ -271,8 +271,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       )
     },
 
-    async listObjects() {
-      const pool = activePool()
+    async listObjects(childDb = null) {
+      const pool = poolForQuery(childDb)
       const [functions, types] = await Promise.all([
         // Plain functions and procedures; aggregates/window functions are
         // rarely user-authored and would mostly be noise.
@@ -306,8 +306,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       return { functions: functions.rows, types: types.rows }
     },
 
-    async inspectServer() {
-      const pool = activePool()
+    async inspectServer(childDb = null) {
+      const pool = poolForQuery(childDb)
       const [extensions, roles, tablespaces, settings] = await Promise.all([
         pool.query(
           `select e.extname as name,
@@ -343,8 +343,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       ].filter((section) => section.rows.length)
     },
 
-    async inspectObject(object, objectKind) {
-      const pool = activePool()
+    async inspectObject(object, objectKind, childDb = null) {
+      const pool = poolForQuery(childDb)
       const schema = object.schema ?? 'public'
 
       if (objectKind === 'function') {
@@ -440,8 +440,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       return { columns: [], sections: [{ title: 'Definition', rows }] }
     },
 
-    async inspectTable(table) {
-      const pool = activePool()
+    async inspectTable(table, childDb = null) {
+      const pool = poolForQuery(childDb)
       const schema = table.schema ?? 'public'
       const args = [schema, table.name]
       type Row = { name: string; definition: string }
