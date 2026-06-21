@@ -57,17 +57,53 @@ function normalizeConnections(connections: ConnectionProfile[]): ConnectionProfi
   })
 }
 
-// Secrets at rest: encrypted through the OS keychain (Electron safeStorage)
-// and marked with a prefix so legacy plaintext configs still read — they
-// migrate to encrypted on the next save (openWorkspace re-saves, so on first
-// open). Keychain-bound by design: a config copied to another machine
-// decrypts to '' and the password must be re-entered there. Falls back to
-// plaintext only where the OS offers no key store.
+// Secrets at rest: encrypted through the OS keychain (Electron safeStorage) and
+// marked with a prefix so legacy plaintext configs still read — they migrate to
+// encrypted on the next save (openWorkspace re-saves, so on first open).
+// Keychain-bound by design: a config copied to another machine decrypts to ''
+// and must be re-entered there. Where the OS offers no key store, the secret is
+// written in plaintext (the .gitignore keeps it out of git) and the save warns —
+// dropping it instead would silently wipe saved passwords on every config
+// rewrite (e.g. a context switch) and break the current session.
 const SECRET_PREFIX = 'enc:v1:'
 
 const encryptSecret = (value: string): string => {
   if (!value || value.startsWith(SECRET_PREFIX) || !safeStorage.isEncryptionAvailable()) return value
   return SECRET_PREFIX + safeStorage.encryptString(value).toString('base64')
+}
+
+const isPlaintextSecret = (value: string | undefined) => !!value && !value.startsWith(SECRET_PREFIX)
+
+const connectionHasPlaintextSecret = (connection: ConnectionProfile) =>
+  isPlaintextSecret(connection.password) ||
+  isPlaintextSecret(connection.ssh?.password) ||
+  isPlaintextSecret(connection.ssh?.passphrase)
+
+// True when the loaded config carries secrets that are unencrypted at rest:
+// there's no key store, so anything non-empty was written (and read back) as
+// plaintext. The renderer warns the user once per workspace open.
+const hasUnencryptedSecrets = (connections: ConnectionProfile[]) =>
+  !safeStorage.isEncryptionAvailable() && connections.some(connectionHasPlaintextSecret)
+
+// Keeps config.json — and the temp file the atomic write leaves on a crash —
+// out of version control; both hold credentials, plaintext on a keyless system.
+// Appends any missing rule to a hand-edited .gitignore rather than skipping, so
+// a pre-existing file can't defeat the guard. Best-effort and idempotent.
+const GITIGNORE_RULES = ['config.json', 'config.json.tmp']
+const ensureInternalGitignore = (workspacePath: string) => {
+  try {
+    const dir = path.join(workspacePath, '.sqlkit')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, '.gitignore')
+    const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
+    const present = new Set(existing.split(/\r?\n/).map((line) => line.trim()))
+    const missing = GITIGNORE_RULES.filter((rule) => !present.has(rule))
+    if (!missing.length) return
+    const lead = existing ? (existing.endsWith('\n') ? '' : '\n') : '# SqlKit: connection credentials — never commit.\n'
+    fs.writeFileSync(file, existing + lead + missing.join('\n') + '\n')
+  } catch {
+    // A read-only workspace simply doesn't get the guard.
+  }
 }
 
 const mapSecrets = (connection: ConnectionProfile, map: (value: string) => string): ConnectionProfile => ({
@@ -124,7 +160,9 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
 export function readWorkspaceConfig(workspacePath: string | null): WorkspaceConfigResult {
   if (!workspacePath) return { config: defaultWorkspaceConfig() }
   const outcome = loadWorkspaceConfig(workspacePath)
-  if (outcome.status === 'ok') return { config: outcome.config }
+  if (outcome.status === 'ok') {
+    return { config: outcome.config, unencryptedSecrets: hasUnencryptedSecrets(outcome.config.connections) }
+  }
   if (outcome.status === 'missing') return { config: defaultWorkspaceConfig() }
   // Hand back empty connections so the UI still renders, but flag the error so
   // it can warn rather than pretend the workspace has no connections.
@@ -135,7 +173,7 @@ export function writeWorkspaceConfig(workspacePath: string | null, config: Works
   if (!workspacePath) return { success: false, error: 'No workspace open' }
   try {
     const normalized = { ...config, connections: normalizeConnections(config.connections) }
-    fs.mkdirSync(path.join(workspacePath, '.sqlkit'), { recursive: true })
+    ensureInternalGitignore(workspacePath)
     // Every connection's files folder exists from the moment it's saved.
     for (const connection of normalized.connections) {
       fs.mkdirSync(path.join(workspacePath, connection.folder), { recursive: true })
@@ -187,8 +225,17 @@ export function openWorkspace(wsPath: string): WorkspaceResult {
   // won't parse is left untouched — re-seeding it would wipe every saved
   // connection over a single hand-edit slip.
   const outcome = loadWorkspaceConfig(workspacePath)
-  if (outcome.status === 'missing') writeWorkspaceConfig(workspacePath, defaultWorkspaceConfig())
-  else if (outcome.status === 'ok' && !outcome.decryptFailed) writeWorkspaceConfig(workspacePath, outcome.config)
+  if (outcome.status === 'missing') {
+    writeWorkspaceConfig(workspacePath, defaultWorkspaceConfig())
+  } else {
+    // Guard an existing config from version control even when it won't be
+    // rewritten (corrupt JSON, or secrets sealed on another machine).
+    ensureInternalGitignore(workspacePath)
+    // Bring a readable config up to date (re-encrypt secrets where a key store
+    // exists, create per-connection folders). An undecryptable one is left as-is
+    // so a missing keychain can't wipe it.
+    if (outcome.status === 'ok' && !outcome.decryptFailed) writeWorkspaceConfig(workspacePath, outcome.config)
+  }
 
   const name = path.basename(workspacePath)
   const config = readGlobalConfig()

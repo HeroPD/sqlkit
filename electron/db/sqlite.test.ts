@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
 import type { ConnectionProfile } from '../../src/electron'
 import { MAX_BUFFERED_ROWS } from './driver'
-import { createSqliteDriver } from './sqlite'
+import { createSqliteDriver, type SqliteChannel, type SqliteSpawner } from './sqlite'
+import { inspectTable, listColumns, listTables, openDatabase, queryDatabase, serverVersion } from './sqlite-engine'
+import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
 
 // Fields the sqlite driver reads; the rest of the profile is filler so the type compiles.
 const sqliteProfile = (file: string): ConnectionProfile => ({
@@ -17,27 +20,127 @@ const sqliteProfile = (file: string): ConnectionProfile => ({
   folder: '',
 })
 
+// Mirrors sqlite.worker.ts but runs the engine in-process, so the proxy's
+// orchestration and the engine itself are exercised without spawning a real
+// utilityProcess. Each spawn() is a fresh "worker" with its own handle; replies
+// are deferred a microtask to mirror the asynchrony of real IPC.
+function inProcessSpawner() {
+  const spawned: Array<{ killed: boolean }> = []
+  const spawn: SqliteSpawner = () => {
+    let db: DatabaseSync | null = null
+    let onMessage: (message: SqliteResponse) => void = () => {}
+    let onExit: () => void = () => {}
+    const record = { killed: false }
+    spawned.push(record)
+
+    const requireDb = (): DatabaseSync => {
+      if (!db) throw new Error('Not connected')
+      return db
+    }
+    const handle = (request: SqliteRequest): unknown => {
+      switch (request.type) {
+        case 'open':
+          db?.close()
+          db = openDatabase(request.file)
+          return serverVersion(db)
+        case 'query':
+          return queryDatabase(requireDb(), request.sql, request.params)
+        case 'listTables':
+          return listTables(requireDb())
+        case 'listColumns':
+          return listColumns(requireDb())
+        case 'inspectTable':
+          return inspectTable(requireDb(), request.table)
+      }
+    }
+
+    const channel: SqliteChannel = {
+      post: (request) =>
+        queueMicrotask(() => {
+          if (record.killed) return
+          try {
+            onMessage({ id: request.id, ok: true, value: handle(request) })
+          } catch (error) {
+            onMessage({ id: request.id, ok: false, error: (error as Error).message })
+          }
+        }),
+      kill: () => {
+        if (record.killed) return
+        record.killed = true
+        db?.close()
+        db = null
+        queueMicrotask(onExit)
+      },
+      onMessage: (listener) => {
+        onMessage = listener
+      },
+      onExit: (listener) => {
+        onExit = listener
+      },
+    }
+    return channel
+  }
+  return { spawn, spawned }
+}
+
+// A worker that answers `open` but never a query — for exercising cancel/timeout.
+function hangingSpawner() {
+  const spawned: Array<{ killed: boolean }> = []
+  const spawn: SqliteSpawner = () => {
+    let onMessage: (message: SqliteResponse) => void = () => {}
+    let onExit: () => void = () => {}
+    const record = { killed: false }
+    spawned.push(record)
+    return {
+      post: (request) => {
+        if (request.type === 'open') {
+          queueMicrotask(() => {
+            if (!record.killed) onMessage({ id: request.id, ok: true, value: 'SQLite 3.0.0' })
+          })
+        }
+      },
+      kill: () => {
+        if (record.killed) return
+        record.killed = true
+        queueMicrotask(onExit)
+      },
+      onMessage: (listener) => {
+        onMessage = listener
+      },
+      onExit: (listener) => {
+        onExit = listener
+      },
+    }
+  }
+  return { spawn, spawned }
+}
+
 const memoryDriver = async () => {
-  const driver = createSqliteDriver(sqliteProfile(':memory:'))
+  const { spawn } = inProcessSpawner()
+  const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
   await driver.connect()
   return driver
 }
 
 describe('sqlite driver: connect / disconnect', () => {
   it('refuses an empty file path', async () => {
-    await expect(createSqliteDriver(sqliteProfile('')).connect()).rejects.toThrow('Choose a database file first.')
+    const { spawn } = inProcessSpawner()
+    await expect(createSqliteDriver(sqliteProfile(''), spawn).connect()).rejects.toThrow('Choose a database file first.')
   })
 
   it('refuses a whitespace-only file path', async () => {
-    await expect(createSqliteDriver(sqliteProfile('   ')).connect()).rejects.toThrow('Choose a database file first.')
+    const { spawn } = inProcessSpawner()
+    await expect(createSqliteDriver(sqliteProfile('   '), spawn).connect()).rejects.toThrow('Choose a database file first.')
   })
 
   it('fails eagerly when the file cannot be opened', async () => {
-    await expect(createSqliteDriver(sqliteProfile('/no/such/dir/x.db')).connect()).rejects.toThrow()
+    const { spawn } = inProcessSpawner()
+    await expect(createSqliteDriver(sqliteProfile('/no/such/dir/x.db'), spawn).connect()).rejects.toThrow()
   })
 
   it('connects in-memory and reports the engine version', async () => {
-    const version = await createSqliteDriver(sqliteProfile(':memory:')).connect()
+    const { spawn } = inProcessSpawner()
+    const version = await createSqliteDriver(sqliteProfile(':memory:'), spawn).connect()
     expect(version).toMatch(/^SQLite \d+\.\d+/)
   })
 
@@ -51,22 +154,27 @@ describe('sqlite driver: connect / disconnect', () => {
   })
 
   it('closes the prior handle and reopens on reconnect', async () => {
-    const driver = createSqliteDriver(sqliteProfile(':memory:'))
+    const { spawn, spawned } = inProcessSpawner()
+    const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
     await driver.connect()
     await driver.query('create table t(a)')
-    // A fresh :memory: database — the reconnect replaced the old handle, so
-    // the earlier table is gone (and the old handle was closed, not leaked).
+    // A fresh :memory: database — the reconnect killed the old worker (and its
+    // handle) and brought up a new one, so the earlier table is gone.
     await driver.connect()
     expect(await driver.listTables()).toEqual([])
+    expect(spawned[0]?.killed).toBe(true)
+    expect(spawned).toHaveLength(2)
   })
 
   it('disconnect is a no-op before connect', async () => {
-    await expect(createSqliteDriver(sqliteProfile(':memory:')).disconnect()).resolves.toBeUndefined()
+    const { spawn } = inProcessSpawner()
+    await expect(createSqliteDriver(sqliteProfile(':memory:'), spawn).disconnect()).resolves.toBeUndefined()
   })
 
-  it('does not advertise server-oriented capabilities', () => {
-    const driver = createSqliteDriver(sqliteProfile(':memory:'))
-    expect(driver.cancel).toBeUndefined()
+  it('advertises cancel but no server-oriented capabilities', () => {
+    const { spawn } = inProcessSpawner()
+    const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
+    expect(driver.cancel).toBeTypeOf('function')
     expect(driver.listObjects).toBeUndefined()
     expect(driver.inspectObject).toBeUndefined()
     expect(driver.inspectServer).toBeUndefined()
@@ -74,6 +182,30 @@ describe('sqlite driver: connect / disconnect', () => {
     expect(driver.createDatabase).toBeUndefined()
     expect(driver.dropDatabase).toBeUndefined()
     expect(driver.useChild).toBeUndefined()
+  })
+})
+
+describe('sqlite driver: cancel', () => {
+  it('cancels an in-flight query by killing and restarting the worker', async () => {
+    const { spawn, spawned } = hangingSpawner()
+    const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
+    expect(await driver.connect()).toBe('SQLite 3.0.0')
+
+    const running = driver.query('select 1')
+    running.catch(() => {}) // asserted below; keep the rejection from going unhandled mid-cancel
+    const outcome = await driver.cancel?.()
+    expect(outcome).toEqual({ running: 1, cancelled: 1 })
+    await expect(running).rejects.toThrow('Query cancelled.')
+    expect(spawned[0]?.killed).toBe(true)
+    // A fresh worker is brought up on the same file so later queries still run.
+    expect(spawned).toHaveLength(2)
+  })
+
+  it('reports nothing to cancel when no query is in flight', async () => {
+    const { spawn } = hangingSpawner()
+    const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
+    await driver.connect()
+    expect(await driver.cancel?.()).toEqual({ running: 0, cancelled: 0 })
   })
 })
 
@@ -139,8 +271,6 @@ describe('sqlite driver: query', () => {
 
     const result = await driver.query('select n from nums')
     expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
-    // Truncated: counting the true total would mean scanning every row
-    // synchronously on the main thread, so rowCount reports the cap as a floor.
     expect(result.rowCount).toBe(MAX_BUFFERED_ROWS)
     expect(result.truncated).toBe(true)
   })

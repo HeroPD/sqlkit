@@ -38,6 +38,15 @@ describe('coerceValue', () => {
   it('falls back to text for unparseable numeric input', () => {
     expect(coerceValue('N/A', col({ dataType: 'integer' }))).toBe('N/A')
   })
+
+  it('keeps bigint and high-scale numerics as exact strings (no Number() rounding)', () => {
+    // 9007199254740993 = 2^53 + 1, the first integer a double cannot represent.
+    expect(coerceValue('9007199254740993', col({ dataType: 'bigint' }))).toBe('9007199254740993')
+    expect(coerceValue('1234567890123456789', col({ dataType: 'bigint' }))).toBe('1234567890123456789')
+    expect(coerceValue('0.123456789012345678', col({ dataType: 'numeric' }))).toBe('0.123456789012345678')
+    // Small, exactly-representable values still bind as numbers.
+    expect(coerceValue('42', col({ dataType: 'integer' }))).toBe(42)
+  })
 })
 
 describe('buildUpdate', () => {

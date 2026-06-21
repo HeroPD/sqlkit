@@ -55,11 +55,7 @@ export type DriverEvents = {
   onError(message: string): void
 }
 
-// Rows a query buffers in the main process; the renderer pages through these on
-// demand (see result-sessions.ts) instead of receiving them all at once.
-// rowCount still reports the true count; `truncated` flags a result larger than
-// this cap, which the buffer can't reach.
-export const MAX_BUFFERED_ROWS = 50_000
+export { MAX_BUFFERED_ROWS } from './limits'
 
 // The endpoint carries the host/port the driver should actually dial — the
 // transport layer has already rewritten it to a tunnel's local port when the

@@ -1,174 +1,162 @@
-import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import type { ColumnRef, ConnectionProfile, InspectSection, QueryResult, TableRef } from '../../src/electron'
-import { MAX_BUFFERED_ROWS } from './driver'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { ColumnRef, ConnectionProfile, QueryResult, TableInspection, TableRef } from '../../src/electron'
 import type { Driver } from './driver'
+import type { SqliteParam } from './sqlite-engine'
+import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
 
-// SQLite via the node:sqlite module built into Electron's Node — no native
-// addon, so nothing to rebuild against Electron's ABI. The API is
-// synchronous; statements run on the main process thread, which is fine for
-// the interactive query sizes a workbench issues.
-export function createSqliteDriver(profile: ConnectionProfile): Driver {
-  let db: DatabaseSync | null = null
+// node:sqlite is synchronous and has no statement interrupt, so a long query
+// blocks whatever runs it. We run it in a separate Electron utilityProcess to
+// keep the main process responsive; cancel and the open handshake bound the
+// wait by killing that process (which closes the file and releases its locks)
+// and bringing a fresh one up. createSqliteDriver here is just the proxy: it
+// owns request/response correlation and lifecycle, not the SQL itself.
 
-  const open = () => {
-    if (!db) throw new Error('Not connected')
-    return db
+// A channel to one SQLite worker. Abstracted so the proxy's orchestration is
+// unit-testable with an in-process fake while production drives a utilityProcess.
+export type SqliteChannel = {
+  post(message: SqliteRequest): void
+  kill(): void
+  onMessage(listener: (message: SqliteResponse) => void): void
+  onExit(listener: () => void): void
+}
+
+export type SqliteSpawner = () => SqliteChannel
+
+// Distributes over the request union so each variant keeps its own fields
+// (a plain Omit<SqliteRequest, 'id'> would collapse to the shared `type` only).
+type SqliteRequestBody = SqliteRequest extends infer R ? (R extends { id: number } ? Omit<R, 'id'> : never) : never
+
+// A worker that never answers `open` (failed spawn that didn't even emit exit)
+// must not hang connect forever.
+const OPEN_TIMEOUT_MS = 15_000
+
+export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpawner = defaultSpawn): Driver {
+  let channel: SqliteChannel | null = null
+  let file = ''
+  let nextId = 1
+  const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
+
+  const rejectAll = (message: string) => {
+    for (const entry of pending.values()) entry.reject(new Error(message))
+    pending.clear()
+  }
+
+  const spawnChannel = () => {
+    const opened = spawn()
+    opened.onMessage((message) => {
+      const entry = pending.get(message.id)
+      if (!entry) return
+      pending.delete(message.id)
+      if (message.ok) entry.resolve(message.value)
+      else entry.reject(new Error(message.error))
+    })
+    opened.onExit(() => {
+      // Ignore the exit of a channel we've already replaced (reconnect/cancel).
+      if (channel !== opened) return
+      channel = null
+      rejectAll('SQLite engine stopped unexpectedly')
+    })
+    channel = opened
+  }
+
+  const request = <T>(message: SqliteRequestBody, timeoutMs?: number): Promise<T> => {
+    const target = channel
+    if (!target) return Promise.reject(new Error('Not connected'))
+    const id = nextId++
+    return new Promise<T>((resolve, reject) => {
+      const timer = timeoutMs
+        ? setTimeout(() => {
+            if (!pending.delete(id)) return
+            // A worker that never answered is wedged: drop it so the next call respawns.
+            if (channel === target) channel = null
+            target.kill()
+            reject(new Error('SQLite engine timed out'))
+          }, timeoutMs)
+        : null
+      pending.set(id, {
+        resolve: (value) => {
+          if (timer) clearTimeout(timer)
+          resolve(value as T)
+        },
+        reject: (error) => {
+          if (timer) clearTimeout(timer)
+          reject(error)
+        },
+      })
+      target.post({ id, ...message })
+    })
+  }
+
+  const teardown = (reason: string) => {
+    const closing = channel
+    channel = null
+    rejectAll(reason)
+    closing?.kill()
+  }
+
+  const open = (dbFile: string): Promise<string> => {
+    spawnChannel()
+    return request<string>({ type: 'open', file: dbFile }, OPEN_TIMEOUT_MS)
   }
 
   return {
     async connect() {
-      const file = profile.file.trim()
+      file = profile.file.trim()
       if (!file) throw new Error('Choose a database file first.')
-      // A re-connect must close the previous handle first, or it leaks.
-      db?.close()
-      db = null
-      // Opens (and creates, if missing) the file eagerly so a bad path fails
-      // here rather than on the first query.
-      db = new DatabaseSync(file)
-      const row = db.prepare('select sqlite_version() as version').get() as { version: string }
-      return `SQLite ${row.version}`
+      // A reconnect replaces the worker (and its database handle) outright.
+      if (channel) teardown('Reconnecting')
+      return open(file)
     },
 
     async disconnect() {
-      db?.close()
-      db = null
+      teardown('Disconnected')
+      file = ''
     },
 
     async query(sql, params = [], _childDb = null) {
-      const statement = open().prepare(sql)
-      const started = performance.now()
-      const result = run(statement, params as Array<string | number | bigint | null>)
-      return { ...result, durationMs: performance.now() - started }
+      return request<QueryResult>({ type: 'query', sql, params: params as SqliteParam[] })
     },
 
     async listTables() {
-      const rows = open()
-        .prepare(
-          "select name, type from sqlite_master where type in ('table', 'view') and name not like 'sqlite_%' order by name",
-        )
-        .all() as Array<{ name: string; type: string }>
-      return rows.map((row): TableRef => ({ schema: null, name: row.name, kind: row.type === 'view' ? 'view' : 'table' }))
+      return request<TableRef[]>({ type: 'listTables' })
     },
 
     async listColumns() {
-      // pragma_table_info as a correlated table-valued function: one statement
-      // covers every table without string-built pragmas.
-      const rows = open()
-        .prepare(
-          `select m.name as table_name, p.name as column_name, p.type as data_type,
-                  p."notnull" as not_null, p.pk as pk,
-                  exists (select 1 from pragma_foreign_key_list(m.name) f where f."from" = p.name) as fk
-           from sqlite_master m
-           join pragma_table_info(m.name) p
-           where m.type in ('table', 'view') and m.name not like 'sqlite_%'
-           order by m.name, p.cid`,
-        )
-        .all() as Array<{
-        table_name: string
-        column_name: string
-        data_type: string
-        not_null: number
-        pk: number
-        fk: number
-      }>
-      return rows.map(
-        (row): ColumnRef => ({
-          schema: null,
-          table: row.table_name,
-          name: row.column_name,
-          dataType: row.data_type || 'any',
-          nullable: !row.not_null,
-          primaryKey: row.pk > 0,
-          foreignKey: row.fk > 0,
-        }),
-      )
+      return request<ColumnRef[]>({ type: 'listColumns' })
     },
 
     async inspectTable(table) {
-      const db = open()
-      const columns = db.prepare(`select name, type, "notnull" as not_null, dflt_value, pk from pragma_table_info(?)`).all(table.name) as Array<{
-        name: string
-        type: string
-        not_null: number
-        dflt_value: string | null
-        pk: number
-      }>
-      const foreignKeys = db
-        .prepare(`select id, seq, "table" as ref_table, "from" as from_col, "to" as to_col, on_update, on_delete from pragma_foreign_key_list(?) order by id, seq`)
-        .all(table.name) as Array<{
-        id: number
-        ref_table: string
-        from_col: string
-        to_col: string | null
-        on_update: string
-        on_delete: string
-      }>
-      const named = db
-        .prepare(`select name, type, sql from sqlite_master where tbl_name = ? and type in ('index', 'trigger') order by type, name`)
-        .all(table.name) as Array<{ name: string; type: string; sql: string | null }>
+      return request<TableInspection>({ type: 'inspectTable', table })
+    },
 
-      const sections: InspectSection[] = [
-        {
-          title: 'Foreign Keys',
-          rows: foreignKeys.map((fk) => ({
-            name: fk.from_col,
-            definition: `REFERENCES ${fk.ref_table}(${fk.to_col ?? 'rowid'}) ON UPDATE ${fk.on_update} ON DELETE ${fk.on_delete}`,
-          })),
-        },
-        {
-          title: 'Indexes',
-          // sql is null for the implicit indexes behind UNIQUE/PK constraints.
-          rows: named
-            .filter((row) => row.type === 'index')
-            .map((row) => ({ name: row.name, definition: row.sql ?? '(auto: unique/primary key)' })),
-        },
-        {
-          title: 'Triggers',
-          rows: named.filter((row) => row.type === 'trigger').map((row) => ({ name: row.name, definition: row.sql ?? '' })),
-        },
-      ]
-      return {
-        columns: columns.map((row) => ({
-          name: row.name,
-          dataType: row.type || 'any',
-          nullable: !row.not_null,
-          default: row.dflt_value,
-          primaryKey: row.pk > 0,
-        })),
-        sections: sections.filter((section) => section.rows.length),
-      }
+    async cancel() {
+      const running = pending.size
+      if (!running) return { running: 0, cancelled: 0 }
+      // No interrupt in node:sqlite: kill the worker (which rolls its connection
+      // back cleanly) and bring a fresh one up on the same file so work continues.
+      teardown('Query cancelled.')
+      if (file) await open(file)
+      return { running, cancelled: running }
     },
   }
 }
 
-function run(statement: StatementSync, params: Array<string | number | bigint | null>): Omit<QueryResult, 'durationMs'> {
-  const metadata = statement.columns()
-  const columns = metadata.map((column) => column.name)
-  const columnSources = metadata.some((column) => column.table !== null && column.column !== null)
-    ? metadata.map((column) => ({ schema: null, table: column.table, column: column.column }))
-    : undefined
+const requireElectron = createRequire(import.meta.url)
+const workerPath = () => join(dirname(fileURLToPath(import.meta.url)), 'sqlite.worker.js')
 
-  // No result columns means a write/DDL statement: execute and report the
-  // affected-row count instead of an empty row set.
-  if (columns.length === 0) {
-    const info = statement.run(...params)
-    return { columns: [], rows: [], rowCount: Number(info.changes) }
+// Production spawner: an Electron utilityProcess running sqlite.worker.js, which
+// sits next to this bundle in dist-electron. Electron is required lazily (not
+// imported) so this module loads outside Electron — tests inject their own
+// in-process spawner instead.
+const defaultSpawn: SqliteSpawner = () => {
+  const { utilityProcess } = requireElectron('electron') as typeof import('electron')
+  const child = utilityProcess.fork(workerPath())
+  return {
+    post: (message) => child.postMessage(message),
+    kill: () => void child.kill(),
+    onMessage: (listener) => child.on('message', (message) => listener(message as SqliteResponse)),
+    onExit: (listener) => child.on('exit', () => listener()),
   }
-
-  // Array rows (not objects) keep duplicate column names intact (select a.id,
-  // b.id). Iteration is synchronous on the main thread, so stop at the buffer
-  // cap plus one probe row: scanning a huge result just to count it would freeze
-  // the whole UI. A truncated result reports the cap as a floor (the renderer
-  // shows "N+ rows") rather than an exact total we'd have to scan for.
-  statement.setReturnArrays(true)
-  const rows: unknown[][] = []
-  let truncated = false
-  for (const row of statement.iterate(...params) as unknown as Iterable<unknown[]>) {
-    if (rows.length >= MAX_BUFFERED_ROWS) {
-      truncated = true
-      break
-    }
-    rows.push(row)
-  }
-  return { columns, columnSources, rows, rowCount: rows.length, truncated }
 }

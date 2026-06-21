@@ -14,6 +14,10 @@ const CONFIG_READ_ERROR =
   'The file was left untouched, so your saved connections are still on disk. ' +
   'Fix or restore .sqlkit/config.json and reopen the workspace — saving new connections now would overwrite it.'
 
+const UNENCRYPTED_SECRETS_WARNING =
+  'No OS key store (keychain) is available on this system, so connection passwords are saved unencrypted in ' +
+  "this workspace's .sqlkit/config.json. A .gitignore keeps that file out of version control — avoid syncing or sharing it."
+
 // Owns the workspace's saved connection profiles (.sqlkit/config.json): the
 // list, its load/persist/save round trips, profile lookups, and resolving the
 // child database a profile should target. Distinct from ConnectionsController,
@@ -22,6 +26,8 @@ export class ConfigController {
   private _connections: ConnectionProfile[] = []
   private host: ReactiveControllerHost
   private deps: Deps
+  /** Warn about unencrypted-at-rest secrets at most once per workspace open. */
+  private _warnedUnencrypted = false
 
   constructor(host: ReactiveControllerHost, deps: Deps) {
     this.host = host
@@ -39,6 +45,7 @@ export class ConfigController {
   // Workspace close: forget the loaded profiles.
   reset() {
     this.connections = []
+    this._warnedUnencrypted = false
   }
 
   byId(id: string | null): ConnectionProfile | null {
@@ -85,8 +92,14 @@ export class ConfigController {
   // the context to restore: the saved active profile (or the first one) and its
   // default child. A read error is surfaced; the on-disk file is left untouched.
   async load(): Promise<{ profileId: string | null; child: string | null }> {
-    const { config, error } = await window.sqlkit.getWorkspaceConfig()
+    const { config, error, unencryptedSecrets } = await window.sqlkit.getWorkspaceConfig()
     if (error) this.deps.dialogs.notice('Workspace config could not be read', `${error}\n\n${CONFIG_READ_ERROR}`)
+    // Fires on open and after every save (via _loadConfig), so this one spot
+    // covers the open-migration and persist() re-saves too; shown once a session.
+    if (unencryptedSecrets && !this._warnedUnencrypted) {
+      this._warnedUnencrypted = true
+      this.deps.dialogs.notice('Passwords stored unencrypted', UNENCRYPTED_SECRETS_WARNING)
+    }
     this.connections = config.connections
     const restored =
       config.activeDbId && config.connections.some((connection) => connection.id === config.activeDbId)
@@ -117,6 +130,8 @@ export class ConfigController {
       console.error('Failed to save workspace config:', result.error)
       return false
     }
+    // The caller re-reads via _loadConfig, so the unencrypted-secrets warning is
+    // raised there (load) — one source for it, covering open and persist too.
     return true
   }
 

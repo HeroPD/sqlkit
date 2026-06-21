@@ -82,6 +82,8 @@ export type WorkspaceConfigResult = {
   config: WorkspaceConfig
   /** Set when an existing config file couldn't be read/parsed; the file is left untouched. */
   error?: string
+  /** True when the loaded config holds secrets stored unencrypted (no OS key store). */
+  unencryptedSecrets?: boolean
 }
 
 // --- Live connections ---------------------------------------------------

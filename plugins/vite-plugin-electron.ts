@@ -17,10 +17,12 @@ type ElectronPluginOptions = {
   main?: string
   /** Built as CJS (`.cjs`) because sandboxed preload scripts cannot be ESM. */
   preload?: string
+  /** utilityProcess entry forked at runtime (SQLite runs off the main process). */
+  worker?: string
   outDir?: string
 }
 
-type EntryKind = 'main' | 'preload'
+type EntryKind = 'main' | 'preload' | 'worker'
 
 type RollupWatcher = Rollup.RollupWatcher
 
@@ -39,9 +41,11 @@ export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin 
     const main = resolve(viteConfig.root, options.main ?? 'electron/main.ts')
     const preloadEntry = resolve(viteConfig.root, options.preload ?? 'electron/preload.ts')
     const preload = existsSync(preloadEntry) ? preloadEntry : undefined
+    const workerEntry = resolve(viteConfig.root, options.worker ?? 'electron/db/sqlite.worker.ts')
+    const worker = existsSync(workerEntry) ? workerEntry : undefined
     const outDir = resolve(viteConfig.root, options.outDir ?? 'dist-electron')
 
-    return { main, preload, outDir }
+    return { main, preload, worker, outDir }
   }
 
   function cleanup() {
@@ -119,7 +123,7 @@ export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin 
 
   async function startDev(server: ViteDevServer) {
     const devServerUrl = getDevServerUrl(server)
-    const { main, preload, outDir } = resolvePaths()
+    const { main, preload, worker, outDir } = resolvePaths()
 
     // The preload bundle must exist before Electron launches, so wait for its
     // first build before starting the main-process watcher.
@@ -127,6 +131,12 @@ export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin 
       await watchBuild(preload, 'preload', outDir, () => {
         server.ws.send({ type: 'full-reload' })
       })
+    }
+
+    // The SQLite worker is forked from disk at runtime, so build it before
+    // launch (and on change). No restart — a fresh fork picks up the rebuild.
+    if (worker) {
+      await watchBuild(worker, 'worker', outDir, () => {})
     }
 
     await watchBuild(main, 'main', outDir, () => {
@@ -160,13 +170,17 @@ export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin 
         return
       }
 
-      const { main, preload, outDir } = resolvePaths()
+      const { main, preload, worker, outDir } = resolvePaths()
 
       await rm(outDir, { recursive: true, force: true })
       await build(createBuildConfig(viteConfig, { entry: main, kind: 'main', outDir, watch: false }))
 
       if (preload) {
         await build(createBuildConfig(viteConfig, { entry: preload, kind: 'preload', outDir, watch: false }))
+      }
+
+      if (worker) {
+        await build(createBuildConfig(viteConfig, { entry: worker, kind: 'worker', outDir, watch: false }))
       }
     },
   }

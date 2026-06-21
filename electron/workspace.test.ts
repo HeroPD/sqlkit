@@ -126,13 +126,66 @@ describe('workspace config: credential round-trip', () => {
     expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('twice')
   })
 
-  it('stores secrets in plaintext when the OS keychain is unavailable', () => {
+  it('stores secrets as plaintext and flags them unencrypted when the OS keychain is unavailable', () => {
     state.encryptionAvailable = false
-    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'plain-fallback' })] })
+    expect(writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'plain-fallback' })] }).success).toBe(true)
 
+    // Plaintext is destructive-free and round-trips, so the password is usable
+    // this session and the next; the read flag (and .gitignore) carry the risk.
     const stored = JSON.parse(rawConfig()) as { connections: { password: string }[] }
     expect(stored.connections[0]?.password).toBe('plain-fallback')
-    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('plain-fallback')
+    const read = readWorkspaceConfig(workspaceDir)
+    expect(read.config.connections[0]?.password).toBe('plain-fallback')
+    expect(read.unencryptedSecrets).toBe(true)
+  })
+
+  it('does not flag unencrypted secrets when there are none, even without a keychain', () => {
+    state.encryptionAvailable = false
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: '' })] })
+    expect(readWorkspaceConfig(workspaceDir).unencryptedSecrets).toBeFalsy()
+  })
+
+  it('does not flag unencrypted secrets when the keychain encrypted them', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'sekret' })] })
+    expect(readWorkspaceConfig(workspaceDir).unencryptedSecrets).toBeFalsy()
+  })
+
+  it('rewrites an existing password unchanged on a keyless re-save (no silent wipe)', () => {
+    // The renderer's persist() ignores the result and fires on every context
+    // switch; storing plaintext must round-trip so a re-save can't blank it.
+    state.encryptionAvailable = false
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'still-here' })] })
+    const reloaded = readWorkspaceConfig(workspaceDir).config.connections
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: reloaded })
+    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('still-here')
+  })
+})
+
+describe('workspace config: credential .gitignore guard', () => {
+  const gitignore = () => fs.readFileSync(path.join(workspaceDir, '.sqlkit', '.gitignore'), 'utf8')
+
+  it('ignores config.json and its atomic-write temp file', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] })
+    const lines = gitignore().split('\n')
+    expect(lines).toContain('config.json')
+    expect(lines).toContain('config.json.tmp')
+  })
+
+  it('augments a hand-edited .gitignore with the missing rules instead of skipping', () => {
+    fs.mkdirSync(path.join(workspaceDir, '.sqlkit'), { recursive: true })
+    fs.writeFileSync(path.join(workspaceDir, '.sqlkit', '.gitignore'), 'custom\n')
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] })
+    const content = gitignore()
+    expect(content).toContain('custom')
+    expect(content.split('\n')).toContain('config.json')
+    expect(content.split('\n')).toContain('config.json.tmp')
+  })
+
+  it('does not duplicate rules a .gitignore already covers', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] })
+    const first = gitignore()
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] })
+    expect(gitignore()).toBe(first)
   })
 })
 
@@ -165,5 +218,16 @@ describe('workspace open: legacy migration', () => {
     const stored = JSON.parse(rawConfig()) as { connections: { password: string }[] }
     expect(stored.connections[0]?.password).toMatch(/^enc:v1:/)
     expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('legacy-plain')
+  })
+
+  it('preserves a legacy plaintext password when opened without a keychain (no silent wipe)', () => {
+    writeRawConfig({ version: 1, connections: [{ ...profile(), password: 'legacy-plain' }] })
+    state.encryptionAvailable = false
+
+    expect(openWorkspace(workspaceDir).success).toBe(true)
+    // Re-saved (folders/.gitignore) but, with no key store, the password is
+    // rewritten as-is rather than encrypted or blanked.
+    const stored = JSON.parse(rawConfig()) as { connections: { password: string }[] }
+    expect(stored.connections[0]?.password).toBe('legacy-plain')
   })
 })

@@ -13,8 +13,12 @@ export function coerceValue(value: string, column: ColumnRef | undefined): unkno
   if (value === '' && (column?.nullable ?? true)) return null
   const type = column?.dataType?.toLowerCase() ?? ''
   if (/int|serial|numeric|decimal|real|double|float|money/.test(type)) {
-    const n = Number(value)
-    return value.trim() !== '' && Number.isFinite(n) ? n : value
+    const trimmed = value.trim()
+    if (trimmed === '') return value
+    // Keep the raw string unless it round-trips losslessly through Number: a
+    // bigint/numeric past 2^53 routed through Number() rounds — corrupting the save.
+    const n = Number(trimmed)
+    return Number.isFinite(n) && String(n) === trimmed ? n : value
   }
   if (/bool/.test(type)) {
     if (/^(t|true|1|yes|y)$/i.test(value)) return true

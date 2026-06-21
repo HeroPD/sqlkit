@@ -71,6 +71,27 @@ describe('ConfigController.load', () => {
     await ctrl.load()
     expect(notice).toHaveBeenCalledOnce()
   })
+
+  it('warns once per session when secrets are stored unencrypted', async () => {
+    stubSqlkit({
+      getWorkspaceConfig: vi.fn(() => Promise.resolve({ config: { version: 1, connections: profiles(), activeDbId: 'a' }, unencryptedSecrets: true })),
+    })
+    const { ctrl, notice } = make()
+    await ctrl.load()
+    await ctrl.load()
+    expect(notice).toHaveBeenCalledOnce()
+    // After a workspace switch the warning can show again.
+    ctrl.reset()
+    await ctrl.load()
+    expect(notice).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not warn when secrets are encrypted at rest', async () => {
+    stubSqlkit(withConfig(profiles(), 'a'))
+    const { ctrl, notice } = make()
+    await ctrl.load()
+    expect(notice).not.toHaveBeenCalled()
+  })
 })
 
 describe('ConfigController.defaultChild', () => {
