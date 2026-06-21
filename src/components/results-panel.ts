@@ -3,7 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { isMac } from '../platform'
 import type { QueryResult } from '../electron'
-import { rowToTsv, toDelimited, toJson } from '../result-export'
+import { cellToTsv, cellsToTsv, rowToTsv, toDelimited, toJson } from '../result-export'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './export-dialog'
@@ -361,12 +361,9 @@ export class ResultsPanel extends LitElement {
 
   private async _onMenuPick(action: string, result: QueryResult, at: { row: number; col: number }) {
     const copy = (text: string) => void navigator.clipboard.writeText(text)
-    if (action === 'copy-cell') {
-      const value = result.rows[at.row]?.[at.col]
-      copy(value === null || value === undefined ? '' : formatCell(value))
-    }
+    if (action === 'copy-cell') copy(cellToTsv(result.rows[at.row]?.[at.col]))
     if (action === 'copy-row') copy(rowToTsv(result.rows[at.row] ?? []))
-    if (action === 'copy-column-name') copy(result.columns[at.col] ?? '')
+    if (action === 'copy-column-name') copy(cellToTsv(result.columns[at.col] ?? ''))
     // Copy-all / export cover every buffered row, not just what's loaded on screen.
     if (action === 'copy-csv') copy(toDelimited(result.columns, await this._allRows(result), ','))
     if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
@@ -521,16 +518,15 @@ export class ResultsPanel extends LitElement {
       event.preventDefault()
       const { rows } = this.run.result
       const s = this._sel
-      const lines: string[] = []
+      const selected: unknown[][] = []
       for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r += 1) {
-        const cells: string[] = []
-        for (let c = Math.min(s.c0, s.c1); c <= Math.max(s.c0, s.c1); c += 1) {
-          const value = rows[r]?.[c]
-          cells.push(value === null || value === undefined ? '' : formatCell(value))
-        }
-        lines.push(cells.join('\t'))
+        const cells: unknown[] = []
+        for (let c = Math.min(s.c0, s.c1); c <= Math.max(s.c0, s.c1); c += 1) cells.push(rows[r]?.[c])
+        selected.push(cells)
       }
-      void navigator.clipboard.writeText(lines.join('\n'))
+      // cellsToTsv applies full TSV field escaping: an embedded tab/newline is
+      // quoted (stays one cell) and a formula-leading cell is neutralized.
+      void navigator.clipboard.writeText(cellsToTsv(selected))
     }
   }
 

@@ -262,11 +262,11 @@ export class ContextsController {
     }
   }
 
+  // Applies a successful save to the tab state. Failures (including a canceled
+  // dialog) are handled by the caller (FileOpsController), which surfaces the
+  // error to the user; this just no-ops defensively if one slips through.
   applySaveResult(tab: SqlTabState, result: FileSaveResult) {
-    if (!result.success) {
-      if (!result.canceled) console.error('Save failed:', result.error)
-      return
-    }
+    if (!result.success) return
     this.tabs = this._tabs.map((entry) =>
       entry.id === tab.id && entry.kind === 'sql'
         ? { ...entry, path: result.path, name: result.name, savedContent: tab.content }

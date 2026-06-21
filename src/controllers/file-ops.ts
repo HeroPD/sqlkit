@@ -1,4 +1,4 @@
-import type { FileInfo } from '../electron'
+import type { FileInfo, FileSaveResult } from '../electron'
 import type { ContextsController } from './contexts'
 import type { FilesController } from './files'
 import type { QueriesController } from './queries'
@@ -43,7 +43,7 @@ export class FileOpsController {
     }
     const result = await window.sqlkit.readFile(file.path)
     if (!result.success) {
-      console.error('Failed to read file:', result.error)
+      this.deps.dialogs.notice('Could not open file', result.error ?? 'Unknown error')
       return
     }
     this.deps.ctx.addTabToContext(context.profileId, context.childDb, {
@@ -64,7 +64,7 @@ export class FileOpsController {
       return
     }
     void window.sqlkit.openExternal(file.path).then((result) => {
-      if (!result.success) console.error('Open failed:', result.error)
+      if (!result.success) this.deps.dialogs.notice('Could not open file', result.error ?? 'Unknown error')
     })
   }
 
@@ -76,6 +76,7 @@ export class FileOpsController {
     const result = tab.path
       ? await window.sqlkit.saveFile(tab.path, tab.content)
       : await window.sqlkit.saveFileAs(this.deps.contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
+    if (!this.reportSaveError(result)) return
     this.deps.ctx.applySaveResult(tab, result)
   }
 
@@ -84,7 +85,17 @@ export class FileOpsController {
     const tab = this.deps.ctx.activeSqlTab()
     if (!tab) return
     const result = await window.sqlkit.saveFileAs(this.deps.contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
+    if (!this.reportSaveError(result)) return
     this.deps.ctx.applySaveResult(tab, result)
+  }
+
+  // A failed save must never look like it succeeded — the tab keeps its dirty
+  // marker and the user is told why. A canceled dialog is not an error. Returns
+  // true when the save went through and the caller should apply it.
+  private reportSaveError(result: FileSaveResult): boolean {
+    if (result.success) return true
+    if (!result.canceled) this.deps.dialogs.notice('Could not save file', result.error ?? 'Unknown error')
+    return false
   }
 
   async create(parent: string, name: string) {
@@ -93,7 +104,7 @@ export class FileOpsController {
     const context = this.currentContext()
     const result = await window.sqlkit.createFile(folder, parent ? `${parent}/${name}` : name)
     if (!result.success) {
-      console.error('Create failed:', result.error)
+      this.deps.dialogs.notice('Could not create file', result.error ?? 'Unknown error')
       return
     }
     await this.deps.files.reload()
@@ -109,7 +120,7 @@ export class FileOpsController {
   async rename(file: FileInfo, newName: string) {
     const result = await window.sqlkit.renameFile(file.path, newName)
     if (!result.success) {
-      console.error('Rename failed:', result.error)
+      this.deps.dialogs.notice('Could not rename file', result.error ?? 'Unknown error')
       return
     }
     const oldId = fileTabId(file.path)
@@ -131,7 +142,7 @@ export class FileOpsController {
   private async performDelete(targetPath: string) {
     const result = await window.sqlkit.deleteFile(targetPath)
     if (!result.success) {
-      console.error('Delete failed:', result.error)
+      this.deps.dialogs.notice('Could not delete file', result.error ?? 'Unknown error')
       return
     }
     this.deps.ctx.closeFilesUnder(targetPath)

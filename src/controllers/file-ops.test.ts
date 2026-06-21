@@ -86,12 +86,13 @@ describe('FileOpsController.openFile', () => {
     expect(ctx.activeTabId).toBe('file:/ws/ctx/q.sql')
   })
 
-  it('opens no tab when the read fails', async () => {
+  it('opens no tab and surfaces a notice when the read fails', async () => {
     stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: false, error: 'nope' })) })
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { ctrl, ctx } = make()
+    const { ctrl, ctx, dialogs } = make()
     await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
     expect(ctx.tabs).toEqual([])
+    expect(dialogs.confirm?.message).toBe('Could not open file')
+    expect(dialogs.confirm?.detail).toBe('nope')
   })
 
   it('opens a file in the context where the request started after a context switch', async () => {
@@ -138,6 +139,24 @@ describe('FileOpsController.saveActive', () => {
     await ctrl.saveActive()
     expect(api.saveFile).toHaveBeenCalledWith('/ws/ctx/q.sql', 'select 2')
     expect(ctx.activeSqlTab()?.savedContent).toBe('select 2')
+  })
+
+  it('keeps the tab dirty and notifies the user when a save fails', async () => {
+    stubSqlkit({ saveFile: vi.fn(() => Promise.resolve({ success: false, error: 'disk full' })) })
+    const { ctrl, ctx, dialogs } = make()
+    ctx.addTab({ id: 'file:/ws/ctx/q.sql', kind: 'sql', name: 'q.sql', path: '/ws/ctx/q.sql', content: 'select 2', savedContent: 'select 1' })
+    await ctrl.saveActive()
+    expect(ctx.activeSqlTab()?.savedContent).toBe('select 1')
+    expect(dialogs.confirm?.message).toBe('Could not save file')
+    expect(dialogs.confirm?.detail).toBe('disk full')
+  })
+
+  it('stays silent when the save dialog is canceled', async () => {
+    stubSqlkit({ saveFileAs: vi.fn(() => Promise.resolve({ success: false, canceled: true })) })
+    const { ctrl, ctx, dialogs } = make()
+    ctx.newQuery()
+    await ctrl.saveActive()
+    expect(dialogs.confirm).toBeNull()
   })
 
   it('routes an untitled query through Save As into the context folder', async () => {

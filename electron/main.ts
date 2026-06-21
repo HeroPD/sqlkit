@@ -4,6 +4,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  session,
   shell,
   type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
@@ -68,6 +69,47 @@ const isAppUrl = (url: string) =>
   devServerUrl
     ? url.startsWith(devServerUrl)
     : url === appFileUrl || url.startsWith(`${appFileUrl}#`) || url.startsWith(`${appFileUrl}?`)
+
+// Content-Security-Policy applied to every response (prod loads over file://,
+// dev over the Vite server — webRequest intercepts both). Prod is strict: only
+// same-origin scripts, no remote/inline JS, so a malicious DB cell or workspace
+// file can't escalate to script execution even if an HTML sink slipped in.
+// Dev must stay loose enough for Vite: its HMR client is an inline module
+// script that connects over websocket and uses eval for transforms, so the dev
+// server origin (http + ws) and 'unsafe-inline'/'unsafe-eval' are allowed there
+// only. style-src keeps 'unsafe-inline' both ways — Lit/components emit inline
+// styles. font/img allow data: for embedded assets.
+function contentSecurityPolicy(): string {
+  const base = [
+    `default-src 'self'`,
+    `style-src 'self' 'unsafe-inline'`,
+    `img-src 'self' data:`,
+    `font-src 'self' data:`,
+    `object-src 'none'`,
+    `frame-src 'none'`,
+    `base-uri 'none'`,
+    `form-action 'none'`,
+  ]
+  if (devServerUrl) {
+    const origin = new URL(devServerUrl).origin
+    const wsOrigin = origin.replace(/^http/, 'ws')
+    return [
+      ...base,
+      `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${origin}`,
+      `connect-src 'self' ${origin} ${wsOrigin}`,
+    ].join('; ')
+  }
+  return [...base, `script-src 'self'`, `connect-src 'self'`].join('; ')
+}
+
+function installContentSecurityPolicy() {
+  const csp = contentSecurityPolicy()
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] },
+    })
+  })
+}
 
 const workspaceFor = (contents: WebContents) => workspacePaths.get(contents.id) ?? null
 const normalizeWorkspacePath = (wsPath: string) => {
@@ -437,6 +479,7 @@ function buildAppMenu() {
 }
 
 void app.whenReady().then(() => {
+  installContentSecurityPolicy()
   buildAppMenu()
   registerWorkspaceIpc()
   registerDbIpc()
