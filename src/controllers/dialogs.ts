@@ -19,9 +19,13 @@ type ReviewConfig = { sql: string; params: unknown[]; run: () => void }
 // one is open and runs its action on accept. Setting confirm/prompt re-renders
 // the host, so call sites just assign a config (or null to dismiss).
 export class DialogsController implements ReactiveController {
-  private _confirm: ConfirmConfig | null = null
-  private _prompt: PromptConfig | null = null
-  private _review: ReviewConfig | null = null
+  // FIFO queues, not single slots: a second dialog opened while one is showing
+  // (e.g. an async status push raising a notice over an open confirm) must not
+  // silently drop either. The head is what's rendered; dismiss/accept pops it
+  // and reveals the next.
+  private _confirmQueue: ConfirmConfig[] = []
+  private _promptQueue: PromptConfig[] = []
+  private _reviewQueue: ReviewConfig[] = []
   private host: ReactiveControllerHost
 
   constructor(host: ReactiveControllerHost) {
@@ -30,32 +34,36 @@ export class DialogsController implements ReactiveController {
   }
 
   hostDisconnected() {
-    this._confirm = null
-    this._prompt = null
-    this._review = null
+    this._confirmQueue = []
+    this._promptQueue = []
+    this._reviewQueue = []
   }
 
+  // Setting a config enqueues it; setting null dismisses the current (head) one.
   get confirm() {
-    return this._confirm
+    return this._confirmQueue[0] ?? null
   }
   set confirm(config: ConfirmConfig | null) {
-    this._confirm = config
+    if (config) this._confirmQueue.push(config)
+    else this._confirmQueue.shift()
     this.host.requestUpdate()
   }
 
   get prompt() {
-    return this._prompt
+    return this._promptQueue[0] ?? null
   }
   set prompt(config: PromptConfig | null) {
-    this._prompt = config
+    if (config) this._promptQueue.push(config)
+    else this._promptQueue.shift()
     this.host.requestUpdate()
   }
 
   get review() {
-    return this._review
+    return this._reviewQueue[0] ?? null
   }
   set review(config: ReviewConfig | null) {
-    this._review = config
+    if (config) this._reviewQueue.push(config)
+    else this._reviewQueue.shift()
     this.host.requestUpdate()
   }
 
@@ -65,21 +73,21 @@ export class DialogsController implements ReactiveController {
   }
 
   acceptConfirm = () => {
-    const action = this._confirm?.action
-    this.confirm = null
-    action?.()
+    const current = this._confirmQueue.shift()
+    this.host.requestUpdate()
+    current?.action()
   }
 
   acceptPrompt = (event: Event) => {
     const { value } = (event as CustomEvent<PromptConfirmDetail>).detail
-    const action = this._prompt?.action
-    this.prompt = null
-    action?.(value)
+    const current = this._promptQueue.shift()
+    this.host.requestUpdate()
+    current?.action(value)
   }
 
   acceptReview = () => {
-    const run = this._review?.run
-    this.review = null
-    run?.()
+    const current = this._reviewQueue.shift()
+    this.host.requestUpdate()
+    current?.run()
   }
 }

@@ -1,5 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
+import { keyed } from 'lit/directives/keyed.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
@@ -304,22 +305,28 @@ export class WorkbenchScreen extends LitElement {
   // target explicitly rather than reading this._ctx.activeChildDb, so a run that
   // captured its context can align that exact child even after the active
   // selection has drifted.
+  // 'aligned' — the driver is now on childDb (or there's nothing to align).
+  // 'redirected' — childDb is gone, so (followMissing) the UI moved to the
+  // child actually in use. 'unavailable' — childDb isn't on this connection and
+  // we didn't redirect. Distinct outcomes so callers don't have to guess which.
   private async _alignActiveChild(
     profileId: string,
     childDb: string | null,
     options: { followMissing?: boolean } = {},
-  ): Promise<boolean> {
-    if (!childDb) return true
+  ): Promise<'aligned' | 'redirected' | 'unavailable'> {
+    if (!childDb) return 'aligned'
     const children = this._live.statuses[profileId]?.children ?? []
-    if (children.length < 2) return true
+    if (children.length < 2) return 'aligned'
     const inUse = children.find((child) => child.inUse)?.name
-    if (inUse === childDb) return true
+    if (inUse === childDb) return 'aligned'
     if (children.some((child) => child.name === childDb)) {
-      return (await this._live.setActiveChild(profileId, childDb)).success
-    } else if (options.followMissing && inUse) {
-      this._setActiveDb(profileId, inUse)
+      return (await this._live.setActiveChild(profileId, childDb)).success ? 'aligned' : 'unavailable'
     }
-    return false
+    if (options.followMissing && inUse) {
+      this._setActiveDb(profileId, inUse)
+      return 'redirected'
+    }
+    return 'unavailable'
   }
 
   // --- global shortcuts -----------------------------------------------------
@@ -435,7 +442,7 @@ export class WorkbenchScreen extends LitElement {
     }
     // The driver may be targeting the discovery database; point it at the
     // captured child before running.
-    if (!(await this._alignActiveChild(profile.id, childDb))) {
+    if ((await this._alignActiveChild(profile.id, childDb)) === 'unavailable') {
       this._queries.setRun(tabId, { phase: 'error', error: `Database "${childDb}" is not available on this connection` })
       return
     }
@@ -586,18 +593,24 @@ export class WorkbenchScreen extends LitElement {
           `
         : ''}
       ${this._dialogs.prompt
-        ? html`
-            <prompt-dialog
-              .message=${this._dialogs.prompt.message}
-              .detail=${this._dialogs.prompt.detail}
-              .confirmLabel=${this._dialogs.prompt.confirmLabel}
-              .placeholder=${this._dialogs.prompt.placeholder}
-              .allowEmpty=${this._dialogs.prompt.allowEmpty ?? false}
-              .trim=${this._dialogs.prompt.trim ?? true}
-              @dialog-cancel=${() => (this._dialogs.prompt = null)}
-              @dialog-confirm=${this._dialogs.acceptPrompt}
-            ></prompt-dialog>
-          `
+        ? // Key by the config object so a queued prompt advancing mounts a fresh
+          // dialog — the input is uncontrolled, so a reused element would keep
+          // the previous prompt's typed text (and skip re-focus).
+          keyed(
+            this._dialogs.prompt,
+            html`
+              <prompt-dialog
+                .message=${this._dialogs.prompt.message}
+                .detail=${this._dialogs.prompt.detail}
+                .confirmLabel=${this._dialogs.prompt.confirmLabel}
+                .placeholder=${this._dialogs.prompt.placeholder}
+                .allowEmpty=${this._dialogs.prompt.allowEmpty ?? false}
+                .trim=${this._dialogs.prompt.trim ?? true}
+                @dialog-cancel=${() => (this._dialogs.prompt = null)}
+                @dialog-confirm=${this._dialogs.acceptPrompt}
+              ></prompt-dialog>
+            `,
+          )
         : ''}
       ${this._dialogs.review
         ? html`
@@ -982,11 +995,13 @@ export class WorkbenchScreen extends LitElement {
   }
 
   // A search match opens the file and lands the cursor on the matched line.
-  // A search match opens the file and lands the cursor on the matched line.
   private async _onSearchOpen(event: Event) {
     const { file, line } = (event as CustomEvent<SearchOpenDetail>).detail
     await this._fileOps.openFile(file)
     await this.updateComplete
+    // The user may have switched tabs during the awaits; only reveal if the
+    // file we opened is still the active editor.
+    if (this._ctx.activeSqlTab()?.path !== file.path) return
     const editor = this.shadowRoot?.querySelector('sql-editor')
     if (!editor) return
     await editor.updateComplete

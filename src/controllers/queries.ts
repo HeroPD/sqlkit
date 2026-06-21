@@ -4,8 +4,19 @@ import type { QueryRun } from '../components/results-panel'
 import type { HistoryItem } from '../components/history-view'
 import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
 
-// Reference behavior: keep the most recent runs, drop the tail.
+// Keep the most recent runs per context (not globally), so a busy context can't
+// evict another context's history — the history view is filtered per context.
 const MAX_HISTORY = 200
+
+// Caps each context's entries to `max`, keeping the newest. Input is newest-first.
+export const capHistoryPerContext = (items: HistoryItem[], max: number): HistoryItem[] => {
+  const seen = new Map<string, number>()
+  return items.filter((item) => {
+    const count = (seen.get(item.contextKey) ?? 0) + 1
+    seen.set(item.contextKey, count)
+    return count <= max
+  })
+}
 
 const MAX_TASKS = 50
 
@@ -124,19 +135,22 @@ export class QueriesController implements ReactiveController {
       response.success ? { phase: 'done', result: response.result, sql } : { phase: 'error', error: response.error },
     )
     this.finishTask(task.id, response, task.startedAt)
-    this.history = [
-      {
-        id: crypto.randomUUID(),
-        contextKey,
-        sql,
-        success: response.success,
-        durationMs: response.success ? response.result.durationMs : 0,
-        rowCount: response.success ? response.result.rowCount : null,
-        error: response.success ? '' : response.error,
-        createdAt: new Date().toISOString(),
-      },
-      ...this.history,
-    ].slice(0, MAX_HISTORY)
+    this.history = capHistoryPerContext(
+      [
+        {
+          id: crypto.randomUUID(),
+          contextKey,
+          sql,
+          success: response.success,
+          durationMs: response.success ? response.result.durationMs : 0,
+          rowCount: response.success ? response.result.rowCount : null,
+          error: response.success ? '' : response.error,
+          createdAt: new Date().toISOString(),
+        },
+        ...this.history,
+      ],
+      MAX_HISTORY,
+    )
     this.host.requestUpdate()
   }
 

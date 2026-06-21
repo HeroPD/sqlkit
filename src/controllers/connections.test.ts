@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactiveControllerHost } from 'lit'
-import type { ColumnsResult, ConnectionStatus, DbObjects, ObjectsResult, TablesResult } from '../electron'
+import type { ColumnsResult, ConnectionProfile, ConnectResult, ConnectionStatus, DbObjects, ObjectsResult, TablesResult } from '../electron'
 import { ConnectionsController } from './connections'
 
 const host = (): ReactiveControllerHost =>
@@ -73,6 +73,63 @@ function stubSqlkit() {
 
 afterEach(() => {
   vi.restoreAllMocks()
+})
+
+describe('ConnectionsController.connect coalescing', () => {
+  it('coalesces concurrent connects for one profile into a single attempt', async () => {
+    const pending = defer<ConnectResult>()
+    const connectDatabase = vi.fn(() => pending.promise)
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      connectDatabase,
+      getConnectionStatuses: vi.fn(() => Promise.resolve([] as ConnectionStatus[])),
+      onConnectionStatus: vi.fn(() => vi.fn()),
+    }
+    const controller = new ConnectionsController(host())
+    const profile = { id: 'p1' } as ConnectionProfile
+
+    const first = controller.connect(profile)
+    const second = controller.connect(profile)
+    expect(connectDatabase).toHaveBeenCalledTimes(1)
+    expect(first).toBe(second)
+
+    pending.resolve({ success: true, serverVersion: 'PG' })
+    await Promise.all([first, second])
+
+    // Once it settles, a fresh connect starts a new attempt.
+    await controller.connect(profile)
+    expect(connectDatabase).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not reuse an in-flight connect after a disconnect', async () => {
+    const queue = [defer<ConnectResult>(), defer<ConnectResult>(), defer<ConnectResult>()]
+    let next = 0
+    const connectDatabase = vi.fn(() => queue[next++]!.promise)
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      connectDatabase,
+      disconnectDatabase: vi.fn(() => Promise.resolve()),
+      getConnectionStatuses: vi.fn(() => Promise.resolve([] as ConnectionStatus[])),
+      onConnectionStatus: vi.fn(() => vi.fn()),
+    }
+    const controller = new ConnectionsController(host())
+    const profile = { id: 'p1' } as ConnectionProfile
+
+    const first = controller.connect(profile)
+    void controller.disconnect(profile.id)
+    const second = controller.connect(profile)
+    expect(second).not.toBe(first)
+    expect(connectDatabase).toHaveBeenCalledTimes(2)
+
+    // The superseded first attempt settling must not evict the newer entry:
+    // a connect after it still coalesces onto the second attempt.
+    queue[0]!.resolve({ success: true, serverVersion: 'PG' })
+    await first
+    const third = controller.connect(profile)
+    expect(third).toBe(second)
+    expect(connectDatabase).toHaveBeenCalledTimes(2)
+
+    queue[1]!.resolve({ success: true, serverVersion: 'PG' })
+    await Promise.all([second, third])
+  })
 })
 
 describe('ConnectionsController metadata', () => {

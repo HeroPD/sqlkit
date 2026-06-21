@@ -1,5 +1,5 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectionStatus, DbObjects, TableRef } from '../electron'
+import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectResult, ConnectionStatus, DbObjects, TableRef } from '../electron'
 
 const activeChildName = (status: ConnectionStatus | undefined): string | null =>
   status?.phase === 'connected' ? (status.children?.find((child) => child.inUse)?.name ?? null) : null
@@ -25,6 +25,8 @@ export class ConnectionsController implements ReactiveController {
   private unsubscribe: (() => void) | null = null
   /** Per-profile metadata-load token; a newer load invalidates older ones. */
   private metaGen: Record<string, number> = {}
+  /** In-flight connect per profile, so two cold tabs don't open two tunnels/pools. */
+  private connecting = new Map<string, Promise<ConnectResult>>()
 
   constructor(host: ReactiveControllerHost) {
     this.host = host
@@ -49,7 +51,22 @@ export class ConnectionsController implements ReactiveController {
     return Object.values(this.statuses).filter((status) => status.phase === 'connected')
   }
 
-  async connect(profile: ConnectionProfile) {
+  connect(profile: ConnectionProfile): Promise<ConnectResult> {
+    // Coalesce concurrent connects for the same profile (two cold tabs running
+    // at once) onto a single attempt; otherwise each opens its own SSH tunnel
+    // and pool, and the manager tears one back down after the handshake.
+    const inFlight = this.connecting.get(profile.id)
+    if (inFlight) return inFlight
+    const attempt: Promise<ConnectResult> = this.runConnect(profile).finally(() => {
+      // Only clear our own entry: a disconnect (which drops the entry) followed
+      // by a fresh connect may have replaced it, and that newer attempt must survive.
+      if (this.connecting.get(profile.id) === attempt) this.connecting.delete(profile.id)
+    })
+    this.connecting.set(profile.id, attempt)
+    return attempt
+  }
+
+  private async runConnect(profile: ConnectionProfile): Promise<ConnectResult> {
     const result = await window.sqlkit.connectDatabase(profile)
     // The status push (with the connection's child databases) is a separate
     // IPC message that may not have landed when this resolves; pull the fresh
@@ -59,10 +76,14 @@ export class ConnectionsController implements ReactiveController {
   }
 
   disconnect(profileId: string) {
+    // Drop any in-flight connect so a connect after this disconnect starts a
+    // fresh attempt instead of resolving with the one being torn down.
+    this.connecting.delete(profileId)
     return window.sqlkit.disconnectDatabase(profileId)
   }
 
   disconnectAll() {
+    this.connecting.clear()
     return window.sqlkit.disconnectAllDatabases()
   }
 

@@ -2,7 +2,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile, QueryResponse } from '../electron'
-import { QueriesController } from './queries'
+import type { HistoryItem } from '../components/history-view'
+import { QueriesController, capHistoryPerContext } from './queries'
+
+const historyItem = (contextKey: string, id: string): HistoryItem =>
+  ({ id, contextKey, sql: id, success: true, durationMs: 0, rowCount: 0, error: '', createdAt: '' })
+
+describe('capHistoryPerContext', () => {
+  it('keeps the newest N of each context independently', () => {
+    // newest-first, interleaved across two contexts.
+    const items = [historyItem('A', 'a3'), historyItem('B', 'b1'), historyItem('A', 'a2'), historyItem('A', 'a1')]
+    expect(capHistoryPerContext(items, 2).map((item) => item.id)).toEqual(['a3', 'b1', 'a2'])
+  })
+
+  it('does not let a busy context evict another context', () => {
+    const busy = Array.from({ length: 5 }, (_, i) => historyItem('A', `a${i}`))
+    const capped = capHistoryPerContext([...busy, historyItem('B', 'b0')], 3)
+    expect(capped.filter((item) => item.contextKey === 'A')).toHaveLength(3)
+    expect(capped.filter((item) => item.contextKey === 'B')).toHaveLength(1)
+  })
+})
 
 const host = (): ReactiveControllerHost =>
   ({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
