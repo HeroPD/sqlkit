@@ -37,6 +37,7 @@ function setup(opts: Opts = {}) {
     addDatabase: vi.fn(),
     refreshFiles: vi.fn(),
     toggleSidebar: vi.fn(),
+    toggleResultsPanel: vi.fn(),
     closeWorkspace: vi.fn(),
   }
   const live = {

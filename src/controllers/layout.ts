@@ -4,6 +4,8 @@ import type { ReactiveController, ReactiveControllerHost } from 'lit'
 // the rest of the area (no fixed cap). A small floor keeps the panel usable.
 const EDITOR_MIN_HEIGHT = 250
 const RESULTS_MIN_HEIGHT = 80
+// Collapsed, only the results head (its toolbar) shows; matches its CSS height.
+const COLLAPSED_HEIGHT = 28
 
 type Deps = {
   // Committing a collapse drag drops the active sidebar view (host state).
@@ -28,6 +30,8 @@ export class LayoutController implements ReactiveController {
   // null = the default split: results take 70% of the editor area, editor 30%.
   panelHeight: number | null = null
   panelResizing: { startY: number; startHeight: number; maxHeight: number } | null = null
+  // Collapsed to just the head, handing the rest of the area to the editor.
+  panelCollapsed = false
 
   private host: ReactiveControllerHost
   private deps: Deps
@@ -54,7 +58,27 @@ export class LayoutController implements ReactiveController {
 
   resetPanelHeight = () => {
     this.panelHeight = null
+    this.panelCollapsed = false
     this.host.requestUpdate()
+  }
+
+  togglePanelCollapse = () => {
+    this.panelCollapsed = !this.panelCollapsed
+    this.host.requestUpdate()
+  }
+
+  // Running or refreshing a query reveals a collapsed panel so its results show.
+  expandPanel = () => {
+    if (!this.panelCollapsed) return
+    this.panelCollapsed = false
+    this.host.requestUpdate()
+  }
+
+  // The CSS height for the results-panel host: collapsed to its head, an
+  // explicit dragged height, or the default 70% split.
+  panelStyleHeight(): string {
+    if (this.panelCollapsed) return `${COLLAPSED_HEIGHT}px`
+    return this.panelHeight === null ? '70%' : `${this.panelHeight}px`
   }
 
   onSidebarResizeStart = (event: PointerEvent) => {
@@ -114,6 +138,8 @@ export class LayoutController implements ReactiveController {
       startHeight: panel.offsetHeight,
       maxHeight: Math.max(RESULTS_MIN_HEIGHT, available - EDITOR_MIN_HEIGHT),
     }
+    // Grabbing the seam of a collapsed panel resizes it back open.
+    this.panelCollapsed = false
     event.preventDefault()
     window.addEventListener('pointermove', this.onPanelResizeMove)
     window.addEventListener('pointerup', this.onPanelResizeEnd)

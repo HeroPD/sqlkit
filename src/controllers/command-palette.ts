@@ -22,6 +22,7 @@ type Deps = {
   addDatabase: () => void
   refreshFiles: () => void
   toggleSidebar: () => void
+  toggleResultsPanel: () => void
   closeWorkspace: () => void
 }
 
@@ -232,6 +233,9 @@ export class CommandPaletteController implements ReactiveController {
         break
       case 'toggle-sidebar':
         this.deps.toggleSidebar()
+        break
+      case 'toggle-results-panel':
+        this.deps.toggleResultsPanel()
         break
       case 'close-workspace':
         this.deps.closeWorkspace()

@@ -94,6 +94,10 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   rowEditable = false
 
+  /** Collapsed to just this head; the owner shrinks the host height to match. */
+  @property({ attribute: false })
+  collapsed = false
+
   /** The cell currently being edited inline (absolute data indices). */
   @state()
   private _editing: { row: number; col: number } | null = null
@@ -239,6 +243,10 @@ export class ResultsPanel extends LitElement {
     this.dispatchEvent(new CustomEvent('delete-rows', { detail: { rows }, bubbles: true, composed: true }))
   }
 
+  private _toggleCollapse = () => {
+    this.dispatchEvent(new CustomEvent('toggle-collapse', { bubbles: true, composed: true }))
+  }
+
   render() {
     const exportable = this.run.phase === 'done' && this.run.result.columns.length > 0
     const showRowTools = this.rowEditable && exportable
@@ -277,6 +285,15 @@ export class ResultsPanel extends LitElement {
               </button>
             `
           : ''}
+        <button
+          class="head-action"
+          title=${this.collapsed ? 'Expand results panel' : 'Collapse results panel'}
+          aria-label=${this.collapsed ? 'Expand results panel' : 'Collapse results panel'}
+          aria-expanded=${!this.collapsed}
+          @click=${this._toggleCollapse}
+        >
+          <i class="codicon codicon-chevron-${this.collapsed ? 'up' : 'down'}" aria-hidden="true"></i>
+        </button>
       </div>
       <div class="body" @scroll=${this._onScroll}>${this._renderBody()}</div>
       ${this._renderMenu()}

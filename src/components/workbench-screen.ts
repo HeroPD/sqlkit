@@ -93,6 +93,7 @@ const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind
   { id: 'disconnect-all', label: 'Disconnect All Databases', icon: 'codicon-debug-disconnect' },
   { id: 'refresh-files', label: 'Refresh Files', icon: 'codicon-sync' },
   { id: 'toggle-sidebar', label: 'Toggle Sidebar', icon: 'codicon-layout-sidebar-left', keybind: mod('B') },
+  { id: 'toggle-results-panel', label: 'Toggle Results Panel', icon: 'codicon-layout-panel', keybind: mod('J') },
   ...VIEWS.map((view) => ({ id: `show-${view.id}`, label: `Show ${view.title}`, icon: view.icon })),
   { id: 'close-workspace', label: 'Close Workspace', icon: 'codicon-folder-opened' },
 ]
@@ -137,6 +138,7 @@ export class WorkbenchScreen extends LitElement {
     addDatabase: () => this._onAddDatabase(),
     refreshFiles: () => void this._workspaceFiles.reload(),
     toggleSidebar: () => this._toggleSidebar(),
+    toggleResultsPanel: () => this._layout.togglePanelCollapse(),
     closeWorkspace: () => this._onCloseWorkspace(),
   })
 
@@ -368,6 +370,11 @@ export class WorkbenchScreen extends LitElement {
       this._toggleSidebar()
       return
     }
+    if (key === 'j') {
+      event.preventDefault()
+      this._layout.togglePanelCollapse()
+      return
+    }
     if (key === 'n') {
       event.preventDefault()
       this._ctx.newQuery()
@@ -418,6 +425,9 @@ export class WorkbenchScreen extends LitElement {
     if (!tabId) return
     // One run per tab: ignore re-triggers while this tab's query is in flight.
     if (this._queries.runFor(tabId).phase === 'running') return
+
+    // Reveal the results panel if it was collapsed, so the run (or its error) shows.
+    this._layout.expandPanel()
 
     const profile = this._config.activeProfile()
     if (!profile) {
@@ -826,13 +836,15 @@ export class WorkbenchScreen extends LitElement {
             .canCancel=${this._config.activeProfile()?.engine === 'postgresql'}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
+            .collapsed=${this._layout.panelCollapsed}
             @cancel-query=${this._onCancelQuery}
             @load-more=${this._onLoadMore}
             @cell-edit=${this._onCellEdit}
             @cells-edit=${this._onCellsEdit}
             @add-row=${this._onAddRow}
             @delete-rows=${this._onDeleteRows}
-            style="height: ${this._layout.panelHeight === null ? '70%' : `${this._layout.panelHeight}px`}"
+            @toggle-collapse=${() => this._layout.togglePanelCollapse()}
+            style="height: ${this._layout.panelStyleHeight()}"
           ></results-panel>
         </div>
       `
