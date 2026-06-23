@@ -109,6 +109,29 @@ export function buildInsertDefault(table: TableRef): { sql: string; params: unkn
   return { sql: `INSERT INTO ${quoteQualified(table)} DEFAULT VALUES`, params: [] }
 }
 
+export type InsertSpec = {
+  table: TableRef
+  /** Only the columns the user filled in; untouched columns are omitted so the
+   * table's own DEFAULT applies — the one portable way to express defaults
+   * (SQLite rejects the DEFAULT keyword inside a VALUES list). */
+  columns: { name: string; columnMeta: ColumnRef | undefined }[]
+  /** Raw cell strings aligned to `columns`, coerced per column. */
+  values: string[]
+  dialect: Engine
+}
+
+// One parameterized single-row INSERT. With no filled columns it falls back to
+// DEFAULT VALUES. Kept single-statement so params bind on both engines (SQLite
+// only binds params for a lone statement; Postgres params are extended-protocol).
+export function buildInsert(spec: InsertSpec): { sql: string; params: unknown[] } {
+  if (spec.columns.length === 0) return buildInsertDefault(spec.table)
+  const placeholder = (index: number) => (spec.dialect === 'postgresql' ? `$${index}` : '?')
+  const columns = spec.columns.map((column) => quoteIdent(column.name)).join(', ')
+  const placeholders = spec.columns.map((_, index) => placeholder(index + 1)).join(', ')
+  const params = spec.columns.map((column, index) => coerceValue(spec.values[index] ?? '', column.columnMeta, spec.dialect))
+  return { sql: `INSERT INTO ${quoteQualified(spec.table)} (${columns})\nVALUES (${placeholders})`, params }
+}
+
 export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: unknown[] } {
   if (spec.rows.length === 0) throw new Error('Cannot build a DELETE without rows')
   const params: unknown[] = []

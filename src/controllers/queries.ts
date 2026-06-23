@@ -1,6 +1,7 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile, QueryResponse } from '../electron'
 import type { QueryRun } from '../components/results-panel'
+import type { DraftRow } from '../result-editing'
 import type { HistoryItem } from '../components/history-view'
 import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
 
@@ -23,6 +24,10 @@ const MAX_TASKS = 50
 // Rows pulled per lazy fetch as the grid scrolls into not-yet-loaded territory.
 const FETCH_PAGE = 200
 
+// Shared empty edits map, so a tab with no pending edits returns a stable
+// reference (no spurious re-renders).
+const NO_EDITS: ReadonlyMap<string, string> = new Map()
+
 // Owns everything a query run produces: the per-tab results (switching tabs
 // brings a tab's result back), the cross-connection task list with its live
 // ticker, and per-context history. The workbench decides what to run and
@@ -31,6 +36,12 @@ const FETCH_PAGE = 200
 export class QueriesController implements ReactiveController {
   /** Last run of every tab, keyed by tab id. */
   runs = new Map<string, QueryRun>()
+
+  /** Unsaved new rows staged in the grid, keyed by tab id. */
+  drafts = new Map<string, DraftRow[]>()
+
+  /** Unsaved cell edits per tab: inner key "row:col" → new value string. */
+  edits = new Map<string, Map<string, string>>()
 
   /** Query history of every context in this workspace, newest first. */
   history: HistoryItem[] = []
@@ -70,6 +81,137 @@ export class QueriesController implements ReactiveController {
     if (!this.tabExists(tabId)) return
     this.runs = new Map(this.runs).set(tabId, run)
     this.host.requestUpdate()
+  }
+
+  // --- draft (unsaved new) rows --------------------------------------------
+
+  /** The tab's staged new rows; empty when none. */
+  draftsFor(tabId: string | null): DraftRow[] {
+    return (tabId ? this.drafts.get(tabId) : undefined) ?? []
+  }
+
+  /** Inserts an all-default new row (every cell untouched) below result row
+   * `after` (-1 = above the first row) at array position `index`, or appends. */
+  addDraft(tabId: string, columnCount: number, after = -1, index?: number) {
+    const rows = [...(this.drafts.get(tabId) ?? [])]
+    const at = index === undefined ? rows.length : Math.max(0, Math.min(index, rows.length))
+    rows.splice(at, 0, { after, cells: Array<string | null>(columnCount).fill(null) })
+    this.drafts = new Map(this.drafts).set(tabId, rows)
+    this.host.requestUpdate()
+  }
+
+  setDraftCell(tabId: string, index: number, col: number, value: string) {
+    const rows = this.drafts.get(tabId)
+    if (!rows?.[index] || col < 0 || col >= rows[index].cells.length) return
+    const nextCells = [...rows[index].cells]
+    nextCells[col] = value
+    this.drafts = new Map(this.drafts).set(
+      tabId,
+      rows.map((row, i) => (i === index ? { ...row, cells: nextCells } : row)),
+    )
+    this.host.requestUpdate()
+  }
+
+  removeDraft(tabId: string, index: number) {
+    this.dropDrafts(tabId, [index])
+  }
+
+  /** Drops the given draft indexes (e.g. the rows just inserted), keeping the rest. */
+  dropDrafts(tabId: string, indexes: number[]) {
+    const rows = this.drafts.get(tabId)
+    if (!rows || !indexes.length) return
+    const drop = new Set(indexes)
+    const remaining = rows.filter((_, i) => !drop.has(i))
+    const next = new Map(this.drafts)
+    if (remaining.length) next.set(tabId, remaining)
+    else next.delete(tabId)
+    this.drafts = next
+    this.host.requestUpdate()
+  }
+
+  // --- pending cell edits ---------------------------------------------------
+
+  /** The tab's staged edits as a lookup map ("row:col" → value); empty when none. */
+  editsFor(tabId: string | null): ReadonlyMap<string, string> {
+    return (tabId ? this.edits.get(tabId) : undefined) ?? NO_EDITS
+  }
+
+  /** The tab's staged edits as a flat list, for building the UPDATE. */
+  editsList(tabId: string | null): Array<{ row: number; col: number; value: string }> {
+    const map = tabId ? this.edits.get(tabId) : undefined
+    if (!map) return []
+    return [...map.entries()].map(([key, value]) => {
+      const [row, col] = key.split(':')
+      return { row: Number(row), col: Number(col), value }
+    })
+  }
+
+  setEdit(tabId: string, row: number, col: number, value: string) {
+    const inner = new Map(this.edits.get(tabId) ?? [])
+    inner.set(`${row}:${col}`, value)
+    this.edits = new Map(this.edits).set(tabId, inner)
+    this.host.requestUpdate()
+  }
+
+  clearEdit(tabId: string, row: number, col: number) {
+    const inner = this.edits.get(tabId)
+    if (!inner?.has(`${row}:${col}`)) return
+    const nextInner = new Map(inner)
+    nextInner.delete(`${row}:${col}`)
+    const next = new Map(this.edits)
+    if (nextInner.size) next.set(tabId, nextInner)
+    else next.delete(tabId)
+    this.edits = next
+    this.host.requestUpdate()
+  }
+
+  clearEdits(tabId: string) {
+    if (!this.edits.has(tabId)) return
+    const next = new Map(this.edits)
+    next.delete(tabId)
+    this.edits = next
+    this.host.requestUpdate()
+  }
+
+  /** Discards all staged changes (new rows and cell edits) for a tab. */
+  clearStaged(tabId: string) {
+    let changed = false
+    if (this.drafts.has(tabId)) {
+      const next = new Map(this.drafts)
+      next.delete(tabId)
+      this.drafts = next
+      changed = true
+    }
+    if (this.edits.has(tabId)) {
+      const next = new Map(this.edits)
+      next.delete(tabId)
+      this.edits = next
+      changed = true
+    }
+    if (changed) this.host.requestUpdate()
+  }
+
+  hasStaged(tabId: string | null): boolean {
+    if (!tabId) return false
+    return (this.drafts.get(tabId)?.length ?? 0) > 0 || (this.edits.get(tabId)?.size ?? 0) > 0
+  }
+
+  hasAnyStaged(): boolean {
+    return [...this.drafts.values()].some((rows) => rows.length > 0) || [...this.edits.values()].some((edits) => edits.size > 0)
+  }
+
+  // A run that changes the result's shape (or errors) invalidates staged rows and
+  // edits (aligned to the old result rows). Drafts can survive a same-shape
+  // refresh, but cell edits are keyed by row index and must not retarget silently.
+  private realignStaged(tabId: string, columnCount: number | null) {
+    // Drafts align by cell count, so they survive any run that keeps that count.
+    const rows = this.drafts.get(tabId)
+    if (rows?.length && !(columnCount !== null && rows.every((row) => row.cells.length === columnCount))) {
+      const next = new Map(this.drafts)
+      next.delete(tabId)
+      this.drafts = next
+    }
+    if (this.edits.has(tabId)) this.clearEdits(tabId)
   }
 
   /** Marks a tab as running before connection/child alignment awaits. */
@@ -130,6 +272,7 @@ export class QueriesController implements ReactiveController {
       return
     }
 
+    this.realignStaged(tabId, response.success ? response.result.columns.length : null)
     this.setRun(
       tabId,
       response.success ? { phase: 'done', result: response.result, sql } : { phase: 'error', error: response.error },
@@ -232,9 +375,23 @@ export class QueriesController implements ReactiveController {
   dropTab(tabId: string) {
     this.closeRunSession(this.runs.get(tabId))
     this.runs.delete(tabId)
+    this.drafts.delete(tabId)
+    this.edits.delete(tabId)
   }
 
   renameTab(oldId: string, newId: string) {
+    const draft = this.drafts.get(oldId)
+    if (draft) {
+      const nextDrafts = new Map(this.drafts)
+      nextDrafts.delete(oldId)
+      this.drafts = nextDrafts.set(newId, draft)
+    }
+    const edit = this.edits.get(oldId)
+    if (edit) {
+      const nextEdits = new Map(this.edits)
+      nextEdits.delete(oldId)
+      this.edits = nextEdits.set(newId, edit)
+    }
     const run = this.runs.get(oldId)
     if (!run) return
     const next = new Map(this.runs)
@@ -250,6 +407,12 @@ export class QueriesController implements ReactiveController {
         this.runs.delete(id)
       }
     }
+    for (const id of [...this.drafts.keys()]) {
+      if (!this.tabExists(id)) this.drafts.delete(id)
+    }
+    for (const id of [...this.edits.keys()]) {
+      if (!this.tabExists(id)) this.edits.delete(id)
+    }
   }
 
   /** Workspace switch: results, tasks and history all belong to the old one. */
@@ -259,6 +422,8 @@ export class QueriesController implements ReactiveController {
     this.generation += 1
     for (const run of this.runs.values()) this.closeRunSession(run)
     this.runs = new Map()
+    this.drafts = new Map()
+    this.edits = new Map()
     this.history = []
     this.tasks = []
     this.host.requestUpdate()

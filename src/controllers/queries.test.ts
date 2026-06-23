@@ -111,6 +111,100 @@ describe('QueriesController.execute', () => {
   })
 })
 
+describe('QueriesController drafts', () => {
+  it('adds, edits, and drops staged new rows', () => {
+    const controller = new QueriesController(host(), () => true)
+
+    controller.addDraft('t1', 2)
+    controller.addDraft('t1', 2)
+    controller.setDraftCell('t1', 1, 0, 'hi')
+    expect(controller.draftsFor('t1').map((row) => row.cells)).toEqual([[null, null], ['hi', null]])
+
+    controller.removeDraft('t1', 0)
+    expect(controller.draftsFor('t1').map((row) => row.cells)).toEqual([['hi', null]])
+
+    controller.dropDrafts('t1', [0])
+    expect(controller.draftsFor('t1')).toEqual([])
+    expect(controller.drafts.has('t1')).toBe(false)
+  })
+
+  it('inserts a new row below its anchor at the given index, clamping out-of-range', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.addDraft('t1', 1, 0) // [A] anchored below result row 0
+    controller.setDraftCell('t1', 0, 0, 'A')
+    controller.addDraft('t1', 1, 0, 1) // append below A → [A, B]
+    controller.setDraftCell('t1', 1, 0, 'B')
+    controller.addDraft('t1', 1, 0, 1) // below A → [A, C, B]
+    controller.setDraftCell('t1', 1, 0, 'C')
+    expect(controller.draftsFor('t1').map((row) => row.cells[0])).toEqual(['A', 'C', 'B'])
+
+    controller.addDraft('t1', 1, 0, 99) // out of range → appended
+    expect(controller.draftsFor('t1')).toHaveLength(4)
+    expect(controller.draftsFor('t1')[3]).toEqual({ after: 0, cells: [null] })
+  })
+
+  it('clears a tab\'s drafts when a run returns a different column count', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+    controller.addDraft('t1', 1) // staged against a 1-column result
+
+    const done = controller.execute(runArgs)
+    settle({ success: true, result: { columns: ['a', 'b'], rows: [], rowCount: 0, durationMs: 1 } })
+    await done
+
+    expect(controller.draftsFor('t1')).toEqual([])
+  })
+
+  it('keeps drafts across a same-shape refresh', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+    controller.addDraft('t1', 1)
+
+    const done = controller.execute(runArgs)
+    settle({ success: true, result }) // result has 1 column ('n')
+    await done
+
+    expect(controller.draftsFor('t1')).toEqual([{ after: -1, cells: [null] }])
+  })
+
+  it('stages and clears cell edits, and clearStaged drops drafts and edits together', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 1, 'Grace')
+    controller.setEdit('t1', 2, 0, '9')
+    expect(controller.editsList('t1')).toEqual([
+      { row: 0, col: 1, value: 'Grace' },
+      { row: 2, col: 0, value: '9' },
+    ])
+
+    controller.clearEdit('t1', 0, 1)
+    expect(controller.editsList('t1')).toEqual([{ row: 2, col: 0, value: '9' }])
+
+    controller.addDraft('t1', 2)
+    controller.clearStaged('t1')
+    expect(controller.editsFor('t1').size).toBe(0)
+    expect(controller.draftsFor('t1')).toEqual([])
+  })
+
+  it('clears row-indexed cell edits on a same-shape rerun', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'stale')
+
+    const done = controller.execute(runArgs)
+    settle({ success: true, result })
+    await done
+
+    expect(controller.editsFor('t1').size).toBe(0)
+  })
+
+  it('drops drafts when its tab closes', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.addDraft('t1', 1)
+    controller.dropTab('t1')
+    expect(controller.draftsFor('t1')).toEqual([])
+  })
+})
+
 describe('QueriesController paging', () => {
   it('appends a fetched page on loadMore', async () => {
     const api = stubSqlkit({ fetchRows: vi.fn(() => Promise.resolve({ success: true, rows: [[2], [3]] })) })

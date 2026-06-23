@@ -49,8 +49,17 @@ const tab = (id: string, content: string): SqlTabState => ({
 function make() {
   let activeChildDb: string | null = 'db_a'
   let activeTab: SqlTabState | null = tab('tab-a', 'select id, name from accounts')
+  let drafts: Array<{ after: number; cells: Array<string | null> }> = []
+  let edits: Array<{ row: number; col: number; value: string }> = []
   const dialogs = new DialogsController({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
   const runSql = vi.fn(() => Promise.resolve())
+  const dropDrafts = vi.fn((_tabId: string, indexes: number[]) => {
+    const drop = new Set(indexes)
+    drafts = drafts.filter((_, i) => !drop.has(i))
+  })
+  const clearEdits = vi.fn(() => {
+    edits = []
+  })
   const ctrl = new ResultEditingController({
     activeTab: () => activeTab,
     activeDbId: () => profile.id,
@@ -61,13 +70,21 @@ function make() {
     columns: () => columns,
     dialogs,
     runSql,
+    drafts: () => drafts,
+    dropDrafts,
+    edits: () => edits,
+    clearEdits,
   })
   return {
     ctrl,
     dialogs,
     runSql,
+    dropDrafts,
+    clearEdits,
     setActiveChild: (next: string | null) => (activeChildDb = next),
     setActiveTab: (next: SqlTabState | null) => (activeTab = next),
+    setDrafts: (next: Array<{ after: number; cells: Array<string | null> }>) => (drafts = next),
+    setEdits: (next: Array<{ row: number; col: number; value: string }>) => (edits = next),
   }
 }
 
@@ -76,18 +93,84 @@ afterEach(() => {
 })
 
 describe('ResultEditingController', () => {
-  it('executes a reviewed cell write against the child database captured during review', async () => {
+  it('commits a staged cell edit as an UPDATE against the child captured at review', async () => {
     const runQuery = vi.fn(() => Promise.resolve({ success: true, result: { columns: [], rows: [], rowCount: 1, durationMs: 1 } }))
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
-    const { ctrl, dialogs, runSql, setActiveChild, setActiveTab } = make()
+    const { ctrl, dialogs, runSql, clearEdits, setEdits, setActiveChild, setActiveTab } = make()
 
-    ctrl.cellEdit({ row: 0, col: 1, value: 'Grace' })
+    setEdits([{ row: 0, col: 1, value: 'Grace' }])
+    ctrl.saveChanges()
     setActiveChild('db_b')
     setActiveTab(tab('tab-b', 'select * from other_table'))
     dialogs.acceptReview()
 
     await vi.waitFor(() => expect(runQuery).toHaveBeenCalled())
     expect(runQuery).toHaveBeenCalledWith('p1', 'db_a', expect.stringContaining('UPDATE'), expect.any(Array))
+    expect(clearEdits).toHaveBeenCalledWith('tab-a')
+    // The active tab moved away before accepting, so no refresh runs there.
     expect(runSql).not.toHaveBeenCalled()
+  })
+
+  it('keeps staged edits when the reviewed UPDATE affects no rows', async () => {
+    const runQuery = vi.fn(() => Promise.resolve({ success: true, result: { columns: [], rows: [], rowCount: 0, durationMs: 1 } }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
+    const { ctrl, dialogs, runSql, clearEdits, setEdits } = make()
+
+    setEdits([{ row: 0, col: 1, value: 'Grace' }])
+    ctrl.saveChanges()
+    dialogs.acceptReview()
+
+    await vi.waitFor(() => expect(runQuery).toHaveBeenCalledOnce())
+    expect(clearEdits).not.toHaveBeenCalled()
+    expect(runSql).not.toHaveBeenCalled()
+    expect(dialogs.confirm?.message).toBe('Save failed')
+    expect(dialogs.confirm?.detail).toContain('affected no rows')
+  })
+
+  it('saves edits and new rows together: one UPDATE then an INSERT per row', async () => {
+    const runQuery = vi.fn(() => Promise.resolve({ success: true, result: { columns: [], rows: [], rowCount: 1, durationMs: 1 } }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
+    const { ctrl, dialogs, runSql, dropDrafts, clearEdits, setDrafts, setEdits } = make()
+
+    setEdits([{ row: 0, col: 1, value: 'Grace' }])
+    // Row 1 fills only name (id untouched → DB default); row 2 fills both.
+    setDrafts([
+      { after: -1, cells: [null, 'Bob'] },
+      { after: -1, cells: ['7', 'Cy'] },
+    ])
+    ctrl.saveChanges()
+
+    expect(dialogs.review?.sql).toContain('UPDATE "public"."accounts"')
+    expect(dialogs.review?.sql).toContain('INSERT INTO "public"."accounts" ("name")')
+    expect(dialogs.review?.sql).toContain('INSERT INTO "public"."accounts" ("id", "name")')
+    dialogs.acceptReview()
+
+    await vi.waitFor(() => expect(runQuery).toHaveBeenCalledTimes(3))
+    expect(runQuery).toHaveBeenNthCalledWith(1, 'p1', 'db_a', expect.stringContaining('UPDATE'), expect.any(Array))
+    expect(runQuery).toHaveBeenNthCalledWith(2, 'p1', 'db_a', expect.stringContaining('INSERT'), ['Bob'])
+    expect(runQuery).toHaveBeenNthCalledWith(3, 'p1', 'db_a', expect.stringContaining('INSERT'), [7, 'Cy'])
+    expect(clearEdits).toHaveBeenCalledWith('tab-a')
+    expect(dropDrafts).toHaveBeenCalledWith('tab-a', [0, 1])
+    expect(runSql).toHaveBeenCalledOnce()
+  })
+
+  it('keeps un-inserted rows and reports when a change fails midway', async () => {
+    const runQuery = vi
+      .fn()
+      .mockResolvedValueOnce({ success: true, result: { columns: [], rows: [], rowCount: 1, durationMs: 1 } })
+      .mockResolvedValueOnce({ success: false, error: 'duplicate key' })
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
+    const { ctrl, dialogs, runSql, dropDrafts, setDrafts } = make()
+
+    setDrafts([{ after: -1, cells: ['1', 'A'] }, { after: -1, cells: ['2', 'B'] }])
+    ctrl.saveChanges()
+    dialogs.acceptReview()
+
+    await vi.waitFor(() => expect(runQuery).toHaveBeenCalledTimes(2))
+    // Only the first row landed: drop just it, refresh, and surface the failure.
+    expect(dropDrafts).toHaveBeenCalledWith('tab-a', [0])
+    expect(runSql).toHaveBeenCalledOnce()
+    expect(dialogs.confirm?.message).toBe('Save failed')
+    expect(dialogs.confirm?.detail).toContain('Saved 1 of 2')
   })
 })

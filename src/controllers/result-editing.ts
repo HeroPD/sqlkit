@@ -1,10 +1,19 @@
 import { firstStatement } from '../codemirror/run-query'
-import type { CellCoord, QueryRun } from '../components/results-panel'
+import type { QueryRun } from '../components/results-panel'
 import type { SqlTabState } from './contexts'
 import type { DialogsController } from './dialogs'
 import type { ColumnRef, ConnectionProfile, TableRef } from '../electron'
-import { buildBatchUpdate, buildDeleteRows, buildInsertDefault, buildUpdate } from '../sql-write'
-import { buildEditSpecs, hasResultCells, rowKeysForDelete, singleTableEditContext, type EditIssue } from '../result-editing'
+import { buildBatchUpdate, buildDeleteRows, buildInsert } from '../sql-write'
+import { previewSql } from '../components/review-query-dialog'
+import {
+  buildInsertRows,
+  buildPendingUpdate,
+  hasResultCells,
+  rowKeysForDelete,
+  singleTableEditContext,
+  type DraftRow,
+  type EditIssue,
+} from '../result-editing'
 
 type Deps = {
   activeTab: () => SqlTabState | null
@@ -16,6 +25,11 @@ type Deps = {
   columns: () => ColumnRef[]
   dialogs: DialogsController
   runSql: (sql: string) => Promise<void>
+  // The active tab's staged new rows and cell edits, and how to clear them once saved.
+  drafts: () => DraftRow[]
+  dropDrafts: (tabId: string, indexes: number[]) => void
+  edits: () => Array<{ row: number; col: number; value: string }>
+  clearEdits: (tabId: string) => void
 }
 
 // Owns result-grid write behavior: validation, prompts, review SQL, execution,
@@ -35,36 +49,93 @@ export class ResultEditingController {
     return singleTableEditContext(this.input()) !== null
   }
 
-  cellEdit(detail: { row: number; col: number; value: string }) {
-    const built = buildEditSpecs(this.input(), [{ row: detail.row, col: detail.col }], detail.value)
-    if (!built.ok) return this.notice(built.issue)
-    const [spec] = built.value.edits
-    if (!spec) return
-    const profile = this.activeProfileForWrite()
-    if (!profile) return
-    const { sql, params } = buildUpdate({ table: built.value.table, ...spec, dialect: profile.engine })
-    this.reviewWrite(profile, sql, params)
+  /** Whether there is anything staged to save (cell edits or new rows). */
+  hasPendingChanges() {
+    return this.deps.edits().length > 0 || this.deps.drafts().length > 0
   }
 
-  promptCellsEdit(cells: CellCoord[]) {
-    if (!cells.length) return
-    this.deps.dialogs.prompt = {
-      message: cells.length === 1 ? 'Edit Cell' : `Edit ${cells.length} Cells`,
-      detail: 'Enter the value to write. Empty writes NULL for nullable columns.',
-      confirmLabel: 'Review Update',
-      placeholder: 'new value',
-      allowEmpty: true,
-      trim: false,
-      action: (value) => this.reviewCellsEdit(cells, value),
+  // Commits every staged change together: one batch UPDATE for the edited cells
+  // plus one INSERT per new row, shown in the review dialog before running.
+  saveChanges() {
+    const profile = this.activeProfileForWrite()
+    if (!profile) return
+    const editsList = this.deps.edits()
+    const drafts = this.deps.drafts()
+    if (!editsList.length && !drafts.length) return
+    const input = this.input()
+    const statements: Array<{ sql: string; params: unknown[] }> = []
+
+    let hasUpdate = false
+    if (editsList.length) {
+      const built = buildPendingUpdate(input, editsList)
+      if (!built.ok) return this.notice(built.issue)
+      statements.push(buildBatchUpdate({ table: built.value.table, edits: built.value.edits, dialect: profile.engine }))
+      hasUpdate = true
+    }
+
+    if (drafts.length) {
+      const built = buildInsertRows(input, drafts)
+      if (!built.ok) return this.notice(built.issue)
+      for (const row of built.value.rows) {
+        statements.push(buildInsert({ table: built.value.table, columns: row.columns, values: row.values, dialect: profile.engine }))
+      }
+    }
+
+    const display = statements.map((statement) => previewSql(statement.sql, statement.params)).join(';\n\n')
+    const childDb = this.deps.activeChildDb()
+    const tab = this.deps.activeTab()
+    const tabId = tab?.id ?? null
+    const refreshSql = tab ? firstStatement(tab.content) || tab.content : null
+    this.deps.dialogs.review = {
+      sql: display,
+      params: [],
+      run: () => void this.runChanges(profile, childDb, statements, hasUpdate, tabId, refreshSql),
     }
   }
 
-  addRow() {
-    const ctx = singleTableEditContext(this.input())
-    const profile = this.activeProfileForWrite()
-    if (!ctx || !profile) return
-    const { sql, params } = buildInsertDefault(ctx.table)
-    this.reviewWrite(profile, sql, params)
+  private async runChanges(
+    profile: ConnectionProfile,
+    childDb: string | null,
+    statements: Array<{ sql: string; params: unknown[] }>,
+    hasUpdate: boolean,
+    tabId: string | null,
+    refreshSql: string | null,
+  ) {
+    // No cross-statement transaction: pooling can route each call to a different
+    // backend, so a wrapping BEGIN/COMMIT wouldn't share a connection. Run in
+    // order (UPDATE first), stop at the first failure, and only clear what landed.
+    let done = 0
+    let updateDone = false
+    let insertsDone = 0
+    for (const statement of statements) {
+      const isUpdate = hasUpdate && done === 0
+      let response
+      try {
+        response = await window.sqlkit.runQuery(profile.id, childDb, statement.sql, statement.params)
+      } catch (error) {
+        response = { success: false as const, error: (error as Error).message }
+      }
+      if (!response.success) {
+        this.deps.dialogs.notice(
+          'Save failed',
+          `Saved ${done} of ${statements.length} change${statements.length === 1 ? '' : 's'}. Change ${done + 1} failed: ${response.error}`,
+        )
+        break
+      }
+      if (response.result.rowCount === 0) {
+        this.deps.dialogs.notice(
+          'Save failed',
+          `Saved ${done} of ${statements.length} change${statements.length === 1 ? '' : 's'}. Change ${done + 1} affected no rows.`,
+        )
+        break
+      }
+      if (isUpdate) updateDone = true
+      else insertsDone += 1
+      done += 1
+    }
+    if (tabId && updateDone) this.deps.clearEdits(tabId)
+    if (tabId && insertsDone > 0) this.deps.dropDrafts(tabId, Array.from({ length: insertsDone }, (_, i) => i))
+    if ((updateDone || insertsDone > 0) && refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)
   }
 
   deleteRows(rows: number[]) {
@@ -74,15 +145,6 @@ export class ResultEditingController {
     const keys = rowKeysForDelete(ctx, rows)
     if (!keys.ok) return this.notice(keys.issue)
     const { sql, params } = buildDeleteRows({ table: ctx.table, rows: keys.value, dialect: profile.engine })
-    this.reviewWrite(profile, sql, params)
-  }
-
-  private reviewCellsEdit(cells: CellCoord[], value: string) {
-    const built = buildEditSpecs(this.input(), cells, value)
-    if (!built.ok) return this.notice(built.issue)
-    const profile = this.activeProfileForWrite()
-    if (!profile) return
-    const { sql, params } = buildBatchUpdate({ table: built.value.table, edits: built.value.edits, dialect: profile.engine })
     this.reviewWrite(profile, sql, params)
   }
 

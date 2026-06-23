@@ -45,7 +45,6 @@ import { quoteQualified } from '../sql-write'
 import { stripExplain } from '../sql-types'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
-import type { CellCoord } from './results-panel'
 
 const VIEWS = [
   { id: 'explorer', title: 'Explorer', icon: 'codicon-files', hint: 'No files yet.' },
@@ -191,6 +190,10 @@ export class WorkbenchScreen extends LitElement {
     columns: () => (this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? []) : []),
     dialogs: this._dialogs,
     runSql: (sql) => this._runSql(sql),
+    drafts: () => this._queries.draftsFor(this._ctx.activeTabId),
+    dropDrafts: (tabId, indexes) => this._queries.dropDrafts(tabId, indexes),
+    edits: () => this._queries.editsList(this._ctx.activeTabId),
+    clearEdits: (tabId) => this._queries.clearEdits(tabId),
   })
 
   // Server-side schema mutations (drop/truncate/matview refresh, create/drop
@@ -229,7 +232,7 @@ export class WorkbenchScreen extends LitElement {
         this._ctx.newQuery()
         break
       case 'save':
-        void this._fileOps.saveActive()
+        this._saveActive()
         break
       case 'save-as':
         void this._fileOps.saveActiveAs()
@@ -238,6 +241,14 @@ export class WorkbenchScreen extends LitElement {
         if (this._ctx.activeTabId) this._requestCloseTab(this._ctx.activeTabId)
         break
     }
+  }
+
+  private _saveActive() {
+    if (this._resultEditing.hasPendingChanges()) {
+      this._resultEditing.saveChanges()
+      return
+    }
+    void this._fileOps.saveActive()
   }
 
   protected willUpdate(changed: PropertyValues) {
@@ -382,7 +393,7 @@ export class WorkbenchScreen extends LitElement {
     }
     if (key === 's') {
       event.preventDefault()
-      void this._fileOps.saveActive()
+      this._saveActive()
       return
     }
     if (key === 'enter') {
@@ -400,14 +411,22 @@ export class WorkbenchScreen extends LitElement {
 
   // --- tabs ------------------------------------------------------------------
 
-  // Close via ⌘W, the tab ✕, etc.: dirty editors get a confirmation first.
+  // Close via ⌘W, the tab ✕, etc.: unsaved editor/grid state gets a confirmation first.
   private _requestCloseTab(id: string) {
     const tab = this._ctx.tabs.find((entry) => entry.id === id)
-    if (tab?.kind === 'sql' && tab.content !== tab.savedContent) {
+    const fileDirty = tab?.kind === 'sql' && tab.content !== tab.savedContent
+    const stagedDirty = this._queries.hasStaged(id)
+    if (fileDirty || stagedDirty) {
+      const title = tab ? (tab.kind === 'sql' ? tab.name : tabTitle(tab)) : 'tab'
+      const detail = fileDirty && stagedDirty
+        ? 'Unsaved SQL changes and staged result edits/new rows will be lost.'
+        : fileDirty
+          ? 'Unsaved changes will be lost.'
+          : 'Staged result edits/new rows will be lost.'
       this._dialogs.confirm = {
-        message: `Close "${tab.name}" without saving?`,
-        detail: 'Unsaved changes will be lost.',
-        confirmLabel: 'Close Without Saving',
+        message: `Close "${title}" without saving?`,
+        detail,
+        confirmLabel: fileDirty ? 'Close Without Saving' : 'Discard and Close',
         action: () => this._ctx.closeTab(id),
       }
       return
@@ -837,12 +856,18 @@ export class WorkbenchScreen extends LitElement {
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
             .collapsed=${this._layout.panelCollapsed}
+            .drafts=${this._queries.draftsFor(this._ctx.activeTabId)}
+            .edits=${this._queries.editsFor(this._ctx.activeTabId)}
             @cancel-query=${this._onCancelQuery}
             @load-more=${this._onLoadMore}
             @cell-edit=${this._onCellEdit}
-            @cells-edit=${this._onCellsEdit}
+            @cell-edit-clear=${this._onCellEditClear}
             @add-row=${this._onAddRow}
             @delete-rows=${this._onDeleteRows}
+            @draft-edit=${this._onDraftEdit}
+            @draft-remove=${this._onDraftRemove}
+            @save-rows=${() => this._resultEditing.saveChanges()}
+            @discard-changes=${this._onDiscardChanges}
             @toggle-collapse=${() => this._layout.togglePanelCollapse()}
             style="height: ${this._layout.panelStyleHeight()}"
           ></results-panel>
@@ -1070,18 +1095,41 @@ export class WorkbenchScreen extends LitElement {
     if (this._ctx.activeTabId) void this._queries.loadMore(this._ctx.activeTabId)
   }
 
+  // A result-cell edit stages a pending change (committed later via ⌘S / Save),
+  // mirroring how new rows are staged — no per-edit dialog.
   private _onCellEdit(event: Event) {
     const { row, col, value } = (event as CustomEvent<{ row: number; col: number; value: string }>).detail
-    this._resultEditing.cellEdit({ row, col, value })
+    if (this._ctx.activeTabId) this._queries.setEdit(this._ctx.activeTabId, row, col, value)
   }
 
-  private _onCellsEdit(event: Event) {
-    const { cells } = (event as CustomEvent<{ cells: CellCoord[] }>).detail
-    this._resultEditing.promptCellsEdit(cells)
+  private _onCellEditClear(event: Event) {
+    const { row, col } = (event as CustomEvent<{ row: number; col: number }>).detail
+    if (this._ctx.activeTabId) this._queries.clearEdit(this._ctx.activeTabId, row, col)
   }
 
-  private _onAddRow() {
-    this._resultEditing.addRow()
+  // Stages an empty new row in the grid (committed later via ⌘S / Save rows),
+  // inserting below the selected row and expanding the panel if it was collapsed.
+  private _onAddRow(event: Event) {
+    const tabId = this._ctx.activeTabId
+    const run = this._queries.runFor(tabId)
+    if (!tabId || run.phase !== 'done') return
+    const { after, index } = (event as CustomEvent<{ after?: number; index?: number }>).detail ?? {}
+    this._queries.addDraft(tabId, run.result.columns.length, after, index)
+    this._layout.expandPanel()
+  }
+
+  private _onDraftEdit(event: Event) {
+    const { index, col, value } = (event as CustomEvent<{ index: number; col: number; value: string }>).detail
+    if (this._ctx.activeTabId) this._queries.setDraftCell(this._ctx.activeTabId, index, col, value)
+  }
+
+  private _onDraftRemove(event: Event) {
+    const { indexes } = (event as CustomEvent<{ indexes: number[] }>).detail
+    if (this._ctx.activeTabId) this._queries.dropDrafts(this._ctx.activeTabId, indexes)
+  }
+
+  private _onDiscardChanges() {
+    if (this._ctx.activeTabId) this._queries.clearStaged(this._ctx.activeTabId)
   }
 
   private _onDeleteRows(event: Event) {
@@ -1130,6 +1178,19 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onCloseWorkspace() {
+    if (this._queries.hasAnyStaged()) {
+      this._dialogs.confirm = {
+        message: 'Close workspace and discard staged result changes?',
+        detail: 'Unsaved result edits and new rows in open tabs will be lost.',
+        confirmLabel: 'Discard and Close',
+        action: () => this._closeWorkspaceNow(),
+      }
+      return
+    }
+    this._closeWorkspaceNow()
+  }
+
+  private _closeWorkspaceNow() {
     this.dispatchEvent(new CustomEvent('close-workspace', { bubbles: true, composed: true }))
   }
 

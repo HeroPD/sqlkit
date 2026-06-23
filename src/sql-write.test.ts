@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ColumnRef, TableRef } from './electron'
-import { buildBatchUpdate, buildDeleteRows, buildInsertDefault, buildUpdate, coerceValue, quoteQualified } from './sql-write'
+import { buildBatchUpdate, buildDeleteRows, buildInsert, buildInsertDefault, buildUpdate, coerceValue, quoteQualified } from './sql-write'
 
 const users: TableRef = { schema: 'public', name: 'users', kind: 'table' }
 const col = (over: Partial<ColumnRef>): ColumnRef => ({
@@ -178,6 +178,42 @@ describe('buildBatchUpdate', () => {
 describe('buildInsertDefault', () => {
   it('builds an INSERT DEFAULT VALUES statement', () => {
     expect(buildInsertDefault(users)).toEqual({ sql: 'INSERT INTO "public"."users" DEFAULT VALUES', params: [] })
+  })
+})
+
+describe('buildInsert', () => {
+  it('lists only filled columns, coercing values, with Postgres placeholders', () => {
+    const { sql, params } = buildInsert({
+      table: users,
+      columns: [
+        { name: 'id', columnMeta: col({ name: 'id', dataType: 'integer', nullable: false }) },
+        { name: 'name', columnMeta: col({ name: 'name' }) },
+      ],
+      values: ['42', 'Ada'],
+      dialect: 'postgresql',
+    })
+
+    expect(sql).toBe('INSERT INTO "public"."users" ("id", "name")\nVALUES ($1, $2)')
+    expect(params).toEqual([42, 'Ada'])
+  })
+
+  it('uses ? placeholders and coerces empty nullable cells to NULL on SQLite', () => {
+    const { sql, params } = buildInsert({
+      table: users,
+      columns: [{ name: 'name', columnMeta: col({ name: 'name', nullable: true }) }],
+      values: [''],
+      dialect: 'sqlite',
+    })
+
+    expect(sql).toBe('INSERT INTO "public"."users" ("name")\nVALUES (?)')
+    expect(params).toEqual([null])
+  })
+
+  it('falls back to DEFAULT VALUES when no columns were filled', () => {
+    expect(buildInsert({ table: users, columns: [], values: [], dialect: 'postgresql' })).toEqual({
+      sql: 'INSERT INTO "public"."users" DEFAULT VALUES',
+      params: [],
+    })
   })
 })
 

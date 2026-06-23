@@ -54,3 +54,66 @@ describe('WorkbenchScreen query orchestration', () => {
     expect(workbench._queries.execute).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('WorkbenchScreen staged result changes', () => {
+  it('routes app-menu Save to staged result changes before file save', () => {
+    const screen = new WorkbenchScreen()
+    screen.workspace = { name: 'Workspace', path: '/workspace' }
+    const saveChanges = vi.fn()
+    const saveActive = vi.fn()
+    const workbench = screen as never as {
+      _resultEditing: { hasPendingChanges(): boolean; saveChanges(): void }
+      _fileOps: { saveActive(): void }
+      _onMenuAction(action: 'save'): void
+    }
+    workbench._resultEditing = { hasPendingChanges: () => true, saveChanges }
+    workbench._fileOps = { saveActive }
+
+    workbench._onMenuAction('save')
+
+    expect(saveChanges).toHaveBeenCalledOnce()
+    expect(saveActive).not.toHaveBeenCalled()
+  })
+
+  it('confirms before closing a tab with staged result changes', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _ctx: { tabs: Array<{ id: string; kind: 'sql'; name: string; path: null; content: string; savedContent: string }> }
+      _queries: { setEdit(tabId: string, row: number, col: number, value: string): void }
+      _dialogs: { confirm: { message: string; confirmLabel: string } | null; acceptConfirm(): void }
+      _requestCloseTab(id: string): void
+    }
+    workbench._ctx.tabs = [{ id: 't1', kind: 'sql', name: 'Query.sql', path: null, content: 'select 1', savedContent: 'select 1' }]
+    workbench._queries.setEdit('t1', 0, 0, '2')
+
+    workbench._requestCloseTab('t1')
+
+    expect(workbench._ctx.tabs).toHaveLength(1)
+    expect(workbench._dialogs.confirm?.message).toContain('Query.sql')
+    expect(workbench._dialogs.confirm?.confirmLabel).toBe('Discard and Close')
+
+    workbench._dialogs.acceptConfirm()
+    expect(workbench._ctx.tabs).toHaveLength(0)
+  })
+
+  it('confirms before closing a workspace with staged result changes', () => {
+    const screen = new WorkbenchScreen()
+    const closed = vi.fn()
+    screen.addEventListener('close-workspace', closed)
+    const workbench = screen as never as {
+      _queries: { setEdit(tabId: string, row: number, col: number, value: string): void }
+      _dialogs: { confirm: { message: string; confirmLabel: string } | null; acceptConfirm(): void }
+      _onCloseWorkspace(): void
+    }
+    workbench._queries.setEdit('t1', 0, 0, '2')
+
+    workbench._onCloseWorkspace()
+
+    expect(closed).not.toHaveBeenCalled()
+    expect(workbench._dialogs.confirm?.message).toContain('Close workspace')
+    expect(workbench._dialogs.confirm?.confirmLabel).toBe('Discard and Close')
+
+    workbench._dialogs.acceptConfirm()
+    expect(closed).toHaveBeenCalledOnce()
+  })
+})

@@ -4,6 +4,12 @@ import type { SqlTabState } from './controllers/contexts'
 import { inferEditableTable } from './sql-edit-context'
 import type { BatchUpdateEdit, RowKey } from './sql-write'
 
+// An unsaved new row staged in the grid. `cells` align to the result's columns:
+// null = never touched (omit from INSERT so the DB default applies); a string =
+// a typed value ('' coerces to NULL for nullable columns). `after` is the result
+// row index it renders below (-1 = above the first row), purely for display.
+export type DraftRow = { after: number; cells: Array<string | null> }
+
 export type ResultEditInput = {
   tab: SqlTabState | null
   profileId: string | null
@@ -96,6 +102,75 @@ export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value
       return { ok: false, issue: { title: 'Cannot edit this row', detail: 'Its primary key value is missing from the result.' } }
     }
     specs.push({ column: ctx.columnName, columnMeta: ctx.columnMeta, value, pks })
+  }
+  return table && specs.length ? { ok: true, value: { table, edits: specs } } : { ok: false, issue: cannotEditColumn }
+}
+
+// The table column a result column maps to, for INSERT: from columnSources when
+// present, else the projected name (SELECT * / simple projection). null when the
+// column isn't a plain column of the editable table.
+export function insertableColumn(ctx: SingleTableEditContext, colIndex: number): { name: string; columnMeta: ColumnRef | undefined } | null {
+  const source = ctx.result.columnSources?.[colIndex]
+  const name = ctx.result.columnSources
+    ? source && tableMatchesSource(ctx.table, source)
+      ? source.column
+      : null
+    : ctx.result.columns[colIndex]
+  if (!name) return null
+  const columnMeta = ctx.columns.find((column) => column.name.toLowerCase() === name.toLowerCase())
+  return { name, columnMeta }
+}
+
+export function buildInsertRows(
+  input: ResultEditInput,
+  drafts: DraftRow[],
+): EditResult<{ table: TableRef; rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: string[] }> }> {
+  if (!drafts.length) return { ok: false, issue: { title: 'No new rows', detail: 'Add a row before saving.' } }
+  const ctx = singleTableEditContext(input)
+  if (!ctx) {
+    return { ok: false, issue: { title: 'Cannot add rows here', detail: 'New rows can only be saved to a result that maps to one editable table.' } }
+  }
+  const rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: string[] }> = []
+  for (const draft of drafts) {
+    const columns: { name: string; columnMeta: ColumnRef | undefined }[] = []
+    const values: string[] = []
+    for (let col = 0; col < draft.cells.length; col += 1) {
+      const cell = draft.cells[col]
+      if (cell === null || cell === undefined) continue
+      const ref = insertableColumn(ctx, col)
+      if (!ref) return { ok: false, issue: { title: 'Cannot save this row', detail: 'A filled column is not an editable column of the table.' } }
+      columns.push(ref)
+      values.push(cell)
+    }
+    rows.push({ columns, values })
+  }
+  return { ok: true, value: { table: ctx.table, rows } }
+}
+
+// Turns staged per-cell edits (each its own value) into batch-UPDATE specs,
+// validating that every cell is an editable column of one source table whose
+// primary key is present in the result.
+export function buildPendingUpdate(
+  input: ResultEditInput,
+  edits: Array<{ row: number; col: number; value: string }>,
+): EditResult<{ table: TableRef; edits: BatchUpdateEdit[] }> {
+  const specs: BatchUpdateEdit[] = []
+  let table: TableRef | null = null
+  for (const edit of edits) {
+    const ctx = cellEditContext(input, { row: edit.row, col: edit.col })
+    if (!ctx) return { ok: false, issue: cannotEditColumn }
+    if (table && !sameTable(table, ctx.table)) {
+      return { ok: false, issue: { title: 'Cannot save these edits', detail: 'Edited cells must belong to the same source table.' } }
+    }
+    table = ctx.table
+    if (!ctx.result.rows[edit.row]) {
+      return { ok: false, issue: { title: 'Cannot save an edit', detail: 'A row is no longer loaded in the current result.' } }
+    }
+    const pks = rowKey(ctx.result, edit.row, ctx.pkIndexes)
+    if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
+      return { ok: false, issue: { title: 'Cannot save an edit', detail: 'A row\'s primary key value is missing from the result.' } }
+    }
+    specs.push({ column: ctx.columnName, columnMeta: ctx.columnMeta, value: edit.value, pks })
   }
   return table && specs.length ? { ok: true, value: { table, edits: specs } } : { ok: false, issue: cannotEditColumn }
 }

@@ -18,13 +18,19 @@ export type QueryRun =
 
 export type CellCoord = { row: number; col: number }
 
+// A row in the displayed grid: a result row (by data index) or a staged new row
+// (by draft array index). The grid lays these out in one interleaved sequence,
+// so selection/navigation work in a single "display row" coordinate space.
+type RowRef = { kind: 'result'; row: number } | { kind: 'draft'; index: number }
+
 const NUM_COL_MIN_WIDTH = 30
 const NUM_COL_MAX_WIDTH = 96
 // Rows rendered beyond the viewport on each side — covers fast scrolls and the
 // sticky header's overlap without exact offset math.
 const OVERSCAN = 8
-// Row height used before the first real row is measured (rows are uniform).
-const ESTIMATED_ROW_HEIGHT = 22
+// Row height used before the first real row is measured; matches the pinned
+// cell height in CSS (tbody tr td height) so rows stay uniform.
+const ESTIMATED_ROW_HEIGHT = 25
 
 const formatCell = (value: unknown) => {
   if (typeof value === 'object' && value !== null) return JSON.stringify(value)
@@ -98,9 +104,20 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   collapsed = false
 
-  /** The cell currently being edited inline (absolute data indices). */
+  /** Unsaved new rows interleaved into the grid: `after` is the result row each
+   * one renders below (-1 = above the first row); `cells` align to result columns. */
+  @property({ attribute: false })
+  drafts: Array<{ after: number; cells: Array<string | null> }> = []
+
+  /** Staged result-cell edits, keyed "row:col" → new value, shown until saved. */
+  @property({ attribute: false })
+  edits: ReadonlyMap<string, string> = new Map()
+
+  /** The cell being edited inline, by row reference. `seed` is the character that
+   * started a type-to-edit (replaces the value); null edits the existing value.
+   * `sel` snapshots the selection at edit start so the committed value fills it. */
   @state()
-  private _editing: { row: number; col: number } | null = null
+  private _editing: { ref: RowRef; col: number; seed: string | null; sel: { r0: number; c0: number; r1: number; c1: number } | null } | null = null
 
   /** Cell the context menu was opened on: row/col index into the result
    * (col -1 on the # column, row -1 on the header row). */
@@ -110,8 +127,9 @@ export class ResultsPanel extends LitElement {
   @state()
   private _exportOpen = false
 
-  /** Selected cell rectangle: anchor (r0,c0) → focus (r1,c1), 0-based data
-   * indices. A single cell when anchor === focus; null when nothing selected. */
+  /** Selected cell rectangle in display-row space: anchor (r0,c0) → focus (r1,c1).
+   * Rows are display indices (result rows and staged rows share one numbering),
+   * so a selection can span both. A single cell when anchor === focus. */
   @state()
   private _sel: { r0: number; c0: number; r1: number; c1: number } | null = null
 
@@ -134,12 +152,39 @@ export class ResultsPanel extends LitElement {
   // Widths measured once per result, keyed by session so appends don't reflow.
   private _widthsCache: { key: unknown; widths: number[] } | null = null
 
+  // Display-order map (result rows + interleaved drafts), rebuilt when the rows
+  // or drafts arrays change. Lets selection work in one coordinate space.
+  private _displayCache: { rows: unknown; drafts: unknown; order: RowRef[]; resultToDisplay: number[]; draftToDisplay: number[] } | null = null
+  // A freshly-added draft to select once it arrives via the drafts property.
+  private _pendingSelectDraft: number | null = null
+  // First of a double-Esc: a second consecutive Escape discards staged changes.
+  private _escArmed = false
+  // Refocus the grid after a toolbar action so keyboard work keeps flowing.
+  private _focusGridPending = false
+
   protected willUpdate(changed: PropertyValues) {
+    if (changed.has('drafts')) {
+      // Select a just-added draft once it lands in the property.
+      if (this._pendingSelectDraft !== null) {
+        const display = this._display().draftToDisplay[this._pendingSelectDraft]
+        if (display !== undefined) this._sel = { r0: display, c0: 0, r1: display, c1: 0 }
+        this._pendingSelectDraft = null
+        this._focusGridPending = true
+      }
+      // Keep the selection within the grid if drafts were removed.
+      const len = this._display().order.length
+      if (this._sel && (this._sel.r1 >= len || this._sel.r0 >= len)) this._sel = null
+    }
     if (!changed.has('run')) return
     const key = this.run.phase === 'done' ? (this.run.result.sessionId ?? this.run.result) : this.run.phase
     if (key === this._lastKey) return // an append to the same result, not a new one
     this._lastKey = key
-    this._sel = null
+    // Land the selection on the first cell of a fresh result, so keyboard work
+    // and "add row below" have a defined anchor without a click.
+    this._sel =
+      this.run.phase === 'done' && this.run.result.rows.length && this.run.result.columns.length
+        ? { r0: 0, c0: 0, r1: 0, c1: 0 }
+        : null
     this._editing = null
     this._scrollTop = 0
     this._resetScroll = true
@@ -170,7 +215,17 @@ export class ResultsPanel extends LitElement {
       if (input) {
         this._editFocusPending = false
         input.focus()
-        input.select()
+        // Type-to-edit (seed) keeps the typed char and puts the caret at the end;
+        // a plain edit selects all so the first keystroke replaces.
+        if (this._editing?.seed != null) input.setSelectionRange(input.value.length, input.value.length)
+        else input.select()
+      }
+    }
+    if (this._focusGridPending) {
+      const table = this.shadowRoot?.querySelector<HTMLElement>('table')
+      if (table) {
+        this._focusGridPending = false
+        table.focus()
       }
     }
     this._measureRowHeight()
@@ -234,13 +289,124 @@ export class ResultsPanel extends LitElement {
     this.dispatchEvent(new CustomEvent('cancel-query', { bubbles: true, composed: true }))
   }
 
-  private _addRow = () => {
-    this.dispatchEvent(new CustomEvent('add-row', { bubbles: true, composed: true }))
+  // --- display-row mapping (result rows + interleaved drafts) -----------------
+
+  // The interleaved display order and the index of each result/draft row within
+  // it. Rebuilt only when the rows or drafts arrays change.
+  private _display() {
+    const result = this.run.phase === 'done' ? this.run.result : null
+    const rows = result?.rows
+    if (!rows) return { order: [] as RowRef[], resultToDisplay: [] as number[], draftToDisplay: [] as number[] }
+    const drafts = this.drafts
+    if (this._displayCache && this._displayCache.rows === rows && this._displayCache.drafts === drafts) return this._displayCache
+    const lastRow = rows.length - 1
+    const byAnchor = new Map<number, number[]>()
+    drafts.forEach((draft, i) => {
+      const anchor = draft.after < 0 ? -1 : Math.min(draft.after, lastRow)
+      const list = byAnchor.get(anchor) ?? []
+      list.push(i)
+      byAnchor.set(anchor, list)
+    })
+    const order: RowRef[] = []
+    const resultToDisplay = new Array<number>(rows.length)
+    const draftToDisplay = new Array<number>(drafts.length)
+    for (const i of byAnchor.get(-1) ?? []) {
+      draftToDisplay[i] = order.length
+      order.push({ kind: 'draft', index: i })
+    }
+    for (let r = 0; r < rows.length; r += 1) {
+      resultToDisplay[r] = order.length
+      order.push({ kind: 'result', row: r })
+      for (const i of byAnchor.get(r) ?? []) {
+        draftToDisplay[i] = order.length
+        order.push({ kind: 'draft', index: i })
+      }
+    }
+    this._displayCache = { rows, drafts, order, resultToDisplay, draftToDisplay }
+    return this._displayCache
   }
 
-  private _deleteRows(rows: number[]) {
-    if (!rows.length) return
-    this.dispatchEvent(new CustomEvent('delete-rows', { detail: { rows }, bubbles: true, composed: true }))
+  private _refAt(display: number): RowRef | null {
+    return this._display().order[display] ?? null
+  }
+
+  // The result-row index to scroll to so a display row is visible (a draft's
+  // anchor for drafts), used by keyboard navigation.
+  private _anchorRowOf(ref: RowRef): number {
+    if (ref.kind === 'result') return ref.row
+    const after = this.drafts[ref.index]?.after ?? -1
+    return Math.max(0, after)
+  }
+
+  // Values of a display row's cells, for copy. Drafts expose their staged cells;
+  // untouched draft cells read as null.
+  private _rowValuesAt(ref: RowRef): unknown[] {
+    if (this.run.phase !== 'done') return []
+    if (ref.kind === 'result') return this.run.result.rows[ref.row] ?? []
+    return this.drafts[ref.index]?.cells ?? []
+  }
+
+  private _addRow = () => {
+    // The new row renders below the focused cell's row: under the focused draft
+    // (same anchor, stacked after it), else under the focused result row.
+    let after = -1
+    let index: number | undefined
+    const ref = this._sel ? this._refAt(this._sel.r1) : null
+    if (ref?.kind === 'draft') {
+      after = this.drafts[ref.index]?.after ?? -1
+      index = ref.index + 1
+    } else if (ref?.kind === 'result') {
+      after = ref.row
+    }
+    this.dispatchEvent(new CustomEvent('add-row', { detail: { after, index }, bubbles: true, composed: true }))
+    // Select the new row once it arrives (it lands at `index`, or appended).
+    this._pendingSelectDraft = index ?? this.drafts.length
+  }
+
+  private _saveRows = () => {
+    if (!this._hasPending()) return
+    this.dispatchEvent(new CustomEvent('save-rows', { bubbles: true, composed: true }))
+  }
+
+  private _hasPending() {
+    return this.drafts.length > 0 || this.edits.size > 0
+  }
+
+  // Throws away every staged edit and new row (no DB write to undo).
+  private _discardChanges = () => {
+    this._escArmed = false
+    if (!this._hasPending()) return
+    this._editing = null
+    this.dispatchEvent(new CustomEvent('discard-changes', { bubbles: true, composed: true }))
+  }
+
+  private _removeDraft(indexes: number[]) {
+    if (!indexes.length) return
+    this.dispatchEvent(new CustomEvent('draft-remove', { detail: { indexes }, bubbles: true, composed: true }))
+  }
+
+  // Delete acts on the unified selection: result rows go through the DELETE
+  // review; staged draft rows are just discarded (nothing to confirm).
+  private _deleteSelection() {
+    const { results, drafts } = this._selectedRefs()
+    if (results.length) this.dispatchEvent(new CustomEvent('delete-rows', { detail: { rows: results }, bubbles: true, composed: true }))
+    this._removeDraft(drafts)
+  }
+
+  // Result-row data indices and draft array indices covered by the selection.
+  private _selectedRefs(): { results: number[]; drafts: number[] } {
+    const results: number[] = []
+    const drafts: number[] = []
+    if (!this._sel) return { results, drafts }
+    const { order } = this._display()
+    const r0 = Math.max(0, Math.min(this._sel.r0, this._sel.r1))
+    const r1 = Math.min(order.length - 1, Math.max(this._sel.r0, this._sel.r1))
+    for (let d = r0; d <= r1; d += 1) {
+      const ref = order[d]
+      if (ref?.kind === 'result') results.push(ref.row)
+      else if (ref?.kind === 'draft') drafts.push(ref.index)
+    }
+    return { results, drafts }
   }
 
   private _toggleCollapse = () => {
@@ -249,26 +415,54 @@ export class ResultsPanel extends LitElement {
 
   render() {
     const exportable = this.run.phase === 'done' && this.run.result.columns.length > 0
-    const showRowTools = this.rowEditable && exportable
-    const selectedRows = showRowTools ? this._selectedRows() : []
+    const pendingCount = this.drafts.length + this.edits.size
+    const showWriteTools = exportable && (this.rowEditable || pendingCount > 0)
+    const selected = this.rowEditable ? this._selectedRefs() : { results: [], drafts: [] }
+    const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
       <div class="head">
         <span>Results</span>
-        ${showRowTools
+        ${showWriteTools
           ? html`
-              <div class="toolbar" aria-label="Result row actions">
-                <button class="head-action" title="Add row" aria-label="Add row" @click=${this._addRow}>
-                  <i class="codicon codicon-add" aria-hidden="true"></i>
+              <div class="toolbar" aria-label="Result edit actions">
+                ${this.rowEditable
+                  ? html`
+                      <button class="head-action" title="Add new row" aria-label="Add new row" @click=${this._addRow}>
+                        <i class="codicon codicon-add" aria-hidden="true"></i>
+                      </button>
+                    `
+                  : ''}
+                <button
+                  class="head-action"
+                  title=${`Save ${pendingCount} pending change${pendingCount === 1 ? '' : 's'} (${isMac ? '⌘S' : 'Ctrl+S'})`}
+                  aria-label="Save changes"
+                  ?disabled=${pendingCount === 0}
+                  @click=${this._saveRows}
+                >
+                  <i class="codicon codicon-save" aria-hidden="true"></i>
                 </button>
                 <button
-                  class="head-action danger"
-                  title="Delete selected rows"
-                  aria-label="Delete selected rows"
-                  ?disabled=${selectedRows.length === 0}
-                  @click=${() => this._deleteRows(selectedRows)}
+                  class="head-action"
+                  title="Discard all changes (Esc Esc)"
+                  aria-label="Discard changes"
+                  ?disabled=${pendingCount === 0}
+                  @click=${this._discardChanges}
                 >
-                  <i class="codicon codicon-remove" aria-hidden="true"></i>
+                  <i class="codicon codicon-discard" aria-hidden="true"></i>
                 </button>
+                ${this.rowEditable
+                  ? html`
+                      <button
+                        class="head-action danger"
+                        title="Delete selected rows"
+                        aria-label="Delete selected rows"
+                        ?disabled=${!hasDeletable}
+                        @click=${() => this._deleteSelection()}
+                      >
+                        <i class="codicon codicon-remove" aria-hidden="true"></i>
+                      </button>
+                    `
+                  : ''}
               </div>
             `
           : ''}
@@ -340,11 +534,16 @@ export class ResultsPanel extends LitElement {
     if (this.run.phase !== 'done') return
     const cell = (event.target as HTMLElement).closest<HTMLTableCellElement>('td, th')
     if (!cell) return
+    // Draft rows aren't part of the result; no copy/edit menu for them.
+    if (cell.closest('tr')?.hasAttribute('data-draft')) return
     event.preventDefault()
     const dataRow = cell.closest('tr')?.getAttribute('data-row')
     const row = cell.tagName === 'TH' || dataRow === null || dataRow === undefined ? -1 : Number(dataRow)
     const col = cell.cellIndex - 1
-    if (row >= 0 && col >= 0 && !this._isSelected(row, col)) this._sel = { r0: row, c0: col, r1: row, c1: col }
+    if (row >= 0 && col >= 0) {
+      const display = this._displayIndexOfRef({ kind: 'result', row })
+      if (!this._isSelectedDisplay(display, col)) this._sel = { r0: display, c0: col, r1: display, c1: col }
+    }
     this._menu = { x: event.clientX, y: event.clientY, row, col }
   }
 
@@ -352,11 +551,9 @@ export class ResultsPanel extends LitElement {
     const menu = this._menu
     if (!menu || this.run.phase !== 'done') return ''
     const { result } = this.run
-    const editCells = this.editable ? this._cellsForMenu(menu) : []
+    const canEdit = this.editable && menu.row >= 0 && menu.col >= 0
     const items: MenuItem[] = [
-      ...(editCells.length
-        ? [{ id: 'edit-cells', label: editCells.length === 1 ? 'Edit Cell…' : `Edit ${editCells.length} Selected Cells…` }]
-        : []),
+      ...(canEdit ? [{ id: 'edit-cell', label: 'Edit…' }] : []),
       ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'copy-cell', label: 'Copy Cell' }] : []),
       ...(menu.row >= 0 ? [{ id: 'copy-row', label: 'Copy Row' }] : []),
       ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: 'Copy Column Name' }] : []),
@@ -386,81 +583,62 @@ export class ResultsPanel extends LitElement {
     if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
     if (action === 'copy-json') copy(toJson(result.columns, await this._allRows(result)))
     if (action === 'export') this._exportOpen = true
-    if (action === 'edit-cells') {
-      const cells = this._cellsForMenu(at)
-      if (cells.length) {
-        this.dispatchEvent(new CustomEvent('cells-edit', { detail: { cells }, bubbles: true, composed: true }))
-      }
-    }
+    // Edit opens the inline editor on the clicked cell; if it's inside a
+    // multi-cell selection, the committed value fills the whole selection.
+    if (action === 'edit-cell' && at.row >= 0 && at.col >= 0) this._beginEdit({ kind: 'result', row: at.row }, at.col, null)
   }
 
   // --- cell selection ---------------------------------------------------------
 
-  // Data-cell coordinates for a DOM node: the absolute row from data-row (not
-  // sectionRowIndex, which shifts with windowing's spacer rows), null for the
-  // # column / header / spacers.
-  private _dataCellAt(node: Element | null): { row: number; col: number } | null {
-    const cell = node?.closest<HTMLTableCellElement>('td')
-    if (!cell || cell.classList.contains('num')) return null
-    const dataRow = cell.closest('tr')?.getAttribute('data-row')
-    if (dataRow === null || dataRow === undefined) return null
-    const col = cell.cellIndex - 1
-    if (col < 0) return null
-    return { row: Number(dataRow), col }
+  // The display index of a row reference (result or draft) in the interleaved order.
+  private _displayIndexOfRef(ref: RowRef): number {
+    const map = this._display()
+    return (ref.kind === 'result' ? map.resultToDisplay[ref.row] : map.draftToDisplay[ref.index]) ?? 0
   }
 
-  private _isSelected(row: number, col: number): boolean {
+  // The cell a DOM node sits in, as a row reference + column; null for the #
+  // column, header, or windowing spacers. Handles both result and draft rows.
+  private _cellRefAt(node: Element | null): { ref: RowRef; col: number } | null {
+    const cell = node?.closest<HTMLTableCellElement>('td')
+    if (!cell || cell.classList.contains('num')) return null
+    const tr = cell.closest('tr')
+    const col = cell.cellIndex - 1
+    if (!tr || col < 0) return null
+    const draftIndex = tr.getAttribute('data-draft')
+    if (draftIndex !== null) return { ref: { kind: 'draft', index: Number(draftIndex) }, col }
+    const dataRow = tr.getAttribute('data-row')
+    if (dataRow !== null) return { ref: { kind: 'result', row: Number(dataRow) }, col }
+    return null
+  }
+
+  private _isSelectedDisplay(display: number, col: number): boolean {
     const s = this._sel
     if (!s) return false
     return (
-      row >= Math.min(s.r0, s.r1) &&
-      row <= Math.max(s.r0, s.r1) &&
+      display >= Math.min(s.r0, s.r1) &&
+      display <= Math.max(s.r0, s.r1) &&
       col >= Math.min(s.c0, s.c1) &&
       col <= Math.max(s.c0, s.c1)
     )
   }
 
-  private _cellsForMenu(at: { row: number; col: number }): CellCoord[] {
-    if (this.run.phase !== 'done' || at.row < 0 || at.col < 0) return []
-    const { rows, columns } = this.run.result
-    const bounds = this._sel && this._isSelected(at.row, at.col) ? this._sel : { r0: at.row, c0: at.col, r1: at.row, c1: at.col }
-    const r0 = Math.max(0, Math.min(bounds.r0, bounds.r1))
-    const r1 = Math.min(rows.length - 1, Math.max(bounds.r0, bounds.r1))
-    const c0 = Math.max(0, Math.min(bounds.c0, bounds.c1))
-    const c1 = Math.min(columns.length - 1, Math.max(bounds.c0, bounds.c1))
-    const cells: CellCoord[] = []
-    for (let row = r0; row <= r1; row += 1) {
-      for (let col = c0; col <= c1; col += 1) cells.push({ row, col })
-    }
-    return cells
-  }
-
-  private _selectedRows(): number[] {
-    if (this.run.phase !== 'done' || !this._sel) return []
-    const max = this.run.result.rows.length - 1
-    const r0 = Math.max(0, Math.min(this._sel.r0, this._sel.r1))
-    const r1 = Math.min(max, Math.max(this._sel.r0, this._sel.r1))
-    const rows: number[] = []
-    for (let row = r0; row <= r1; row += 1) rows.push(row)
-    return rows
-  }
-
   private _onCellPointerDown = (event: PointerEvent) => {
     if (event.button !== 0) return // leave right-click to the context menu
+    this._escArmed = false // a click breaks a pending double-Esc
     // Clicking inside the inline editor must not re-select or steal its focus.
     if ((event.target as HTMLElement).closest('.cell-edit')) return
-    const hit = this._dataCellAt(event.target as Element)
+    const hit = this._cellRefAt(event.target as Element)
     if (!hit) return
-    ;(event.currentTarget as HTMLElement).focus() // so Cmd/Ctrl-C reaches us
+    ;(event.currentTarget as HTMLElement).focus() // so keyboard nav / copy reach us
+    const display = this._displayIndexOfRef(hit.ref)
 
     // Shift-click extends the rectangle from the anchor; a plain press starts a
-    // drag. Both just set _sel — only the ~viewport rows re-render, so it's
-    // cheap and stays declarative (the cell class is bound to _isSelected).
+    // drag. Both just set _sel — only the ~viewport rows re-render, so it's cheap.
     if (event.shiftKey && this._sel) {
-      this._sel = { ...this._sel, r1: hit.row, c1: hit.col }
+      this._sel = { ...this._sel, r1: display, c1: hit.col }
       return
     }
-    this._sel = { r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col }
+    this._sel = { r0: display, c0: hit.col, r1: display, c1: hit.col }
     this._dragging = true
     window.addEventListener('pointermove', this._onDragMove)
     window.addEventListener('pointerup', this._endDrag)
@@ -470,9 +648,11 @@ export class ResultsPanel extends LitElement {
   private _onDragMove = (event: PointerEvent) => {
     if (!this._dragging || !this._sel) return
     // elementFromPoint must go through the shadow root to see inside it.
-    const hit = this._dataCellAt(this.shadowRoot?.elementFromPoint(event.clientX, event.clientY) ?? null)
-    if (!hit || (hit.row === this._sel.r1 && hit.col === this._sel.c1)) return
-    this._sel = { ...this._sel, r1: hit.row, c1: hit.col }
+    const hit = this._cellRefAt(this.shadowRoot?.elementFromPoint(event.clientX, event.clientY) ?? null)
+    if (!hit) return
+    const display = this._displayIndexOfRef(hit.ref)
+    if (display === this._sel.r1 && hit.col === this._sel.c1) return
+    this._sel = { ...this._sel, r1: display, c1: hit.col }
   }
 
   private _endDrag = () => {
@@ -483,68 +663,219 @@ export class ResultsPanel extends LitElement {
     window.removeEventListener('pointercancel', this._endDrag)
   }
 
+  // --- keyboard navigation (DBeaver-style) ------------------------------------
+
+  // Moves the focus cell by (dRow, dCol); without shift the whole selection
+  // collapses onto it, with shift the anchor stays and the rectangle grows.
+  private _moveFocus(dRow: number, dCol: number, extend: boolean) {
+    const s = this._sel
+    if (!s || this.run.phase !== 'done') return
+    const len = this._display().order.length
+    const cols = this.run.result.columns.length
+    const r = Math.max(0, Math.min(len - 1, s.r1 + dRow))
+    const c = Math.max(0, Math.min(cols - 1, s.c1 + dCol))
+    this._sel = extend ? { ...s, r1: r, c1: c } : { r0: r, c0: c, r1: r, c1: c }
+    this._scrollDisplayIntoView(r)
+  }
+
+  // Tab/Shift-Tab move one cell horizontally, wrapping to the next/previous row.
+  private _moveTab(forward: boolean) {
+    const s = this._sel
+    if (!s || this.run.phase !== 'done') return
+    const len = this._display().order.length
+    const cols = this.run.result.columns.length
+    let r = s.r1
+    let c = s.c1 + (forward ? 1 : -1)
+    if (c >= cols) {
+      c = 0
+      r = Math.min(len - 1, r + 1)
+    } else if (c < 0) {
+      c = cols - 1
+      r = Math.max(0, r - 1)
+    }
+    this._sel = { r0: r, c0: c, r1: r, c1: c }
+    this._scrollDisplayIntoView(r)
+  }
+
+  private _scrollDisplayIntoView(display: number) {
+    const ref = this._refAt(display)
+    const body = this._bodyEl()
+    if (!ref || !body) return
+    const rowH = this._rowHeight || ESTIMATED_ROW_HEIGHT
+    const top = this._anchorRowOf(ref) * rowH
+    const bottom = top + rowH
+    if (top < body.scrollTop) body.scrollTop = top
+    else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight
+  }
+
+  private _copySelection() {
+    if (!this._sel || this.run.phase !== 'done') return
+    const { order } = this._display()
+    const r0 = Math.max(0, Math.min(this._sel.r0, this._sel.r1))
+    const r1 = Math.min(order.length - 1, Math.max(this._sel.r0, this._sel.r1))
+    const c0 = Math.min(this._sel.c0, this._sel.c1)
+    const c1 = Math.max(this._sel.c0, this._sel.c1)
+    const selected: unknown[][] = []
+    for (let d = r0; d <= r1; d += 1) {
+      const ref = order[d]
+      if (!ref) continue
+      const values = this._rowValuesAt(ref)
+      const cells: unknown[] = []
+      for (let c = c0; c <= c1; c += 1) cells.push(values[c])
+      selected.push(cells)
+    }
+    // cellsToTsv applies full TSV field escaping: an embedded tab/newline is
+    // quoted (stays one cell) and a formula-leading cell is neutralized.
+    void navigator.clipboard.writeText(cellsToTsv(selected))
+  }
+
+  private _onGridKeydown = (event: KeyboardEvent) => {
+    if (this.run.phase !== 'done') return
+    // A second consecutive Escape (with staged changes) discards them; the first
+    // just arms it. Any other key disarms, so only a genuine double-Esc fires.
+    if (event.key === 'Escape') {
+      if (!this._hasPending()) return
+      event.preventDefault()
+      if (this._escArmed) this._discardChanges()
+      else this._escArmed = true
+      return
+    }
+    this._escArmed = false
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
+      event.preventDefault()
+      this._copySelection()
+      return
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey || !this._sel) return
+    switch (event.key) {
+      case 'ArrowDown': event.preventDefault(); return this._moveFocus(1, 0, event.shiftKey)
+      case 'ArrowUp': event.preventDefault(); return this._moveFocus(-1, 0, event.shiftKey)
+      case 'ArrowRight': event.preventDefault(); return this._moveFocus(0, 1, event.shiftKey)
+      case 'ArrowLeft': event.preventDefault(); return this._moveFocus(0, -1, event.shiftKey)
+      case 'Tab': event.preventDefault(); return this._moveTab(!event.shiftKey)
+      case 'Enter':
+      case 'F2':
+        event.preventDefault()
+        return this._editAnchor(null)
+      default:
+        // Type-to-edit: a printable key opens the editor seeded with that char.
+        if (event.key.length === 1) {
+          event.preventDefault()
+          this._editAnchor(event.key)
+        }
+    }
+  }
+
   // --- cell editing -----------------------------------------------------------
 
+  // Edits the anchor (top-left) cell of the selection — so a typed value fills
+  // from the first selected cell, not the last.
+  private _editAnchor(seed: string | null) {
+    if (!this._sel) return
+    const display = Math.min(this._sel.r0, this._sel.r1)
+    const col = Math.min(this._sel.c0, this._sel.c1)
+    const ref = this._refAt(display)
+    if (ref) this._beginEdit(ref, col, seed)
+  }
+
   private _onCellDblClick = (event: MouseEvent) => {
-    if (!this.editable) return
     // Double-clicking inside the editor (e.g. to select a word) must not reset it.
     if ((event.target as HTMLElement).closest('.cell-edit')) return
-    const hit = this._dataCellAt(event.target as Element)
-    if (!hit) return
-    this._editing = hit
+    const hit = this._cellRefAt(event.target as Element)
+    if (hit) this._beginEdit(hit.ref, hit.col, null)
+  }
+
+  // Opens the inline editor on a cell; `seed` (a typed char) replaces the value.
+  // The current selection is snapshotted so the committed value fills all of it.
+  private _beginEdit(ref: RowRef, col: number, seed: string | null) {
+    if (ref.kind === 'result' && !this.editable) return
+    this._editing = { ref, col, seed, sel: this._sel ? { ...this._sel } : null }
     this._editFocusPending = true
+    this._scrollDisplayIntoView(this._displayIndexOfRef(ref))
   }
 
   private _onEditKeydown = (event: KeyboardEvent) => {
+    const input = event.target as HTMLInputElement
     if (event.key === 'Enter') {
       event.preventDefault()
-      this._commitEdit(event.target as HTMLInputElement)
+      this._commitEdit(input)
+      this._moveFocus(1, 0, false) // commit and drop to the next row
+      this._focusGridPending = true
+    } else if (event.key === 'Tab') {
+      event.preventDefault()
+      this._commitEdit(input)
+      this._moveTab(!event.shiftKey)
+      this._focusGridPending = true
     } else if (event.key === 'Escape') {
       event.preventDefault()
       this._editing = null
+      this._focusGridPending = true
     }
     // Don't let Cmd/Ctrl-C etc. bubble to the grid's copy handler while typing.
     event.stopPropagation()
   }
 
-  // Enter commits: emit the new value for the owner to turn into an UPDATE (it
-  // pops the review dialog). Unchanged values are a no-op.
+  // Commits the inline edit, filling every cell of the snapshotted selection
+  // with the value: draft cells stage onto the row, result cells stage a pending
+  // edit (unchanged is a no-op). Nothing writes to the DB until ⌘S / Save.
   private _commitEdit(input: HTMLInputElement) {
     const editing = this._editing
     this._editing = null
-    if (!editing || this.run.phase !== 'done') return
-    const original = this.run.result.rows[editing.row]?.[editing.col]
-    const originalText = original === null || original === undefined ? '' : formatCell(original)
-    if (input.value === originalText) return
-    this.dispatchEvent(
-      new CustomEvent('cell-edit', {
-        detail: { row: editing.row, col: editing.col, value: input.value },
-        bubbles: true,
-        composed: true,
-      }),
-    )
-  }
-
-  private _cancelEdit = () => {
-    this._editing = null
-  }
-
-  private _onGridKeydown = (event: KeyboardEvent) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
-      if (!this._sel || this.run.phase !== 'done') return
-      event.preventDefault()
-      const { rows } = this.run.result
-      const s = this._sel
-      const selected: unknown[][] = []
-      for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r += 1) {
-        const cells: unknown[] = []
-        for (let c = Math.min(s.c0, s.c1); c <= Math.max(s.c0, s.c1); c += 1) cells.push(rows[r]?.[c])
-        selected.push(cells)
+    if (!editing) return
+    const value = input.value
+    if (editing.seed === null && value === this._editCellText(editing.ref, editing.col)) return
+    for (const { ref, col } of this._editTargets(editing)) {
+      if (ref.kind === 'draft') {
+        this.dispatchEvent(new CustomEvent('draft-edit', { detail: { index: ref.index, col, value }, bubbles: true, composed: true }))
+      } else if (this.run.phase === 'done') {
+        const original = this.run.result.rows[ref.row]?.[col]
+        const originalText = original === null || original === undefined ? '' : formatCell(original)
+        const key = `${ref.row}:${col}`
+        const pending = this.edits.get(key)
+        const current = pending ?? originalText
+        if (value !== current) {
+          if (pending !== undefined && value === originalText) {
+            this.dispatchEvent(new CustomEvent('cell-edit-clear', { detail: { row: ref.row, col }, bubbles: true, composed: true }))
+          } else {
+            this.dispatchEvent(new CustomEvent('cell-edit', { detail: { row: ref.row, col, value }, bubbles: true, composed: true }))
+          }
+        }
       }
-      // cellsToTsv applies full TSV field escaping: an embedded tab/newline is
-      // quoted (stays one cell) and a formula-leading cell is neutralized.
-      void navigator.clipboard.writeText(cellsToTsv(selected))
     }
+  }
+
+  private _editCellText(ref: RowRef, col: number): string {
+    if (ref.kind === 'draft') return this.drafts[ref.index]?.cells[col] ?? ''
+    if (this.run.phase !== 'done') return ''
+    const original = this.run.result.rows[ref.row]?.[col]
+    const originalText = original === null || original === undefined ? '' : formatCell(original)
+    return this.edits.get(`${ref.row}:${col}`) ?? originalText
+  }
+
+  // The cells a commit writes to: the whole snapshotted selection (fill), or just
+  // the edited cell when there was no multi-cell selection.
+  private _editTargets(editing: { ref: RowRef; col: number; sel: { r0: number; c0: number; r1: number; c1: number } | null }) {
+    const s = editing.sel
+    if (!s) return [{ ref: editing.ref, col: editing.col }]
+    const { order } = this._display()
+    const r0 = Math.max(0, Math.min(s.r0, s.r1))
+    const r1 = Math.min(order.length - 1, Math.max(s.r0, s.r1))
+    const c0 = Math.min(s.c0, s.c1)
+    const c1 = Math.max(s.c0, s.c1)
+    const targets: Array<{ ref: RowRef; col: number }> = []
+    for (let d = r0; d <= r1; d += 1) {
+      const ref = order[d]
+      if (!ref) continue
+      for (let c = c0; c <= c1; c += 1) targets.push({ ref, col: c })
+    }
+    return targets
+  }
+
+  // Clicking away commits the staged value (a safe local change, like leaving a
+  // spreadsheet cell). The snapshotted selection makes the fill correct even
+  // though a click may have already moved the live selection.
+  private _onEditBlur = (event: FocusEvent) => {
+    this._commitEdit(event.target as HTMLInputElement)
   }
 
   private _status() {
@@ -604,9 +935,25 @@ export class ResultsPanel extends LitElement {
     // Only the visible window of loaded rows is in the DOM; spacer rows above
     // and below stand in for the rest so the scrollbar reflects the full set.
     const { first, last, rowH } = this._window()
+    const { resultToDisplay, draftToDisplay } = this._display()
     const colSpan = result.columns.length + 1
     const topPad = first * rowH
     const bottomPad = Math.max(0, (result.rows.length - last) * rowH)
+    // Staged rows are interleaved at their anchor (the result row they sit below;
+    // -1 = above the first row). A stale anchor past the result clamps to the last
+    // row. Only anchors inside the rendered window appear — the rest scroll in.
+    const lastRow = result.rows.length - 1
+    const draftsByAnchor = new Map<number, Array<{ draft: { cells: Array<string | null> }; index: number }>>()
+    this.drafts.forEach((draft, index) => {
+      const anchor = draft.after < 0 ? -1 : Math.min(draft.after, lastRow)
+      const list = draftsByAnchor.get(anchor) ?? []
+      list.push({ draft, index })
+      draftsByAnchor.set(anchor, list)
+    })
+    const draftsAfter = (anchor: number) =>
+      (draftsByAnchor.get(anchor) ?? []).map(({ draft, index }) =>
+        this._renderDraft(draft.cells, index, draftToDisplay[index] ?? 0, result.columns.length, numColWidth),
+      )
     return html`
       <table
         style="width: ${tableWidth}px"
@@ -628,34 +975,73 @@ export class ResultsPanel extends LitElement {
         </thead>
         <tbody>
           ${topPad > 0 ? html`<tr class="spacer" style="height: ${topPad}px"><td colspan=${colSpan}></td></tr>` : ''}
+          ${first === 0 ? draftsAfter(-1) : ''}
           ${result.rows.slice(first, last).map((row, i) => {
             const absRow = first + i
+            const display = resultToDisplay[absRow] ?? 0
+            const editing = this._editing?.ref.kind === 'result' && this._editing.ref.row === absRow ? this._editing : null
             return html`
               <tr data-row=${absRow} class=${absRow % 2 ? 'alt' : ''}>
                 <td class="num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">${absRow + 1}</td>
                 ${row.map((cell, col) => {
-                  const sel = this._isSelected(absRow, col) ? 'selected' : ''
-                  if (this._editing?.row === absRow && this._editing.col === col) {
-                    const initial = cell === null || cell === undefined ? '' : formatCell(cell)
-                    return html`<td class=${sel}>
+                  const sel = this._isSelectedDisplay(display, col) ? 'selected' : ''
+                  const original = cell === null || cell === undefined ? '' : formatCell(cell)
+                  const pending = this.edits.get(`${absRow}:${col}`)
+                  const cls = `${sel}${pending !== undefined ? ' dirty' : ''}`
+                  if (editing && editing.col === col) {
+                    const value = editing.seed ?? pending ?? original
+                    return html`<td class=${cls}>
                       <input
                         class="cell-edit"
-                        .value=${initial}
+                        .value=${value}
                         @keydown=${this._onEditKeydown}
-                        @blur=${this._cancelEdit}
+                        @blur=${this._onEditBlur}
                       />
                     </td>`
                   }
+                  if (pending !== undefined) {
+                    return pending === ''
+                      ? html`<td class=${cls}></td>`
+                      : html`<td class=${cls} title=${pending}>${pending}</td>`
+                  }
                   if (cell === null || cell === undefined) return html`<td class=${sel}><span class="null">NULL</span></td>`
-                  const text = formatCell(cell)
-                  return html`<td class=${sel} title=${text}>${text}</td>`
+                  return html`<td class=${sel} title=${original}>${original}</td>`
                 })}
               </tr>
+              ${draftsAfter(absRow)}
             `
           })}
           ${bottomPad > 0 ? html`<tr class="spacer" style="height: ${bottomPad}px"><td colspan=${colSpan}></td></tr>` : ''}
         </tbody>
       </table>
+    `
+  }
+
+  // A staged new row interleaved at its anchor: highlighted, with a discard
+  // button in the # column. Edited like a result cell, but commits to the draft.
+  private _renderDraft(cells: Array<string | null>, index: number, display: number, columnCount: number, numColWidth: number) {
+    const editing = this._editing?.ref.kind === 'draft' && this._editing.ref.index === index ? this._editing : null
+    return html`
+      <tr class="draft" data-draft=${index}>
+        <td class="num draft-num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">
+          <button class="draft-remove" title="Discard new row" aria-label="Discard new row" @click=${() => this._removeDraft([index])}>
+            <i class="codicon codicon-close" aria-hidden="true"></i>
+          </button>
+        </td>
+        ${Array.from({ length: columnCount }, (_, col) => {
+          const value = cells[col] ?? null
+          const sel = this._isSelectedDisplay(display, col) ? 'draft-sel' : ''
+          if (editing && editing.col === col) {
+            const initial = editing.seed ?? (value ?? '')
+            return html`<td class=${sel}>
+              <input class="cell-edit" .value=${initial} @keydown=${this._onEditKeydown} @blur=${this._onEditBlur} />
+            </td>`
+          }
+          if (value === null) return html`<td class=${sel}></td>`
+          if (value === '') return html`<td class=${sel}><span class="null">NULL</span></td>`
+          return html`<td class=${sel} title=${value}>${value}</td>`
+        })}
+      </tr>
     `
   }
 
@@ -809,6 +1195,7 @@ export class ResultsPanel extends LitElement {
 
       th,
       td {
+        box-sizing: border-box;
         padding: 3px 10px;
         text-align: left;
         border-bottom: 1px solid var(--grid-border);
@@ -834,6 +1221,17 @@ export class ResultsPanel extends LitElement {
 
       td {
         color: var(--text);
+        line-height: 18px;
+      }
+
+      /* Pin every content cell to one height (with border-box, so it includes
+         padding + the 1px separator) so rows are identical whether their cells
+         hold text, NULL, or nothing — an empty <td> has no line box, so content
+         alone sizes rows unevenly and throws off the windowing, which measures
+         one row and assumes the rest match. Spacer cells are excluded so the
+         windowing keeps their exact inline heights. */
+      tbody tr:not(.spacer) td {
+        height: 25px;
       }
 
       /* Zebra by absolute row index (set as a class) — nth-child would flip
@@ -884,11 +1282,68 @@ export class ResultsPanel extends LitElement {
         outline: none;
       }
 
-      /* Cell selection — wins over zebra striping and cell hover. */
+      /* Staged changes use dark theme-blended tints, not raw status colors, so
+         they read as pending state without glowing against the grid. */
+      tbody tr td.dirty {
+        background: color-mix(in srgb, var(--status-dot-warning) 9%, var(--editor-bg));
+        box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--status-dot-warning) 35%, var(--grid-border));
+        color: var(--text);
+      }
+
+      tbody tr td.dirty:has(.cell-edit) {
+        box-shadow: none;
+      }
+
+      /* Cell selection — wins over zebra striping, cell hover, and dirty tint. */
       tbody tr td.selected,
       tbody tr:hover td.selected {
         background: color-mix(in srgb, var(--accent) 28%, transparent);
         color: var(--text);
+      }
+
+      /* Unsaved new rows: a low-contrast insert tint until saved. The hover rule
+         below sits after the generic cell hover so it wins at equal specificity. */
+      tbody tr.draft td {
+        background: color-mix(in srgb, var(--status-dot-connected) 7%, var(--editor-bg));
+        color: var(--text);
+      }
+
+      tbody tr.draft:hover td:not(.num) {
+        background: color-mix(in srgb, var(--status-dot-connected) 11%, var(--editor-bg));
+      }
+
+      /* The anchored draft cell — after the draft rules so it wins at equal specificity. */
+      tbody tr.draft td.draft-sel,
+      tbody tr.draft:hover td.draft-sel {
+        background: color-mix(in srgb, var(--accent) 30%, transparent);
+        color: var(--text);
+      }
+
+      td.draft-num {
+        padding: 0;
+        box-shadow: inset 2px 0 0 color-mix(in srgb, var(--status-dot-connected) 45%, transparent);
+      }
+
+      /* The button fills the # cell and flex-centers the ✕, so it's centered both
+         axes regardless of the icon font's baseline metrics (an inline button
+         would sit slightly high). */
+      .draft-remove {
+        display: flex;
+        width: 100%;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        color: var(--text-3);
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        --codicon-size: 12px;
+      }
+
+      .draft-remove:hover {
+        color: var(--status-dot-error);
+        background: var(--list-hover);
       }
     `,
   ]
