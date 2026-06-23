@@ -1,5 +1,5 @@
 import { LitElement, css, html } from 'lit'
-import { customElement, property } from 'lit/decorators.js'
+import { customElement, property, query, state } from 'lit/decorators.js'
 
 export type MenuItem = { id: string; label: string; danger?: boolean }
 export type MenuPickDetail = { id: string }
@@ -18,6 +18,16 @@ export class ContextMenu extends LitElement {
 
   @property({ attribute: false })
   items: MenuItem[] = []
+
+  // Resolved position after clamping to the viewport; defaults to the raw x/y.
+  @state()
+  private _left = 0
+
+  @state()
+  private _top = 0
+
+  @query('.menu')
+  private _menuEl!: HTMLElement
 
   connectedCallback() {
     super.connectedCallback()
@@ -39,7 +49,7 @@ export class ContextMenu extends LitElement {
           this._close()
         }}
       ></div>
-      <div class="menu" style="left: ${this.x}px; top: ${this.y}px" role="menu">
+      <div class="menu" style="left: ${this._left}px; top: ${this._top}px" role="menu">
         ${this.items.map(
           (item) => html`
             <button
@@ -54,6 +64,29 @@ export class ContextMenu extends LitElement {
         )}
       </div>
     `
+  }
+
+  willUpdate(changed: Map<string, unknown>) {
+    // Paint at the pointer first; updated() then clamps once the menu has a size.
+    if (changed.has('x')) this._left = this.x
+    if (changed.has('y')) this._top = this.y
+  }
+
+  updated(changed: Map<string, unknown>) {
+    if (changed.has('x') || changed.has('y') || changed.has('items')) this._clamp()
+  }
+
+  // Keep the menu inside the viewport: measure it and shift left/up so it
+  // isn't clipped by the window edge when opened near the bottom or right.
+  private _clamp() {
+    const el = this._menuEl
+    if (!el) return
+    const margin = 4
+    const { width, height } = el.getBoundingClientRect()
+    const maxLeft = Math.max(margin, window.innerWidth - width - margin)
+    const maxTop = Math.max(margin, window.innerHeight - height - margin)
+    this._left = Math.min(Math.max(this.x, margin), maxLeft)
+    this._top = Math.min(Math.max(this.y, margin), maxTop)
   }
 
   private _onKeydown = (event: KeyboardEvent) => {
