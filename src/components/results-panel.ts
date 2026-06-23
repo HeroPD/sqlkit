@@ -79,6 +79,15 @@ function measureColumnWidths(columns: string[], rows: unknown[][]): number[] {
   })
 }
 
+function measureRecordColumnWidth(columns: string[]): number {
+  const ctx = document.createElement('canvas').getContext('2d')
+  const fallback = Math.max(...columns.map((column) => column.length), 1) * 7 + 28
+  if (!ctx) return Math.min(360, Math.max(120, fallback))
+  ctx.font = `600 11px ${getComputedStyle(document.body).fontFamily}`
+  const width = Math.max(...columns.map((column) => ctx.measureText(column).width), 0) + 28
+  return Math.min(360, Math.max(120, Math.ceil(width)))
+}
+
 // The panel under the SQL editor: header with row count + timing, body
 // showing the latest run (hint, spinner, error, or the results grid). The
 // host sets the panel's height; everything inside is this component's.
@@ -127,6 +136,9 @@ export class ResultsPanel extends LitElement {
   @state()
   private _exportOpen = false
 
+  @state()
+  private _record: { ref: RowRef; col: number } | null = null
+
   /** Selected cell rectangle in display-row space: anchor (r0,c0) → focus (r1,c1).
    * Rows are display indices (result rows and staged rows share one numbering),
    * so a selection can span both. A single cell when anchor === focus. */
@@ -161,6 +173,8 @@ export class ResultsPanel extends LitElement {
   private _escArmed = false
   // Refocus the grid after a toolbar action so keyboard work keeps flowing.
   private _focusGridPending = false
+  // Focus the record view after switching away from the grid table.
+  private _recordFocusPending = false
 
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('drafts')) {
@@ -171,6 +185,7 @@ export class ResultsPanel extends LitElement {
         this._pendingSelectDraft = null
         this._focusGridPending = true
       }
+      if (this._record?.ref.kind === 'draft' && !this.drafts[this._record.ref.index]) this._record = null
       // Keep the selection within the grid if drafts were removed.
       const len = this._display().order.length
       if (this._sel && (this._sel.r1 >= len || this._sel.r0 >= len)) this._sel = null
@@ -186,6 +201,7 @@ export class ResultsPanel extends LitElement {
         ? { r0: 0, c0: 0, r1: 0, c1: 0 }
         : null
     this._editing = null
+    this._record = null
     this._scrollTop = 0
     this._resetScroll = true
   }
@@ -226,6 +242,13 @@ export class ResultsPanel extends LitElement {
       if (table) {
         this._focusGridPending = false
         table.focus()
+      }
+    }
+    if (this._recordFocusPending) {
+      const record = this.shadowRoot?.querySelector<HTMLElement>('.record-view')
+      if (record) {
+        this._recordFocusPending = false
+        record.focus()
       }
     }
     this._measureRowHeight()
@@ -417,6 +440,7 @@ export class ResultsPanel extends LitElement {
     const exportable = this.run.phase === 'done' && this.run.result.columns.length > 0
     const pendingCount = this.drafts.length + this.edits.size
     const showWriteTools = exportable && (this.rowEditable || pendingCount > 0)
+    const canToggleRecord = exportable && (this._record !== null || (this._sel ? this._refAt(this._sel.r1) !== null : false))
     const selected = this.rowEditable ? this._selectedRefs() : { results: [], drafts: [] }
     const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
@@ -463,6 +487,21 @@ export class ResultsPanel extends LitElement {
                       </button>
                     `
                   : ''}
+              </div>
+            `
+          : ''}
+        ${exportable
+          ? html`
+              <div class="toolbar view-toolbar" aria-label="Result view actions">
+                <button
+                  class="head-action"
+                  title=${this._record ? 'Grid view (Tab)' : 'List view (Tab)'}
+                  aria-label=${this._record ? 'Grid view' : 'List view'}
+                  ?disabled=${!canToggleRecord}
+                  @click=${this._toggleRecordView}
+                >
+                  <i class="codicon codicon-${this._record ? 'table' : 'list-selection'}" aria-hidden="true"></i>
+                </button>
               </div>
             `
           : ''}
@@ -553,6 +592,7 @@ export class ResultsPanel extends LitElement {
     const { result } = this.run
     const canEdit = this.editable && menu.row >= 0 && menu.col >= 0
     const items: MenuItem[] = [
+      ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'view-record', label: 'View Record' }] : []),
       ...(canEdit ? [{ id: 'edit-cell', label: 'Edit…' }] : []),
       ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'copy-cell', label: 'Copy Cell' }] : []),
       ...(menu.row >= 0 ? [{ id: 'copy-row', label: 'Copy Row' }] : []),
@@ -583,9 +623,103 @@ export class ResultsPanel extends LitElement {
     if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
     if (action === 'copy-json') copy(toJson(result.columns, await this._allRows(result)))
     if (action === 'export') this._exportOpen = true
+    if (action === 'view-record' && at.row >= 0 && at.col >= 0) this._openRecord({ kind: 'result', row: at.row }, at.col)
     // Edit opens the inline editor on the clicked cell; if it's inside a
     // multi-cell selection, the committed value fills the whole selection.
     if (action === 'edit-cell' && at.row >= 0 && at.col >= 0) this._beginEdit({ kind: 'result', row: at.row }, at.col, null)
+  }
+
+  private _renderRecordView() {
+    const record = this._record
+    if (!record || this.run.phase !== 'done') return ''
+    const columns = this.run.result.columns
+    const rowLabel = record.ref.kind === 'result' ? `Row #${record.ref.row + 1}` : `New row #${record.ref.index + 1}`
+    return html`
+      <section
+        class="record-view"
+        role="region"
+        aria-label="Record view"
+        tabindex="0"
+        style="--record-column-w: ${measureRecordColumnWidth(columns)}px"
+        @keydown=${this._onRecordKeydown}
+      >
+        <div class="record-grid">
+          <div class="record-field record-header-row">
+            <div class="record-column" aria-hidden="true"></div>
+            <div class="record-value record-row-label">${rowLabel}</div>
+          </div>
+          ${columns.map((column, col) => {
+            const value = this._recordValue(record.ref, col)
+            const pending = record.ref.kind === 'result' && this.edits.has(`${record.ref.row}:${col}`)
+            const selected = col === record.col
+            return html`
+              <div class="record-field ${selected ? 'active' : ''} ${pending ? 'dirty-record' : ''}">
+                <div class="record-column" title=${column}>${column}</div>
+                <textarea
+                  class="record-value ${value === null || value === undefined ? 'null-value' : ''}"
+                  data-col=${col}
+                  rows="1"
+                  placeholder="NULL"
+                  .value=${this._recordEditText(value)}
+                  ?readonly=${!this._recordCellEditable(record.ref)}
+                  @focus=${() => this._focusRecordField(col)}
+                  @blur=${this._onRecordValueBlur}
+                ></textarea>
+              </div>
+            `
+          })}
+        </div>
+      </section>
+    `
+  }
+
+  private _recordValue(ref: RowRef, col: number): unknown {
+    if (ref.kind === 'draft') return this.drafts[ref.index]?.cells[col] ?? null
+    const pending = this.edits.get(`${ref.row}:${col}`)
+    return pending ?? (this.run.phase === 'done' ? this.run.result.rows[ref.row]?.[col] : null)
+  }
+
+  private _recordEditText(value: unknown): string {
+    if (value === null || value === undefined) return ''
+    return formatCell(value)
+  }
+
+  private _recordCellEditable(ref: RowRef): boolean {
+    return ref.kind === 'draft' || this.editable
+  }
+
+  private _focusRecordField(col: number) {
+    if (this._record) this._record = { ...this._record, col }
+  }
+
+  private _onRecordValueBlur = (event: FocusEvent) => {
+    this._commitRecordEdit(event.target as HTMLTextAreaElement)
+  }
+
+  private _commitRecordEdit(input: HTMLTextAreaElement) {
+    const record = this._record
+    const col = Number(input.dataset.col)
+    if (!record || !Number.isFinite(col)) return
+    const value = input.value
+    if (record.ref.kind === 'draft') {
+      const current = this.drafts[record.ref.index]?.cells[col] ?? ''
+      if (value !== current) {
+        this.dispatchEvent(new CustomEvent('draft-edit', { detail: { index: record.ref.index, col, value }, bubbles: true, composed: true }))
+      }
+      return
+    }
+    if (!this.editable || this.run.phase !== 'done') return
+    const original = this.run.result.rows[record.ref.row]?.[col]
+    const originalText = original === null || original === undefined ? '' : formatCell(original)
+    const key = `${record.ref.row}:${col}`
+    const pending = this.edits.get(key)
+    const current = pending ?? originalText
+    if (value === current) return
+    if (pending !== undefined && value === originalText) {
+      this.dispatchEvent(new CustomEvent('cell-edit-clear', { detail: { row: record.ref.row, col }, bubbles: true, composed: true }))
+    } else {
+      this.dispatchEvent(new CustomEvent('cell-edit', { detail: { row: record.ref.row, col, value }, bubbles: true, composed: true }))
+    }
   }
 
   // --- cell selection ---------------------------------------------------------
@@ -678,7 +812,8 @@ export class ResultsPanel extends LitElement {
     this._scrollDisplayIntoView(r)
   }
 
-  // Tab/Shift-Tab move one cell horizontally, wrapping to the next/previous row.
+  // In the inline editor, Tab/Shift-Tab moves one cell horizontally, wrapping to
+  // the next/previous row. On the grid itself, Tab opens the row record view.
   private _moveTab(forward: boolean) {
     const s = this._sel
     if (!s || this.run.phase !== 'done') return
@@ -695,6 +830,40 @@ export class ResultsPanel extends LitElement {
     }
     this._sel = { r0: r, c0: c, r1: r, c1: c }
     this._scrollDisplayIntoView(r)
+  }
+
+  private _openRecordAtSelection() {
+    if (!this._sel) return
+    const ref = this._refAt(this._sel.r1)
+    if (ref) this._openRecord(ref, this._sel.c1)
+  }
+
+  private _openRecord(ref: RowRef, col: number) {
+    this._record = { ref, col }
+    this._recordFocusPending = true
+  }
+
+  private _toggleRecordView = () => {
+    if (this._record) this._closeRecord()
+    else this._openRecordAtSelection()
+  }
+
+  private _closeRecord = () => {
+    this._record = null
+    this._focusGridPending = true
+  }
+
+  private _onRecordKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Tab') {
+      event.preventDefault()
+      if (event.target instanceof HTMLTextAreaElement) this._commitRecordEdit(event.target)
+      this._closeRecord()
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      this._closeRecord()
+    }
   }
 
   private _scrollDisplayIntoView(display: number) {
@@ -734,6 +903,11 @@ export class ResultsPanel extends LitElement {
     // A second consecutive Escape (with staged changes) discards them; the first
     // just arms it. Any other key disarms, so only a genuine double-Esc fires.
     if (event.key === 'Escape') {
+      if (this._record) {
+        event.preventDefault()
+        this._closeRecord()
+        return
+      }
       if (!this._hasPending()) return
       event.preventDefault()
       if (this._escArmed) this._discardChanges()
@@ -752,7 +926,7 @@ export class ResultsPanel extends LitElement {
       case 'ArrowUp': event.preventDefault(); return this._moveFocus(-1, 0, event.shiftKey)
       case 'ArrowRight': event.preventDefault(); return this._moveFocus(0, 1, event.shiftKey)
       case 'ArrowLeft': event.preventDefault(); return this._moveFocus(0, -1, event.shiftKey)
-      case 'Tab': event.preventDefault(); return this._moveTab(!event.shiftKey)
+      case 'Tab': event.preventDefault(); return this._openRecordAtSelection()
       case 'Enter':
       case 'F2':
         event.preventDefault()
@@ -921,6 +1095,7 @@ export class ResultsPanel extends LitElement {
     if (!result.columns.length) {
       return html`<p class="hint">OK — ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} affected.</p>`
     }
+    if (this._record) return this._renderRecordView()
     const widths = this._columnWidths(result)
     // table-layout: fixed only engages with a definite width; with width:
     // auto the browser falls back to AUTO layout and the colgroup widths
@@ -1061,6 +1236,7 @@ export class ResultsPanel extends LitElement {
     scrollbars,
     css`
       :host {
+        position: relative;
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
@@ -1098,6 +1274,11 @@ export class ResultsPanel extends LitElement {
       .head-action:hover:not(:disabled) {
         color: var(--text);
         background: var(--list-hover);
+      }
+
+      .head-action.active {
+        color: var(--text);
+        background: var(--list-selection);
       }
 
       .head-action.danger:hover:not(:disabled) {
@@ -1248,8 +1429,8 @@ export class ResultsPanel extends LitElement {
       }
 
       /* Hover highlights the single cell under the pointer, not the whole row. */
-      tbody tr:not(.spacer) td:not(.num):hover {
-        background: var(--row-hover);
+      tbody tr:not(.spacer) td:not(.num):not(.selected):not(.draft-sel):hover {
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
       }
 
       .num {
@@ -1297,7 +1478,7 @@ export class ResultsPanel extends LitElement {
       /* Cell selection — wins over zebra striping, cell hover, and dirty tint. */
       tbody tr td.selected,
       tbody tr:hover td.selected {
-        background: color-mix(in srgb, var(--accent) 28%, transparent);
+        background: color-mix(in srgb, var(--accent) 34%, transparent);
         color: var(--text);
       }
 
@@ -1344,6 +1525,89 @@ export class ResultsPanel extends LitElement {
       .draft-remove:hover {
         color: var(--status-dot-error);
         background: var(--list-hover);
+      }
+
+      .record-view {
+        display: flex;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--editor-bg);
+        outline: none;
+      }
+
+      .record-grid {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+        flex-direction: column;
+        overflow: auto;
+      }
+
+      .record-field {
+        display: grid;
+        grid-template-columns: var(--record-column-w) minmax(0, 1fr);
+        min-height: 25px;
+        border-bottom: 1px solid var(--grid-border);
+      }
+
+      .record-field.active {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+
+      .record-field.dirty-record {
+        background: color-mix(in srgb, var(--status-dot-warning) 7%, var(--editor-bg));
+      }
+
+      .record-column {
+        min-width: 0;
+        min-height: 25px;
+        box-sizing: border-box;
+        padding: 3px 10px;
+        color: var(--text);
+        font: inherit;
+        line-height: 18px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        border-right: 1px solid var(--grid-border);
+      }
+
+      .record-value {
+        width: 100%;
+        min-width: 0;
+        height: 25px;
+        min-height: 25px;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 3px 10px;
+        color: var(--text);
+        background: transparent;
+        border: 0;
+        font: inherit;
+        line-height: 18px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        resize: vertical;
+        outline: none;
+      }
+
+      .record-value::placeholder {
+        color: var(--text-3);
+        font-style: italic;
+      }
+
+      textarea.record-value:focus {
+        background: var(--input-bg);
+        box-shadow: inset 0 0 0 1px var(--focus-border);
+      }
+
+      textarea.record-value:read-only {
+        color: var(--text-3);
+        resize: none;
+        cursor: default;
       }
     `,
   ]

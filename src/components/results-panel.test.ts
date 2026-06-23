@@ -367,6 +367,93 @@ describe('results-panel DBeaver-style editing', () => {
     el.remove()
   })
 
+  it('Tab on a selected cell opens a record view for the focused row', async () => {
+    const el = await mountGrid(3)
+    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')).toBeNull()
+    key(el, { key: 'ArrowDown' }) // focus row 1
+    key(el, { key: 'ArrowRight' }) // focus column b
+    await el.updateComplete
+
+    key(el, { key: 'Tab' })
+    await el.updateComplete
+
+    const record = el.shadowRoot!.querySelector<HTMLElement>('.record-view')!
+    expect(record).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('table')).toBeNull()
+    expect(record.textContent).toContain('Row #2')
+    const header = record.querySelectorAll('.record-field')[0]!
+    expect(header.querySelector('.record-column')?.textContent).toBe('')
+    expect(header.querySelector('.record-value')?.textContent).toBe('Row #2')
+    expect(record.textContent).toContain('a')
+    expect(record.textContent).toContain('b')
+    expect([...record.querySelectorAll<HTMLTextAreaElement>('textarea.record-value')].map((input) => input.value)).toEqual(['a1', 'b1'])
+    expect(record.querySelectorAll('.record-field')[2]?.classList.contains('active')).toBe(true)
+
+    record.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+    expect(el.shadowRoot!.querySelector('table')).toBeTruthy()
+    el.remove()
+  })
+
+  it('the result toolbar List and Grid buttons switch result views', async () => {
+    const el = await mountGrid(2)
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')).toBeNull()
+    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')).toBeTruthy()
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+    expect(el.shadowRoot!.querySelector('table')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')).toBeNull()
+    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')).toBeTruthy()
+    el.remove()
+  })
+
+  it('record view sizes the column-name lane from the longest column name', async () => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.rowEditable = true
+    el.run = {
+      phase: 'done',
+      result: {
+        columns: ['id', 'very_long_column_name'],
+        rows: [[1, 'Ada']],
+        rowCount: 1,
+        durationMs: 1,
+      },
+    }
+    document.body.append(el)
+    await el.updateComplete
+
+    key(el, { key: 'Tab' })
+    await el.updateComplete
+
+    expect(el.shadowRoot!.querySelector<HTMLElement>('.record-view')!.getAttribute('style')).toContain('--record-column-w: 196px')
+    el.remove()
+  })
+
+  it('record view value edits stage cell changes', async () => {
+    const el = await mountGrid(2)
+    const cellEdit = vi.fn()
+    el.addEventListener('cell-edit', cellEdit)
+
+    key(el, { key: 'Tab' })
+    await el.updateComplete
+    const firstValue = el.shadowRoot!.querySelector<HTMLTextAreaElement>('textarea.record-value')!
+    firstValue.value = 'changed'
+    firstValue.dispatchEvent(new FocusEvent('blur'))
+
+    expect(cellEdit).toHaveBeenCalledOnce()
+    expect((cellEdit.mock.calls[0]![0] as CustomEvent).detail).toEqual({ row: 0, col: 0, value: 'changed' })
+    el.remove()
+  })
+
   it('delete on a mixed selection deletes result rows and discards drafts', async () => {
     const el = await mountGrid(2)
     el.drafts = [{ after: 0, cells: [null, null] }]
