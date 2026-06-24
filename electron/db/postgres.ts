@@ -4,12 +4,16 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, TableRef } from '../../src/electron'
-import { dialectFor } from './dialect'
+import { dialectFor } from '../../src/dialect'
 import { MAX_BUFFERED_ROWS } from './driver'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
+
+// Shared across the batch paths: a save statement that matches no rows aborts
+// the transaction, since the row it targeted is gone or changed.
+const BATCH_ZERO_ROWS = 'A change affected no rows; the row may have been modified or removed.'
 
 export function sslOptions(profile: ConnectionProfile): boolean | ConnectionOptions {
   const ssl = profile.ssl
@@ -129,6 +133,42 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         // Mirror pool.query: an errored client is destroyed, not reused.
         client.release(error as Error)
         throw (error as { code?: string }).code === '57014' ? new Error('Query cancelled.') : error
+      } finally {
+        running.delete(entry)
+      }
+    },
+
+    async runBatch(statements, childDb = null) {
+      if (!statements.length) return { success: true }
+      const pool = poolForQuery(childDb)
+      // One checked-out client for the whole batch: a pool-routed sequence would
+      // spread the statements across backends, so BEGIN/COMMIT couldn't bind them.
+      const client = await pool.connect()
+      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null }
+      running.add(entry)
+      let index = -1
+      try {
+        await client.query('BEGIN')
+        for (index = 0; index < statements.length; index += 1) {
+          const statement = statements[index]!
+          const result = await client.query(statement.sql, statement.params)
+          // A write that matched nothing means the row moved or vanished since
+          // the user reviewed it — abort the whole batch rather than half-apply.
+          if ((result.rowCount ?? 0) === 0) {
+            await client.query('ROLLBACK')
+            client.release()
+            return { success: false, failedIndex: index, error: BATCH_ZERO_ROWS }
+          }
+        }
+        await client.query('COMMIT')
+        client.release()
+        return { success: true }
+      } catch (error) {
+        // A statement (or COMMIT) threw: drop the client so its uncertain
+        // transaction state is discarded — closing the connection aborts the txn.
+        client.release(error as Error)
+        const cancelled = (error as { code?: string }).code === '57014'
+        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? 'Save cancelled.' : (error as Error).message }
       } finally {
         running.delete(entry)
       }

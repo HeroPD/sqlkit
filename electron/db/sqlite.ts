@@ -1,8 +1,8 @@
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ColumnRef, ConnectionProfile, QueryResult, TableInspection, TableRef } from '../../src/electron'
-import { dialectFor } from './dialect'
+import type { BatchResult, ColumnRef, ConnectionProfile, QueryResult, TableInspection, TableRef } from '../../src/electron'
+import { dialectFor } from '../../src/dialect'
 import type { Driver } from './driver'
 import type { SqliteParam } from './sqlite-engine'
 import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
@@ -120,6 +120,10 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
     async query(sql, params = [], _childDb = null, sort = null) {
       const finalSql = sort ? dialect.applyOrderBy(sql, sort) : sql
       return request<QueryResult>({ type: 'query', sql: finalSql, params: params as SqliteParam[] })
+    },
+
+    async runBatch(statements, _childDb = null) {
+      return request<BatchResult>({ type: 'runBatch', statements: statements as { sql: string; params: SqliteParam[] }[] })
     },
 
     async listTables() {

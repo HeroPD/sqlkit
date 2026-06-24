@@ -41,6 +41,7 @@ import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from '
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
+import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
 import { isReorderableQuery } from '../sql-order'
 import type { SortColumnDetail } from './results-panel'
@@ -493,7 +494,7 @@ export class WorkbenchScreen extends LitElement {
   // Double-click browse: a tab named after the table, pre-filled with a capped SELECT and run.
   // Re-browsing reuses the tab and runs its first statement, so trailing half-written SQL doesn't error.
   private _browseTable(profile: ConnectionProfile, table: TableRef) {
-    const sqlText = `SELECT * FROM ${quoteQualified(table)} LIMIT 200`
+    const sqlText = `SELECT * FROM ${quoteQualified(table, dialectFor(profile.engine))} LIMIT 200`
 
     const id = `browse:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
     // Capture the existing tab's content before addTab activates it: re-browse

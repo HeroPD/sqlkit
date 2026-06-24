@@ -81,6 +81,32 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  it('runs a write batch atomically: commits all, or rolls back all on failure', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table sqlkit_it.batch (id integer primary key, v text)')
+      // All statements succeed → both rows commit.
+      const ok = await driver.runBatch!([
+        { sql: 'insert into sqlkit_it.batch (id, v) values ($1, $2)', params: [1, 'a'] },
+        { sql: 'insert into sqlkit_it.batch (id, v) values ($1, $2)', params: [2, 'b'] },
+      ])
+      expect(ok).toEqual({ success: true })
+      expect((await driver.query('select count(*)::int from sqlkit_it.batch')).rows).toEqual([[2]])
+
+      // Second insert violates the primary key → the first must roll back too.
+      const bad = await driver.runBatch!([
+        { sql: 'insert into sqlkit_it.batch (id, v) values ($1, $2)', params: [3, 'c'] },
+        { sql: 'insert into sqlkit_it.batch (id, v) values ($1, $2)', params: [1, 'dup'] },
+      ])
+      expect(bad.success).toBe(false)
+      if (!bad.success) expect(bad.failedIndex).toBe(1)
+      expect((await driver.query('select count(*)::int from sqlkit_it.batch')).rows).toEqual([[2]])
+    } finally {
+      await driver.query('drop table if exists sqlkit_it.batch').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('surfaces SQL errors', async () => {
     const driver = await connectDriver()
     try {

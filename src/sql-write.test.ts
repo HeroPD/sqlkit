@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ColumnRef, TableRef } from './electron'
-import { buildBatchUpdate, buildDeleteRows, buildInsert, buildInsertDefault, buildUpdate, coerceValue, quoteQualified } from './sql-write'
+import { dialectFor } from './dialect'
+import { buildBatchUpdate, buildDeleteRows, buildInsert, buildInsertDefault, coerceValue, quoteQualified } from './sql-write'
 
 const users: TableRef = { schema: 'public', name: 'users', kind: 'table' }
 const col = (over: Partial<ColumnRef>): ColumnRef => ({
@@ -16,9 +17,14 @@ const col = (over: Partial<ColumnRef>): ColumnRef => ({
 
 describe('quoteQualified', () => {
   it('quotes schema.table, and just the name when schema is null', () => {
-    expect(quoteQualified(users)).toBe('"public"."users"')
-    expect(quoteQualified({ schema: null, name: 'users', kind: 'table' })).toBe('"users"')
-    expect(quoteQualified({ schema: null, name: 'we"ird', kind: 'table' })).toBe('"we""ird"')
+    expect(quoteQualified(users, dialectFor('postgresql'))).toBe('"public"."users"')
+    expect(quoteQualified({ schema: null, name: 'users', kind: 'table' }, dialectFor('sqlite'))).toBe('"users"')
+    expect(quoteQualified({ schema: null, name: 'we"ird', kind: 'table' }, dialectFor('postgresql'))).toBe('"we""ird"')
+  })
+
+  it('uses the engine dialect: backticks for MySQL, brackets for SQL Server', () => {
+    expect(quoteQualified(users, dialectFor('mysql'))).toBe('`public`.`users`')
+    expect(quoteQualified(users, dialectFor('sqlserver'))).toBe('[public].[users]')
   })
 })
 
@@ -58,72 +64,6 @@ describe('coerceValue', () => {
   })
 })
 
-describe('buildUpdate', () => {
-  it('builds a Postgres UPDATE with $-placeholders', () => {
-    const { sql, params } = buildUpdate({
-      table: users,
-      column: 'name',
-      columnMeta: col({}),
-      value: 'Ada',
-      pks: [{ name: 'id', value: 42 }],
-      dialect: 'postgresql',
-    })
-    expect(sql).toContain('UPDATE "public"."users"')
-    expect(sql).toContain('SET "name" = $1')
-    expect(sql).toContain('WHERE "id" = $2')
-    expect(params).toEqual(['Ada', 42])
-  })
-
-  it('uses ? placeholders for SQLite', () => {
-    const { sql, params } = buildUpdate({
-      table: { schema: null, name: 'notes', kind: 'table' },
-      column: 'body',
-      columnMeta: col({ schema: null, table: 'notes', name: 'body' }),
-      value: 'hi',
-      pks: [{ name: 'id', value: 7 }],
-      dialect: 'sqlite',
-    })
-    expect(sql).toContain('UPDATE "notes"')
-    expect(sql).toContain('SET "body" = ?')
-    expect(sql).toContain('WHERE "id" = ?')
-    expect(params).toEqual(['hi', 7])
-  })
-
-  it('ANDs every column of a composite primary key', () => {
-    const { sql, params } = buildUpdate({
-      table: users,
-      column: 'qty',
-      columnMeta: col({ name: 'qty', dataType: 'integer' }),
-      value: '5',
-      pks: [
-        { name: 'order_id', value: 10 },
-        { name: 'sku', value: 'A1' },
-      ],
-      dialect: 'postgresql',
-    })
-    expect(sql).toContain('WHERE "order_id" = $2 AND "sku" = $3')
-    expect(params).toEqual([5, 10, 'A1'])
-  })
-
-  it('coerces a boolean cell to 1/0 for a SQLite UPDATE', () => {
-    const { params } = buildUpdate({
-      table: { schema: null, name: 'flags', kind: 'table' },
-      column: 'active',
-      columnMeta: col({ schema: null, table: 'flags', name: 'active', dataType: 'boolean' }),
-      value: 'true',
-      pks: [{ name: 'id', value: 1 }],
-      dialect: 'sqlite',
-    })
-    expect(params).toEqual([1, 1])
-  })
-
-  it('throws without a primary key', () => {
-    expect(() =>
-      buildUpdate({ table: users, column: 'name', columnMeta: col({}), value: 'x', pks: [], dialect: 'postgresql' }),
-    ).toThrow()
-  })
-})
-
 describe('buildBatchUpdate', () => {
   it('builds one Postgres UPDATE for multiple selected cells', () => {
     const { sql, params } = buildBatchUpdate({
@@ -133,7 +73,7 @@ describe('buildBatchUpdate', () => {
         { column: 'name', columnMeta: col({ name: 'name' }), value: 'Ada', pks: [{ name: 'id', value: 2 }] },
         { column: 'qty', columnMeta: col({ name: 'qty', dataType: 'integer' }), value: '7', pks: [{ name: 'id', value: 1 }] },
       ],
-      dialect: 'postgresql',
+      engine: 'postgresql',
     })
 
     expect(sql).toContain('UPDATE "public"."users"')
@@ -154,7 +94,7 @@ describe('buildBatchUpdate', () => {
           pks: [{ name: 'id', value: 7 }],
         },
       ],
-      dialect: 'sqlite',
+      engine: 'sqlite',
     })
 
     expect(sql).toContain('UPDATE "notes"')
@@ -164,12 +104,12 @@ describe('buildBatchUpdate', () => {
   })
 
   it('throws without edits or primary keys', () => {
-    expect(() => buildBatchUpdate({ table: users, edits: [], dialect: 'postgresql' })).toThrow()
+    expect(() => buildBatchUpdate({ table: users, edits: [], engine: 'postgresql' })).toThrow()
     expect(() =>
       buildBatchUpdate({
         table: users,
         edits: [{ column: 'name', columnMeta: col({}), value: 'x', pks: [] }],
-        dialect: 'postgresql',
+        engine: 'postgresql',
       }),
     ).toThrow()
   })
@@ -177,7 +117,10 @@ describe('buildBatchUpdate', () => {
 
 describe('buildInsertDefault', () => {
   it('builds an INSERT DEFAULT VALUES statement', () => {
-    expect(buildInsertDefault(users)).toEqual({ sql: 'INSERT INTO "public"."users" DEFAULT VALUES', params: [] })
+    expect(buildInsertDefault(users, dialectFor('postgresql'))).toEqual({
+      sql: 'INSERT INTO "public"."users" DEFAULT VALUES',
+      params: [],
+    })
   })
 })
 
@@ -190,7 +133,7 @@ describe('buildInsert', () => {
         { name: 'name', columnMeta: col({ name: 'name' }) },
       ],
       values: ['42', 'Ada'],
-      dialect: 'postgresql',
+      engine: 'postgresql',
     })
 
     expect(sql).toBe('INSERT INTO "public"."users" ("id", "name")\nVALUES ($1, $2)')
@@ -202,7 +145,7 @@ describe('buildInsert', () => {
       table: users,
       columns: [{ name: 'name', columnMeta: col({ name: 'name', nullable: true }) }],
       values: [''],
-      dialect: 'sqlite',
+      engine: 'sqlite',
     })
 
     expect(sql).toBe('INSERT INTO "public"."users" ("name")\nVALUES (?)')
@@ -210,7 +153,7 @@ describe('buildInsert', () => {
   })
 
   it('falls back to DEFAULT VALUES when no columns were filled', () => {
-    expect(buildInsert({ table: users, columns: [], values: [], dialect: 'postgresql' })).toEqual({
+    expect(buildInsert({ table: users, columns: [], values: [], engine: 'postgresql' })).toEqual({
       sql: 'INSERT INTO "public"."users" DEFAULT VALUES',
       params: [],
     })
@@ -222,7 +165,7 @@ describe('buildDeleteRows', () => {
     const { sql, params } = buildDeleteRows({
       table: users,
       rows: [[{ name: 'id', value: 1 }], [{ name: 'id', value: 2 }]],
-      dialect: 'postgresql',
+      engine: 'postgresql',
     })
 
     expect(sql).toBe('DELETE FROM "public"."users"\n WHERE ("id" = $1) OR ("id" = $2)')
@@ -233,7 +176,7 @@ describe('buildDeleteRows', () => {
     const { sql, params } = buildDeleteRows({
       table: { schema: null, name: 'line_items', kind: 'table' },
       rows: [[{ name: 'order_id', value: 10 }, { name: 'sku', value: 'A1' }]],
-      dialect: 'sqlite',
+      engine: 'sqlite',
     })
 
     expect(sql).toBe('DELETE FROM "line_items"\n WHERE ("order_id" = ? AND "sku" = ?)')
@@ -241,7 +184,7 @@ describe('buildDeleteRows', () => {
   })
 
   it('throws without rows or primary keys', () => {
-    expect(() => buildDeleteRows({ table: users, rows: [], dialect: 'postgresql' })).toThrow()
-    expect(() => buildDeleteRows({ table: users, rows: [[]], dialect: 'postgresql' })).toThrow()
+    expect(() => buildDeleteRows({ table: users, rows: [], engine: 'postgresql' })).toThrow()
+    expect(() => buildDeleteRows({ table: users, rows: [[]], engine: 'postgresql' })).toThrow()
   })
 })

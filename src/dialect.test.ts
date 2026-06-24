@@ -10,6 +10,15 @@ describe('dialectFor: identifier quoting', () => {
   })
 })
 
+describe('dialectFor: placeholder', () => {
+  it('numbers Postgres params and uses ? elsewhere', () => {
+    expect(dialectFor('postgresql').placeholder(1)).toBe('$1')
+    expect(dialectFor('postgresql').placeholder(7)).toBe('$7')
+    expect(dialectFor('sqlite').placeholder(1)).toBe('?')
+    expect(dialectFor('mysql').placeholder(3)).toBe('?')
+  })
+})
+
 describe('dialectFor: applyOrderBy', () => {
   it('builds an engine-correct ORDER BY for a column sort', () => {
     expect(dialectFor('postgresql').applyOrderBy('SELECT * FROM t LIMIT 5', { column: 'name', direction: 'desc' })).toBe(

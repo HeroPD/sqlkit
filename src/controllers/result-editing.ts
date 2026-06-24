@@ -2,7 +2,7 @@ import { firstStatement } from '../codemirror/run-query'
 import type { QueryRun } from '../components/results-panel'
 import type { SqlTabState } from './contexts'
 import type { DialogsController } from './dialogs'
-import type { ColumnRef, ConnectionProfile, TableRef } from '../electron'
+import type { BatchResult, ColumnRef, ConnectionProfile, TableRef } from '../electron'
 import { buildBatchUpdate, buildDeleteRows, buildInsert } from '../sql-write'
 import { previewSql } from '../components/review-query-dialog'
 import {
@@ -65,19 +65,17 @@ export class ResultEditingController {
     const input = this.input()
     const statements: Array<{ sql: string; params: unknown[] }> = []
 
-    let hasUpdate = false
     if (editsList.length) {
       const built = buildPendingUpdate(input, editsList)
       if (!built.ok) return this.notice(built.issue)
-      statements.push(buildBatchUpdate({ table: built.value.table, edits: built.value.edits, dialect: profile.engine }))
-      hasUpdate = true
+      statements.push(buildBatchUpdate({ table: built.value.table, edits: built.value.edits, engine: profile.engine }))
     }
 
     if (drafts.length) {
       const built = buildInsertRows(input, drafts)
       if (!built.ok) return this.notice(built.issue)
       for (const row of built.value.rows) {
-        statements.push(buildInsert({ table: built.value.table, columns: row.columns, values: row.values, dialect: profile.engine }))
+        statements.push(buildInsert({ table: built.value.table, columns: row.columns, values: row.values, engine: profile.engine }))
       }
     }
 
@@ -86,56 +84,41 @@ export class ResultEditingController {
     const tab = this.deps.activeTab()
     const tabId = tab?.id ?? null
     const refreshSql = tab ? firstStatement(tab.content) || tab.content : null
+    const applied = { hadEdits: editsList.length > 0, draftCount: drafts.length, tabId, refreshSql }
     this.deps.dialogs.review = {
       sql: display,
       params: [],
-      run: () => void this.runChanges(profile, childDb, statements, hasUpdate, tabId, refreshSql),
+      run: () => void this.runChanges(profile, childDb, statements, applied),
     }
   }
 
+  // Sends the whole save as one transaction: it all commits or none of it does,
+  // so the user can't be left with a half-applied batch they reviewed as one
+  // unit. Edits/drafts clear (and the tab refreshes) only on a clean commit.
   private async runChanges(
     profile: ConnectionProfile,
     childDb: string | null,
     statements: Array<{ sql: string; params: unknown[] }>,
-    hasUpdate: boolean,
-    tabId: string | null,
-    refreshSql: string | null,
+    applied: { hadEdits: boolean; draftCount: number; tabId: string | null; refreshSql: string | null },
   ) {
-    // No cross-statement transaction: pooling can route each call to a different
-    // backend, so a wrapping BEGIN/COMMIT wouldn't share a connection. Run in
-    // order (UPDATE first), stop at the first failure, and only clear what landed.
-    let done = 0
-    let updateDone = false
-    let insertsDone = 0
-    for (const statement of statements) {
-      const isUpdate = hasUpdate && done === 0
-      let response
-      try {
-        response = await window.sqlkit.runQuery(profile.id, childDb, statement.sql, statement.params)
-      } catch (error) {
-        response = { success: false as const, error: (error as Error).message }
-      }
-      if (!response.success) {
-        this.deps.dialogs.notice(
-          'Save failed',
-          `Saved ${done} of ${statements.length} change${statements.length === 1 ? '' : 's'}. Change ${done + 1} failed: ${response.error}`,
-        )
-        break
-      }
-      if (response.result.rowCount === 0) {
-        this.deps.dialogs.notice(
-          'Save failed',
-          `Saved ${done} of ${statements.length} change${statements.length === 1 ? '' : 's'}. Change ${done + 1} affected no rows.`,
-        )
-        break
-      }
-      if (isUpdate) updateDone = true
-      else insertsDone += 1
-      done += 1
+    let outcome: BatchResult
+    try {
+      outcome = await window.sqlkit.runBatch(profile.id, childDb, statements)
+    } catch (error) {
+      outcome = { success: false, error: (error as Error).message }
     }
-    if (tabId && updateDone) this.deps.clearEdits(tabId)
-    if (tabId && insertsDone > 0) this.deps.dropDrafts(tabId, Array.from({ length: insertsDone }, (_, i) => i))
-    if ((updateDone || insertsDone > 0) && refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)
+    if (!outcome.success) {
+      const reason =
+        outcome.failedIndex !== undefined
+          ? `Change ${outcome.failedIndex + 1} of ${statements.length} could not be applied: ${outcome.error}`
+          : outcome.error
+      this.deps.dialogs.notice('Save failed', `${reason} The save was rolled back; no changes were made.`)
+      return
+    }
+    const { hadEdits, draftCount, tabId, refreshSql } = applied
+    if (tabId && hadEdits) this.deps.clearEdits(tabId)
+    if (tabId && draftCount > 0) this.deps.dropDrafts(tabId, Array.from({ length: draftCount }, (_, index) => index))
+    if (refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)
   }
 
   deleteRows(rows: number[]) {
@@ -144,7 +127,7 @@ export class ResultEditingController {
     if (!ctx || !profile || !rows.length) return
     const keys = rowKeysForDelete(ctx, rows)
     if (!keys.ok) return this.notice(keys.issue)
-    const { sql, params } = buildDeleteRows({ table: ctx.table, rows: keys.value, dialect: profile.engine })
+    const { sql, params } = buildDeleteRows({ table: ctx.table, rows: keys.value, engine: profile.engine })
     this.reviewWrite(profile, sql, params)
   }
 

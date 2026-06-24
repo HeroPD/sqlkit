@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { ConnectionProfile } from '../../src/electron'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { createSqliteDriver, type SqliteChannel, type SqliteSpawner } from './sqlite'
-import { inspectTable, listColumns, listTables, openDatabase, queryDatabase, serverVersion } from './sqlite-engine'
+import { inspectTable, listColumns, listTables, openDatabase, queryDatabase, runBatch, serverVersion } from './sqlite-engine'
 import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
 
 // Fields the sqlite driver reads; the rest of the profile is filler so the type compiles.
@@ -45,6 +45,8 @@ function inProcessSpawner() {
           return serverVersion(db)
         case 'query':
           return queryDatabase(requireDb(), request.sql, request.params)
+        case 'runBatch':
+          return runBatch(requireDb(), request.statements)
         case 'listTables':
           return listTables(requireDb())
         case 'listColumns':
@@ -400,6 +402,51 @@ describe('sqlite driver: multi-statement', () => {
     await driver.query('create trigger trg after insert on t begin insert into log values (1); end')
     await driver.query('insert into t values (1)')
     expect((await driver.query('select count(*) c from log')).rows).toEqual([[1]])
+  })
+})
+
+describe('sqlite driver: runBatch', () => {
+  const seeded = async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table t (id integer primary key, name text)')
+    await driver.query("insert into t (id, name) values (1, 'a'), (2, 'b')")
+    return driver
+  }
+
+  it('commits every statement in one transaction', async () => {
+    const driver = await seeded()
+    const result = await driver.runBatch!([
+      { sql: 'update t set name = ? where id = ?', params: ['x', 1] },
+      { sql: 'insert into t (id, name) values (?, ?)', params: [3, 'c'] },
+    ])
+    expect(result).toEqual({ success: true })
+    expect((await driver.query('select name from t order by id')).rows).toEqual([['x'], ['b'], ['c']])
+  })
+
+  it('rolls the whole batch back when a statement errors', async () => {
+    const driver = await seeded()
+    const result = await driver.runBatch!([
+      { sql: 'update t set name = ? where id = ?', params: ['x', 1] },
+      { sql: 'insert into t (id, name) values (?, ?)', params: [1, 'dup'] }, // PK conflict
+    ])
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.failedIndex).toBe(1)
+    // The earlier UPDATE must not have survived.
+    expect((await driver.query('select name from t order by id')).rows).toEqual([['a'], ['b']])
+  })
+
+  it('rolls back when a statement affects no rows', async () => {
+    const driver = await seeded()
+    const result = await driver.runBatch!([
+      { sql: 'update t set name = ? where id = ?', params: ['x', 1] },
+      { sql: 'update t set name = ? where id = ?', params: ['y', 999] }, // matches nothing
+    ])
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.failedIndex).toBe(1)
+      expect(result.error).toContain('affected no rows')
+    }
+    expect((await driver.query('select name from t order by id')).rows).toEqual([['a'], ['b']])
   })
 })
 

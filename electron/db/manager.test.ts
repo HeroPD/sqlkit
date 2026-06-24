@@ -370,3 +370,31 @@ describe('connection manager: database mutations', () => {
     expect(await manager.createDatabase('p1', 'x')).toEqual({ success: false, error: expect.stringContaining('Not supported') })
   })
 })
+
+describe('connection manager: runBatch', () => {
+  it('forwards statements to the connected driver', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true as const }))
+    hoisted.driver = fakeDriver({ runBatch })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+
+    const statements = [{ sql: 'update t set a = $1 where id = $2', params: [1, 2] }]
+    expect(await manager.runBatch('p1', 'child', statements)).toEqual({ success: true })
+    expect(runBatch).toHaveBeenCalledWith(statements, 'child')
+  })
+
+  it('reports not connected for an unknown profile', async () => {
+    const manager = createConnectionManager(vi.fn())
+    expect(await manager.runBatch('missing', null, [])).toEqual({ success: false, error: 'Not connected' })
+  })
+
+  it('reports unsupported when the driver cannot run batches', async () => {
+    hoisted.driver = fakeDriver() // no runBatch
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    expect(await manager.runBatch('p1', null, [])).toEqual({
+      success: false,
+      error: 'Atomic writes are not supported on this connection',
+    })
+  })
+})

@@ -93,9 +93,9 @@ afterEach(() => {
 })
 
 describe('ResultEditingController', () => {
-  it('commits a staged cell edit as an UPDATE against the child captured at review', async () => {
-    const runQuery = vi.fn(() => Promise.resolve({ success: true, result: { columns: [], rows: [], rowCount: 1, durationMs: 1 } }))
-    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
+  it('commits a staged cell edit as one atomic batch against the child captured at review', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
     const { ctrl, dialogs, runSql, clearEdits, setEdits, setActiveChild, setActiveTab } = make()
 
     setEdits([{ row: 0, col: 1, value: 'Grace' }])
@@ -104,32 +104,34 @@ describe('ResultEditingController', () => {
     setActiveTab(tab('tab-b', 'select * from other_table'))
     dialogs.acceptReview()
 
-    await vi.waitFor(() => expect(runQuery).toHaveBeenCalled())
-    expect(runQuery).toHaveBeenCalledWith('p1', 'db_a', expect.stringContaining('UPDATE'), expect.any(Array))
+    await vi.waitFor(() => expect(runBatch).toHaveBeenCalled())
+    expect(runBatch).toHaveBeenCalledWith('p1', 'db_a', [expect.objectContaining({ sql: expect.stringContaining('UPDATE') })])
     expect(clearEdits).toHaveBeenCalledWith('tab-a')
     // The active tab moved away before accepting, so no refresh runs there.
     expect(runSql).not.toHaveBeenCalled()
   })
 
-  it('keeps staged edits when the reviewed UPDATE affects no rows', async () => {
-    const runQuery = vi.fn(() => Promise.resolve({ success: true, result: { columns: [], rows: [], rowCount: 0, durationMs: 1 } }))
-    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
+  it('keeps staged edits when the batch reports a zero-row change', async () => {
+    const runBatch = vi.fn(() =>
+      Promise.resolve({ success: false, failedIndex: 0, error: 'A change affected no rows; the row may have been modified or removed.' }),
+    )
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
     const { ctrl, dialogs, runSql, clearEdits, setEdits } = make()
 
     setEdits([{ row: 0, col: 1, value: 'Grace' }])
     ctrl.saveChanges()
     dialogs.acceptReview()
 
-    await vi.waitFor(() => expect(runQuery).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(runBatch).toHaveBeenCalledOnce())
     expect(clearEdits).not.toHaveBeenCalled()
     expect(runSql).not.toHaveBeenCalled()
     expect(dialogs.confirm?.message).toBe('Save failed')
     expect(dialogs.confirm?.detail).toContain('affected no rows')
   })
 
-  it('saves edits and new rows together: one UPDATE then an INSERT per row', async () => {
-    const runQuery = vi.fn(() => Promise.resolve({ success: true, result: { columns: [], rows: [], rowCount: 1, durationMs: 1 } }))
-    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
+  it('saves edits and new rows together as one batch: UPDATE then an INSERT per row', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
     const { ctrl, dialogs, runSql, dropDrafts, clearEdits, setDrafts, setEdits } = make()
 
     setEdits([{ row: 0, col: 1, value: 'Grace' }])
@@ -145,32 +147,35 @@ describe('ResultEditingController', () => {
     expect(dialogs.review?.sql).toContain('INSERT INTO "public"."accounts" ("id", "name")')
     dialogs.acceptReview()
 
-    await vi.waitFor(() => expect(runQuery).toHaveBeenCalledTimes(3))
-    expect(runQuery).toHaveBeenNthCalledWith(1, 'p1', 'db_a', expect.stringContaining('UPDATE'), expect.any(Array))
-    expect(runQuery).toHaveBeenNthCalledWith(2, 'p1', 'db_a', expect.stringContaining('INSERT'), ['Bob'])
-    expect(runQuery).toHaveBeenNthCalledWith(3, 'p1', 'db_a', expect.stringContaining('INSERT'), [7, 'Cy'])
+    await vi.waitFor(() => expect(runBatch).toHaveBeenCalledOnce())
+    // One transaction carrying all three statements, in order.
+    expect(runBatch).toHaveBeenCalledWith('p1', 'db_a', [
+      expect.objectContaining({ sql: expect.stringContaining('UPDATE') }),
+      expect.objectContaining({ sql: expect.stringContaining('INSERT'), params: ['Bob'] }),
+      expect.objectContaining({ sql: expect.stringContaining('INSERT'), params: [7, 'Cy'] }),
+    ])
     expect(clearEdits).toHaveBeenCalledWith('tab-a')
     expect(dropDrafts).toHaveBeenCalledWith('tab-a', [0, 1])
     expect(runSql).toHaveBeenCalledOnce()
   })
 
-  it('keeps un-inserted rows and reports when a change fails midway', async () => {
-    const runQuery = vi
-      .fn()
-      .mockResolvedValueOnce({ success: true, result: { columns: [], rows: [], rowCount: 1, durationMs: 1 } })
-      .mockResolvedValueOnce({ success: false, error: 'duplicate key' })
-    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
-    const { ctrl, dialogs, runSql, dropDrafts, setDrafts } = make()
+  it('rolls the whole batch back and keeps every change when one statement fails', async () => {
+    const runBatch = vi.fn(() =>
+      Promise.resolve({ success: false, failedIndex: 1, error: 'duplicate key value violates unique constraint' }),
+    )
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
+    const { ctrl, dialogs, runSql, dropDrafts, clearEdits, setDrafts } = make()
 
     setDrafts([{ after: -1, cells: ['1', 'A'] }, { after: -1, cells: ['2', 'B'] }])
     ctrl.saveChanges()
     dialogs.acceptReview()
 
-    await vi.waitFor(() => expect(runQuery).toHaveBeenCalledTimes(2))
-    // Only the first row landed: drop just it, refresh, and surface the failure.
-    expect(dropDrafts).toHaveBeenCalledWith('tab-a', [0])
-    expect(runSql).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(runBatch).toHaveBeenCalledOnce())
+    // Atomic: nothing committed, so nothing is cleared, dropped, or refreshed.
+    expect(dropDrafts).not.toHaveBeenCalled()
+    expect(clearEdits).not.toHaveBeenCalled()
+    expect(runSql).not.toHaveBeenCalled()
     expect(dialogs.confirm?.message).toBe('Save failed')
-    expect(dialogs.confirm?.detail).toContain('Saved 1 of 2')
+    expect(dialogs.confirm?.detail).toContain('rolled back')
   })
 })

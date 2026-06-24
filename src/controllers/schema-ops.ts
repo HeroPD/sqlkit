@@ -1,5 +1,6 @@
 import type { ConnectionProfile, TableRef } from '../electron'
 import type { DialogsController } from './dialogs'
+import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
 import { TABLE_KIND_LABELS } from '../table-kinds'
 
@@ -34,7 +35,9 @@ export class SchemaOpsController {
   // through the normal query path, so it shows in results, Tasks (matview
   // refreshes are classic long-runners), and history.
   refreshMatview(table: TableRef) {
-    const statement = `REFRESH MATERIALIZED VIEW ${quoteQualified(table)};`
+    const profile = this.deps.activeProfile()
+    if (!profile) return
+    const statement = `REFRESH MATERIALIZED VIEW ${quoteQualified(table, dialectFor(profile.engine))};`
     this.deps.openPreview(statement)
     void this.deps.runSql(statement)
   }
@@ -42,7 +45,7 @@ export class SchemaOpsController {
   dropTable(table: TableRef) {
     const profile = this.deps.activeProfile()
     if (!profile) return
-    const statement = `${DROP_VERBS[table.kind]} ${quoteQualified(table)};`
+    const statement = `${DROP_VERBS[table.kind]} ${quoteQualified(table, dialectFor(profile.engine))};`
     this.deps.dialogs.confirm = {
       message: `Drop ${TABLE_KIND_LABELS[table.kind]} "${table.name}"?`,
       detail: 'It is permanently deleted on the server. This cannot be undone.',
@@ -59,8 +62,8 @@ export class SchemaOpsController {
     const profile = this.deps.activeProfile()
     if (!profile) return
     // SQLite has no TRUNCATE; an unqualified DELETE is its idiom.
-    const statement =
-      profile.engine === 'sqlite' ? `DELETE FROM ${quoteQualified(table)};` : `TRUNCATE TABLE ${quoteQualified(table)};`
+    const qualified = quoteQualified(table, dialectFor(profile.engine))
+    const statement = profile.engine === 'sqlite' ? `DELETE FROM ${qualified};` : `TRUNCATE TABLE ${qualified};`
     this.deps.dialogs.confirm = {
       message: `Truncate "${table.name}"?`,
       detail: `All rows are permanently deleted (${statement}). This cannot be undone.`,

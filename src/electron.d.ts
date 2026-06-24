@@ -129,6 +129,14 @@ export type QueryResult = {
 
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
 
+/** One parameterized statement in an atomic write batch. */
+export type BatchStatement = { sql: string; params: unknown[] }
+
+/** Outcome of an atomic write batch: every statement committed, or none did.
+ * `failedIndex` points at the statement that aborted it (absent for a
+ * connection-level failure that ran nothing). */
+export type BatchResult = { success: true } | { success: false; error: string; failedIndex?: number }
+
 /** A column sort the UI injects into a query at run time; the driver builds the
  * engine-correct ORDER BY (its own identifier quoting). */
 export type QuerySort = { column: string; direction: 'asc' | 'desc' }
@@ -239,6 +247,10 @@ export type SqlkitApi = {
     params?: unknown[],
     sort?: QuerySort | null,
   ) => Promise<QueryResponse>
+  /** Runs statements in one transaction on a single connection: all commit or
+   * all roll back. The result-grid save path uses this so a multi-row edit
+   * (UPDATE + INSERTs) can't half-apply. */
+  runBatch: (profileId: string, childDb: string | null, statements: BatchStatement[]) => Promise<BatchResult>
   /** A page of a buffered result; rows beyond the first page are pulled on demand. */
   fetchRows: (sessionId: string, offset: number, limit: number) => Promise<FetchRowsResult>
   /** Releases a result's main-process buffer (tab closed / superseded). */

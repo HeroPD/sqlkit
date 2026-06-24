@@ -1,4 +1,6 @@
 import type {
+  BatchResult,
+  BatchStatement,
   ColumnsResult,
   ConnectResult,
   ConnectionProfile,
@@ -150,6 +152,20 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  // Atomic write batch: the whole save commits or rolls back on one connection.
+  // A connection-level failure (not connected / unsupported) reports no
+  // failedIndex, since nothing ran.
+  async function runBatch(profileId: string, childDb: string | null, statements: BatchStatement[]): Promise<BatchResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver.runBatch) return { success: false, error: 'Atomic writes are not supported on this connection' }
+    try {
+      return await driver.runBatch(statements, childDb)
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
   // A page of a buffered result; fails when the session is gone (evicted or its
   // connection dropped) so the renderer can fall back instead of seeing 0 rows.
   function fetchRows(sessionId: string, offset: number, limit: number): FetchRowsResult {
@@ -284,6 +300,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     disconnectAll,
     statuses,
     query,
+    runBatch,
     fetchRows,
     closeSession,
     cancelQuery,

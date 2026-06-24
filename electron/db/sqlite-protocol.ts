@@ -7,6 +7,7 @@ import type { SqliteParam } from './sqlite-engine'
 export type SqliteRequest =
   | { id: number; type: 'open'; file: string }
   | { id: number; type: 'query'; sql: string; params: SqliteParam[] }
+  | { id: number; type: 'runBatch'; statements: { sql: string; params: SqliteParam[] }[] }
   | { id: number; type: 'listTables' }
   | { id: number; type: 'listColumns' }
   | { id: number; type: 'inspectTable'; table: TableRef }

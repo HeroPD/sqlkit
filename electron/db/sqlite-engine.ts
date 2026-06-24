@@ -1,6 +1,9 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import type { ColumnRef, InspectSection, QueryResult, TableInspection, TableRef } from '../../src/electron'
+import type { BatchResult, ColumnRef, InspectSection, QueryResult, TableInspection, TableRef } from '../../src/electron'
 import { MAX_BUFFERED_ROWS } from './limits'
+
+// A save statement that matched no rows aborts the batch: the row is gone/changed.
+const BATCH_ZERO_ROWS = 'A change affected no rows; the row may have been modified or removed.'
 
 // The synchronous SQLite core, factored out of any process/threading concern:
 // every function takes the DatabaseSync it operates on. The worker owns the
@@ -212,6 +215,34 @@ function splitStatements(sql: string, masked: string): string[] {
   const tail = sql.slice(start).trim()
   if (masked.slice(start).trim()) parts.push(tail)
   return parts
+}
+
+// Runs every statement inside one transaction on the worker's single handle:
+// all commit, or the first failure (an error or a zero-row write) rolls the
+// whole batch back. The result-grid save path relies on this all-or-nothing.
+export function runBatch(db: DatabaseSync, statements: { sql: string; params: SqliteParam[] }[]): BatchResult {
+  if (!statements.length) return { success: true }
+  db.exec('BEGIN')
+  let index = -1
+  try {
+    for (index = 0; index < statements.length; index += 1) {
+      const statement = statements[index]!
+      const info = db.prepare(statement.sql).run(...statement.params)
+      if (Number(info.changes) === 0) {
+        db.exec('ROLLBACK')
+        return { success: false, failedIndex: index, error: BATCH_ZERO_ROWS }
+      }
+    }
+    db.exec('COMMIT')
+    return { success: true }
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      // The transaction may have auto-aborted already; nothing left to undo.
+    }
+    return { success: false, failedIndex: index >= 0 ? index : undefined, error: (error as Error).message }
+  }
 }
 
 function run(statement: StatementSync, params: SqliteParam[]): Omit<QueryResult, 'durationMs'> {

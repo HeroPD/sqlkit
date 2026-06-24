@@ -1,15 +1,14 @@
 import type { ColumnRef, Engine, TableRef } from './electron'
+import { dialectFor, type Dialect } from './dialect'
 
-export const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`
-
-export const quoteQualified = (table: TableRef) =>
-  table.schema ? `${quoteIdent(table.schema)}.${quoteIdent(table.name)}` : quoteIdent(table.name)
+export const quoteQualified = (table: TableRef, dialect: Dialect) =>
+  table.schema ? `${dialect.quoteIdent(table.schema)}.${dialect.quoteIdent(table.name)}` : dialect.quoteIdent(table.name)
 
 // Turns a cell's string input into a bound parameter, guided by the column's
 // declared type: empty + nullable → NULL; numeric/boolean parsed; anything else
 // passed as text for the engine to cast. Unparseable input falls back to text
 // so a typo surfaces as a DB error rather than a silent wrong value.
-export function coerceValue(value: string, column: ColumnRef | undefined, dialect?: Engine): unknown {
+export function coerceValue(value: string, column: ColumnRef | undefined, engine?: Engine): unknown {
   if (value === '' && (column?.nullable ?? true)) return null
   const type = column?.dataType?.toLowerCase() ?? ''
   if (/int|serial|numeric|decimal|real|double|float|money/.test(type)) {
@@ -25,20 +24,9 @@ export function coerceValue(value: string, column: ColumnRef | undefined, dialec
     const falsy = /^(f|false|0|no|n)$/i.test(value)
     // SQLite has no boolean type and rejects a JS boolean bind, so store 1/0;
     // Postgres takes the real boolean. An unrecognized token falls through to text.
-    if (truthy || falsy) return dialect === 'sqlite' ? (truthy ? 1 : 0) : truthy
+    if (truthy || falsy) return engine === 'sqlite' ? (truthy ? 1 : 0) : truthy
   }
   return value
-}
-
-export type UpdateSpec = {
-  table: TableRef
-  column: string
-  columnMeta: ColumnRef | undefined
-  /** Raw string from the cell editor; coerced per columnMeta. */
-  value: string
-  /** Primary-key column/value pairs identifying the one row to update. */
-  pks: { name: string; value: unknown }[]
-  dialect: Engine
 }
 
 export type BatchUpdateEdit = {
@@ -53,7 +41,7 @@ export type BatchUpdateEdit = {
 export type BatchUpdateSpec = {
   table: TableRef
   edits: BatchUpdateEdit[]
-  dialect: Engine
+  engine: Engine
 }
 
 export type RowKey = { name: string; value: unknown }[]
@@ -61,52 +49,44 @@ export type RowKey = { name: string; value: unknown }[]
 export type DeleteRowsSpec = {
   table: TableRef
   rows: RowKey[]
-  dialect: Engine
-}
-
-// Builds a single-row parameterized UPDATE. Placeholders are $1.. for Postgres,
-// ? otherwise (SQLite). Params are [newValue, ...pkValues] in placeholder order.
-export function buildUpdate(spec: UpdateSpec): { sql: string; params: unknown[] } {
-  if (spec.pks.length === 0) throw new Error('Cannot build an UPDATE without a primary key')
-  const placeholder = (index: number) => (spec.dialect === 'postgresql' ? `$${index}` : '?')
-  const where = spec.pks.map((pk, i) => `${quoteIdent(pk.name)} = ${placeholder(i + 2)}`).join(' AND ')
-  const sql = `UPDATE ${quoteQualified(spec.table)}\n   SET ${quoteIdent(spec.column)} = ${placeholder(1)}\n WHERE ${where}`
-  return { sql, params: [coerceValue(spec.value, spec.columnMeta, spec.dialect), ...spec.pks.map((pk) => pk.value)] }
+  engine: Engine
 }
 
 // Builds one atomic UPDATE for multiple cells. Each target column gets a CASE
 // expression keyed by the row's primary key; rows/columns outside the selection
-// keep their existing values.
+// keep their existing values. Quoting and placeholder style come from the
+// engine's dialect, so backtick/bracket engines stay correct.
 export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: unknown[] } {
   if (spec.edits.length === 0) throw new Error('Cannot build an UPDATE without edits')
+  const dialect = dialectFor(spec.engine)
 
   const params: unknown[] = []
   const bind = (value: unknown) => {
     params.push(value)
-    return spec.dialect === 'postgresql' ? `$${params.length}` : '?'
+    return dialect.placeholder(params.length)
   }
   const condition = (pks: { name: string; value: unknown }[]) => {
     if (pks.length === 0) throw new Error('Cannot build an UPDATE without a primary key')
-    return pks.map((pk) => `${quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
+    return pks.map((pk) => `${dialect.quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
   }
 
   const byColumn = new Map<string, string[]>()
   for (const edit of spec.edits) {
     const cases = byColumn.get(edit.column) ?? []
-    cases.push(`WHEN ${condition(edit.pks)} THEN ${bind(coerceValue(edit.value, edit.columnMeta, spec.dialect))}`)
+    cases.push(`WHEN ${condition(edit.pks)} THEN ${bind(coerceValue(edit.value, edit.columnMeta, spec.engine))}`)
     byColumn.set(edit.column, cases)
   }
 
   const set = [...byColumn.entries()]
-    .map(([column, cases]) => `       ${quoteIdent(column)} = CASE\n         ${cases.join('\n         ')}\n         ELSE ${quoteIdent(column)}\n       END`)
+    .map(([column, cases]) => `       ${dialect.quoteIdent(column)} = CASE\n         ${cases.join('\n         ')}\n         ELSE ${dialect.quoteIdent(column)}\n       END`)
     .join(',\n')
   const where = spec.edits.map((edit) => `(${condition(edit.pks)})`).join(' OR ')
 
-  return { sql: `UPDATE ${quoteQualified(spec.table)}\n   SET\n${set}\n WHERE ${where}`, params }
+  return { sql: `UPDATE ${quoteQualified(spec.table, dialect)}\n   SET\n${set}\n WHERE ${where}`, params }
 }
 
-export function buildInsertDefault(table: TableRef): { sql: string; params: unknown[] } {
-  return { sql: `INSERT INTO ${quoteQualified(table)} DEFAULT VALUES`, params: [] }
+export function buildInsertDefault(table: TableRef, dialect: Dialect): { sql: string; params: unknown[] } {
+  return { sql: `INSERT INTO ${quoteQualified(table, dialect)} DEFAULT VALUES`, params: [] }
 }
 
 export type InsertSpec = {
@@ -117,32 +97,33 @@ export type InsertSpec = {
   columns: { name: string; columnMeta: ColumnRef | undefined }[]
   /** Raw cell strings aligned to `columns`, coerced per column. */
   values: string[]
-  dialect: Engine
+  engine: Engine
 }
 
 // One parameterized single-row INSERT. With no filled columns it falls back to
 // DEFAULT VALUES. Kept single-statement so params bind on both engines (SQLite
 // only binds params for a lone statement; Postgres params are extended-protocol).
 export function buildInsert(spec: InsertSpec): { sql: string; params: unknown[] } {
-  if (spec.columns.length === 0) return buildInsertDefault(spec.table)
-  const placeholder = (index: number) => (spec.dialect === 'postgresql' ? `$${index}` : '?')
-  const columns = spec.columns.map((column) => quoteIdent(column.name)).join(', ')
-  const placeholders = spec.columns.map((_, index) => placeholder(index + 1)).join(', ')
-  const params = spec.columns.map((column, index) => coerceValue(spec.values[index] ?? '', column.columnMeta, spec.dialect))
-  return { sql: `INSERT INTO ${quoteQualified(spec.table)} (${columns})\nVALUES (${placeholders})`, params }
+  const dialect = dialectFor(spec.engine)
+  if (spec.columns.length === 0) return buildInsertDefault(spec.table, dialect)
+  const columns = spec.columns.map((column) => dialect.quoteIdent(column.name)).join(', ')
+  const placeholders = spec.columns.map((_, index) => dialect.placeholder(index + 1)).join(', ')
+  const params = spec.columns.map((column, index) => coerceValue(spec.values[index] ?? '', column.columnMeta, spec.engine))
+  return { sql: `INSERT INTO ${quoteQualified(spec.table, dialect)} (${columns})\nVALUES (${placeholders})`, params }
 }
 
 export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: unknown[] } {
   if (spec.rows.length === 0) throw new Error('Cannot build a DELETE without rows')
+  const dialect = dialectFor(spec.engine)
   const params: unknown[] = []
   const bind = (value: unknown) => {
     params.push(value)
-    return spec.dialect === 'postgresql' ? `$${params.length}` : '?'
+    return dialect.placeholder(params.length)
   }
   const condition = (pks: RowKey) => {
     if (pks.length === 0) throw new Error('Cannot build a DELETE without a primary key')
-    return pks.map((pk) => `${quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
+    return pks.map((pk) => `${dialect.quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
   }
   const where = spec.rows.map((pks) => `(${condition(pks)})`).join(' OR ')
-  return { sql: `DELETE FROM ${quoteQualified(spec.table)}\n WHERE ${where}`, params }
+  return { sql: `DELETE FROM ${quoteQualified(spec.table, dialect)}\n WHERE ${where}`, params }
 }
