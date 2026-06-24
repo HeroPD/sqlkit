@@ -1,8 +1,13 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { hostKeyFingerprint, verifyHostKey } from './knownHosts'
+
+// knownHosts.ts imports `app` from electron only for storePath(), which these
+// tests never hit (they pass an explicit store path). Stub it so importing the
+// module under vitest doesn't require the real Electron binary.
+vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 
 const tmpFiles: string[] = []
 const tmpStore = () => {

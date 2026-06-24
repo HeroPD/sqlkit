@@ -43,9 +43,6 @@ jobs:
           node-version: 24
           cache: npm
 
-      # Do NOT set ELECTRON_SKIP_BINARY_DOWNLOAD: several test files import the
-      # 'electron' module at load time, and its Node shim reads path.txt from the
-      # downloaded binary — skipping the download makes those imports ENOENT.
       - run: npm ci
 
       - name: Lint

@@ -1,9 +1,14 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ConnectionStatus } from '../../src/electron'
 import type { ConnectionManager } from './manager'
 import { createConnectionManager, testConnection } from './manager'
 import { PAGE_SIZE } from './result-sessions'
 import { adminPool, profileFromUrl, testDatabaseUrl } from './test-db'
+
+// The manager transitively imports electron (transport → sshTunnel → knownHosts).
+// These tests use no SSH, so app.getPath is never called — stub electron so the
+// suite doesn't depend on the Electron binary being installed.
+vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 
 const url = testDatabaseUrl()
 const describeDb = url ? describe : describe.skip
