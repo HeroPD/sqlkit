@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch/PR cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint, typecheck & tests
+    runs-on: ubuntu-latest
+    env:
+      # Unit tests never launch Electron (drivers are injected/mocked), so skip
+      # the ~100 MB binary download that npm ci would otherwise trigger.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      # Activates the *.integration.test.ts suites against the postgres service
+      # below; without it they self-skip. Matches the postgres service env.
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/testsqlkit?sslmode=disable
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testsqlkit
+        ports:
+          - 5432:5432
+        # Hold the job's steps until Postgres is accepting connections.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # node:sqlite is unflagged only from Node 24; sqlite tests import it directly.
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npx tsc -b
+
+      # vitest run — unit tests plus the Postgres integration suites (TEST_DATABASE_URL is set).
+      - name: Tests
+        run: npm test
