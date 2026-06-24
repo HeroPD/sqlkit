@@ -15,9 +15,6 @@ jobs:
     name: Lint, typecheck & tests
     runs-on: ubuntu-latest
     env:
-      # Unit tests never launch Electron (drivers are injected/mocked), so skip
-      # the ~100 MB binary download that npm ci would otherwise trigger.
-      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
       # Activates the *.integration.test.ts suites against the postgres service
       # below; without it they self-skip. Matches the postgres service env.
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/testsqlkit?sslmode=disable
@@ -46,6 +43,9 @@ jobs:
           node-version: 24
           cache: npm
 
+      # Do NOT set ELECTRON_SKIP_BINARY_DOWNLOAD: several test files import the
+      # 'electron' module at load time, and its Node shim reads path.txt from the
+      # downloaded binary — skipping the download makes those imports ENOENT.
       - run: npm ci
 
       - name: Lint
