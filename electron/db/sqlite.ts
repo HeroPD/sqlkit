@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ColumnRef, ConnectionProfile, QueryResult, TableInspection, TableRef } from '../../src/electron'
+import { dialectFor } from './dialect'
 import type { Driver } from './driver'
 import type { SqliteParam } from './sqlite-engine'
 import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
@@ -33,6 +34,7 @@ type SqliteRequestBody = SqliteRequest extends infer R ? (R extends { id: number
 const OPEN_TIMEOUT_MS = 15_000
 
 export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpawner = defaultSpawn): Driver {
+  const dialect = dialectFor(profile.engine)
   let channel: SqliteChannel | null = null
   let file = ''
   let nextId = 1
@@ -115,8 +117,9 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       file = ''
     },
 
-    async query(sql, params = [], _childDb = null) {
-      return request<QueryResult>({ type: 'query', sql, params: params as SqliteParam[] })
+    async query(sql, params = [], _childDb = null, sort = null) {
+      const finalSql = sort ? dialect.applyOrderBy(sql, sort) : sql
+      return request<QueryResult>({ type: 'query', sql: finalSql, params: params as SqliteParam[] })
     },
 
     async listTables() {

@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, TableRef } from '../../src/electron'
+import { dialectFor } from './dialect'
 import { MAX_BUFFERED_ROWS } from './driver'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -76,7 +77,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     return pool
   }
 
-  const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`
+  const dialect = dialectFor(profile.engine)
 
   return {
     async connect() {
@@ -111,8 +112,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       await Promise.all([...closing.values()].map((pool) => pool.end().catch(() => {})))
     },
 
-    async query(sql, params = [], childDb = null) {
+    async query(sql, params = [], childDb = null, sort = null) {
       const started = performance.now()
+      const finalSql = sort ? dialect.applyOrderBy(sql, sort) : sql
       const pool = poolForQuery(childDb)
       // Checked out manually (not pool.query) so the backend PID is known
       // while the statement runs and cancel() has a target.
@@ -120,7 +122,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const entry = { pid: (client as unknown as { processID?: number }).processID ?? null }
       running.add(entry)
       try {
-        const result = await streamQuery(client, sql, params, started)
+        const result = await streamQuery(client, finalSql, params, started)
         client.release()
         return result
       } catch (error) {
@@ -135,7 +137,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     async createDatabase(name) {
       // CREATE DATABASE refuses to run inside a transaction; a plain
       // single-statement pool query never opens one, so this is fine.
-      await activePool().query(`create database ${quoteIdent(name)}`)
+      await activePool().query(`create database ${dialect.quoteIdent(name)}`)
       if (profile.databaseMode === 'all' && pools && !pools.has(name)) {
         pools.set(name, makePool(name))
         childNames = [...childNames, name].sort()
@@ -154,7 +156,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         await pool.end().catch(() => {})
       }
       try {
-        await activePool().query(`drop database ${quoteIdent(name)}`)
+        await activePool().query(`drop database ${dialect.quoteIdent(name)}`)
       } catch (error) {
         // Drop refused (e.g. someone else is connected): keep it browsable.
         if (pool) pools.set(name, makePool(name))

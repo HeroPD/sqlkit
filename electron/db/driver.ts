@@ -7,6 +7,7 @@ import type {
   DbObjects,
   InspectSection,
   QueryResult,
+  QuerySort,
   TableInspection,
   TableRef,
 } from '../../src/electron'
@@ -21,8 +22,10 @@ export type Driver = {
   /** Opens the connection; resolves with the server version string. */
   connect(): Promise<string>
   disconnect(): Promise<void>
-  /** Runs in `childDb` when provided; otherwise uses the driver's active database. */
-  query(sql: string, params?: unknown[], childDb?: string | null): Promise<QueryResult>
+  /** Runs in `childDb` when provided; otherwise uses the driver's active
+   * database. `sort` injects an ORDER BY the driver builds with its own
+   * identifier quoting. */
+  query(sql: string, params?: unknown[], childDb?: string | null, sort?: QuerySort | null): Promise<QueryResult>
   /** Interrupts in-flight queries. Reports how many were `running` and how many
    * could be `cancelled` — a query whose backend PID isn't known yet can't be
    * targeted, so the caller can tell "nothing running" (running 0) from "running

@@ -234,6 +234,37 @@ describe('sqlite driver: query', () => {
     expect(result.rows).toEqual([[7, 'hi']])
   })
 
+  it('injects a column sort as an ORDER BY (descending)', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table t(a, b)')
+    await driver.query('insert into t values (1, 2), (3, 4), (2, 9)')
+
+    const result = await driver.query('select a, b from t', [], null, { column: 'a', direction: 'desc' })
+    expect(result.rows).toEqual([
+      [3, 4],
+      [2, 9],
+      [1, 2],
+    ])
+  })
+
+  it('replaces an existing ORDER BY when sorting, keeping the LIMIT after it', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table t(a)')
+    await driver.query('insert into t values (3), (1), (4), (1), (5)')
+
+    const result = await driver.query('select a from t order by a desc limit 2', [], null, { column: 'a', direction: 'asc' })
+    expect(result.rows).toEqual([[1], [1]])
+  })
+
+  it('quotes the sort column so reserved/odd names are safe', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table t("order")')
+    await driver.query('insert into t values (2), (1), (3)')
+
+    const result = await driver.query('select "order" from t', [], null, { column: 'order', direction: 'asc' })
+    expect(result.rows).toEqual([[1], [2], [3]])
+  })
+
   it('returns an empty row set when a select matches nothing', async () => {
     const driver = await memoryDriver()
     await driver.query('create table t(a)')

@@ -42,6 +42,9 @@ import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
 import { quoteQualified } from '../sql-write'
+import { isReorderableQuery } from '../sql-order'
+import type { SortColumnDetail } from './results-panel'
+import type { QuerySort } from '../electron'
 import { stripExplain } from '../sql-types'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
@@ -437,7 +440,8 @@ export class WorkbenchScreen extends LitElement {
   // --- query running ----------------------------------------------------------
 
   // Runs against the in-use context (⌘K), connecting it first if needed.
-  private async _runSql(sqlText: string) {
+  // `sort` re-runs with a grid-injected ORDER BY; omitting it clears any sort.
+  private async _runSql(sqlText: string, sort?: QuerySort | null) {
     // The run belongs to the tab it started from, even if the user switches
     // tabs or contexts before it finishes.
     const tabId = this._ctx.activeTabId
@@ -482,6 +486,7 @@ export class WorkbenchScreen extends LitElement {
       childDb,
       contextKey: runContextKey,
       sql: sqlText,
+      sort,
     })
   }
 
@@ -858,6 +863,7 @@ export class WorkbenchScreen extends LitElement {
             .collapsed=${this._layout.panelCollapsed}
             .drafts=${this._queries.draftsFor(this._ctx.activeTabId)}
             .edits=${this._queries.editsFor(this._ctx.activeTabId)}
+            .sort=${this._queries.sortFor(this._ctx.activeTabId)}
             @cancel-query=${this._onCancelQuery}
             @load-more=${this._onLoadMore}
             @cell-edit=${this._onCellEdit}
@@ -869,6 +875,7 @@ export class WorkbenchScreen extends LitElement {
             @draft-remove=${this._onDraftRemove}
             @save-rows=${() => this._resultEditing.saveChanges()}
             @discard-changes=${this._onDiscardChanges}
+            @sort-column=${this._onSortColumn}
             @toggle-collapse=${() => this._layout.togglePanelCollapse()}
             style="height: ${this._layout.panelStyleHeight()}"
           ></results-panel>
@@ -1137,6 +1144,16 @@ export class WorkbenchScreen extends LitElement {
 
   private _onDiscardChanges() {
     if (this._ctx.activeTabId) this._queries.clearStaged(this._ctx.activeTabId)
+  }
+
+  // A header sort button: re-run the result's own query with a column sort the
+  // driver turns into an engine-correct ORDER BY. A null direction clears it.
+  // The editor text is left untouched.
+  private _onSortColumn(event: Event) {
+    const { column, direction } = (event as CustomEvent<SortColumnDetail>).detail
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    if (run.phase !== 'done' || !run.sql || !isReorderableQuery(run.sql)) return
+    void this._runSql(run.sql, direction ? { column, direction } : undefined)
   }
 
   private _onDeleteRows(event: Event) {

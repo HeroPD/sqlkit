@@ -1,5 +1,5 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ConnectionProfile, QueryResponse } from '../electron'
+import type { ConnectionProfile, QueryResponse, QuerySort } from '../electron'
 import type { QueryRun } from '../components/results-panel'
 import type { DraftRow } from '../result-editing'
 import type { HistoryItem } from '../components/history-view'
@@ -43,6 +43,9 @@ export class QueriesController implements ReactiveController {
   /** Unsaved cell edits per tab: inner key "row:col" → new value string. */
   edits = new Map<string, Map<string, string>>()
 
+  /** The column sort the result grid injected, per tab; absent when unsorted. */
+  sorts = new Map<string, QuerySort>()
+
   /** Query history of every context in this workspace, newest first. */
   history: HistoryItem[] = []
 
@@ -74,6 +77,11 @@ export class QueriesController implements ReactiveController {
   /** What the results panel shows: the given tab's last run. */
   runFor(tabId: string | null): QueryRun {
     return (tabId ? this.runs.get(tabId) : undefined) ?? { phase: 'idle' }
+  }
+
+  /** The column sort applied to the tab's current result, if any. */
+  sortFor(tabId: string | null): QuerySort | null {
+    return (tabId ? this.sorts.get(tabId) : undefined) ?? null
   }
 
   /** A run belongs to the tab that started it, wherever the user is now. */
@@ -226,15 +234,20 @@ export class QueriesController implements ReactiveController {
     this.setRun(tabId, note ? { phase: 'running', note } : { phase: 'running' })
   }
 
-  /** Runs the SQL on an already-connected profile and records the outcome. */
+  /** Runs the SQL on an already-connected profile and records the outcome.
+   * `sort` re-runs with an injected ORDER BY (built engine-side); absent clears
+   * any previous sort so a fresh run starts unsorted. */
   async execute(args: {
     tabId: string
     profile: ConnectionProfile
     childDb: string | null
     contextKey: string
     sql: string
+    sort?: QuerySort | null
   }) {
-    const { tabId, profile, childDb, contextKey, sql } = args
+    const { tabId, profile, childDb, contextKey, sql, sort } = args
+    if (sort) this.sorts.set(tabId, sort)
+    else this.sorts.delete(tabId)
     const gen = this.generation
     // A new query supersedes the tab's old buffered result.
     this.closeRunSession(this.runs.get(tabId))
@@ -255,7 +268,7 @@ export class QueriesController implements ReactiveController {
 
     let response: QueryResponse
     try {
-      response = await window.sqlkit.runQuery(profile.id, childDb, sql)
+      response = await window.sqlkit.runQuery(profile.id, childDb, sql, undefined, sort)
     } catch (error) {
       // A rejected IPC (channel error, main-side throw) would otherwise leave
       // the run and its task stuck on 'running' forever.
@@ -383,6 +396,7 @@ export class QueriesController implements ReactiveController {
     this.runs.delete(tabId)
     this.drafts.delete(tabId)
     this.edits.delete(tabId)
+    this.sorts.delete(tabId)
   }
 
   renameTab(oldId: string, newId: string) {
@@ -397,6 +411,11 @@ export class QueriesController implements ReactiveController {
       const nextEdits = new Map(this.edits)
       nextEdits.delete(oldId)
       this.edits = nextEdits.set(newId, edit)
+    }
+    const sort = this.sorts.get(oldId)
+    if (sort) {
+      this.sorts.delete(oldId)
+      this.sorts.set(newId, sort)
     }
     const run = this.runs.get(oldId)
     if (!run) return
@@ -419,6 +438,9 @@ export class QueriesController implements ReactiveController {
     for (const id of [...this.edits.keys()]) {
       if (!this.tabExists(id)) this.edits.delete(id)
     }
+    for (const id of [...this.sorts.keys()]) {
+      if (!this.tabExists(id)) this.sorts.delete(id)
+    }
   }
 
   /** Workspace switch: results, tasks and history all belong to the old one. */
@@ -430,6 +452,7 @@ export class QueriesController implements ReactiveController {
     this.runs = new Map()
     this.drafts = new Map()
     this.edits = new Map()
+    this.sorts = new Map()
     this.history = []
     this.tasks = []
     this.host.requestUpdate()

@@ -9,6 +9,7 @@ import type {
   InspectResult,
   ObjectsResult,
   QueryResponse,
+  QuerySort,
   ServerInfoResult,
   TableRef,
   TablesResult,
@@ -125,11 +126,17 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     return active?.status.phase === 'connected' ? active.driver : null
   }
 
-  async function query(profileId: string, childDb: string | null, sql: string, params?: unknown[]): Promise<QueryResponse> {
+  async function query(
+    profileId: string,
+    childDb: string | null,
+    sql: string,
+    params?: unknown[],
+    sort?: QuerySort | null,
+  ): Promise<QueryResponse> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
-      const raw = await driver.query(sql, params, childDb)
+      const raw = await driver.query(sql, params, childDb, sort)
       // Disconnected mid-query: don't register a buffer no one can page or free
       // (disconnect already swept this profile's sessions). Return a single
       // page, sessionless, so it can't leak.

@@ -129,6 +129,10 @@ export type QueryResult = {
 
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
 
+/** A column sort the UI injects into a query at run time; the driver builds the
+ * engine-correct ORDER BY (its own identifier quoting). */
+export type QuerySort = { column: string; direction: 'asc' | 'desc' }
+
 export type FetchRowsResult = { success: true; rows: unknown[][] } | { success: false; error: string }
 
 /** Partitioned tables count as plain tables — partitioning is hidden anyway. */
@@ -228,7 +232,13 @@ export type SqlkitApi = {
   getConnectionStatuses: () => Promise<ConnectionStatus[]>
   /** Subscribes to status pushes from the main process; returns unsubscribe. */
   onConnectionStatus: (listener: (statuses: ConnectionStatus[]) => void) => () => void
-  runQuery: (profileId: string, childDb: string | null, sql: string, params?: unknown[]) => Promise<QueryResponse>
+  runQuery: (
+    profileId: string,
+    childDb: string | null,
+    sql: string,
+    params?: unknown[],
+    sort?: QuerySort | null,
+  ) => Promise<QueryResponse>
   /** A page of a buffered result; rows beyond the first page are pulled on demand. */
   fetchRows: (sessionId: string, offset: number, limit: number) => Promise<FetchRowsResult>
   /** Releases a result's main-process buffer (tab closed / superseded). */

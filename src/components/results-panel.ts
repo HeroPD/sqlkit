@@ -2,7 +2,8 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { isMac } from '../platform'
-import type { QueryResult } from '../electron'
+import type { QueryResult, QuerySort } from '../electron'
+import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { cellToTsv, cellsToTsv, rowToTsv, toDelimited, toJson } from '../result-export'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -17,6 +18,9 @@ export type QueryRun =
   | { phase: 'error'; error: string }
 
 export type CellCoord = { row: number; col: number }
+
+// A header sort button click: re-sort by `column`, or clear the sort (null).
+export type SortColumnDetail = { column: string; direction: SortDir | null }
 
 // A row in the displayed grid: a result row (by data index) or a staged new row
 // (by draft array index). The grid lays these out in one interleaved sequence,
@@ -121,6 +125,10 @@ export class ResultsPanel extends LitElement {
   /** Staged result-cell edits, keyed "row:col" → new value, shown until saved. */
   @property({ attribute: false })
   edits: ReadonlyMap<string, string> = new Map()
+
+  /** The grid-injected column sort, so the header shows the active direction. */
+  @property({ attribute: false })
+  sort: QuerySort | null = null
 
   /** The cell being edited inline, by row reference. `seed` is the character that
    * started a type-to-edit (replaces the value); null edits the existing value.
@@ -1132,6 +1140,15 @@ export class ResultsPanel extends LitElement {
       return html`<p class="hint">OK — ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} affected.</p>`
     }
     if (this._record) return this._renderRecordView()
+    // Header sort buttons re-run the query with a driver-built ORDER BY (only
+    // when it's a single read statement). The active direction comes from the
+    // grid-injected sort, falling back to the query's own ORDER BY before any click.
+    const sortable = !!run.sql && isReorderableQuery(run.sql)
+    let current: QuerySort | null = sortable ? this.sort : null
+    if (!current && sortable && run.sql) {
+      const parsed = activeSort(run.sql, result.columns)
+      if (parsed) current = { column: result.columns[parsed.index]!, direction: parsed.dir }
+    }
     const widths = this._columnWidths(result)
     // table-layout: fixed only engages with a definite width; with width:
     // auto the browser falls back to AUTO layout and the colgroup widths
@@ -1181,7 +1198,7 @@ export class ResultsPanel extends LitElement {
         <thead>
           <tr>
             <th class="num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">#</th>
-            ${result.columns.map((column) => html`<th>${column}</th>`)}
+            ${result.columns.map((column, col) => this._renderHeader(column, col, sortable, current?.column === column ? current.direction : null))}
           </tr>
         </thead>
         <tbody>
@@ -1226,6 +1243,37 @@ export class ResultsPanel extends LitElement {
         </tbody>
       </table>
     `
+  }
+
+  // A column header with an optional sort button. The button shows the active
+  // direction when this column is sorted; clicking it cycles asc → desc → unsorted.
+  private _renderHeader(column: string, col: number, sortable: boolean, dir: SortDir | null) {
+    if (!sortable) return html`<th><div class="th-inner"><span class="th-name" title=${column}>${column}</span></div></th>`
+    const next = dir === 'asc' ? 'descending' : dir === 'desc' ? 'unsorted' : 'ascending'
+    return html`
+      <th class=${dir ? 'sorted' : ''}>
+        <div class="th-inner">
+          <span class="th-name" title=${column}>${column}</span>
+          <button
+            class="th-sort ${dir ? 'active' : ''}"
+            title=${`Sort ${column} (${next})`}
+            aria-label=${`Sort ${column} ${next}`}
+            @click=${() => this._sortBy(col, dir)}
+          >
+            <i class="codicon codicon-${dir === 'desc' ? 'arrow-down' : 'arrow-up'}" aria-hidden="true"></i>
+          </button>
+        </div>
+      </th>
+    `
+  }
+
+  // Cycles the column's sort and asks the owner to rewrite + re-run the query.
+  private _sortBy(col: number, dir: SortDir | null) {
+    if (this.run.phase !== 'done') return
+    const column = this.run.result.columns[col]
+    if (column === undefined) return
+    const direction: SortDir | null = dir === 'asc' ? 'desc' : dir === 'desc' ? null : 'asc'
+    this.dispatchEvent(new CustomEvent<SortColumnDetail>('sort-column', { detail: { column, direction }, bubbles: true, composed: true }))
   }
 
   // A staged new row interleaved at its anchor: highlighted, with a discard
@@ -1434,6 +1482,66 @@ export class ResultsPanel extends LitElement {
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.03em;
+      }
+
+      th.sorted {
+        color: var(--text);
+      }
+
+      .th-inner {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+      }
+
+      /* Reserve room for the pinned arrow only on the sorted column, so other
+         headers keep their full label width. */
+      th.sorted .th-inner {
+        padding-right: 18px;
+      }
+
+      .th-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* Pinned to the header's right edge (the sticky th is the containing
+         block); hidden until the header is hovered, except when this column is
+         sorted. The header-bg fill hides the label end it overlays. */
+      .th-sort {
+        position: absolute;
+        top: 50%;
+        right: 6px;
+        transform: translateY(-50%);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        padding: 0;
+        color: var(--text-3);
+        background: var(--header-bg);
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        opacity: 0;
+        --codicon-size: 12px;
+      }
+
+      th:hover .th-sort,
+      .th-sort.active {
+        opacity: 1;
+      }
+
+      .th-sort:hover {
+        color: var(--text);
+        background: var(--list-hover);
+      }
+
+      .th-sort.active {
+        color: var(--accent);
       }
 
       td {

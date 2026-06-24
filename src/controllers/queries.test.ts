@@ -80,7 +80,31 @@ describe('QueriesController.execute', () => {
     settle({ success: true, result })
     await done
 
-    expect(runQuery).toHaveBeenCalledWith('p1', 'analytics', 'SELECT 1')
+    expect(runQuery).toHaveBeenCalledWith('p1', 'analytics', 'SELECT 1', undefined, undefined)
+  })
+
+  it('forwards a column sort to the query IPC and tracks it per tab', async () => {
+    const { settle, runQuery } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute({ ...runArgs, sort: { column: 'name', direction: 'desc' } })
+    settle({ success: true, result })
+    await done
+
+    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', undefined, { column: 'name', direction: 'desc' })
+    expect(controller.sortFor('t1')).toEqual({ column: 'name', direction: 'desc' })
+  })
+
+  it('clears a previous sort when a run carries none', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    controller.sorts.set('t1', { column: 'name', direction: 'asc' })
+    const done = controller.execute(runArgs)
+    settle({ success: true, result })
+    await done
+
+    expect(controller.sortFor('t1')).toBeNull()
   })
 
   it('drops a result that resolves after a workspace switch (reset)', async () => {

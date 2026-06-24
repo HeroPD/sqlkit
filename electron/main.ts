@@ -43,7 +43,7 @@ import {
 } from './files'
 import { createConnectionManager, testConnection, type ConnectionManager } from './db/manager'
 import { testSshTunnel } from './db/transport'
-import type { ConnectionProfile, ConnectionStatus, DbObject, DbObjectKind, TableRef, WorkspaceConfig } from '../src/electron'
+import type { ConnectionProfile, ConnectionStatus, DbObject, DbObjectKind, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
@@ -380,8 +380,10 @@ function registerDbIpc() {
     manager(event).setActiveChild(profileId, database),
   )
   ipcMain.handle('db:statuses', (event) => existingManager(event)?.statuses() ?? [])
-  ipcMain.handle('db:query', (event, profileId: string, childDb: string | null, sql: string, params?: unknown[]) =>
-    manager(event).query(profileId, childDb, sql, params),
+  ipcMain.handle(
+    'db:query',
+    (event, profileId: string, childDb: string | null, sql: string, params?: unknown[], sort?: QuerySort | null) =>
+      manager(event).query(profileId, childDb, sql, params, sort),
   )
   ipcMain.handle('db:fetch-rows', (event, sessionId: string, offset: number, limit: number) =>
     existingManager(event)?.fetchRows(sessionId, offset, limit) ?? { success: false as const, error: 'No active session' },

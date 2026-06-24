@@ -21,7 +21,7 @@ const api: SqlkitApi = {
     ipcRenderer.on('db:status', handler)
     return () => ipcRenderer.off('db:status', handler)
   },
-  runQuery: (profileId, childDb, sql, params) => ipcRenderer.invoke('db:query', profileId, childDb, sql, params),
+  runQuery: (profileId, childDb, sql, params, sort) => ipcRenderer.invoke('db:query', profileId, childDb, sql, params, sort),
   fetchRows: (sessionId, offset, limit) => ipcRenderer.invoke('db:fetch-rows', sessionId, offset, limit),
   closeSession: (sessionId) => ipcRenderer.invoke('db:close-session', sessionId),
   cancelQuery: (profileId) => ipcRenderer.invoke('db:cancel', profileId),
