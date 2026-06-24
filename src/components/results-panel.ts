@@ -386,6 +386,28 @@ export class ResultsPanel extends LitElement {
     this._pendingSelectDraft = index ?? this.drafts.length
   }
 
+  private _duplicateSelection = () => {
+    if (this.run.phase !== 'done') return
+    const { results } = this._selectedRefs()
+    if (!results.length) return
+    // Stack every duplicate below the last selected row, in selection order,
+    // rather than interleaving each copy under its own source row.
+    const after = Math.max(...results)
+    const drafts = results.map((row) => ({ after, cells: this._duplicateCells(row) }))
+    this.dispatchEvent(new CustomEvent('duplicate-rows', { detail: { drafts }, bubbles: true, composed: true }))
+    this._pendingSelectDraft = this.drafts.length
+  }
+
+  private _duplicateCells(row: number): Array<string | null> {
+    if (this.run.phase !== 'done') return []
+    return this.run.result.columns.map((_, col) => {
+      const pending = this.edits.get(`${row}:${col}`)
+      if (pending !== undefined) return pending
+      const value = this.run.phase === 'done' ? this.run.result.rows[row]?.[col] : null
+      return value === null || value === undefined ? '' : formatCell(value)
+    })
+  }
+
   private _saveRows = () => {
     if (!this._hasPending()) return
     this.dispatchEvent(new CustomEvent('save-rows', { bubbles: true, composed: true }))
@@ -453,6 +475,15 @@ export class ResultsPanel extends LitElement {
                   ? html`
                       <button class="head-action" title="Add new row" aria-label="Add new row" @click=${this._addRow}>
                         <i class="codicon codicon-add" aria-hidden="true"></i>
+                      </button>
+                      <button
+                        class="head-action"
+                        title=${`Duplicate selected rows (${isMac ? '⌘D' : 'Ctrl+D'})`}
+                        aria-label="Duplicate selected rows"
+                        ?disabled=${selected.results.length === 0}
+                        @click=${this._duplicateSelection}
+                      >
+                        <i class="codicon codicon-copy" aria-hidden="true"></i>
                       </button>
                     `
                   : ''}
@@ -918,6 +949,11 @@ export class ResultsPanel extends LitElement {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
       event.preventDefault()
       this._copySelection()
+      return
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
+      event.preventDefault()
+      if (this.rowEditable) this._duplicateSelection()
       return
     }
     if (event.metaKey || event.ctrlKey || event.altKey || !this._sel) return

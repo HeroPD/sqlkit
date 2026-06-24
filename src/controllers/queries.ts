@@ -100,6 +100,12 @@ export class QueriesController implements ReactiveController {
     this.host.requestUpdate()
   }
 
+  addDrafts(tabId: string, drafts: DraftRow[]) {
+    if (!drafts.length) return
+    this.drafts = new Map(this.drafts).set(tabId, [...(this.drafts.get(tabId) ?? []), ...drafts])
+    this.host.requestUpdate()
+  }
+
   setDraftCell(tabId: string, index: number, col: number, value: string) {
     const rows = this.drafts.get(tabId)
     if (!rows?.[index] || col < 0 || col >= rows[index].cells.length) return

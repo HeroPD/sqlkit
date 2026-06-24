@@ -863,6 +863,7 @@ export class WorkbenchScreen extends LitElement {
             @cell-edit=${this._onCellEdit}
             @cell-edit-clear=${this._onCellEditClear}
             @add-row=${this._onAddRow}
+            @duplicate-rows=${this._onDuplicateRows}
             @delete-rows=${this._onDeleteRows}
             @draft-edit=${this._onDraftEdit}
             @draft-remove=${this._onDraftRemove}
@@ -1126,6 +1127,12 @@ export class WorkbenchScreen extends LitElement {
   private _onDraftRemove(event: Event) {
     const { indexes } = (event as CustomEvent<{ indexes: number[] }>).detail
     if (this._ctx.activeTabId) this._queries.dropDrafts(this._ctx.activeTabId, indexes)
+  }
+
+  private _onDuplicateRows(event: Event) {
+    const { drafts } = (event as CustomEvent<{ drafts: Array<{ after: number; cells: Array<string | null> }> }>).detail
+    if (this._ctx.activeTabId) this._queries.addDrafts(this._ctx.activeTabId, drafts)
+    this._layout.expandPanel()
   }
 
   private _onDiscardChanges() {

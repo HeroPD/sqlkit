@@ -143,6 +143,20 @@ describe('QueriesController drafts', () => {
     expect(controller.draftsFor('t1')[3]).toEqual({ after: 0, cells: [null] })
   })
 
+  it('adds multiple prefilled draft rows in one update', () => {
+    const controller = new QueriesController(host(), () => true)
+
+    controller.addDrafts('t1', [
+      { after: 0, cells: ['1', 'Ada'] },
+      { after: 1, cells: ['2', 'Grace'] },
+    ])
+
+    expect(controller.draftsFor('t1')).toEqual([
+      { after: 0, cells: ['1', 'Ada'] },
+      { after: 1, cells: ['2', 'Grace'] },
+    ])
+  })
+
   it('clears a tab\'s drafts when a run returns a different column count', async () => {
     const { settle } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)

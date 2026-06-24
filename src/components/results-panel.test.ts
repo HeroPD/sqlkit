@@ -210,6 +210,85 @@ describe('results-panel draft rows', () => {
     el.remove()
   })
 
+  it('duplicates selected result rows into prefilled drafts with every column value', async () => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.rowEditable = true
+    el.run = {
+      phase: 'done',
+      result: {
+        columns: ['id', 'name', 'meta'],
+        rows: [[1, null, { role: 'admin' }]],
+        rowCount: 1,
+        durationMs: 1,
+      },
+    }
+    el.edits = new Map([['0:0', '2']])
+    document.body.append(el)
+    await el.updateComplete
+    const duplicate = vi.fn()
+    el.addEventListener('duplicate-rows', duplicate)
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Duplicate selected rows"]')!.click()
+
+    expect(duplicate).toHaveBeenCalledOnce()
+    expect((duplicate.mock.calls[0]![0] as CustomEvent).detail).toEqual({
+      drafts: [{ after: 0, cells: ['2', '', '{"role":"admin"}'] }],
+    })
+    el.remove()
+  })
+
+  it('stacks every duplicate below the last selected row in selection order', async () => {
+    const el = await mountGrid(3)
+    const duplicate = vi.fn()
+    el.addEventListener('duplicate-rows', duplicate)
+
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Duplicate selected rows"]')!.click()
+
+    expect((duplicate.mock.calls[0]![0] as CustomEvent).detail).toEqual({
+      drafts: [
+        { after: 2, cells: ['a0', 'b0'] },
+        { after: 2, cells: ['a1', 'b1'] },
+        { after: 2, cells: ['a2', 'b2'] },
+      ],
+    })
+    el.remove()
+  })
+
+  it('duplicates the selection on Cmd/Ctrl+D', async () => {
+    const el = await mountGrid(3)
+    const duplicate = vi.fn()
+    el.addEventListener('duplicate-rows', duplicate)
+
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    await el.updateComplete
+    key(el, { key: 'd', metaKey: true })
+
+    expect((duplicate.mock.calls[0]![0] as CustomEvent).detail).toEqual({
+      drafts: [
+        { after: 1, cells: ['a0', 'b0'] },
+        { after: 1, cells: ['a1', 'b1'] },
+      ],
+    })
+    el.remove()
+  })
+
+  it('ignores Cmd/Ctrl+D when rows are not editable', async () => {
+    const el = await mountGrid(2)
+    el.rowEditable = false
+    await el.updateComplete
+    const duplicate = vi.fn()
+    el.addEventListener('duplicate-rows', duplicate)
+
+    key(el, { key: 'd', metaKey: true })
+
+    expect(duplicate).not.toHaveBeenCalled()
+    el.remove()
+  })
+
   it('disables Save until a draft or edit exists and emits save-rows on click', async () => {
     const el = await mount()
     el.rowEditable = true
