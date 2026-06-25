@@ -81,6 +81,15 @@ const softHighlightStyle = HighlightStyle.define([
 
 const appTheme = EditorView.theme(
   {
+    // Override One Dark's #282c34 so the editor matches --editor-bg (and the
+    // active tab) instead of sitting in a lighter gray box.
+    '&': {
+      backgroundColor: 'var(--editor-bg)',
+    },
+
+    '.cm-gutters': {
+      backgroundColor: 'var(--editor-bg)',
+    },
 
     '.cm-scroller': {
       fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",

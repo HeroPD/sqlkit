@@ -1360,7 +1360,9 @@ export class WorkbenchScreen extends LitElement {
         align-items: stretch;
         overflow-x: auto;
         flex-shrink: 0;
-        border-bottom: 1px solid var(--border);
+        /* Inset (not border-bottom) so it sits inside the scroll-clip region
+           and the active tab can paint over it; covers the trailing space. */
+        box-shadow: inset 0 -1px 0 var(--border);
         scrollbar-width: none;
         overscroll-behavior: none;
       }

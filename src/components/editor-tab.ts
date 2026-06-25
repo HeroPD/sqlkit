@@ -56,7 +56,9 @@ export class EditorTab extends LitElement {
       font-size: var(--font-size);
       color: var(--tab-inactive-fg);
       background: var(--tab-inactive-bg);
+      box-sizing: border-box;
       border-right: 1px solid var(--tab-border);
+      border-bottom: 1px solid var(--border);
       cursor: pointer;
       position: relative;
       user-select: none;
@@ -69,6 +71,9 @@ export class EditorTab extends LitElement {
     :host([active]) {
       color: var(--tab-active-fg);
       background: var(--tab-active-bg);
+      /* Paint the 1px divider in the editor color so the active tab merges
+         into the editor below instead of being separated by a line. */
+      border-bottom-color: var(--tab-active-bg);
     }
 
     :host([active])::after {
