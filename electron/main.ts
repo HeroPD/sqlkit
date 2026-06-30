@@ -479,7 +479,23 @@ function buildAppMenu() {
       ],
     },
     { role: 'editMenu' },
-    { role: 'viewMenu' },
+    {
+      // Hand-rolled View menu: the viewMenu role binds ⌘R to a full window
+      // reload, which we repurpose to refresh the result grid. ⇧⌘R force-reload
+      // stays as a dev escape hatch.
+      label: 'View',
+      submenu: [
+        { label: 'Refresh Results', accelerator: 'CmdOrCtrl+R', click: menuAction('refresh-results') },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     {
       // Hand-rolled window menu: the windowMenu role would re-register ⌘W.
       label: 'Window',

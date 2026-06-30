@@ -189,6 +189,7 @@ export type InspectColumn = {
   nullable: boolean
   default: string | null
   primaryKey: boolean
+  comment: string | null
 }
 
 /** One named-rows block of a table inspection (Indexes, Triggers, …).
@@ -302,7 +303,7 @@ export type SqlkitApi = {
 }
 
 /** Action ids the app menu sends over `app:menu`. */
-export type MenuAction = 'new-query' | 'save' | 'save-as' | 'close-tab'
+export type MenuAction = 'new-query' | 'save' | 'save-as' | 'close-tab' | 'refresh-results'
 
 declare global {
   interface Window {

@@ -244,7 +244,19 @@ export class WorkbenchScreen extends LitElement {
       case 'close-tab':
         if (this._ctx.activeTabId) this._requestCloseTab(this._ctx.activeTabId)
         break
+      case 'refresh-results':
+        this._refreshResults()
+        break
     }
+  }
+
+  // ⌘R: re-run the active tab's current result query, keeping its column sort.
+  // No-op until a query has produced a result (errored/idle runs store no SQL).
+  private _refreshResults() {
+    const tabId = this._ctx.activeTabId
+    const run = this._queries.runFor(tabId)
+    if (run.phase !== 'done' || !run.sql) return
+    void this._runSql(run.sql, this._queries.sortFor(tabId))
   }
 
   private _saveActive() {

@@ -449,6 +449,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
             nullable: true,
             default: null,
             primaryKey: false,
+            comment: null,
           })),
           sections: [],
         }
@@ -495,7 +496,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
                   pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type,
                   not a.attnotnull as nullable,
                   pg_catalog.pg_get_expr(d.adbin, d.adrelid) as default_expr,
-                  coalesce(i.indisprimary, false) as primary_key
+                  coalesce(i.indisprimary, false) as primary_key,
+                  pg_catalog.col_description(a.attrelid, a.attnum) as comment
            from pg_catalog.pg_attribute a
            join pg_catalog.pg_class c on c.oid = a.attrelid
            join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -512,7 +514,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
            from pg_catalog.pg_constraint con
            join pg_catalog.pg_class c on c.oid = con.conrelid
            join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-           where n.nspname = $1 and c.relname = $2
+           where n.nspname = $1 and c.relname = $2 and con.conparentid = 0
            order by con.contype, con.conname`,
           args,
         ),
@@ -544,8 +546,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const sections: InspectSection[] = [
         // FKs are constraints too, but they're what people look for most.
         { title: 'Foreign Keys', rows: constraintRows.filter((row) => row.type === 'f') },
-        // Skip NOT NULL (contype 'n', PG 17+) — already shown in the Nullable column.
-        { title: 'Constraints', rows: constraintRows.filter((row) => row.type !== 'f' && row.type !== 'n') },
+        // Skip NOT NULL (contype 'n', PG 17+) and PRIMARY KEY ('p') — already shown in the columns table.
+        { title: 'Constraints', rows: constraintRows.filter((row) => row.type !== 'f' && row.type !== 'n' && row.type !== 'p') },
         { title: 'Indexes', rows: indexes },
         { title: 'Partitions', rows: partitions },
         { title: 'Triggers', rows: triggers },
@@ -554,12 +556,20 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       ]
       return {
         columns: columns.rows.map(
-          (row: { name: string; data_type: string; nullable: boolean; default_expr: string | null; primary_key: boolean }) => ({
+          (row: {
+            name: string
+            data_type: string
+            nullable: boolean
+            default_expr: string | null
+            primary_key: boolean
+            comment: string | null
+          }) => ({
             name: row.name,
             dataType: row.data_type,
             nullable: row.nullable,
             default: row.default_expr,
             primaryKey: row.primary_key,
+            comment: row.comment,
           }),
         ),
         sections: sections.filter((section) => section.rows.length),

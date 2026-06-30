@@ -17,6 +17,12 @@ export type Dialect = {
   placeholder(index: number): string
   /** Inserts or replaces the outer query's ORDER BY for a single-column sort. */
   applyOrderBy(sql: string, sort: QuerySort): string
+  /** Strips this engine's auto-generated constraint/index name suffix for display
+   *  (e.g. Postgres `_fkey`); returns the name unchanged when there's nothing to strip. */
+  displayConstraintName(name: string): string
+  /** Whether this engine has native column comments — drives whether the inspector
+   *  shows a Comment column at all (shown even when every value is empty). */
+  supportsColumnComments: boolean
 }
 
 // SQL-standard double quotes (Postgres, SQLite), MySQL backticks, SQL Server
@@ -32,13 +38,36 @@ const quoteFor: Record<Engine, (name: string) => string> = {
   sqlserver: bracketQuote,
 }
 
+// Auto-generated constraint/index name suffix per engine, stripped for display.
+// Postgres uses <table>_<cols>_<suffix>; SQLite section names are real column or
+// index identifiers (never strip). MySQL's _ibfk_N/_chk_N strip down to just the
+// table name — not useful — so it opts out until its driver proves otherwise.
+const constraintSuffixFor: Record<Engine, RegExp | null> = {
+  postgresql: /_(?:pkey|key|fkey|check|excl)$/,
+  sqlite: null,
+  mysql: null,
+  sqlserver: null,
+}
+
+// Native column comments: Postgres (COMMENT ON), MySQL (COLUMN COMMENT). SQLite
+// has none; SQL Server uses extended properties (not wired up yet), so off here.
+const columnCommentsFor: Record<Engine, boolean> = {
+  postgresql: true,
+  sqlite: false,
+  mysql: true,
+  sqlserver: false,
+}
+
 const makeDialect = (engine: Engine): Dialect => {
   const quoteIdent = quoteFor[engine]
+  const suffix = constraintSuffixFor[engine]
   return {
     engine,
     quoteIdent,
     placeholder: (index) => (engine === 'postgresql' ? `$${index}` : '?'),
     applyOrderBy: (sql, sort) => placeOrderBy(sql, { column: quoteIdent(sort.column), dir: sort.direction }),
+    displayConstraintName: (name) => (suffix ? name.replace(suffix, '') : name),
+    supportsColumnComments: columnCommentsFor[engine],
   }
 }
 

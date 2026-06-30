@@ -152,6 +152,8 @@ export function inspectTable(db: DatabaseSync, table: TableRef): TableInspection
       nullable: !row.not_null,
       default: row.dflt_value,
       primaryKey: row.pk > 0,
+      // SQLite has no native column comments.
+      comment: null,
     })),
     sections: sections.filter((section) => section.rows.length),
   }

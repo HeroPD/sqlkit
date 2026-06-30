@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import type { DbObject, DbObjectKind, Engine, TableInspection, TableRef } from '../electron'
 import { abbreviateType } from '../sql-types'
+import { dialectFor } from '../dialect'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
@@ -168,7 +169,12 @@ export class TableInspect extends LitElement {
       ${columns.length ? this._renderColumnsTable(columns) : ''}
       ${sections.map(
         (section) => html`
-          <h4>${section.title} <span class="count">${section.rows.length}</span></h4>
+          <h4>
+            ${section.title} <span class="count">${section.rows.length}</span>
+            <button class="add-btn" type="button" title="Add ${section.title}" aria-label="Add ${section.title}">
+              <i class="codicon codicon-add" aria-hidden="true"></i>
+            </button>
+          </h4>
           <table class="section-table">
             <colgroup>
               <col class="name-col" />
@@ -178,7 +184,9 @@ export class TableInspect extends LitElement {
               ${section.rows.map(
                 (row) => html`
                   <tr @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}>
-                    <td class="mono name-cell" title=${row.name}>${row.name}</td>
+                    <td class="mono name-cell" title=${row.name}>
+                      ${this.engine ? dialectFor(this.engine).displayConstraintName(row.name) : row.name}
+                    </td>
                     <td class="mono def" title=${row.definition}>${highlightDefinition(row.definition)}</td>
                   </tr>
                 `,
@@ -198,6 +206,7 @@ export class TableInspect extends LitElement {
   }
 
   private _renderColumnsTable(columns: TableInspection['columns']) {
+    const hasComments = this.engine ? dialectFor(this.engine).supportsColumnComments : false
     return html`
       <h4>${this.object ? 'Attributes' : 'Columns'} <span class="count">${columns.length}</span></h4>
       <table class="columns-table">
@@ -207,6 +216,7 @@ export class TableInspect extends LitElement {
           <col class="type-col" />
           <col class="nullable-col" />
           <col />
+          ${hasComments ? html`<col />` : ''}
         </colgroup>
         <thead>
           <tr>
@@ -215,6 +225,7 @@ export class TableInspect extends LitElement {
             <th>Type</th>
             <th>Nullable</th>
             <th>Default</th>
+            ${hasComments ? html`<th>Comment</th>` : ''}
           </tr>
         </thead>
         <tbody>
@@ -228,6 +239,7 @@ export class TableInspect extends LitElement {
                 <td class="mono type clip" title=${column.dataType}>${abbreviateType(column.dataType, this.engine)}</td>
                 <td class="muted">${column.nullable ? 'yes' : 'no'}</td>
                 <td class="mono muted clip" title=${column.default ?? ''}>${column.default ?? ''}</td>
+                ${hasComments ? html`<td class="muted clip" title=${column.comment ?? ''}>${column.comment ?? ''}</td>` : ''}
               </tr>
             `,
           )}
@@ -296,6 +308,9 @@ export class TableInspect extends LitElement {
       }
 
       h4 {
+        display: flex;
+        align-items: center;
+        gap: 6px;
         margin: 18px 0 6px;
         font-size: 11px;
         font-weight: 600;
@@ -307,6 +322,32 @@ export class TableInspect extends LitElement {
       .count {
         font-weight: 400;
         color: var(--text-3);
+      }
+
+      .add-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        padding: 1px;
+        color: var(--on-accent);
+        background: var(--accent);
+        border: none;
+        border-radius: 50%;
+        cursor: pointer;
+        letter-spacing: normal;
+        line-height: 1;
+      }
+
+      .add-btn .codicon {
+        font-size: 11px;
+        margin: 1px 0 0 1px;
+        -webkit-text-stroke: 0.6px currentColor;
+      }
+
+      .add-btn:hover {
+        background: var(--accent-hover);
       }
 
       table {
