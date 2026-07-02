@@ -123,13 +123,14 @@ export class DatabasesView extends LitElement {
         ? status.error
         : status?.phase === 'connected'
           ? `${status.serverVersion}${status.tunneled ? ' · SSH' : ''}`
-          : connection.engine
+          : (connection.flavor ?? connection.engine)
     return html`
       <db-list-item
         dbId=${connection.id}
         name=${connection.name}
         detail=${detail ?? connection.engine}
         engine=${connection.engine}
+        flavor=${connection.flavor ?? ''}
         status=${status?.phase ?? ''}
         .active=${this.activeTabId === connection.id}
         @contextmenu=${(event: MouseEvent) => this._onItemMenu(event, connection.id)}

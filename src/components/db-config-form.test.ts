@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import type { ConnectionProfile, Engine, TestConnectionResult, TestSshResult } from '../electron'
+import type { ConnectionProfile, TestConnectionResult, TestSshResult } from '../electron'
 import { DbConfigForm } from './db-config-form'
 
 const profile = (over: Partial<ConnectionProfile> = {}): ConnectionProfile => ({
@@ -23,7 +23,7 @@ const internals = (form: DbConfigForm) =>
     _test: TestState
     _sshTest: TestState
     _patch(partial: Partial<ConnectionProfile>): void
-    _onEngineChange(engine: Engine): void
+    _onEngineChange(id: string): void
     _onSave(): void
     _onTest(): Promise<void>
     _onTestSsh(): Promise<void>
@@ -82,6 +82,28 @@ describe('DbConfigForm engine switch port carry', () => {
     const { form, changes } = setup({ port: '5432' })
     internals(form)._onEngineChange('sqlite')
     expect(changes[0]).toMatchObject({ engine: 'sqlite', port: '5432' })
+  })
+
+  it('maps compatible variants to their parent engine with a flavor tag', () => {
+    const { form, changes } = setup({ port: '5432' })
+    internals(form)._onEngineChange('supabase')
+    expect(changes[0]).toMatchObject({ engine: 'postgresql', flavor: 'supabase', port: '5432' })
+
+    internals(form)._onEngineChange('mariadb')
+    expect(changes[1]).toMatchObject({ engine: 'mysql', flavor: 'mariadb', port: '3306' })
+  })
+
+  it('clears the flavor when switching back to a plain engine', () => {
+    const { form, changes } = setup({ flavor: 'supabase' })
+    internals(form)._onEngineChange('postgresql')
+    expect(changes[0]?.flavor).toBeUndefined()
+    expect(changes[0]).toMatchObject({ engine: 'postgresql' })
+  })
+
+  it('ignores roadmapped entries with no driver', () => {
+    const { form, changes } = setup()
+    internals(form)._onEngineChange('clickhouse')
+    expect(changes).toHaveLength(0)
   })
 })
 

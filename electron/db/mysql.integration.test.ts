@@ -147,15 +147,25 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
+  it('displays the last result set of a multi-statement run', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query('set @x = 1; select 1 as a; select 2 as b')
+      expect(result.columns).toEqual(['b'])
+      expect(result.rows).toEqual([[2]])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('buffers at most MAX_BUFFERED_ROWS but counts them all', async () => {
     const driver = await connectDriver()
     try {
       const count = MAX_BUFFERED_ROWS + 25
-      // Multi-statement: the session tweak's OK packet is superseded by the
-      // recursive CTE's result set (last statement wins).
+      // A cross join over information_schema generates rows without recursive
+      // CTEs, whose depth cap is spelled differently on MySQL vs MariaDB.
       const result = await driver.query(
-        `set session cte_max_recursion_depth = ${count + 1};
-         with recursive seq as (select 1 as n union all select n + 1 from seq where n < ${count}) select n from seq`,
+        `select a.table_name from information_schema.columns a cross join information_schema.columns b limit ${count}`,
       )
       expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
       expect(result.rowCount).toBe(count)

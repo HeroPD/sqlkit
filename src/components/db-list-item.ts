@@ -1,7 +1,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { codicons } from '../shared-styles'
-import type { ConnectionPhase, Engine } from '../electron'
+import type { ConnectionPhase, Engine, EngineFlavor } from '../electron'
 import './engine-badge'
 
 // One row in the Databases sidebar list. Dispatches `db-select` with its
@@ -21,6 +21,9 @@ export class DbListItem extends LitElement {
 
   @property()
   engine: Engine | '' = ''
+
+  @property()
+  flavor: EngineFlavor | '' = ''
 
   @property({ reflect: true })
   status: ConnectionPhase | '' = ''
@@ -46,7 +49,7 @@ export class DbListItem extends LitElement {
     const live = this.status === 'connected' || this.status === 'connecting'
     return html`
       <span class="icon">
-        <engine-badge engine=${this.engine}></engine-badge>
+        <engine-badge engine=${this.engine} flavor=${this.flavor}></engine-badge>
         <span class="dot"></span>
       </span>
       <span class="meta">

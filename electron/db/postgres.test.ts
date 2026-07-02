@@ -85,4 +85,10 @@ describe('shortVersion', () => {
   it('returns the string unchanged when there is no platform suffix', () => {
     expect(shortVersion('PostgreSQL 17.2')).toBe('PostgreSQL 17.2')
   })
+
+  it('trims PG-compatible banners with a parenthesized build suffix', () => {
+    expect(shortVersion('CockroachDB CCL v26.2.3 (aarch64-unknown-linux-gnu, built 2026/06/24, go1.25.5)')).toBe(
+      'CockroachDB CCL v26.2.3',
+    )
+  })
 })

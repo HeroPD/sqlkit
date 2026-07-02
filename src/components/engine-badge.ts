@@ -1,20 +1,22 @@
 import { LitElement, css, html, svg, type TemplateResult } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { codicons } from '../shared-styles'
-import type { Engine } from '../electron'
+import type { Engine, EngineFlavor } from '../electron'
 
 // A rounded square in the engine's brand color carrying its white logo
 // (simple-icons, 24×24 viewBox). Engines without a bundled logo fall back to
 // the database codicon on the same brand square, so every engine renders
 // consistently. Size with --engine-badge-size from the outside.
-const BRAND: Record<Engine, string> = {
+const BRAND: Record<Engine | EngineFlavor, string> = {
   postgresql: '#336791',
   sqlite: '#003b57',
   mysql: '#4479a1',
   sqlserver: '#cc2927',
+  supabase: '#3ecf8e',
+  mariadb: '#003545',
 }
 
-const LOGOS: Partial<Record<Engine, TemplateResult<2>>> = {
+const LOGOS: Partial<Record<Engine | EngineFlavor, TemplateResult<2>>> = {
   postgresql: svg`
     <path
       d="
@@ -94,13 +96,18 @@ export class EngineBadge extends LitElement {
   @property()
   engine: Engine | '' = ''
 
+  /** Compatible-variant branding (Supabase, MariaDB); wins over engine. */
+  @property()
+  flavor: EngineFlavor | '' = ''
+
   render() {
-    const logo = this.engine ? LOGOS[this.engine] : undefined
-    const brand = this.engine ? BRAND[this.engine] : undefined
+    const key = this.flavor || this.engine
+    const logo = key ? LOGOS[key] : undefined
+    const brand = key ? BRAND[key] : undefined
     return html`
-      <span class="badge" style="background: ${brand ?? 'var(--accent)'}" title=${this.engine}>
+      <span class="badge" style="background: ${brand ?? 'var(--accent)'}" title=${key}>
         ${logo
-        ? html`<svg viewBox="0 0 24 24" role="img" aria-label=${this.engine}>${logo}</svg>`
+        ? html`<svg viewBox="0 0 24 24" role="img" aria-label=${key}>${logo}</svg>`
         : html`<i class="codicon codicon-database" aria-hidden="true"></i>`}
       </span>
     `

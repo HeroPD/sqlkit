@@ -10,6 +10,9 @@ export type WorkspaceResult =
 
 export type Engine = 'postgresql' | 'sqlite' | 'mysql' | 'sqlserver'
 
+/** Branding variant of a wire-compatible engine; all behavior comes from `engine`. */
+export type EngineFlavor = 'supabase' | 'mariadb'
+
 /**
  * single — the connection stays on its one configured database.
  * all — list every database on the server as runtime children; one is active
@@ -46,6 +49,9 @@ export type ConnectionProfile = {
   id: string
   name: string
   engine: Engine
+  /** Set when the user picked a compatible variant (Supabase, MariaDB) in the
+   *  engine list; presentational only — drivers and dialects key on `engine`. */
+  flavor?: EngineFlavor
   host: string
   port: string
   username: string

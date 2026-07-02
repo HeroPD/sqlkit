@@ -276,7 +276,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
          from pg_catalog.pg_class c
          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
          where c.relkind in ('r', 'p', 'v', 'm', 'f')
-           and not c.relispartition
+           and not coalesce(c.relispartition, false)
            and n.nspname !~ '^pg_'
            and n.nspname <> 'information_schema'
          order by table_schema, table_name`,
@@ -307,7 +307,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
          left join pg_catalog.pg_index i
            on i.indrelid = a.attrelid and i.indisprimary and a.attnum = any(i.indkey)
          where c.relkind in ('r', 'p', 'v', 'm', 'f')
-           and not c.relispartition
+           and not coalesce(c.relispartition, false)
            and n.nspname !~ '^pg_'
            and n.nspname <> 'information_schema'
            and a.attnum > 0
@@ -675,7 +675,9 @@ async function columnSourcesForFields(
   })
 }
 
-/** "PostgreSQL 17.2 on aarch64-apple-darwin…" → "PostgreSQL 17.2". */
+/** "PostgreSQL 17.2 on aarch64-apple-darwin…" → "PostgreSQL 17.2"; also trims
+ *  PG-compatible banners like "CockroachDB CCL v26.2.3 (aarch64-…, built …)". */
 export function shortVersion(version: string) {
-  return version.split(' on ')[0] ?? version
+  const beforeOn = version.split(' on ')[0] ?? version
+  return beforeOn.split(' (')[0]?.trim() || beforeOn
 }

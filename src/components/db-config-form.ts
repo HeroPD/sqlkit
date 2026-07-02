@@ -1,17 +1,21 @@
 import { LitElement, css, html, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
-import type { ConnectionProfile, DatabaseMode, Engine, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
+import type { ConnectionProfile, DatabaseMode, Engine, EngineFlavor, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
 
-// Roadmapped engines are listed disabled; they stay out of the Engine type
-// until a driver exists, so nothing else has to pretend they're real.
-const ENGINES: ReadonlyArray<{ engine: Engine | 'clickhouse' | 'oracle'; label: string; disabled?: boolean }> = [
-  { engine: 'postgresql', label: 'PostgreSQL' },
-  { engine: 'mysql', label: 'MySQL' },
-  { engine: 'sqlite', label: 'SQLite' },
-  { engine: 'sqlserver', label: 'SQL Server' },
-  { engine: 'clickhouse', label: 'ClickHouse (coming soon)', disabled: true },
-  { engine: 'oracle', label: 'Oracle (coming soon)', disabled: true },
+// Verified wire-compatible variants (Supabase, MariaDB) ride their parent
+// engine's driver, distinguished only by `flavor`. Roadmapped engines are
+// listed disabled and stay out of the Engine type until a driver exists.
+type EngineOption = { id: string; engine?: Engine; flavor?: EngineFlavor; label: string; disabled?: boolean }
+const ENGINES: ReadonlyArray<EngineOption> = [
+  { id: 'postgresql', engine: 'postgresql', label: 'PostgreSQL' },
+  { id: 'mysql', engine: 'mysql', label: 'MySQL' },
+  { id: 'sqlite', engine: 'sqlite', label: 'SQLite' },
+  { id: 'sqlserver', engine: 'sqlserver', label: 'SQL Server' },
+  { id: 'supabase', engine: 'postgresql', flavor: 'supabase', label: 'Supabase (Postgres)' },
+  { id: 'mariadb', engine: 'mysql', flavor: 'mariadb', label: 'MariaDB (MySQL)' },
+  { id: 'clickhouse', label: 'ClickHouse (coming soon)', disabled: true },
+  { id: 'oracle', label: 'Oracle (coming soon)', disabled: true },
 ]
 
 const DEFAULT_PORTS: Partial<Record<Engine, string>> = {
@@ -77,10 +81,14 @@ export class DbConfigForm extends LitElement {
           ${this._field(
             'Driver',
             html`
-              <select @change=${(e: Event) => this._onEngineChange((e.target as HTMLSelectElement).value as Engine)}>
+              <select @change=${(e: Event) => this._onEngineChange((e.target as HTMLSelectElement).value)}>
                 ${ENGINES.map(
                   (entry) => html`
-                    <option value=${entry.engine} ?selected=${entry.engine === draft.engine} ?disabled=${entry.disabled ?? false}>
+                    <option
+                      value=${entry.id}
+                      ?selected=${entry.id === (draft.flavor ?? draft.engine)}
+                      ?disabled=${entry.disabled ?? false}
+                    >
                       ${entry.label}
                     </option>
                   `,
@@ -362,15 +370,17 @@ export class DbConfigForm extends LitElement {
     this.dispatchEvent(new CustomEvent('config-change', { detail: { profile }, bubbles: true, composed: true }))
   }
 
-  private _onEngineChange(engine: Engine) {
-    if (!this.profile) return
+  private _onEngineChange(id: string) {
+    const entry = ENGINES.find((option) => option.id === id)
+    if (!this.profile || !entry?.engine) return
     // Carry the port along only if the user hasn't customized it.
     const ports = Object.values(DEFAULT_PORTS)
     const port =
       this.profile.port === '' || ports.includes(this.profile.port)
-        ? (DEFAULT_PORTS[engine] ?? this.profile.port)
+        ? (DEFAULT_PORTS[entry.engine] ?? this.profile.port)
         : this.profile.port
-    this._patch({ engine, port })
+    // flavor is set for variants and explicitly cleared for plain engines.
+    this._patch({ engine: entry.engine, flavor: entry.flavor, port })
   }
 
   private async _onBrowse() {
