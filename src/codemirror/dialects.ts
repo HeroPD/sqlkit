@@ -1,4 +1,5 @@
 import { MSSQL, MySQL, PostgreSQL, SQLite, type SQLDialect } from '@codemirror/lang-sql'
+import { dialectFor } from '../dialect'
 import type { Engine } from '../electron'
 
 export type SqlDialectName = 'postgres' | 'mssql' | 'sqlite' | 'mysql'
@@ -15,6 +16,8 @@ export type SqlDialectConfig = {
   dialect: SQLDialect
   /** Keywords offered by autocomplete. Extend per dialect as needed. */
   keywords: readonly string[]
+  /** Engine-correct identifier quoting, for completing names that can't appear bare. */
+  quoteIdent: (name: string) => string
 }
 
 /** ANSI core shared by every dialect; dialect-specific keywords go in SQL_DIALECTS. */
@@ -91,8 +94,9 @@ const COMMON_KEYWORDS = [
   'REFERENCES',
 ] as const
 
+// Completion.boost is documented as -99..99; keep every value in range.
 export const KEYWORD_BOOSTS: Record<string, number> = {
-  SELECT: 100,
+  SELECT: 99,
   FROM: 95,
   WHERE: 90,
   JOIN: 85,
@@ -110,18 +114,22 @@ export const SQL_DIALECTS: Record<SqlDialectName, SqlDialectConfig> = {
   postgres: {
     dialect: PostgreSQL,
     keywords: [...COMMON_KEYWORDS, 'LIMIT', 'OFFSET', 'ILIKE', 'RETURNING', 'NOW'],
+    quoteIdent: dialectFor('postgresql').quoteIdent,
   },
   mssql: {
     dialect: MSSQL,
     keywords: [...COMMON_KEYWORDS, 'TOP', 'OUTPUT', 'IDENTITY', 'GETDATE'],
+    quoteIdent: dialectFor('sqlserver').quoteIdent,
   },
   sqlite: {
     dialect: SQLite,
     keywords: [...COMMON_KEYWORDS, 'LIMIT', 'OFFSET', 'RETURNING', 'PRAGMA', 'AUTOINCREMENT'],
+    quoteIdent: dialectFor('sqlite').quoteIdent,
   },
   mysql: {
     dialect: MySQL,
     keywords: [...COMMON_KEYWORDS, 'LIMIT', 'OFFSET', 'SHOW', 'AUTO_INCREMENT'],
+    quoteIdent: dialectFor('mysql').quoteIdent,
   },
 }
 

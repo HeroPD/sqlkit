@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeAll, expect, test } from 'vitest'
-import { startCompletion, completionStatus } from '@codemirror/autocomplete'
+import { startCompletion, completionStatus, acceptCompletion, moveCompletionSelection } from '@codemirror/autocomplete'
 import type { EditorView } from '@codemirror/view'
 import { stubEditorLayout } from '../test/dom-stubs'
 import './sql-editor'
@@ -10,16 +10,20 @@ beforeAll(stubEditorLayout)
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-// Opens completion at the end of `doc` and returns the option labels.
-async function completionsAt(doc: string) {
+// Mounts an editor with fixture metadata and opens completion at the end of `doc`.
+async function mountCompletion(doc: string) {
   const el = document.createElement('sql-editor')
   el.tabId = `completion:${doc}`
   el.value = doc
-  el.tables = ['postings', 'users']
+  el.tables = [
+    { schema: 'public', name: 'postings' },
+    { schema: 'public', name: 'users' },
+  ]
   el.columns = [
-    { schema: null, table: 'postings', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
-    { schema: null, table: 'postings', name: 'item_count', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: false },
-    { schema: null, table: 'users', name: 'user_name', dataType: 'text', nullable: true, primaryKey: false, foreignKey: false },
+    { schema: 'public', table: 'postings', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
+    { schema: 'public', table: 'postings', name: 'item_count', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: false },
+    { schema: 'public', table: 'postings', name: 'sort order', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: false },
+    { schema: 'public', table: 'users', name: 'user_name', dataType: 'text', nullable: true, primaryKey: false, foreignKey: false },
   ]
   document.body.append(el)
   await el.updateComplete
@@ -27,11 +31,29 @@ async function completionsAt(doc: string) {
   view.dispatch({ selection: { anchor: doc.length } })
   startCompletion(view)
   for (let i = 0; i < 20 && completionStatus(view.state) !== 'active'; i++) await sleep(25)
+  return { el, view }
+}
+
+// Opens completion at the end of `doc` and returns the option labels.
+async function completionsAt(doc: string) {
+  const { el } = await mountCompletion(doc)
   const labels = [...el.shadowRoot!.querySelectorAll('.cm-tooltip-autocomplete li .cm-completionLabel')].map(
     (label) => label.textContent,
   )
   el.remove()
   return labels
+}
+
+// Accepts the option with `label` and returns the resulting document.
+async function acceptAt(doc: string, label: string) {
+  const { el, view } = await mountCompletion(doc)
+  const selected = () => el.shadowRoot!.querySelector('li[aria-selected] .cm-completionLabel')?.textContent
+  for (let i = 0; i < 40 && selected() !== label; i++) moveCompletionSelection(true)(view)
+  await sleep(80) // interactionDelay guards against accepting a just-opened tooltip
+  acceptCompletion(view)
+  const result = view.state.doc.toString()
+  el.remove()
+  return result
 }
 
 test('table. completes its columns', async () => {
@@ -43,13 +65,51 @@ test('FROM/JOIN alias resolves to the aliased table', async () => {
   expect(await completionsAt('SELECT * FROM postings AS pg JOIN users u ON u.us')).toEqual(['user_name'])
 })
 
-test('unbound prefix falls back to the unique matching table', async () => {
-  expect(await completionsAt('SELECT * FROM postings WHERE p.i')).toEqual(['id', 'item_count'])
+test('unbound unique prefix expands to table.column', async () => {
+  expect(await completionsAt('SELECT * FROM postings WHERE p.i')).toEqual(['postings.id', 'postings.item_count'])
+  expect(await acceptAt('SELECT * FROM postings WHERE p.it', 'postings.item_count')).toBe(
+    'SELECT * FROM postings WHERE postings.item_count',
+  )
 })
 
 test('ambiguous or unknown prefix completes nothing', async () => {
-  // matches neither a table, an alias, nor a unique prefix
+  // matches neither a table, an alias, a schema, nor a unique prefix
   expect(await completionsAt('SELECT * FROM postings WHERE x.i')).toEqual([])
+})
+
+test('schema. lists its tables', async () => {
+  expect(await completionsAt('SELECT * FROM public.')).toEqual(['postings', 'users'])
+})
+
+test('schema.table. completes columns', async () => {
+  expect(await completionsAt('SELECT * FROM public.users WHERE public.users.us')).toEqual(['user_name'])
+})
+
+test('an opened quote completes identifiers in that quote style', async () => {
+  expect(await completionsAt('SELECT * FROM postings WHERE postings."so')).toEqual(['"sort order"'])
+})
+
+test('column names that cannot appear bare insert quoted', async () => {
+  expect(await acceptAt('SELECT * FROM postings WHERE postings.sor', 'sort order')).toBe(
+    'SELECT * FROM postings WHERE postings."sort order"',
+  )
+})
+
+test('multi-word keywords survive past the first word', async () => {
+  expect(await completionsAt('SELECT * FROM users GROUP B')).toContain('GROUP BY')
+  expect(await acceptAt('SELECT * FROM users GROUP B', 'GROUP BY')).toBe('SELECT * FROM users GROUP BY')
+})
+
+test('explicit completion still lists multi-word keywords', async () => {
+  expect(await completionsAt('SELECT * FROM users ')).toContain('GROUP BY')
+})
+
+test('select-list commas do not bind aliases', async () => {
+  expect(await completionsAt('SELECT id, users q FROM postings WHERE q.')).toEqual([])
+})
+
+test('FROM-list commas bind old-style join aliases', async () => {
+  expect(await completionsAt('SELECT * FROM postings g, users q WHERE q.us')).toEqual(['user_name'])
 })
 
 const text = (el: SqlEditor) => el.shadowRoot!.querySelector('.cm-content')!.textContent ?? ''

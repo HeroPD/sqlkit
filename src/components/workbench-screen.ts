@@ -871,7 +871,7 @@ export class WorkbenchScreen extends LitElement {
       `
     }
     if (activeTab?.kind === 'sql') {
-      const tables = (this._ctx.activeDbId ? (this._live.tables[this._ctx.activeDbId] ?? []) : []).map((table) => table.name)
+      const tables = this._ctx.activeDbId ? (this._live.tables[this._ctx.activeDbId] ?? []) : []
       const columns = this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? null) : null
       const dialect = dialectForEngine[this._config.activeProfile()?.engine ?? 'postgresql']
       return html`

@@ -51,6 +51,13 @@ const quoteFor: Record<Engine, (name: string) => string> = {
   sqlserver: bracketQuote,
 }
 
+/** Quoting fn keyed by opening char, for requoting in the style the user already typed. */
+export const quoteStyleFor: Record<string, (name: string) => string> = {
+  '"': ansiQuote,
+  '`': backtickQuote,
+  '[': bracketQuote,
+}
+
 // Auto-generated constraint/index name suffix per engine, stripped for display.
 // Postgres uses <table>_<cols>_<suffix>; SQLite section names are real column or
 // index identifiers (never strip). MySQL's _ibfk_N/_chk_N strip down to just the

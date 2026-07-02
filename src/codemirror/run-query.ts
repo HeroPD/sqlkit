@@ -175,10 +175,29 @@ const closestQueryBlock = (state: EditorState, cursor: number) => {
   return paragraphBlock(tree, doc, seed, chosen.from, chosen.to)
 }
 
-/** The SQL that Mod-Enter would run: the selection if any, else the query block at/nearest the cursor. */
+// A position strictly inside a leaf token (identifier, keyword, string, …):
+// a selection endpoint there is a sloppy drag, not a deliberate fragment.
+const cutsToken = (state: EditorState, pos: number) => {
+  const node = syntaxTree(state).resolveInner(pos, 0)
+  return !node.firstChild && node.from < pos && node.to > pos
+}
+
+/**
+ * The SQL that Mod-Enter would run: the selection if any, else the query
+ * block at/nearest the cursor. A selection with an endpoint mid-token is
+ * snapped out to whole lines — the cut fragment could never run, and a drag
+ * across lines rarely lands exactly on token edges.
+ */
 export const queryToRun = (state: EditorState) => {
   const { from, to, head } = state.selection.main
-  return state.sliceDoc(from, to).trim() || closestQueryBlock(state, head)
+  if (from < to) {
+    const snap = cutsToken(state, from) || cutsToken(state, to)
+    const runFrom = snap ? state.doc.lineAt(from).from : from
+    const runTo = snap ? state.doc.lineAt(to).to : to
+    const selected = state.sliceDoc(runFrom, runTo).trim()
+    if (selected) return selected
+  }
+  return closestQueryBlock(state, head)
 }
 
 // First runnable statement of a plain SQL string (same `;`/blank-line splitting as run-at-caret),

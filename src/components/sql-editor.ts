@@ -43,6 +43,7 @@ import { sql } from '@codemirror/lang-sql'
 import { runQuery } from '../codemirror/run-query'
 import { createFindPanel } from '../codemirror/find-panel'
 import type { ColumnRef } from '../electron'
+import { quoteStyleFor } from '../dialect'
 import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 
@@ -319,19 +320,54 @@ const ALIAS_STOPWORDS = new Set([
   'then', 'else', 'end', 'case', 'by', 'asc', 'desc', 'for', 'with', 'window',
 ])
 
-// Finds what table `alias` is bound to in FROM/JOIN/UPDATE/INTO clauses
-// (`from postings p`, `join users as u`, old-style `from a x, b y`). Returns
-// the bare table name (schema stripped), or null when the alias is unbound.
+// One identifier segment: double-quoted, backticked, bracketed, or bare.
+const IDENT_SEG = '"[^"]*"|`[^`]*`|\\[[^\\]]*\\]|[A-Za-z_][\\w$]*'
+// The segment still being typed: its closing quote may be missing.
+const IDENT_TAIL = '"[^"]*"?|`[^`]*`?|\\[[^\\]]*\\]?|[A-Za-z0-9_$]*'
+// `schema.table.col` / `table.col` / `alias.col`, cursor inside the last segment.
+const DOTTED_MATCH = new RegExp(`(?:(?:${IDENT_SEG})\\.){1,2}(?:${IDENT_TAIL})`)
+const DOTTED_PARTS = new RegExp(`^(?:(${IDENT_SEG})\\.)?(${IDENT_SEG})\\.(${IDENT_TAIL})$`)
+
+// What may still be typed after a quoted member completion opened, per quote char.
+const QUOTE_VALID: Record<string, RegExp> = {
+  '"': /^"[^"]*"?$/,
+  '`': /^`[^`]*`?$/,
+  '[': /^\[[^\]]*\]?$/,
+}
+
+// Strips any quote style and unescapes its doubled close char; lowercased for map keys.
+function normIdent(seg: string): string {
+  const open = seg[0]
+  if (open !== '"' && open !== '`' && open !== '[') return seg.toLowerCase()
+  const close = open === '[' ? ']' : open
+  const body = seg.length > 1 && seg.endsWith(close) ? seg.slice(1, -1) : seg.slice(1)
+  return body.replaceAll(close + close, close).toLowerCase()
+}
+
+const CLAUSE_KEYWORDS = /\b(from|join|where|on|select|set|group|order|having|union|intersect|except|limit|offset|values|returning|update|into|window|with)\b/gi
+
+// Whether the nearest clause keyword before `index` is FROM — comma aliases only bind there.
+function inFromList(sql: string, index: number): boolean {
+  let last: string | undefined
+  for (const match of sql.slice(0, index).matchAll(CLAUSE_KEYWORDS)) last = match[1]?.toLowerCase()
+  return last === 'from'
+}
+
+// Finds what table `alias` (unquoted, lowercased) is bound to in FROM/JOIN/UPDATE/INTO
+// clauses or old-style FROM lists. Returns `schema.table` or `table`, lowercased.
 function findAliasTarget(sql: string, alias: string): string | null {
-  const pattern = /\b(?:from|join|update|into|,)\s*([a-z_][\w$]*(?:\.[a-z_][\w$]*)?)\s+(?:as\s+)?([a-z_][\w$]*)/gi
+  const pattern = new RegExp(
+    `(?:\\b(?:from|join|update|into)\\b|(,))\\s*(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?\\s+(?:as\\s+)?(${IDENT_SEG})`,
+    'gi',
+  )
   for (const match of sql.matchAll(pattern)) {
-    const target = match[1]
-    const candidate = match[2]?.toLowerCase()
-    if (target === undefined || candidate === undefined) continue
+    const [, comma, first, second, aliasSeg] = match
+    if (first === undefined || aliasSeg === undefined) continue
+    const candidate = normIdent(aliasSeg)
     if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
-    const table = target.toLowerCase()
-    const dot = table.lastIndexOf('.')
-    return dot >= 0 ? table.slice(dot + 1) : table
+    // A select-list comma must not bind "select a, b c" as alias c → table b.
+    if (comma !== undefined && !inFromList(sql, match.index ?? 0)) continue
+    return second !== undefined ? `${normIdent(first)}.${normIdent(second)}` : normIdent(first)
   }
   return null
 }
@@ -345,8 +381,9 @@ export class SqlEditor extends LitElement {
   @property()
   tabId = ''
 
+  /** Table refs of the context; schema drives `schema.` member completion. */
   @property({ attribute: false })
-  tables: string[] = []
+  tables: { schema: string | null; name: string }[] = []
 
   /** Column metadata of the context, for member and bare-name completion. */
   @property({ attribute: false })
@@ -556,38 +593,67 @@ export class SqlEditor extends LitElement {
       activateOnTyping: true,
       defaultKeymap: false,
       interactionDelay: 75,
-      override: [this._completionSource()],
+      override: [this._completionSource(), this._phraseSource()],
     })
   }
 
   private _completionSource() {
-    const tableOptions: Completion[] = [...new Set(this.tables)]
-      .filter(Boolean)
+    const { keywords, quoteIdent } = resolveDialect(this.dialect)
+
+    // Names that can't appear bare: invalid identifier chars, a reserved word,
+    // or (Postgres folds unquoted names to lowercase) any uppercase letter.
+    const reserved = new Set(keywords.filter((keyword) => !keyword.includes(' ')).map((keyword) => keyword.toLowerCase()))
+    const needsQuotes = (name: string) =>
+      !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name) ||
+      reserved.has(name.toLowerCase()) ||
+      (this.dialect === 'postgres' && /[A-Z]/.test(name))
+    const ident = (name: string) => (needsQuotes(name) ? quoteIdent(name) : name)
+    const makeOption = (name: string, type: string, boost: number): Completion =>
+      needsQuotes(name) ? { label: name, type, boost, apply: quoteIdent(name) } : { label: name, type, boost }
+
+    // Table metadata: display names for bare completion and unique-prefix
+    // expansion, grouped per schema for `schema.` member completion.
+    const tableNames = new Map<string, string>()
+    const tablesBySchema = new Map<string, Completion[]>()
+    for (const table of this.tables) {
+      if (!table.name) continue
+      tableNames.set(table.name.toLowerCase(), table.name)
+      if (!table.schema) continue
+      const option = makeOption(table.name, 'type', 60)
+      const schemaLower = table.schema.toLowerCase()
+      const list = tablesBySchema.get(schemaLower)
+      if (list) list.push(option)
+      else tablesBySchema.set(schemaLower, [option])
+    }
+    const tableOptions: Completion[] = [...tableNames.values()]
       .sort((a, b) => a.localeCompare(b))
-      .map((table) => ({
-        label: table,
-        type: 'type',
-        boost: 60,
+      .map((name) => makeOption(name, 'type', 60))
+
+    // Single-word keywords only; multi-word ones live in _phraseSource.
+    const keywordOptions: Completion[] = keywords
+      .filter((keyword) => !keyword.includes(' '))
+      .map((keyword) => ({
+        label: keyword,
+        type: 'keyword',
+        apply: keyword,
+        boost: KEYWORD_BOOSTS[keyword] ?? 0,
       }))
 
-    const keywordOptions: Completion[] = resolveDialect(this.dialect).keywords.map((keyword) => ({
-      label: keyword,
-      type: 'keyword',
-      apply: keyword,
-      boost: KEYWORD_BOOSTS[keyword] ?? 0,
-    }))
-
-    // Column metadata: per-table lists drive `table.` member completion;
+    // Column metadata: keyed by bare table name and, when known, schema.table;
     // bare-word completion gets the names deduped across tables.
     const columnsByTable = new Map<string, Completion[]>()
     const bareColumns = new Map<string, Completion>()
-    for (const column of this.columns ?? []) {
-      const option: Completion = { label: column.name, type: 'property', detail: column.dataType, boost: 30 }
-      const tableLower = column.table.toLowerCase()
-      const list = columnsByTable.get(tableLower)
+    const addColumn = (key: string, option: Completion) => {
+      const list = columnsByTable.get(key)
       if (list) list.push(option)
-      else columnsByTable.set(tableLower, [option])
-      if (!bareColumns.has(column.name)) bareColumns.set(column.name, { label: column.name, type: 'property', boost: 30 })
+      else columnsByTable.set(key, [option])
+    }
+    for (const column of this.columns ?? []) {
+      const option = makeOption(column.name, 'property', 30)
+      const tableLower = column.table.toLowerCase()
+      addColumn(tableLower, option)
+      if (column.schema) addColumn(`${column.schema.toLowerCase()}.${tableLower}`, option)
+      if (!bareColumns.has(column.name)) bareColumns.set(column.name, option)
     }
 
     // Lowercased once here, not per keystroke in the source below.
@@ -598,30 +664,56 @@ export class SqlEditor extends LitElement {
     return ifNotIn(
       ['String', 'LineComment', 'BlockComment'],
       (context: CompletionContext) => {
-        // `x.` completes columns of the table x names — directly, through a
-        // FROM/JOIN alias, or as a unique prefix of one table name.
-        const dotted = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_]*/)
+        // `x.` completes members of x: a table's (or FROM/JOIN alias's)
+        // columns, a schema's tables, or a unique table-name prefix.
+        const dotted = context.matchBefore(DOTTED_MATCH)
         if (dotted) {
-          const dot = dotted.text.indexOf('.')
-          const prefix = dotted.text.slice(0, dot).toLowerCase()
-          let tableColumns = columnsByTable.get(prefix)
-          if (!tableColumns) {
-            const aliased = findAliasTarget(context.state.doc.toString(), prefix)
-            if (aliased) tableColumns = columnsByTable.get(aliased)
+          const parts = DOTTED_PARTS.exec(dotted.text)
+          const [, qual, base, typedSeg] = parts ?? []
+          if (base === undefined || typedSeg === undefined) return null
+          const from = context.pos - typedSeg.length
+          // The user opened a quote: show and insert labels in that style.
+          const requote = quoteStyleFor[typedSeg[0] ?? '']
+          const member = (options: Completion[]) => ({
+            from,
+            options: requote
+              ? options.map((option) => ({ label: requote(option.label), type: option.type, boost: option.boost }))
+              : options,
+            validFor: requote ? QUOTE_VALID[typedSeg[0] ?? ''] : /^[A-Za-z0-9_$]*$/,
+          })
+          const baseKey = normIdent(base)
+          if (qual !== undefined) {
+            const cols = columnsByTable.get(`${normIdent(qual)}.${baseKey}`) ?? columnsByTable.get(baseKey)
+            return cols ? member(cols) : null
           }
-          if (!tableColumns) {
-            const candidates = [...columnsByTable.keys()].filter((table) => table.startsWith(prefix))
-            const onlyMatch = candidates.length === 1 ? candidates[0] : undefined
-            if (onlyMatch) tableColumns = columnsByTable.get(onlyMatch)
+          let cols = columnsByTable.get(baseKey)
+          if (!cols) {
+            const target = findAliasTarget(context.state.doc.toString(), baseKey)
+            if (target) cols = columnsByTable.get(target) ?? columnsByTable.get(target.slice(target.lastIndexOf('.') + 1))
           }
-          if (!tableColumns) return null
-          const typedColumn = dotted.text.slice(dot + 1).toLowerCase()
-          const options = tableColumns.filter((option) => option.label.toLowerCase().startsWith(typedColumn))
-          if (!options.length) return null
-          return { from: dotted.from + dot + 1, options, validFor: /^[A-Za-z0-9_]*$/ }
+          if (cols) return member(cols)
+          const schemaTables = tablesBySchema.get(baseKey)
+          if (schemaTables) return member(schemaTables)
+          // Unique prefix: complete `use.` as `users.<col>`, replacing the whole token.
+          const candidates = [...tableNames.keys()].filter((name) => name.startsWith(baseKey))
+          const onlyMatch = candidates.length === 1 ? candidates[0] : undefined
+          const prefixCols = onlyMatch !== undefined && !requote ? columnsByTable.get(onlyMatch) : undefined
+          const display = onlyMatch !== undefined ? tableNames.get(onlyMatch) : undefined
+          if (!prefixCols || display === undefined) return null
+          return {
+            from: dotted.from,
+            options: prefixCols.map((option) => {
+              const label = `${display}.${option.label}`
+              const applied = `${ident(display)}.${ident(option.label)}`
+              return applied === label
+                ? { label, type: 'property', boost: 30 }
+                : { label, type: 'property', boost: 30, apply: applied }
+            }),
+            validFor: /^[A-Za-z_][\w$]*\.[A-Za-z0-9_$]*$/,
+          }
         }
 
-        const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/)
+        const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_$]*/)
 
         if (!word && !context.explicit) return null
 
@@ -638,15 +730,63 @@ export class SqlEditor extends LitElement {
         return {
           from,
           options,
-          validFor: /^[A-Za-z_][A-Za-z0-9_]*$/,
+          validFor: /^[A-Za-z_][A-Za-z0-9_$]*$/,
         }
       },
     )
   }
 
-  private _makeTablesKey(tables: string[]) {
-    return [...new Set(tables)]
-      .filter(Boolean)
+  // Multi-word keywords ("GROUP BY", "IS NOT NULL") get their own source
+  // anchored at the phrase start: the word-anchored source can't reach them
+  // once a space is typed, and CM won't match a 1-char word mid-label.
+  private _phraseSource() {
+    const multiKeywords = resolveDialect(this.dialect)
+      .keywords.filter((keyword) => keyword.includes(' '))
+      .map((keyword) => ({
+        lower: keyword.toLowerCase(),
+        option: { label: keyword, type: 'keyword', apply: keyword, boost: KEYWORD_BOOSTS[keyword] ?? 0 },
+      }))
+    const phrasePattern = /^[A-Za-z_][\w$]*(?:\s+[\w$]*)*$/
+
+    return ifNotIn(
+      ['String', 'LineComment', 'BlockComment'],
+      (context: CompletionContext) => {
+        const line = context.state.doc.lineAt(context.pos)
+        const before = line.text.slice(0, context.pos - line.from)
+        const tokens = [...before.matchAll(/[A-Za-z_][\w$]*/g)]
+        // Longest phrase first: "is not n" must beat "not n" (NOT IN).
+        for (const back of [3, 2, 1]) {
+          const token = tokens[tokens.length - back]
+          if (token?.index === undefined) continue
+          // A dot/quote right before the phrase means member access, not a keyword.
+          const preceding = before[token.index - 1]
+          if (preceding !== undefined && /["'`.[\]]/.test(preceding)) continue
+          const phrase = before.slice(token.index)
+          if (!phrasePattern.test(phrase)) continue
+          const prefix = phrase.toLowerCase().replace(/\s+/g, ' ')
+          const options = multiKeywords.filter(({ lower }) => lower.startsWith(prefix)).map(({ option }) => option)
+          if (options.length) return { from: line.from + token.index, options, validFor: phrasePattern }
+        }
+        // Explicit completion still offers the multi-word set, except after a
+        // dot/quote where member completion owns the spot.
+        if (context.explicit) {
+          const word = context.matchBefore(/[A-Za-z_][\w$]*/)
+          const preceding = before[(word ? word.from : context.pos) - line.from - 1]
+          if (preceding === undefined || !/["'`.[\]]/.test(preceding)) {
+            return {
+              from: word ? word.from : context.pos,
+              options: multiKeywords.map(({ option }) => option),
+              validFor: phrasePattern,
+            }
+          }
+        }
+        return null
+      },
+    )
+  }
+
+  private _makeTablesKey(tables: { schema: string | null; name: string }[]) {
+    return [...new Set(tables.filter((table) => table.name).map((table) => `${table.schema ?? ''}.${table.name}`))]
       .sort((a, b) => a.localeCompare(b))
       .join('\0')
   }

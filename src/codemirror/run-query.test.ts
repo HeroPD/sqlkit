@@ -203,5 +203,23 @@ describe('queryToRun', () => {
       const state = stateAt(doc, 11, { anchor: 0 })
       expect(queryToRun(state)).toBe('SELECT 1, 2')
     })
+
+    it('snaps a selection ending mid-identifier out to whole lines', () => {
+      const doc = "SELECT * FROM accounts a\nJOIN companies c ON a.company_id = c.id\nwhere a.name = 'x'"
+      const state = stateAt(doc, doc.indexOf('a.company_id') + 4, { anchor: 0 })
+      expect(queryToRun(state)).toBe('SELECT * FROM accounts a\nJOIN companies c ON a.company_id = c.id')
+    })
+
+    it('snaps a selection starting mid-keyword out to whole lines', () => {
+      const doc = 'SELECT 1;\nSELECT 2 FROM t;'
+      const state = stateAt(doc, doc.length, { anchor: doc.indexOf('ELECT 2') })
+      expect(queryToRun(state)).toBe('SELECT 2 FROM t;')
+    })
+
+    it('snaps a selection cutting a string literal out to whole lines', () => {
+      const doc = "SELECT 'abc' FROM t;"
+      const state = stateAt(doc, doc.indexOf('bc'), { anchor: 0 })
+      expect(queryToRun(state)).toBe("SELECT 'abc' FROM t;")
+    })
   })
 })
