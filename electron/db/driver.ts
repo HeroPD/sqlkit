@@ -7,6 +7,7 @@ import type {
   DbObject,
   DbObjectKind,
   DbObjects,
+  DdlResult,
   InspectSection,
   QueryResult,
   QuerySort,
@@ -14,6 +15,7 @@ import type {
   TableRef,
 } from '../../src/electron'
 import type { Endpoint } from './transport'
+import { createMysqlDriver } from './mysql'
 import { createPostgresDriver } from './postgres'
 import { createSqliteDriver } from './sqlite'
 
@@ -32,6 +34,10 @@ export type Driver = {
    * if every statement succeeds and affects at least one row — otherwise the
    * whole batch rolls back. Undefined for engines without transaction support. */
   runBatch?(statements: BatchStatement[], childDb?: string | null): Promise<BatchResult>
+  /** Runs schema statements in a single transaction, committing only if every one
+   * succeeds. Like runBatch but with no rows-affected gate (DDL affects 0 rows).
+   * Undefined for engines without transaction support. */
+  runDdl?(statements: string[], childDb?: string | null): Promise<DdlResult>
   /** Interrupts in-flight queries. Reports how many were `running` and how many
    * could be `cancelled` — a query whose backend PID isn't known yet can't be
    * targeted, so the caller can tell "nothing running" (running 0) from "running
@@ -76,9 +82,11 @@ export function createDriver(profile: ConnectionProfile, endpoint: Endpoint, eve
   switch (profile.engine) {
     case 'postgresql':
       return createPostgresDriver(profile, endpoint, events)
+    case 'mysql':
+      return createMysqlDriver(profile, endpoint, events)
     case 'sqlite':
       return createSqliteDriver(profile)
     default:
-      throw new Error(`No ${profile.engine} driver yet — only PostgreSQL and SQLite are supported.`)
+      throw new Error(`No ${profile.engine} driver yet — only PostgreSQL, MySQL and SQLite are supported.`)
   }
 }

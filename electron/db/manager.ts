@@ -7,6 +7,7 @@ import type {
   ConnectionStatus,
   DbObject,
   DbObjectKind,
+  DdlResult,
   FetchRowsResult,
   InspectResult,
   ObjectsResult,
@@ -166,6 +167,18 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  // Atomic schema batch: all statements commit or none do, on one connection.
+  async function runDdl(profileId: string, childDb: string | null, statements: string[]): Promise<DdlResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver.runDdl) return { success: false, error: 'Schema changes are not supported on this connection' }
+    try {
+      return await driver.runDdl(statements, childDb)
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
   // A page of a buffered result; fails when the session is gone (evicted or its
   // connection dropped) so the renderer can fall back instead of seeing 0 rows.
   function fetchRows(sessionId: string, offset: number, limit: number): FetchRowsResult {
@@ -301,6 +314,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     statuses,
     query,
     runBatch,
+    runDdl,
     fetchRows,
     closeSession,
     cancelQuery,

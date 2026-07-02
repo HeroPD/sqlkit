@@ -1,7 +1,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, query, state } from 'lit/decorators.js'
 
-export type MenuItem = { id: string; label: string; danger?: boolean }
+export type MenuItem = { id: string; label: string; danger?: boolean; checked?: boolean }
 export type MenuPickDetail = { id: string }
 
 // Floating right-click menu, shared by the file tree, table list, and
@@ -55,10 +55,11 @@ export class ContextMenu extends LitElement {
             <button
               class="menu-item ${item.danger ? 'danger' : ''}"
               role="menuitem"
+              aria-checked=${item.checked === undefined ? undefined : item.checked ? 'true' : 'false'}
               @mousedown=${(e: Event) => e.preventDefault()}
               @click=${() => this._pick(item)}
             >
-              ${item.label}
+              ${item.checked === undefined ? '' : html`<span class="check">${item.checked ? '✓' : ''}</span>`}${item.label}
             </button>
           `,
         )}
@@ -118,6 +119,8 @@ export class ContextMenu extends LitElement {
       position: fixed;
       z-index: 91;
       min-width: 160px;
+      max-height: calc(100vh - 8px);
+      overflow-y: auto;
       padding: 4px;
       display: flex;
       flex-direction: column;
@@ -125,6 +128,12 @@ export class ContextMenu extends LitElement {
       border: 1px solid var(--border);
       border-radius: 6px;
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
+
+    .check {
+      display: inline-block;
+      width: 14px;
+      color: var(--accent);
     }
 
     .menu-item {

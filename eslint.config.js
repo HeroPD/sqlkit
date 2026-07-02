@@ -25,15 +25,41 @@ export default tseslint.config(
     files: ['src/**/*.ts'],
     extends: [lit.configs['flat/recommended'], wc.configs['flat/recommended']],
     languageOptions: { globals: globals.browser },
-    // Lit calls template handlers with `this` bound to the host, so method
-    // references in `@event`/`.prop` bindings are safe despite this rule.
-    rules: { '@typescript-eslint/unbound-method': 'off' },
+    rules: {
+      // Lit calls template handlers with `this` bound to the host, so method
+      // references in `@event`/`.prop` bindings are safe despite this rule.
+      '@typescript-eslint/unbound-method': 'off',
+      // Process boundary: the renderer reaches the main process only through
+      // window.sqlkit (preload); shared types live in src/electron.d.ts.
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [{ name: 'electron', message: 'Renderer code uses window.sqlkit (preload), never Electron APIs directly.' }],
+          patterns: [{ group: ['**/electron/**'], message: 'Renderer must not import main-process modules; shared types belong in src/electron.d.ts.' }],
+        },
+      ],
+    },
   },
 
   // Main process, preload, plugins, and the Vite config run under Node.
   {
     files: ['electron/**/*.ts', 'plugins/**/*.ts', 'vite.config.ts'],
     languageOptions: { globals: globals.node },
+    rules: {
+      // Process boundary: the main process may share src/ root modules
+      // (dialect, sql-*, types) but never renderer components/controllers.
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/src/components/**', '**/src/controllers/**', '**/src/codemirror/**', '**/src/app-root*'],
+              message: 'Main-process code must not import renderer modules; share logic via src/ root modules instead.',
+            },
+          ],
+        },
+      ],
+    },
   },
 
   // Sync drivers (sqlite) implement the async Driver interface, so their

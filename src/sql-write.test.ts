@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import type { ColumnRef, TableRef } from './electron'
+import type { ColumnRef, InspectColumn, TableRef } from './electron'
 import { dialectFor } from './dialect'
-import { buildBatchUpdate, buildDeleteRows, buildInsert, buildInsertDefault, coerceValue, quoteQualified } from './sql-write'
+import {
+  buildBatchUpdate,
+  buildColumnAlter,
+  buildDeleteRows,
+  buildInsert,
+  buildInsertDefault,
+  coerceValue,
+  quoteLiteral,
+  quoteQualified,
+} from './sql-write'
 
 const users: TableRef = { schema: 'public', name: 'users', kind: 'table' }
 const col = (over: Partial<ColumnRef>): ColumnRef => ({
@@ -186,5 +195,85 @@ describe('buildDeleteRows', () => {
   it('throws without rows or primary keys', () => {
     expect(() => buildDeleteRows({ table: users, rows: [], engine: 'postgresql' })).toThrow()
     expect(() => buildDeleteRows({ table: users, rows: [[]], engine: 'postgresql' })).toThrow()
+  })
+})
+
+const inspectCol = (over: Partial<InspectColumn>): InspectColumn => ({
+  name: 'age',
+  dataType: 'integer',
+  nullable: true,
+  default: null,
+  primaryKey: false,
+  comment: null,
+  ...over,
+})
+
+describe('quoteLiteral', () => {
+  it('single-quotes and doubles embedded quotes', () => {
+    expect(quoteLiteral('hi')).toBe("'hi'")
+    expect(quoteLiteral("O'Brien")).toBe("'O''Brien'")
+  })
+})
+
+describe('buildColumnAlter', () => {
+  it('emits a statement only for changed properties', () => {
+    const original = inspectCol({ name: 'age', dataType: 'integer', nullable: true, default: null, comment: null })
+    // dataType set to the same value, comment changed — only the comment moves.
+    expect(buildColumnAlter(users, [{ original, dataType: 'integer', comment: 'years old' }], 'postgresql')).toEqual([
+      `COMMENT ON COLUMN "public"."users"."age" IS 'years old'`,
+    ])
+    // No diff at all → nothing.
+    expect(buildColumnAlter(users, [{ original }], 'postgresql')).toEqual([])
+  })
+
+  it('builds Postgres type / nullable / default / comment forms', () => {
+    const original = inspectCol({ name: 'age', dataType: 'integer', nullable: true, default: null, comment: null })
+    expect(
+      buildColumnAlter(users, [{ original, dataType: 'bigint', nullable: false, default: '0', comment: 'n' }], 'postgresql'),
+    ).toEqual([
+      'ALTER TABLE "public"."users" ALTER COLUMN "age" TYPE bigint',
+      'ALTER TABLE "public"."users" ALTER COLUMN "age" SET NOT NULL',
+      'ALTER TABLE "public"."users" ALTER COLUMN "age" SET DEFAULT 0',
+      `COMMENT ON COLUMN "public"."users"."age" IS 'n'`,
+    ])
+  })
+
+  it('drops default/comment and sets NOT NULL nullable via the right verbs', () => {
+    const original = inspectCol({ name: 'age', nullable: false, default: '0', comment: 'old' })
+    expect(
+      buildColumnAlter(users, [{ original, nullable: true, default: '', comment: '' }], 'postgresql'),
+    ).toEqual([
+      'ALTER TABLE "public"."users" ALTER COLUMN "age" DROP NOT NULL',
+      'ALTER TABLE "public"."users" ALTER COLUMN "age" DROP DEFAULT',
+      'COMMENT ON COLUMN "public"."users"."age" IS NULL',
+    ])
+  })
+
+  it('treats a null default the same as an empty one (no spurious DROP)', () => {
+    const original = inspectCol({ default: null })
+    expect(buildColumnAlter(users, [{ original, default: '' }], 'postgresql')).toEqual([])
+  })
+
+  it('orders RENAME COLUMN last so prior statements target the old name', () => {
+    const original = inspectCol({ name: 'age', dataType: 'integer' })
+    expect(buildColumnAlter(users, [{ original, name: 'age_years', dataType: 'bigint' }], 'postgresql')).toEqual([
+      'ALTER TABLE "public"."users" ALTER COLUMN "age" TYPE bigint',
+      'ALTER TABLE "public"."users" RENAME COLUMN "age" TO "age_years"',
+    ])
+  })
+
+  it('escapes comment literals', () => {
+    const original = inspectCol({ comment: null })
+    expect(buildColumnAlter(users, [{ original, comment: "it's fine" }], 'postgresql')).toEqual([
+      `COMMENT ON COLUMN "public"."users"."age" IS 'it''s fine'`,
+    ])
+  })
+
+  it('supports SQLite RENAME only, ignoring type/nullable/default diffs', () => {
+    const original = inspectCol({ name: 'age', dataType: 'INTEGER', nullable: true, default: null })
+    const notes: TableRef = { schema: null, name: 'notes', kind: 'table' }
+    expect(
+      buildColumnAlter(notes, [{ original, name: 'years', dataType: 'REAL', nullable: false, default: '0' }], 'sqlite'),
+    ).toEqual(['ALTER TABLE "notes" RENAME COLUMN "age" TO "years"'])
   })
 })

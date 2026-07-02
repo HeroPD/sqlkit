@@ -1,8 +1,19 @@
-import type { ConnectionProfile, TableRef } from '../electron'
+import type { ConnectionProfile, DdlResult, Engine, TableRef } from '../electron'
 import type { DialogsController } from './dialogs'
 import { dialectFor } from '../dialect'
-import { quoteQualified } from '../sql-write'
+import { buildColumnAlter, quoteQualified, type ColumnAlter } from '../sql-write'
 import { TABLE_KIND_LABELS } from '../table-kinds'
+
+// Staged column edits from the Inspect tab, plus how to reach the connection and
+// refresh the view once the change lands. `onApplied` reloads the inspect tab.
+export type ColumnAlterSpec = {
+  profileId: string
+  childDb: string | null
+  table: TableRef
+  engine: Engine
+  edits: ColumnAlter[]
+  onApplied: () => void
+}
 
 type Deps = {
   activeProfile: () => ConnectionProfile | null
@@ -73,6 +84,38 @@ export class SchemaOpsController {
         void this.deps.runSql(statement)
       },
     }
+  }
+
+  // Inspect-tab column edits: build the DDL, show it in the review dialog, then
+  // run it atomically. On success the inspect tab reloads and metadata refreshes
+  // so autocomplete/column lists pick up renames.
+  alterColumns(spec: ColumnAlterSpec) {
+    const statements = buildColumnAlter(spec.table, spec.edits, spec.engine)
+    if (!statements.length) return
+    this.deps.dialogs.review = {
+      sql: statements.map((statement) => `${statement};`).join('\n\n'),
+      params: [],
+      run: () => void this._runAlter(spec, statements),
+    }
+  }
+
+  private async _runAlter(spec: ColumnAlterSpec, statements: string[]) {
+    let result: DdlResult
+    try {
+      result = await window.sqlkit.runDdl(spec.profileId, spec.childDb, statements)
+    } catch (error) {
+      result = { success: false, error: (error as Error).message }
+    }
+    if (!result.success) {
+      const reason =
+        result.failedIndex !== undefined
+          ? `Statement ${result.failedIndex + 1} of ${statements.length} failed: ${result.error}`
+          : result.error
+      this.deps.dialogs.notice('Schema change failed', `${reason} No changes were made.`)
+      return
+    }
+    spec.onApplied()
+    this.deps.refresh(spec.profileId)
   }
 
   createDatabase(profileId: string) {

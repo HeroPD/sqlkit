@@ -28,7 +28,6 @@
     "dotenv-cli": "^11.0.0",
     "electron": "^42.3.3",
     "electron-builder": "^26.15.2",
-    "dotenv-cli": "^11.0.0",
     "eslint": "^10.5.0",
     "eslint-plugin-lit": "^2.3.1",
     "eslint-plugin-wc": "^3.1.0",
@@ -41,6 +40,7 @@
     "vitest": "^4.1.8"
   },
   "dependencies": {
+    "mysql2": "^3.22.5",
     "pg": "^8.21.0",
     "ssh2": "^1.17.0"
   }

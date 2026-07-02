@@ -38,3 +38,33 @@ describe('dialectFor: applyOrderBy', () => {
     )
   })
 })
+
+describe('dialectFor: bindBoolean', () => {
+  it('binds 1/0 on sqlite and real booleans elsewhere', () => {
+    expect(dialectFor('sqlite').bindBoolean(true)).toBe(1)
+    expect(dialectFor('sqlite').bindBoolean(false)).toBe(0)
+    expect(dialectFor('postgresql').bindBoolean(true)).toBe(true)
+    expect(dialectFor('mysql').bindBoolean(false)).toBe(false)
+  })
+})
+
+describe('dialectFor: column edit capabilities', () => {
+  it('allows in-place alters only where the ALTER syntax matches', () => {
+    expect(dialectFor('postgresql').supportsColumnAlter).toBe(true)
+    expect(dialectFor('sqlite').supportsColumnAlter).toBe(false)
+    expect(dialectFor('mysql').supportsColumnAlter).toBe(false)
+  })
+
+  it('allows renames on engines with standard RENAME COLUMN', () => {
+    expect(dialectFor('postgresql').supportsColumnRename).toBe(true)
+    expect(dialectFor('sqlite').supportsColumnRename).toBe(true)
+    expect(dialectFor('sqlserver').supportsColumnRename).toBe(false)
+  })
+
+  it('lists common column types only for wired-up engines', () => {
+    expect(dialectFor('postgresql').commonColumnTypes).toContain('timestamptz')
+    expect(dialectFor('sqlite').commonColumnTypes).toContain('integer')
+    expect(dialectFor('mysql').commonColumnTypes).toContain('datetime')
+    expect(dialectFor('sqlserver').commonColumnTypes).toEqual([])
+  })
+})

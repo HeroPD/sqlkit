@@ -390,6 +390,11 @@ function registerDbIpc() {
     (event, profileId: string, childDb: string | null, statements: BatchStatement[]) =>
       manager(event).runBatch(profileId, childDb, statements),
   )
+  ipcMain.handle(
+    'db:run-ddl',
+    (event, profileId: string, childDb: string | null, statements: string[]) =>
+      manager(event).runDdl(profileId, childDb, statements),
+  )
   ipcMain.handle('db:fetch-rows', (event, sessionId: string, offset: number, limit: number) =>
     existingManager(event)?.fetchRows(sessionId, offset, limit) ?? { success: false as const, error: 'No active session' },
   )

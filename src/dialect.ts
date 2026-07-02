@@ -23,6 +23,19 @@ export type Dialect = {
   /** Whether this engine has native column comments — drives whether the inspector
    *  shows a Comment column at all (shown even when every value is empty). */
   supportsColumnComments: boolean
+  /** How a JS boolean binds as a parameter — SQLite has no boolean type and
+   *  rejects a boolean bind, so it stores 1/0; other engines take the boolean. */
+  bindBoolean(value: boolean): unknown
+  /** Whether columns can be altered in place (type/nullable/default/comment).
+   *  SQLite can only RENAME without a table rebuild; MySQL/SQL Server spell the
+   *  alters differently, so they stay off until their drivers are wired up. */
+  supportsColumnAlter: boolean
+  /** Whether the standard ALTER TABLE … RENAME COLUMN works; SQL Server needs
+   *  sp_rename, and MySQL stays off until its driver lands. */
+  supportsColumnRename: boolean
+  /** Common column types offered by the inspector's type picker, spelled as
+   *  valid DDL for this engine; empty when the engine isn't wired up. */
+  commonColumnTypes: string[]
 }
 
 // SQL-standard double quotes (Postgres, SQLite), MySQL backticks, SQL Server
@@ -58,6 +71,42 @@ const columnCommentsFor: Record<Engine, boolean> = {
   sqlserver: false,
 }
 
+// In-place column alters, gating the Postgres-flavored ALTER/COMMENT statements
+// that sql-write builds. Only engines sharing that syntax may turn this on.
+const columnAlterFor: Record<Engine, boolean> = {
+  postgresql: true,
+  sqlite: false,
+  mysql: false,
+  sqlserver: false,
+}
+
+const columnRenameFor: Record<Engine, boolean> = {
+  postgresql: true,
+  sqlite: true,
+  mysql: true,
+  sqlserver: false,
+}
+
+// Short spellings that are valid DDL (int, timestamptz, float8 …); SQLite's
+// are its storage classes. Entries with (…) are templates — the picker opens
+// them in the inline editor with the parameters selected for adjustment.
+const columnTypesFor: Record<Engine, string[]> = {
+  postgresql: [
+    'text', 'varchar(255)', 'char(1)', 'bool',
+    'smallint', 'int', 'bigint', 'numeric(10,2)', 'real', 'float8',
+    'date', 'time', 'timetz', 'timestamp', 'timestamptz', 'interval',
+    'uuid', 'json', 'jsonb', 'bytea', 'inet',
+  ],
+  sqlite: ['text', 'integer', 'real', 'numeric', 'blob'],
+  mysql: [
+    'varchar(255)', 'char(1)', 'text', 'tinyint', 'smallint', 'int', 'bigint',
+    'decimal(10,2)', 'float', 'double', 'bool',
+    'date', 'time', 'datetime', 'timestamp',
+    'json', 'blob',
+  ],
+  sqlserver: [],
+}
+
 const makeDialect = (engine: Engine): Dialect => {
   const quoteIdent = quoteFor[engine]
   const suffix = constraintSuffixFor[engine]
@@ -68,6 +117,10 @@ const makeDialect = (engine: Engine): Dialect => {
     applyOrderBy: (sql, sort) => placeOrderBy(sql, { column: quoteIdent(sort.column), dir: sort.direction }),
     displayConstraintName: (name) => (suffix ? name.replace(suffix, '') : name),
     supportsColumnComments: columnCommentsFor[engine],
+    bindBoolean: (value) => (engine === 'sqlite' ? (value ? 1 : 0) : value),
+    supportsColumnAlter: columnAlterFor[engine],
+    supportsColumnRename: columnRenameFor[engine],
+    commonColumnTypes: columnTypesFor[engine],
   }
 }
 

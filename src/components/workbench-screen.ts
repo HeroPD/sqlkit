@@ -35,6 +35,7 @@ import './sql-editor'
 import './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
+import type { ColumnAlterEventDetail } from './table-inspect'
 import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
@@ -116,6 +117,14 @@ export class WorkbenchScreen extends LitElement {
 
   @state()
   private _activeView: ViewId | null = 'explorer'
+
+  // Id of the inspect tab with unsaved column edits, if any. Only the active tab
+  // can be dirty (its edits live in the mounted component, dropped on switch), so
+  // this resets whenever the active tab changes.
+  @state()
+  private _inspectDirtyTabId: string | null = null
+
+  private _lastActiveTabId: string | null = null
 
   // ⌘⇧P / ⌘P / ⌘K palette: open/close state, entry list, and pick dispatch.
   private _cmdPalette = new CommandPaletteController(this, {
@@ -260,6 +269,11 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _saveActive() {
+    const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
+    if (activeTab?.kind === 'inspect' || activeTab?.kind === 'inspect-object') {
+      this.renderRoot.querySelector('table-inspect')?.save()
+      return
+    }
     if (this._resultEditing.hasPendingChanges()) {
       this._resultEditing.saveChanges()
       return
@@ -278,6 +292,12 @@ export class WorkbenchScreen extends LitElement {
       // Connections belong to the workspace they were opened from.
       void this._live.disconnectAll()
       if (this.workspace) void this._loadConfig()
+    }
+    // Switching tabs unmounts the inspect component, dropping its staged edits;
+    // clear the dirty marker so it can't linger on a tab that's no longer editing.
+    if (this._ctx.activeTabId !== this._lastActiveTabId) {
+      this._lastActiveTabId = this._ctx.activeTabId
+      this._inspectDirtyTabId = null
     }
   }
 
@@ -431,14 +451,17 @@ export class WorkbenchScreen extends LitElement {
   private _requestCloseTab(id: string) {
     const tab = this._ctx.tabs.find((entry) => entry.id === id)
     const fileDirty = tab?.kind === 'sql' && tab.content !== tab.savedContent
-    const stagedDirty = this._queries.hasStaged(id)
+    const inspectDirty = id === this._inspectDirtyTabId
+    const stagedDirty = this._queries.hasStaged(id) || inspectDirty
     if (fileDirty || stagedDirty) {
       const title = tab ? (tab.kind === 'sql' ? tab.name : tabTitle(tab)) : 'tab'
       const detail = fileDirty && stagedDirty
-        ? 'Unsaved SQL changes and staged result edits/new rows will be lost.'
+        ? 'Unsaved SQL changes and staged edits will be lost.'
         : fileDirty
           ? 'Unsaved changes will be lost.'
-          : 'Staged result edits/new rows will be lost.'
+          : inspectDirty
+            ? 'Unsaved column changes will be lost.'
+            : 'Staged result edits/new rows will be lost.'
       this._dialogs.confirm = {
         message: `Close "${title}" without saving?`,
         detail,
@@ -607,7 +630,7 @@ export class WorkbenchScreen extends LitElement {
                     (tab) => html`
                       <editor-tab
                         tabId=${tab.id}
-                        name=${tabTitle(tab)}
+                        name=${tab.id === this._inspectDirtyTabId ? `${tabTitle(tab)} •` : tabTitle(tab)}
                         .active=${tab.id === this._ctx.activeTabId}
                         .preview=${tab.kind === 'sql' && (tab.preview ?? false)}
                       ></editor-tab>
@@ -828,6 +851,8 @@ export class WorkbenchScreen extends LitElement {
             .childDb=${this._ctx.activeChildDb}
             .table=${activeTab.table}
             .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
+            @alter-columns=${this._onAlterColumns}
+            @inspect-dirty=${this._onInspectDirty}
           ></table-inspect>
         </div>
       `
@@ -870,7 +895,7 @@ export class WorkbenchScreen extends LitElement {
           ></div>
           <results-panel
             .run=${this._queries.runFor(this._ctx.activeTabId)}
-            .canCancel=${this._config.activeProfile()?.engine === 'postgresql'}
+            .canCancel=${this._config.activeProfile()?.engine !== 'sqlite'}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
             .collapsed=${this._layout.panelCollapsed}
@@ -1031,6 +1056,14 @@ export class WorkbenchScreen extends LitElement {
 
   private _onTableTruncate(event: Event) {
     this._schemaOps.truncateTable((event as CustomEvent<TableBrowseDetail>).detail.table)
+  }
+
+  private _onAlterColumns(event: Event) {
+    this._schemaOps.alterColumns((event as CustomEvent<ColumnAlterEventDetail>).detail)
+  }
+
+  private _onInspectDirty(event: Event) {
+    this._inspectDirtyTabId = (event as CustomEvent<{ dirty: boolean }>).detail.dirty ? this._ctx.activeTabId : null
   }
 
   // Inspect opens (or revisits) the table's structure tab — columns,

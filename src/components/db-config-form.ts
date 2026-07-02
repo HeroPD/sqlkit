@@ -5,8 +5,8 @@ import type { ConnectionProfile, DatabaseMode, Engine, SshAuthType, SshConfig, S
 
 const ENGINES: ReadonlyArray<{ engine: Engine; label: string; disabled?: boolean }> = [
   { engine: 'postgresql', label: 'PostgreSQL' },
+  { engine: 'mysql', label: 'MySQL' },
   { engine: 'sqlite', label: 'SQLite' },
-  { engine: 'mysql', label: 'MySQL (coming soon)', disabled: true },
   { engine: 'sqlserver', label: 'SQL Server (coming soon)', disabled: true },
 ]
 

@@ -1,5 +1,9 @@
-import type { ColumnRef, Engine, TableRef } from './electron'
+import type { ColumnRef, Engine, InspectColumn, TableRef } from './electron'
 import { dialectFor, type Dialect } from './dialect'
+
+// A single-quoted SQL string literal (doubling embedded quotes). Column DDL runs
+// param-free, so the review preview is exactly what executes.
+export const quoteLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`
 
 export const quoteQualified = (table: TableRef, dialect: Dialect) =>
   table.schema ? `${dialect.quoteIdent(table.schema)}.${dialect.quoteIdent(table.name)}` : dialect.quoteIdent(table.name)
@@ -22,9 +26,8 @@ export function coerceValue(value: string, column: ColumnRef | undefined, engine
   if (/bool/.test(type)) {
     const truthy = /^(t|true|1|yes|y)$/i.test(value)
     const falsy = /^(f|false|0|no|n)$/i.test(value)
-    // SQLite has no boolean type and rejects a JS boolean bind, so store 1/0;
-    // Postgres takes the real boolean. An unrecognized token falls through to text.
-    if (truthy || falsy) return engine === 'sqlite' ? (truthy ? 1 : 0) : truthy
+    // The dialect decides how a boolean binds; an unrecognized token falls through to text.
+    if (truthy || falsy) return engine ? dialectFor(engine).bindBoolean(truthy) : truthy
   }
   return value
 }
@@ -110,6 +113,63 @@ export function buildInsert(spec: InsertSpec): { sql: string; params: unknown[] 
   const placeholders = spec.columns.map((_, index) => dialect.placeholder(index + 1)).join(', ')
   const params = spec.columns.map((column, index) => coerceValue(spec.values[index] ?? '', column.columnMeta, spec.engine))
   return { sql: `INSERT INTO ${quoteQualified(spec.table, dialect)} (${columns})\nVALUES (${placeholders})`, params }
+}
+
+// One column's staged edits, diffed against the loaded structure. Only fields
+// that differ from `original` produce a statement; `original.name` is the old
+// name for RENAME and the target for the other alters.
+export type ColumnAlter = {
+  original: InspectColumn
+  name?: string
+  dataType?: string
+  nullable?: boolean
+  default?: string | null
+  comment?: string | null
+}
+
+// Builds the ALTER/COMMENT/RENAME statements for staged column edits, one per
+// changed property. Engines with supportsColumnAlter get the full set; the rest
+// only RENAME COLUMN. Statements that keep a column's name run first
+// (referencing the original name); RENAME runs last so every prior statement
+// targets a name that still exists.
+export function buildColumnAlter(table: TableRef, edits: ColumnAlter[], engine: Engine): string[] {
+  const dialect = dialectFor(engine)
+  const qualified = quoteQualified(table, dialect)
+  const alters: string[] = []
+  const renames: string[] = []
+  for (const edit of edits) {
+    const col = dialect.quoteIdent(edit.original.name)
+    if (dialect.supportsColumnAlter) {
+      if (edit.dataType !== undefined && edit.dataType !== edit.original.dataType) {
+        alters.push(`ALTER TABLE ${qualified} ALTER COLUMN ${col} TYPE ${edit.dataType}`)
+      }
+      if (edit.nullable !== undefined && edit.nullable !== edit.original.nullable) {
+        alters.push(`ALTER TABLE ${qualified} ALTER COLUMN ${col} ${edit.nullable ? 'DROP NOT NULL' : 'SET NOT NULL'}`)
+      }
+      if (edit.default !== undefined) {
+        const next = edit.default ?? ''
+        const current = edit.original.default ?? ''
+        if (next !== current) {
+          alters.push(
+            next === ''
+              ? `ALTER TABLE ${qualified} ALTER COLUMN ${col} DROP DEFAULT`
+              : `ALTER TABLE ${qualified} ALTER COLUMN ${col} SET DEFAULT ${next}`,
+          )
+        }
+      }
+      if (edit.comment !== undefined) {
+        const next = edit.comment ?? ''
+        const current = edit.original.comment ?? ''
+        if (next !== current) {
+          alters.push(`COMMENT ON COLUMN ${qualified}.${col} IS ${next === '' ? 'NULL' : quoteLiteral(next)}`)
+        }
+      }
+    }
+    if (edit.name !== undefined && edit.name !== edit.original.name) {
+      renames.push(`ALTER TABLE ${qualified} RENAME COLUMN ${col} TO ${dialect.quoteIdent(edit.name)}`)
+    }
+  }
+  return [...alters, ...renames]
 }
 
 export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: unknown[] } {

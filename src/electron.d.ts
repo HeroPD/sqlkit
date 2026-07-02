@@ -137,6 +137,10 @@ export type BatchStatement = { sql: string; params: unknown[] }
  * connection-level failure that ran nothing). */
 export type BatchResult = { success: true } | { success: false; error: string; failedIndex?: number }
 
+/** Outcome of an atomic DDL batch: same shape as BatchResult, but DDL statements
+ * legitimately affect zero rows so there's no rows-affected gate. */
+export type DdlResult = { success: true } | { success: false; error: string; failedIndex?: number }
+
 /** A column sort the UI injects into a query at run time; the driver builds the
  * engine-correct ORDER BY (its own identifier quoting). */
 export type QuerySort = { column: string; direction: 'asc' | 'desc' }
@@ -252,6 +256,10 @@ export type SqlkitApi = {
    * all roll back. The result-grid save path uses this so a multi-row edit
    * (UPDATE + INSERTs) can't half-apply. */
   runBatch: (profileId: string, childDb: string | null, statements: BatchStatement[]) => Promise<BatchResult>
+  /** Runs schema statements (ALTER/COMMENT/…) in one transaction: all commit or
+   * all roll back. Unlike runBatch there's no rows-affected check, since DDL
+   * affects zero rows. The Inspect tab's column edits use this. */
+  runDdl: (profileId: string, childDb: string | null, statements: string[]) => Promise<DdlResult>
   /** A page of a buffered result; rows beyond the first page are pulled on demand. */
   fetchRows: (sessionId: string, offset: number, limit: number) => Promise<FetchRowsResult>
   /** Releases a result's main-process buffer (tab closed / superseded). */

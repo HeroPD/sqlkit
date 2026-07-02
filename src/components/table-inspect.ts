@@ -1,12 +1,31 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
-import type { DbObject, DbObjectKind, Engine, TableInspection, TableRef } from '../electron'
+import type { DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
 import { abbreviateType } from '../sql-types'
 import { dialectFor } from '../dialect'
+import type { ColumnAlter } from '../sql-write'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
+
+// A column property the user can edit inline (click). Nullable is edited via a
+// yes/no menu; primary key stays read-only. Capabilities come from the dialect.
+type EditField = 'name' | 'dataType' | 'comment' | 'default'
+
+// One column's staged edits — the fields that differ from what was loaded.
+type ColumnDiff = Partial<Omit<ColumnAlter, 'original'>>
+
+// Emitted on ⌘S / Save so the workbench routes the change through SchemaOps
+// (build DDL → review dialog → runDdl). `onApplied` reloads this tab on success.
+export type ColumnAlterEventDetail = {
+  profileId: string
+  childDb: string | null
+  table: TableRef
+  engine: Engine
+  edits: ColumnAlter[]
+  onApplied: () => void
+}
 
 // The DDL words that show up in constraint/index/trigger/policy definitions;
 // matched case-insensitively so SQLite's hand-written DDL highlights too.
@@ -59,6 +78,27 @@ export class TableInspect extends LitElement {
   @state()
   private _menu: { x: number; y: number; name: string; definition: string | null } | null = null
 
+  /** Staged column edits, keyed by the column's original name. */
+  @state()
+  private _edits = new Map<string, ColumnDiff>()
+
+  /** The cell in inline-edit mode; `seed` pre-fills the editor (type templates). */
+  @state()
+  private _editing: { col: string; field: EditField; seed?: string } | null = null
+
+  /** The option menu open on a column cell — nullable's yes/no or the type
+   *  list; `filter` narrows the types to what's typed (Ctrl+Space completion). */
+  @state()
+  private _cellMenu: { x: number; y: number; col: InspectColumn; kind: 'nullable' | 'type'; filter?: string } | null = null
+
+  // When the click that blurred an open editor lands on another cell, it should
+  // only commit — not open that cell's menu/editor on the same gesture.
+  private _blurCommitAt = -Infinity
+
+  private _dismissedEditor() {
+    return performance.now() - this._blurCommitAt < 300
+  }
+
   protected willUpdate(changed: PropertyValues) {
     if (
       changed.has('profileId') ||
@@ -71,6 +111,26 @@ export class TableInspect extends LitElement {
     }
   }
 
+  protected updated(changed: PropertyValues) {
+    // Focus the inline editor whenever a cell enters edit mode. A seeded type
+    // template gets just its parameters selected so typing replaces them.
+    if (changed.has('_editing') && this._editing) {
+      const input = this.renderRoot.querySelector<HTMLInputElement>('.cell-input')
+      if (!input) return
+      input.focus()
+      const seed = this._editing.seed
+      const open = seed?.indexOf('(') ?? -1
+      if (seed && open >= 0) input.setSelectionRange(open + 1, seed.endsWith(')') ? seed.length - 1 : seed.length)
+      else input.select()
+    }
+    // Surface the dirty state so the workbench can mark the tab (the • marker).
+    if (changed.has('_edits')) {
+      this.dispatchEvent(
+        new CustomEvent('inspect-dirty', { detail: { dirty: this._edits.size > 0 }, bubbles: true, composed: true }),
+      )
+    }
+  }
+
   private async _load() {
     const profileId = this.profileId
     const childDb = this.childDb
@@ -78,6 +138,10 @@ export class TableInspect extends LitElement {
     const object = this.object
     const objectKind = this.objectKind
     if (!profileId || (!table && !object)) return
+    // A fresh structure invalidates any staged edits against the old one.
+    this._edits = new Map()
+    this._editing = null
+    this._cellMenu = null
     this._state = { phase: 'loading' }
     const result =
       object && objectKind
@@ -127,7 +191,7 @@ export class TableInspect extends LitElement {
         </div>
         ${this._renderBody()}
       </div>
-      ${this._renderMenu()}
+      ${this._renderMenu()} ${this._renderCellMenu()}
     `
   }
 
@@ -153,6 +217,136 @@ export class TableInspect extends LitElement {
   private _onRowMenu(event: MouseEvent, name: string, definition: string | null = null) {
     event.preventDefault()
     this._menu = { x: event.clientX, y: event.clientY, name, definition }
+  }
+
+  // --- column editing --------------------------------------------------------
+
+  // Editability comes from the engine dialect's capabilities. Object attributes
+  // (function/type inspections) aren't editable.
+  private _canEdit(field: EditField | 'nullable'): boolean {
+    if (this.object || !this.table || !this.engine) return false
+    const dialect = dialectFor(this.engine)
+    if (field === 'name') return dialect.supportsColumnRename
+    if (field === 'comment') return dialect.supportsColumnAlter && dialect.supportsColumnComments
+    return dialect.supportsColumnAlter
+  }
+
+  // Effective text for a field: the staged value if edited, else what loaded.
+  private _fieldText(col: InspectColumn, field: EditField): string {
+    const edit = this._edits.get(col.name)
+    if (edit && field in edit) return (edit[field] as string | null) ?? ''
+    return this._fieldOriginal(col, field)
+  }
+
+  private _isEdited(colName: string, field: EditField | 'nullable'): boolean {
+    const edit = this._edits.get(colName)
+    return !!edit && field in edit
+  }
+
+  private _startEdit(colName: string, field: EditField, seed?: string) {
+    this._editing = { col: colName, field, seed }
+  }
+
+  private _cancelEdit() {
+    this._editing = null
+  }
+
+  private _applyEdit(colName: string, edit: ColumnDiff) {
+    const next = new Map(this._edits)
+    if (Object.keys(edit).length) next.set(colName, edit)
+    else next.delete(colName)
+    this._edits = next
+  }
+
+  // Records a text edit, dropping it back out of the staged set when the value
+  // returns to the original. Name/type can't be blanked, so empty reverts;
+  // an emptied comment or default means "drop it" and stays staged.
+  private _commitText(col: InspectColumn, field: EditField, raw: string) {
+    const value = field === 'comment' ? raw : raw.trim()
+    const original = this._fieldOriginal(col, field)
+    const edit: ColumnDiff = { ...this._edits.get(col.name) }
+    if (value === original || ((field === 'name' || field === 'dataType') && value === '')) delete edit[field]
+    else edit[field] = value
+    this._applyEdit(col.name, edit)
+    this._editing = null
+  }
+
+  private _fieldOriginal(col: InspectColumn, field: EditField): string {
+    if (field === 'name') return col.name
+    if (field === 'dataType') return col.dataType
+    if (field === 'default') return col.default ?? ''
+    return col.comment ?? ''
+  }
+
+  // Nullable is a yes/no choice, not free text; staged like the text fields.
+  private _setNullable(col: InspectColumn, value: boolean) {
+    const edit: ColumnDiff = { ...this._edits.get(col.name) }
+    if (value === col.nullable) delete edit.nullable
+    else edit.nullable = value
+    this._applyEdit(col.name, edit)
+  }
+
+  private _fieldNullable(col: InspectColumn): boolean {
+    const edit = this._edits.get(col.name)
+    return edit && 'nullable' in edit ? !!edit.nullable : col.nullable
+  }
+
+  private _onEditKeydown(event: KeyboardEvent, col: InspectColumn, field: EditField) {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      this._commitText(col, field, (event.target as HTMLInputElement).value)
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      // With the completion menu open, Escape closes it and keeps editing.
+      if (this._cellMenu) this._cellMenu = null
+      else this._cancelEdit()
+    } else if (event.key === ' ' && event.ctrlKey && field === 'dataType') {
+      // Editor-style completion: the type choices anchored under the input,
+      // narrowed by what's typed so far.
+      event.preventDefault()
+      const input = event.target as HTMLInputElement
+      const rect = input.getBoundingClientRect()
+      this._cellMenu = { x: rect.left, y: rect.bottom + 2, col, kind: 'type', filter: input.value.trim() }
+    }
+  }
+
+  /** Whether there are staged column edits. Read by the workbench close-confirm. */
+  hasPendingChanges() {
+    return this._edits.size > 0
+  }
+
+  // Commits any focused editor, then emits the staged edits for the workbench to
+  // review and apply. Called on ⌘S and the Save button; a no-op when nothing is
+  // staged.
+  save() {
+    this.renderRoot.querySelector<HTMLElement>('.cell-input')?.blur()
+    if (this._state.phase !== 'done' || !this._edits.size || !this.table || !this.engine) return
+    const byName = new Map(this._state.inspection.columns.map((column) => [column.name, column]))
+    const edits: ColumnAlter[] = []
+    for (const [name, diff] of this._edits) {
+      const original = byName.get(name)
+      if (original) edits.push({ original, ...diff })
+    }
+    if (!edits.length) return
+    this.dispatchEvent(
+      new CustomEvent<ColumnAlterEventDetail>('alter-columns', {
+        bubbles: true,
+        composed: true,
+        detail: {
+          profileId: this.profileId,
+          childDb: this.childDb,
+          table: this.table,
+          engine: this.engine,
+          edits,
+          onApplied: () => {
+            this._edits = new Map()
+            this._editing = null
+            void this._load()
+          },
+        },
+      }),
+    )
   }
 
   private _renderBody() {
@@ -235,16 +429,151 @@ export class TableInspect extends LitElement {
                 <td class="icon-cell">
                   ${column.primaryKey ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>` : ''}
                 </td>
-                <td class="mono clip" title=${column.name}>${column.name}</td>
-                <td class="mono type clip" title=${column.dataType}>${abbreviateType(column.dataType, this.engine)}</td>
-                <td class="muted">${column.nullable ? 'yes' : 'no'}</td>
-                <td class="mono muted clip" title=${column.default ?? ''}>${column.default ?? ''}</td>
-                ${hasComments ? html`<td class="muted clip" title=${column.comment ?? ''}>${column.comment ?? ''}</td>` : ''}
+                ${this._renderTextCell(column, 'name', 'mono clip', this._fieldText(column, 'name'))}
+                ${this._renderTextCell(column, 'dataType', 'mono type clip', abbreviateType(this._fieldText(column, 'dataType'), this.engine))}
+                ${this._renderNullableCell(column)}
+                ${this._renderTextCell(column, 'default', 'mono muted clip', this._fieldText(column, 'default'))}
+                ${hasComments ? this._renderTextCell(column, 'comment', 'muted clip', this._fieldText(column, 'comment')) : ''}
               </tr>
             `,
           )}
         </tbody>
       </table>
+    `
+  }
+
+  // Type/nullable/default are editable on Postgres but not SQLite (which would
+  // need a table rebuild); explain that on hover rather than leaving them inert.
+  private _rebuildTip(field: EditField | 'nullable'): string | null {
+    return this.engine === 'sqlite' && !this.object && field !== 'name'
+      ? 'SQLite requires a table rebuild to change this'
+      : null
+  }
+
+  private _renderTextCell(col: InspectColumn, field: EditField, cls: string, display: unknown) {
+    const editable = this._canEdit(field)
+    if (this._editing?.col === col.name && this._editing.field === field) {
+      return html`
+        <td class=${cls}>
+          <input
+            class="cell-input"
+            .value=${this._editing.seed ?? this._fieldText(col, field)}
+            @keydown=${(event: KeyboardEvent) => this._onEditKeydown(event, col, field)}
+            @blur=${(event: FocusEvent) => {
+              this._blurCommitAt = performance.now()
+              this._commitText(col, field, (event.target as HTMLInputElement).value)
+            }}
+          />
+        </td>
+      `
+    }
+    const choices = field === 'dataType' && editable
+    const classes = `${cls}${this._isEdited(col.name, field) ? ' edited' : ''}${editable ? ' editable' : ''}${choices ? ' has-choices' : ''}`
+    return html`
+      <td
+        class=${classes}
+        title=${this._rebuildTip(field) ?? this._fieldText(col, field)}
+        @click=${editable ? () => this._onCellClick(col, field) : undefined}
+      >
+        ${display}${choices
+          ? html`
+              <button
+                class="choices-btn"
+                title="Choose type"
+                aria-label="Choose type"
+                @click=${(event: MouseEvent) => this._openTypeMenu(event, col)}
+              >
+                <i class="codicon codicon-chevron-down" aria-hidden="true"></i>
+              </button>
+            `
+          : ''}
+      </td>
+    `
+  }
+
+  // Every cell edits inline on click; the type cell's end arrow opens the menu.
+  private _onCellClick(col: InspectColumn, field: EditField) {
+    if (this._dismissedEditor()) return
+    this._startEdit(col.name, field)
+  }
+
+  private _openTypeMenu(event: MouseEvent, col: InspectColumn) {
+    event.stopPropagation() // the cell behind it would start an inline edit
+    if (this._dismissedEditor()) return
+    this._cellMenu = { x: event.clientX, y: event.clientY, col, kind: 'type' }
+  }
+
+  private _renderNullableCell(col: InspectColumn) {
+    const editable = this._canEdit('nullable')
+    const classes = `muted${this._isEdited(col.name, 'nullable') ? ' edited' : ''}${editable ? ' editable has-choices' : ''}`
+    return html`
+      <td
+        class=${classes}
+        title=${this._rebuildTip('nullable') ?? ''}
+        @click=${editable
+          ? (event: MouseEvent) => {
+              if (this._dismissedEditor()) return
+              this._cellMenu = { x: event.clientX, y: event.clientY, col, kind: 'nullable' }
+            }
+          : undefined}
+      >
+        ${this._fieldNullable(col) ? 'yes' : 'no'}${editable
+          ? html`
+              <button class="choices-btn" tabindex="-1" aria-hidden="true">
+                <i class="codicon codicon-chevron-down" aria-hidden="true"></i>
+              </button>
+            `
+          : ''}
+      </td>
+    `
+  }
+
+  private _nullableItems(col: InspectColumn): MenuItem[] {
+    const current = this._fieldNullable(col)
+    return [
+      { id: 'yes', label: 'yes — NULL allowed', checked: current },
+      { id: 'no', label: 'no — NOT NULL', checked: !current },
+    ]
+  }
+
+  // All of the engine's common types, the effective one check-marked (compared
+  // by base name, so varchar(64) checks the varchar(255) template), plus a
+  // Custom… escape hatch into the inline editor for anything else. A filter
+  // (from Ctrl+Space) narrows by typed prefix; no match falls back to the lot.
+  private _typeItems(col: InspectColumn, filter?: string): MenuItem[] {
+    const base = (type: string) => abbreviateType(type, this.engine).replace(/\(.*/, '').trim()
+    const current = base(this._fieldText(col, 'dataType'))
+    const types = this.engine ? dialectFor(this.engine).commonColumnTypes : []
+    const prefix = filter?.toLowerCase().replace(/\(.*/, '').trim() ?? ''
+    const matches = prefix ? types.filter((type) => type.toLowerCase().startsWith(prefix)) : types
+    return [
+      ...(matches.length ? matches : types).map((type) => ({ id: `type:${type}`, label: type, checked: base(type) === current })),
+      { id: 'custom', label: 'Custom…' },
+    ]
+  }
+
+  // Template types — varchar(255), numeric(10,2) — open in the inline editor
+  // with the parameters selected for adjustment; bare types commit directly.
+  private _onCellMenuPick(menu: { col: InspectColumn; kind: 'nullable' | 'type' }, id: string) {
+    if (menu.kind === 'nullable') return this._setNullable(menu.col, id === 'yes')
+    if (id === 'custom') return this._startEdit(menu.col.name, 'dataType')
+    const type = id.slice('type:'.length)
+    if (type.includes('(')) return this._startEdit(menu.col.name, 'dataType', type)
+    this._commitText(menu.col, 'dataType', type)
+  }
+
+  private _renderCellMenu() {
+    const menu = this._cellMenu
+    if (!menu) return ''
+    const items = menu.kind === 'nullable' ? this._nullableItems(menu.col) : this._typeItems(menu.col, menu.filter)
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onCellMenuPick(menu, e.detail.id)}
+        @menu-close=${() => (this._cellMenu = null)}
+      ></context-menu>
     `
   }
 
@@ -455,6 +784,63 @@ export class TableInspect extends LitElement {
         font-size: 12px;
         color: var(--status-dot-error);
         white-space: pre-wrap;
+      }
+
+      td.editable:hover {
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+      }
+
+      /* Choice cells (type, nullable) keep a right gutter for the end arrow. */
+      td.has-choices {
+        position: relative;
+        padding-right: 26px;
+      }
+
+      .choices-btn {
+        position: absolute;
+        top: 50%;
+        right: 6px;
+        transform: translateY(-50%);
+        display: inline-flex;
+        padding: 1px;
+        border: none;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--text-3);
+        cursor: pointer;
+        --codicon-size: 12px;
+      }
+
+      td.has-choices:hover .choices-btn {
+        color: var(--text);
+      }
+
+      .choices-btn:hover {
+        background: var(--list-hover);
+      }
+
+      /* Staged edit: the same amber pending tint the results grid uses for dirty
+         cells, so a changed value reads consistently across both surfaces (and,
+         like there, muted cells jump to full contrast). */
+      td.edited,
+      td.edited:hover {
+        color: var(--text);
+        background: color-mix(in srgb, var(--status-dot-warning) 14%, var(--editor-bg));
+      }
+
+      /* Overlays the cell padding (results-panel .cell-edit trick) so opening
+         the editor never changes the row height or shifts content. */
+      .cell-input {
+        width: calc(100% + 5px);
+        box-sizing: border-box;
+        margin: -3px 0 -3px -5px;
+        padding: 2px 4px;
+        font: inherit;
+        color: var(--text);
+        background: var(--editor-bg);
+        border: 1px solid var(--accent);
+        border-radius: 3px;
+        outline: none;
       }
     `,
   ]

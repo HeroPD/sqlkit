@@ -57,9 +57,11 @@ export class HistoryView extends LitElement {
     if (!menu) return ''
     const items: MenuItem[] = [
       { id: 'explain', label: 'Explain' },
-      // ANALYZE actually executes the query — a Postgres notion; SQLite's
-      // counterpart is the single `explain query plan` mode.
-      ...(this.engine === 'postgresql' ? [{ id: 'explain-analyze', label: 'Explain Analyze' }] : []),
+      // ANALYZE actually executes the query — Postgres and MySQL 8.0.18+;
+      // SQLite's counterpart is the single `explain query plan` mode.
+      ...(this.engine === 'postgresql' || this.engine === 'mysql'
+        ? [{ id: 'explain-analyze', label: 'Explain Analyze' }]
+        : []),
       { id: 'copy-sql', label: 'Copy SQL' },
     ]
     return html`

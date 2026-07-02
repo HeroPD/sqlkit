@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { inspectTable, listColumns, listTables, openDatabase, queryDatabase, runBatch, serverVersion } from './sqlite-engine'
+import { inspectTable, listColumns, listTables, openDatabase, queryDatabase, runBatch, runDdl, serverVersion } from './sqlite-engine'
 import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
 
 // Electron utilityProcess entry: owns one synchronous SQLite handle and answers
@@ -33,6 +33,8 @@ const handle = (request: SqliteRequest): unknown => {
       return queryDatabase(requireDb(), request.sql, request.params)
     case 'runBatch':
       return runBatch(requireDb(), request.statements)
+    case 'runDdl':
+      return runDdl(requireDb(), request.statements)
     case 'listTables':
       return listTables(requireDb())
     case 'listColumns':

@@ -1,9 +1,6 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import type { BatchResult, ColumnRef, InspectSection, QueryResult, TableInspection, TableRef } from '../../src/electron'
-import { MAX_BUFFERED_ROWS } from './limits'
-
-// A save statement that matched no rows aborts the batch: the row is gone/changed.
-const BATCH_ZERO_ROWS = 'A change affected no rows; the row may have been modified or removed.'
+import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, TableInspection, TableRef } from '../../src/electron'
+import { BATCH_ZERO_ROWS, MAX_BUFFERED_ROWS } from './limits'
 
 // The synchronous SQLite core, factored out of any process/threading concern:
 // every function takes the DatabaseSync it operates on. The worker owns the
@@ -235,6 +232,26 @@ export function runBatch(db: DatabaseSync, statements: { sql: string; params: Sq
         return { success: false, failedIndex: index, error: BATCH_ZERO_ROWS }
       }
     }
+    db.exec('COMMIT')
+    return { success: true }
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      // The transaction may have auto-aborted already; nothing left to undo.
+    }
+    return { success: false, failedIndex: index >= 0 ? index : undefined, error: (error as Error).message }
+  }
+}
+
+// Schema statements in one transaction. Like runBatch but with no rows-affected
+// gate — DDL affects zero rows — and no params (DDL runs param-free).
+export function runDdl(db: DatabaseSync, statements: string[]): DdlResult {
+  if (!statements.length) return { success: true }
+  db.exec('BEGIN')
+  let index = -1
+  try {
+    for (index = 0; index < statements.length; index += 1) db.exec(statements[index]!)
     db.exec('COMMIT')
     return { success: true }
   } catch (error) {

@@ -55,6 +55,59 @@ describe('WorkbenchScreen query orchestration', () => {
   })
 })
 
+describe('WorkbenchScreen child alignment', () => {
+  type Child = { name: string; inUse: boolean }
+  const alignInternals = (screen: WorkbenchScreen) =>
+    screen as never as {
+      _live: { statuses: Record<string, { children: Child[] }>; setActiveChild: ReturnType<typeof vi.fn> }
+      _setActiveDb: ReturnType<typeof vi.fn>
+      _alignActiveChild(
+        profileId: string,
+        childDb: string | null,
+        options?: { followMissing?: boolean },
+      ): Promise<'aligned' | 'redirected' | 'unavailable'>
+    }
+  const setup = (children: Child[]) => {
+    const workbench = alignInternals(new WorkbenchScreen())
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', children } } as never
+    workbench._live.setActiveChild = vi.fn(() => Promise.resolve({ success: true }))
+    workbench._setActiveDb = vi.fn()
+    return workbench
+  }
+
+  it('is a no-op without a target child or on single-database connections', async () => {
+    const workbench = setup([{ name: 'db_a', inUse: true }])
+    expect(await workbench._alignActiveChild('p1', null)).toBe('aligned')
+    expect(await workbench._alignActiveChild('p1', 'db_a')).toBe('aligned')
+    expect(workbench._live.setActiveChild).not.toHaveBeenCalled()
+  })
+
+  it('switches the driver when the target child exists but is not in use', async () => {
+    const workbench = setup([{ name: 'db_a', inUse: false }, { name: 'db_b', inUse: true }])
+    expect(await workbench._alignActiveChild('p1', 'db_a')).toBe('aligned')
+    expect(workbench._live.setActiveChild).toHaveBeenCalledWith('p1', 'db_a')
+  })
+
+  it('reports unavailable when the driver refuses the switch', async () => {
+    const workbench = setup([{ name: 'db_a', inUse: false }, { name: 'db_b', inUse: true }])
+    workbench._live.setActiveChild = vi.fn(() => Promise.resolve({ success: false }))
+    expect(await workbench._alignActiveChild('p1', 'db_a')).toBe('unavailable')
+  })
+
+  it('redirects to the in-use child when the target is gone and followMissing is set', async () => {
+    const workbench = setup([{ name: 'db_b', inUse: true }, { name: 'db_c', inUse: false }])
+    expect(await workbench._alignActiveChild('p1', 'db_dropped', { followMissing: true })).toBe('redirected')
+    expect(workbench._setActiveDb).toHaveBeenCalledWith('p1', 'db_b')
+    expect(workbench._live.setActiveChild).not.toHaveBeenCalled()
+  })
+
+  it('reports unavailable for a missing child without followMissing', async () => {
+    const workbench = setup([{ name: 'db_b', inUse: true }, { name: 'db_c', inUse: false }])
+    expect(await workbench._alignActiveChild('p1', 'db_dropped')).toBe('unavailable')
+    expect(workbench._setActiveDb).not.toHaveBeenCalled()
+  })
+})
+
 describe('WorkbenchScreen staged result changes', () => {
   it('routes app-menu Save to staged result changes before file save', () => {
     const screen = new WorkbenchScreen()

@@ -20,6 +20,29 @@ export type TableSelectDetail = { key: string }
 export type ObjectInspectDetail = { object: DbObject; objectKind: DbObjectKind }
 export type TableBrowseDetail = { table: TableRef }
 
+// Expand/collapse of tree rows; every key is prefixed with its profile id so
+// state for removed profiles can be pruned.
+type TreeState = {
+  collapsedSchemas: Set<string>
+  expandedTables: Set<string>
+  expandedObjectGroups: Set<string>
+}
+
+// Section chrome: collapsed headers, the pinned Files height (null = even
+// split), and an in-flight divider drag.
+type SectionLayout = {
+  filesCollapsed: boolean
+  tablesCollapsed: boolean
+  filesHeight: number | null
+  resizing: { startY: number; startHeight: number } | null
+}
+
+// The open context menu; table and object menus are mutually exclusive.
+type ExplorerMenu = { x: number; y: number } & (
+  | { kind: 'table'; table: TableRef }
+  | { kind: 'object'; object: DbObject; objectKind: DbObjectKind }
+)
+
 // The Explorer sidebar view, scoped to the in-use database context (⌘K):
 // VS Code-style Files/Tables split where each section is a flex region with
 // its own scrolling body, a draggable 1px divider between them (double-click
@@ -70,79 +93,70 @@ export class ExplorerView extends LitElement {
   @property({ attribute: false })
   profileIds: string[] = []
 
+  /** Tables expanded to show columns are keyed like selectedTable; function/type groups start collapsed. */
   @state()
-  private _filesCollapsed = false
+  private _tree: TreeState = { collapsedSchemas: new Set(), expandedTables: new Set(), expandedObjectGroups: new Set() }
 
   @state()
-  private _tablesCollapsed = false
+  private _layout: SectionLayout = { filesCollapsed: false, tablesCollapsed: false, filesHeight: null, resizing: null }
 
-  /** Collapsed schema groups, keyed `profileId:schema` so state is per profile. */
   @state()
-  private _collapsedSchemas = new Set<string>()
-
-  /** Expanded tables (showing columns), keyed like selectedTable. */
-  @state()
-  private _expandedTables = new Set<string>()
+  private _menu: ExplorerMenu | null = null
 
   // Columns grouped per table, rebuilt only when the columns array changes.
   private _columnsByTable: { source: ColumnRef[] | null; map: Map<string, ColumnRef[]> } | null = null
 
-  // null = the default even split; a number pins the Files section height.
-  @state()
-  private _filesSectionHeight: number | null = null
+  private _patchTree(partial: Partial<TreeState>) {
+    this._tree = { ...this._tree, ...partial }
+  }
 
-  @state()
-  private _sectionResizing: { startY: number; startHeight: number } | null = null
-
-  @state()
-  private _tableMenu: { x: number; y: number; table: TableRef } | null = null
-
-  /** Function/type groups start collapsed; keys are profile:schema:label. */
-  @state()
-  private _expandedObjectGroups = new Set<string>()
-
-  @state()
-  private _objectMenu: { x: number; y: number; object: DbObject; objectKind: DbObjectKind } | null = null
+  private _patchLayout(partial: Partial<SectionLayout>) {
+    this._layout = { ...this._layout, ...partial }
+  }
 
   protected willUpdate(changed: PropertyValues) {
     // Drop collapse/expand state for profiles that no longer exist — every key
     // is prefixed with its profile id, which is a colon-free UUID.
     if (changed.has('profileIds')) {
       const valid = new Set(this.profileIds)
-      const prune = (keys: Set<string>) => {
-        const next = new Set([...keys].filter((key) => valid.has(key.split(':')[0] ?? '')))
-        return next.size === keys.size ? keys : next
+      const prune = (keys: Set<string>) => new Set([...keys].filter((key) => valid.has(key.split(':')[0] ?? '')))
+      const pruned: TreeState = {
+        collapsedSchemas: prune(this._tree.collapsedSchemas),
+        expandedTables: prune(this._tree.expandedTables),
+        expandedObjectGroups: prune(this._tree.expandedObjectGroups),
       }
-      this._collapsedSchemas = prune(this._collapsedSchemas)
-      this._expandedTables = prune(this._expandedTables)
-      this._expandedObjectGroups = prune(this._expandedObjectGroups)
+      const dropped =
+        pruned.collapsedSchemas.size !== this._tree.collapsedSchemas.size ||
+        pruned.expandedTables.size !== this._tree.expandedTables.size ||
+        pruned.expandedObjectGroups.size !== this._tree.expandedObjectGroups.size
+      if (dropped) this._tree = pruned
     }
     // A selection arriving from outside (⌘P table pick) must be visible:
     // expand the Tables section and the schema group holding it.
     if (changed.has('selectedTable') && this.selectedTable) {
-      this._tablesCollapsed = false
+      if (this._layout.tablesCollapsed) this._patchLayout({ tablesCollapsed: false })
       const [profileId, schema] = this.selectedTable.split(':')
       const groupKey = `${profileId}:${schema}`
-      if (this._collapsedSchemas.has(groupKey)) {
-        const next = new Set(this._collapsedSchemas)
-        next.delete(groupKey)
-        this._collapsedSchemas = next
+      if (this._tree.collapsedSchemas.has(groupKey)) {
+        const collapsedSchemas = new Set(this._tree.collapsedSchemas)
+        collapsedSchemas.delete(groupKey)
+        this._patchTree({ collapsedSchemas })
       }
     }
   }
 
   render() {
-    const filesStyle =
-      !this._filesCollapsed && this._filesSectionHeight !== null ? `flex: 0 0 ${this._filesSectionHeight}px` : ''
+    const { filesCollapsed, tablesCollapsed, filesHeight, resizing } = this._layout
+    const filesStyle = !filesCollapsed && filesHeight !== null ? `flex: 0 0 ${filesHeight}px` : ''
 
     return html`
-      <div class="x-section ${this._filesCollapsed ? 'collapsed' : ''}" style=${filesStyle}>
-        <button class="section-head-row" @click=${() => (this._filesCollapsed = !this._filesCollapsed)}>
-          <i class="codicon codicon-chevron-right chevron ${this._filesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
+      <div class="x-section ${filesCollapsed ? 'collapsed' : ''}" style=${filesStyle}>
+        <button class="section-head-row" @click=${() => this._patchLayout({ filesCollapsed: !filesCollapsed })}>
+          <i class="codicon codicon-chevron-right chevron ${filesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
           <span>Files</span>
           ${this.contextName ? html`<span class="section-detail">${this.contextName}</span>` : ''}
         </button>
-        ${this._filesCollapsed
+        ${filesCollapsed
           ? ''
           : html`
               <div class="section-body">
@@ -153,10 +167,10 @@ export class ExplorerView extends LitElement {
             `}
       </div>
 
-      ${!this._filesCollapsed && !this._tablesCollapsed
+      ${!filesCollapsed && !tablesCollapsed
         ? html`
             <div
-              class="x-resize ${this._sectionResizing ? 'active' : ''}"
+              class="x-resize ${resizing ? 'active' : ''}"
               role="separator"
               aria-label="Resize Files and Tables"
               title="Resize Files and Tables"
@@ -164,17 +178,17 @@ export class ExplorerView extends LitElement {
               @pointermove=${this._onResizeMove}
               @pointerup=${this._onResizeEnd}
               @pointercancel=${this._onResizeEnd}
-              @dblclick=${() => (this._filesSectionHeight = null)}
+              @dblclick=${() => this._patchLayout({ filesHeight: null })}
             ></div>
           `
         : ''}
 
       <div
-        class="x-section ${this._tablesCollapsed ? 'collapsed' : ''} ${this._tablesCollapsed && !this._filesCollapsed ? 'pin-bottom' : ''}"
+        class="x-section ${tablesCollapsed ? 'collapsed' : ''} ${tablesCollapsed && !filesCollapsed ? 'pin-bottom' : ''}"
       >
         <div class="section-head">
-          <button class="section-head-row" @click=${() => (this._tablesCollapsed = !this._tablesCollapsed)}>
-            <i class="codicon codicon-chevron-right chevron ${this._tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
+          <button class="section-head-row" @click=${() => this._patchLayout({ tablesCollapsed: !tablesCollapsed })}>
+            <i class="codicon codicon-chevron-right chevron ${tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
             <span>Tables</span>
           </button>
           ${this.tables !== null
@@ -190,14 +204,14 @@ export class ExplorerView extends LitElement {
               `
             : ''}
         </div>
-        ${this._tablesCollapsed ? '' : html`<div class="section-body">${this._renderTables()}</div>`}
+        ${tablesCollapsed ? '' : html`<div class="section-body">${this._renderTables()}</div>`}
       </div>
       ${this._renderTableMenu()} ${this._renderObjectMenu()}
     `
   }
 
   private _renderTableMenu() {
-    const menu = this._tableMenu
+    const menu = this._menu?.kind === 'table' ? this._menu : null
     if (!menu) return ''
     const kind = menu.table.kind
     const dropLabel = TABLE_KIND_LABELS[kind].replace(/\b\w/g, (c) => c.toUpperCase())
@@ -217,7 +231,7 @@ export class ExplorerView extends LitElement {
         .y=${menu.y}
         .items=${items}
         @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onTableMenuPick(e.detail.id, menu.table)}
-        @menu-close=${() => (this._tableMenu = null)}
+        @menu-close=${() => (this._menu = null)}
       ></context-menu>
     `
   }
@@ -278,7 +292,7 @@ export class ExplorerView extends LitElement {
       <div class="etable-list">
         ${[...groups.entries()].map(([schema, tables]) => {
           const groupKey = `${profileId}:${schema}`
-          const collapsed = this._collapsedSchemas.has(groupKey)
+          const collapsed = this._tree.collapsedSchemas.has(groupKey)
           return html`
             <button class="schema-row" @click=${() => this._toggleSchema(groupKey)}>
               <i class="codicon codicon-chevron-right chevron ${collapsed ? '' : 'expanded'}" aria-hidden="true"></i>
@@ -313,7 +327,7 @@ export class ExplorerView extends LitElement {
   ) {
     if (!items.length) return ''
     const key = `${profileId}:${schema ?? ''}:${label}`
-    const expanded = this._expandedObjectGroups.has(key)
+    const expanded = this._tree.expandedObjectGroups.has(key)
     return html`
       <button class="object-group ${nested ? 'nested' : ''}" @click=${() => this._toggleObjectGroup(key)}>
         <i class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}" aria-hidden="true"></i>
@@ -333,7 +347,7 @@ export class ExplorerView extends LitElement {
                 @contextmenu=${(event: MouseEvent) => {
                   event.preventDefault()
                   event.stopPropagation()
-                  this._objectMenu = { x: event.clientX, y: event.clientY, object: item, objectKind }
+                  this._menu = { kind: 'object', x: event.clientX, y: event.clientY, object: item, objectKind }
                 }}
               >
                 <i class="codicon ${objectIcon(label, item)}" aria-hidden="true"></i>
@@ -346,7 +360,7 @@ export class ExplorerView extends LitElement {
   }
 
   private _renderObjectMenu() {
-    const menu = this._objectMenu
+    const menu = this._menu?.kind === 'object' ? this._menu : null
     if (!menu) return ''
     const items: MenuItem[] = [
       { id: 'inspect', label: 'Inspect' },
@@ -365,7 +379,7 @@ export class ExplorerView extends LitElement {
             )
           }
         }}
-        @menu-close=${() => (this._objectMenu = null)}
+        @menu-close=${() => (this._menu = null)}
       ></context-menu>
     `
   }
@@ -381,14 +395,14 @@ export class ExplorerView extends LitElement {
   }
 
   private _toggleObjectGroup(key: string) {
-    const expanded = new Set(this._expandedObjectGroups)
-    if (!expanded.delete(key)) expanded.add(key)
-    this._expandedObjectGroups = expanded
+    const expandedObjectGroups = new Set(this._tree.expandedObjectGroups)
+    if (!expandedObjectGroups.delete(key)) expandedObjectGroups.add(key)
+    this._patchTree({ expandedObjectGroups })
   }
 
   private _renderTableRow(profileId: string, table: TableRef, nested: boolean) {
     const key = tableKey(profileId, table)
-    const expanded = this._expandedTables.has(key)
+    const expanded = this._tree.expandedTables.has(key)
     return html`
       <div
         class="etable-row ${nested ? 'nested' : ''} ${this.selectedTable === key ? 'selected' : ''}"
@@ -448,10 +462,9 @@ export class ExplorerView extends LitElement {
 
   private _toggleTable(event: Event, key: string) {
     event.stopPropagation() // the row click selects; the chevron only expands
-    const next = new Set(this._expandedTables)
-    if (next.has(key)) next.delete(key)
-    else next.add(key)
-    this._expandedTables = next
+    const expandedTables = new Set(this._tree.expandedTables)
+    if (!expandedTables.delete(key)) expandedTables.add(key)
+    this._patchTree({ expandedTables })
   }
 
   private _refresh() {
@@ -459,10 +472,9 @@ export class ExplorerView extends LitElement {
   }
 
   private _toggleSchema(groupKey: string) {
-    const next = new Set(this._collapsedSchemas)
-    if (next.has(groupKey)) next.delete(groupKey)
-    else next.add(groupKey)
-    this._collapsedSchemas = next
+    const collapsedSchemas = new Set(this._tree.collapsedSchemas)
+    if (!collapsedSchemas.delete(groupKey)) collapsedSchemas.add(groupKey)
+    this._patchTree({ collapsedSchemas })
   }
 
   private _select(key: string) {
@@ -480,30 +492,31 @@ export class ExplorerView extends LitElement {
   private _onTableMenu(event: MouseEvent, table: TableRef) {
     event.preventDefault()
     event.stopPropagation()
-    this._tableMenu = { x: event.clientX, y: event.clientY, table }
+    this._menu = { kind: 'table', x: event.clientX, y: event.clientY, table }
   }
 
   private _onResizeStart(event: PointerEvent) {
     const files = this.shadowRoot?.querySelector<HTMLElement>('.x-section')
     if (!files) return
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-    this._sectionResizing = { startY: event.clientY, startHeight: files.offsetHeight }
+    this._patchLayout({ resizing: { startY: event.clientY, startHeight: files.offsetHeight } })
     event.preventDefault()
   }
 
   private _onResizeMove(event: PointerEvent) {
-    if (!this._sectionResizing) return
+    const resizing = this._layout.resizing
+    if (!resizing) return
 
     // Keep at least a header-plus-a-few-rows visible on both sides.
     const minSection = 72
     const max = Math.max(minSection, this.clientHeight - 1 - minSection)
-    const raw = this._sectionResizing.startHeight + (event.clientY - this._sectionResizing.startY)
-    this._filesSectionHeight = Math.max(minSection, Math.min(max, raw))
+    const raw = resizing.startHeight + (event.clientY - resizing.startY)
+    this._patchLayout({ filesHeight: Math.max(minSection, Math.min(max, raw)) })
   }
 
   private _onResizeEnd(event: PointerEvent) {
-    if (!this._sectionResizing) return
-    this._sectionResizing = null
+    if (!this._layout.resizing) return
+    this._patchLayout({ resizing: null })
     ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
   }
 

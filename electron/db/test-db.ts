@@ -9,12 +9,21 @@ import type { Endpoint } from './transport'
 // the repo-root .env is read so `npm test` works locally with no exports.
 // Undefined when neither is present — the integration suites then skip.
 export function testDatabaseUrl(): string | undefined {
-  const fromEnv = process.env.TEST_DATABASE_URL?.trim()
+  return testUrl('TEST_DATABASE_URL')
+}
+
+/** MySQL integration URL (TEST_MYSQL_URL); undefined skips the mysql suite. */
+export function testMysqlUrl(): string | undefined {
+  return testUrl('TEST_MYSQL_URL')
+}
+
+function testUrl(name: string): string | undefined {
+  const fromEnv = process.env[name]?.trim()
   if (fromEnv) return fromEnv
   try {
     const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
     for (const line of readFileSync(path.join(root, '.env'), 'utf8').split('\n')) {
-      const value = /^\s*TEST_DATABASE_URL\s*=\s*(.+?)\s*$/.exec(line)?.[1]
+      const value = new RegExp(`^\\s*${name}\\s*=\\s*(.+?)\\s*$`).exec(line)?.[1]
       if (value) return value.replace(/^["']|["']$/g, '')
     }
   } catch {
