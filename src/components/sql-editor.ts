@@ -633,7 +633,8 @@ export class SqlEditor extends LitElement {
     const keywordOptions: Completion[] = keywords
       .filter((keyword) => !keyword.includes(' '))
       .map((keyword) => ({
-        label: keyword,
+        label: keyword.toLowerCase(),
+        displayLabel: keyword,
         type: 'keyword',
         apply: keyword,
         boost: KEYWORD_BOOSTS[keyword] ?? 0,
@@ -744,7 +745,13 @@ export class SqlEditor extends LitElement {
       .keywords.filter((keyword) => keyword.includes(' '))
       .map((keyword) => ({
         lower: keyword.toLowerCase(),
-        option: { label: keyword, type: 'keyword', apply: keyword, boost: KEYWORD_BOOSTS[keyword] ?? 0 },
+        option: {
+          label: keyword.toLowerCase(),
+          displayLabel: keyword,
+          type: 'keyword',
+          apply: keyword,
+          boost: KEYWORD_BOOSTS[keyword] ?? 0,
+        },
       }))
     const phrasePattern = /^[A-Za-z_][\w$]*(?:\s+[\w$]*)*$/
 

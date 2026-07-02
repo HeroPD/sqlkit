@@ -104,6 +104,13 @@ test('explicit completion still lists multi-word keywords', async () => {
   expect(await completionsAt('SELECT * FROM users ')).toContain('GROUP BY')
 })
 
+test('boosted keywords rank before table names for lowercase prefixes', async () => {
+  const labels = await completionsAt('u')
+  expect(labels).toContain('UPDATE')
+  expect(labels).toContain('users')
+  expect(labels.indexOf('UPDATE')).toBeLessThan(labels.indexOf('users'))
+})
+
 test('select-list commas do not bind aliases', async () => {
   expect(await completionsAt('SELECT id, users q FROM postings WHERE q.')).toEqual([])
 })
