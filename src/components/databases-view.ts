@@ -52,7 +52,7 @@ export class DatabasesView extends LitElement {
     const engine = this.connections.find((connection) => connection.id === menu.id)?.engine
     const items: MenuItem[] = [
       connected ? { id: 'disconnect', label: 'Disconnect' } : { id: 'connect', label: 'Connect' },
-      ...(connected && (engine === 'postgresql' || engine === 'mysql') ? [{ id: 'create-db', label: 'Create Database…' }] : []),
+      ...(connected && engine !== 'sqlite' ? [{ id: 'create-db', label: 'Create Database…' }] : []),
       { id: 'edit', label: 'Edit Connection' },
       { id: 'remove', label: 'Remove Database…', danger: true },
     ]

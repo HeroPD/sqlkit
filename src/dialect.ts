@@ -104,7 +104,12 @@ const columnTypesFor: Record<Engine, string[]> = {
     'date', 'time', 'datetime', 'timestamp',
     'json', 'blob',
   ],
-  sqlserver: [],
+  sqlserver: [
+    'nvarchar(255)', 'nvarchar(max)', 'varchar(255)', 'char(1)', 'bit',
+    'tinyint', 'smallint', 'int', 'bigint', 'decimal(10,2)', 'float', 'real', 'money',
+    'date', 'time', 'datetime2', 'datetimeoffset',
+    'uniqueidentifier', 'varbinary(max)', 'xml',
+  ],
 }
 
 const makeDialect = (engine: Engine): Dialect => {
@@ -113,7 +118,8 @@ const makeDialect = (engine: Engine): Dialect => {
   return {
     engine,
     quoteIdent,
-    placeholder: (index) => (engine === 'postgresql' ? `$${index}` : '?'),
+    // SQL Server's driver (tedious) has no positional '?', only named params.
+    placeholder: (index) => (engine === 'postgresql' ? `$${index}` : engine === 'sqlserver' ? `@p${index}` : '?'),
     applyOrderBy: (sql, sort) => placeOrderBy(sql, { column: quoteIdent(sort.column), dir: sort.direction }),
     displayConstraintName: (name) => (suffix ? name.replace(suffix, '') : name),
     supportsColumnComments: columnCommentsFor[engine],

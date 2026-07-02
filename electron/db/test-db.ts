@@ -17,6 +17,11 @@ export function testMysqlUrl(): string | undefined {
   return testUrl('TEST_MYSQL_URL')
 }
 
+/** SQL Server integration URL (TEST_MSSQL_URL); undefined skips the mssql suite. */
+export function testMssqlUrl(): string | undefined {
+  return testUrl('TEST_MSSQL_URL')
+}
+
 function testUrl(name: string): string | undefined {
   const fromEnv = process.env[name]?.trim()
   if (fromEnv) return fromEnv

@@ -23,7 +23,7 @@ export function coerceValue(value: string, column: ColumnRef | undefined, engine
     const n = Number(trimmed)
     return Number.isFinite(n) && String(n) === trimmed ? n : value
   }
-  if (/bool/.test(type)) {
+  if (/bool/.test(type) || type === 'bit') { // bit is SQL Server's boolean
     const truthy = /^(t|true|1|yes|y)$/i.test(value)
     const falsy = /^(f|false|0|no|n)$/i.test(value)
     // The dialect decides how a boolean binds; an unrecognized token falls through to text.

@@ -11,9 +11,10 @@ describe('dialectFor: identifier quoting', () => {
 })
 
 describe('dialectFor: placeholder', () => {
-  it('numbers Postgres params and uses ? elsewhere', () => {
+  it('numbers Postgres/SQL Server params and uses ? elsewhere', () => {
     expect(dialectFor('postgresql').placeholder(1)).toBe('$1')
     expect(dialectFor('postgresql').placeholder(7)).toBe('$7')
+    expect(dialectFor('sqlserver').placeholder(2)).toBe('@p2')
     expect(dialectFor('sqlite').placeholder(1)).toBe('?')
     expect(dialectFor('mysql').placeholder(3)).toBe('?')
   })
@@ -65,6 +66,6 @@ describe('dialectFor: column edit capabilities', () => {
     expect(dialectFor('postgresql').commonColumnTypes).toContain('timestamptz')
     expect(dialectFor('sqlite').commonColumnTypes).toContain('integer')
     expect(dialectFor('mysql').commonColumnTypes).toContain('datetime')
-    expect(dialectFor('sqlserver').commonColumnTypes).toEqual([])
+    expect(dialectFor('sqlserver').commonColumnTypes).toContain('nvarchar(255)')
   })
 })

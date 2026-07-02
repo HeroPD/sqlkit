@@ -3,11 +3,15 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
 import type { ConnectionProfile, DatabaseMode, Engine, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
 
-const ENGINES: ReadonlyArray<{ engine: Engine; label: string; disabled?: boolean }> = [
+// Roadmapped engines are listed disabled; they stay out of the Engine type
+// until a driver exists, so nothing else has to pretend they're real.
+const ENGINES: ReadonlyArray<{ engine: Engine | 'clickhouse' | 'oracle'; label: string; disabled?: boolean }> = [
   { engine: 'postgresql', label: 'PostgreSQL' },
   { engine: 'mysql', label: 'MySQL' },
   { engine: 'sqlite', label: 'SQLite' },
-  { engine: 'sqlserver', label: 'SQL Server (coming soon)', disabled: true },
+  { engine: 'sqlserver', label: 'SQL Server' },
+  { engine: 'clickhouse', label: 'ClickHouse (coming soon)', disabled: true },
+  { engine: 'oracle', label: 'Oracle (coming soon)', disabled: true },
 ]
 
 const DEFAULT_PORTS: Partial<Record<Engine, string>> = {

@@ -15,6 +15,7 @@ import type {
   TableRef,
 } from '../../src/electron'
 import type { Endpoint } from './transport'
+import { createMssqlDriver } from './mssql'
 import { createMysqlDriver } from './mysql'
 import { createPostgresDriver } from './postgres'
 import { createSqliteDriver } from './sqlite'
@@ -84,9 +85,9 @@ export function createDriver(profile: ConnectionProfile, endpoint: Endpoint, eve
       return createPostgresDriver(profile, endpoint, events)
     case 'mysql':
       return createMysqlDriver(profile, endpoint, events)
+    case 'sqlserver':
+      return createMssqlDriver(profile, endpoint, events)
     case 'sqlite':
       return createSqliteDriver(profile)
-    default:
-      throw new Error(`No ${profile.engine} driver yet — only PostgreSQL, MySQL and SQLite are supported.`)
   }
 }

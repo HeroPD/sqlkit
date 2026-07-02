@@ -1,0 +1,309 @@
+import sql from 'mssql'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { ConnectionProfile } from '../../src/electron'
+import type { Driver } from './driver'
+import { MAX_BUFFERED_ROWS } from './driver'
+import { createMssqlDriver } from './mssql'
+import { endpointFor, profileFromUrl, testMssqlUrl } from './test-db'
+
+const url = testMssqlUrl()
+const describeDb = url ? describe : describe.skip
+
+const TEST_DB = 'sqlkit_it_mssql'
+
+const configFromUrl = (u: string, database?: string): sql.config => {
+  const parsed = new URL(u)
+  return {
+    server: parsed.hostname,
+    port: Number(parsed.port) || 1433,
+    user: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+    database: database ?? (parsed.pathname.replace(/^\//, '') || 'master'),
+    options: { encrypt: false, trustServerCertificate: true },
+    requestTimeout: 30000,
+  }
+}
+
+// Exercises the real SQL Server driver against TEST_MSSQL_URL (sa — see
+// .env.example). Skips entirely when no test server is configured.
+describeDb('mssql driver (integration)', () => {
+  const dbUrl = url ?? ''
+  let admin: sql.ConnectionPool
+  let fixtures: sql.ConnectionPool
+
+  beforeAll(async () => {
+    admin = await new sql.ConnectionPool(configFromUrl(dbUrl)).connect()
+    await admin.request().batch(`drop database if exists ${TEST_DB}`)
+    await admin.request().batch(`create database ${TEST_DB}`)
+    // Views/functions must be created from inside the database, so a second
+    // pool connects there for the fixtures.
+    fixtures = await new sql.ConnectionPool(configFromUrl(dbUrl, TEST_DB)).connect()
+    await fixtures.request().batch('create table authors (id int identity primary key, name nvarchar(120) not null, bio nvarchar(max))')
+    await fixtures.request().batch(
+      `create table books (
+         id int identity primary key,
+         author_id int not null,
+         title nvarchar(200) not null,
+         published bit default 0,
+         constraint books_author_fk foreign key (author_id) references authors(id))`,
+    )
+    await fixtures.request().batch('create index books_author_idx on books(author_id)')
+    await fixtures.request().batch('create view book_titles as select title from books')
+    await fixtures.request().batch('create function sqlkit_add_one(@x int) returns int as begin return @x + 1 end')
+    await fixtures.request().batch("insert into authors (name, bio) values ('Ada', 'pioneer'), ('Alan', null)")
+  }, 30000)
+
+  afterAll(async () => {
+    await fixtures?.close().catch(() => {})
+    await admin.request().batch(`drop database if exists ${TEST_DB}`).catch(() => {})
+    await admin.close().catch(() => {})
+  })
+
+  const connectDriver = async (overrides: Partial<ConnectionProfile> = {}): Promise<Driver> => {
+    const profile = profileFromUrl(dbUrl, { engine: 'sqlserver', database: TEST_DB, ...overrides })
+    const driver = createMssqlDriver(profile, endpointFor(profile), { onError: () => {} })
+    await driver.connect()
+    return driver
+  }
+
+  it('connects and reports the server version', async () => {
+    const driver = await connectDriver()
+    try {
+      // connect() already returned; re-derive it for the assertion.
+      await driver.disconnect()
+      const profile = profileFromUrl(dbUrl, { engine: 'sqlserver', database: TEST_DB })
+      const fresh = createMssqlDriver(profile, endpointFor(profile), { onError: () => {} })
+      expect(await fresh.connect()).toMatch(/^Microsoft SQL Server \d{4}/)
+      await fresh.disconnect()
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('returns columns, rows, rowCount and a duration for a select', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query('select 1 as a, 2 as b')
+      expect(result.columns).toEqual(['a', 'b'])
+      expect(result.rows).toEqual([[1, 2]])
+      expect(result.rowCount).toBe(1)
+      expect(result.truncated).toBe(false)
+      expect(result.durationMs).toBeGreaterThanOrEqual(0)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('binds @pN parameters', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query('select @p1 as x, @p2 as y', [7, 'hi'])
+      expect(result.columns).toEqual(['x', 'y'])
+      expect(result.rows).toEqual([[7, 'hi']])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('reports affected rows for writes', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table batch_w (id int primary key, v nvarchar(50))')
+      const result = await driver.query("insert into batch_w (id, v) values (1, 'a'), (2, 'b')")
+      expect(result.rowCount).toBe(2)
+      expect(result.columns).toEqual([])
+    } finally {
+      await driver.query('drop table if exists batch_w').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('runs a write batch atomically: commits all, or rolls back all on failure', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table batch (id int primary key, v nvarchar(50))')
+      const ok = await driver.runBatch!([
+        { sql: 'insert into batch (id, v) values (@p1, @p2)', params: [1, 'a'] },
+        { sql: 'insert into batch (id, v) values (@p1, @p2)', params: [2, 'b'] },
+      ])
+      expect(ok).toEqual({ success: true })
+      expect((await driver.query('select count(*) from batch')).rows).toEqual([[2]])
+
+      const bad = await driver.runBatch!([
+        { sql: 'insert into batch (id, v) values (@p1, @p2)', params: [3, 'c'] },
+        { sql: 'insert into batch (id, v) values (@p1, @p2)', params: [1, 'dup'] },
+      ])
+      expect(bad.success).toBe(false)
+      if (!bad.success) expect(bad.failedIndex).toBe(1)
+      expect((await driver.query('select count(*) from batch')).rows).toEqual([[2]])
+    } finally {
+      await driver.query('drop table if exists batch').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('does not trip the zero-rows gate on a no-op update', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table noop (id int primary key, v nvarchar(50))')
+      await driver.query("insert into noop values (1, 'same')")
+      const result = await driver.runBatch!([{ sql: 'update noop set v = @p1 where id = @p2', params: ['same', 1] }])
+      expect(result).toEqual({ success: true })
+    } finally {
+      await driver.query('drop table if exists noop').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('surfaces SQL errors', async () => {
+    const driver = await connectDriver()
+    try {
+      await expect(driver.query('select * from sqlkit_no_such_table')).rejects.toThrow(/invalid object name/i)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('buffers at most MAX_BUFFERED_ROWS but counts them all', async () => {
+    const driver = await connectDriver()
+    try {
+      const count = MAX_BUFFERED_ROWS + 25
+      const result = await driver.query(
+        `select top (${count}) row_number() over (order by (select null)) as n
+         from sys.all_objects a cross join sys.all_objects b`,
+      )
+      expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
+      expect(result.rowCount).toBe(count)
+      expect(result.truncated).toBe(true)
+    } finally {
+      await driver.disconnect()
+    }
+  }, 30000)
+
+  it('cancels an in-flight query in-band', async () => {
+    const driver = await connectDriver()
+    try {
+      const running = driver.query("waitfor delay '00:00:30'")
+      const cancelled = expect(running).rejects.toThrow('Query cancelled.')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const outcome = await driver.cancel?.()
+      expect(outcome?.running).toBeGreaterThanOrEqual(1)
+      expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
+      await cancelled
+    } finally {
+      await driver.disconnect()
+    }
+  }, 20000)
+
+  it('reports nothing running when cancel finds no in-flight query', async () => {
+    const driver = await connectDriver()
+    try {
+      expect(await driver.cancel?.()).toEqual({ running: 0, cancelled: 0 })
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('lists tables and views with their schema', async () => {
+    const driver = await connectDriver()
+    try {
+      const tables = await driver.listTables()
+      expect(tables).toEqual(
+        expect.arrayContaining([
+          { schema: 'dbo', name: 'authors', kind: 'table' },
+          { schema: 'dbo', name: 'books', kind: 'table' },
+          { schema: 'dbo', name: 'book_titles', kind: 'view' },
+        ]),
+      )
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('reports column type, nullability and key flags', async () => {
+    const driver = await connectDriver()
+    try {
+      const columns = await driver.listColumns()
+      const find = (table: string, name: string) =>
+        columns.find((column) => column.schema === 'dbo' && column.table === table && column.name === name)
+      expect(find('authors', 'id')).toMatchObject({ primaryKey: true, nullable: false })
+      expect(find('authors', 'name')).toMatchObject({ dataType: 'nvarchar(120)' })
+      expect(find('authors', 'bio')).toMatchObject({ nullable: true, primaryKey: false, foreignKey: false, dataType: 'nvarchar(max)' })
+      expect(find('books', 'author_id')).toMatchObject({ foreignKey: true, nullable: false })
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('lists routines with their parameters via listObjects', async () => {
+    const driver = await connectDriver()
+    try {
+      const objects = await driver.listObjects?.()
+      expect(objects?.functions).toEqual(
+        expect.arrayContaining([{ schema: 'dbo', name: 'sqlkit_add_one', detail: '@x int' }]),
+      )
+      expect(objects?.types).toEqual([])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('inspects a table: columns, foreign keys and indexes', async () => {
+    const driver = await connectDriver()
+    try {
+      const inspection = await driver.inspectTable({ schema: 'dbo', name: 'books', kind: 'table' })
+      expect(inspection.columns.map((column) => column.name)).toEqual(['id', 'author_id', 'title', 'published'])
+      expect(inspection.columns[0]).toMatchObject({ primaryKey: true, default: 'identity' })
+      const foreignKeys = inspection.sections.find((section) => section.title === 'Foreign Keys')
+      expect(foreignKeys?.rows[0]?.definition).toMatch(/REFERENCES dbo\.authors/i)
+      const indexes = inspection.sections.find((section) => section.title === 'Indexes')
+      expect(indexes?.rows.some((row) => row.name === 'books_author_idx')).toBe(true)
+      expect(indexes?.rows.every((row) => !/^PK_/.test(row.name))).toBe(true)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('creates and drops a database', async () => {
+    const driver = await connectDriver()
+    const name = 'sqlkit_it_created'
+    try {
+      await admin.request().batch(`drop database if exists ${name}`)
+      await driver.createDatabase?.(name)
+      const made = await admin.request().query(`select 1 as x from sys.databases where name = '${name}'`)
+      expect(made.recordset).toHaveLength(1)
+      await driver.dropDatabase?.(name)
+      const gone = await admin.request().query(`select 1 as x from sys.databases where name = '${name}'`)
+      expect(gone.recordset).toHaveLength(0)
+    } finally {
+      await admin.request().batch(`drop database if exists ${name}`).catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('refuses to drop the database currently in use', async () => {
+    const driver = await connectDriver()
+    try {
+      await expect(driver.dropDatabase?.(TEST_DB)).rejects.toThrow(/currently in use/i)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('lists and switches child databases in all-databases mode, hiding system DBs', async () => {
+    const driver = await connectDriver({ databaseMode: 'all' })
+    try {
+      const children = driver.children?.() ?? []
+      const names = children.map((child) => child.name)
+      expect(names).toContain(TEST_DB)
+      expect(names).toContain('master')
+      expect(names).not.toEqual(expect.arrayContaining(['tempdb', 'model', 'msdb']))
+      expect(children.find((child) => child.name === TEST_DB)?.inUse).toBe(true)
+      expect(driver.useChild?.('master')).toBe(true)
+      expect(driver.children?.().find((child) => child.name === 'master')?.inUse).toBe(true)
+      expect(driver.useChild?.('sqlkit_no_such_database')).toBe(false)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+})
