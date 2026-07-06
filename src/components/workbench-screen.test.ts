@@ -170,3 +170,44 @@ describe('WorkbenchScreen staged result changes', () => {
     expect(closed).toHaveBeenCalledOnce()
   })
 })
+
+describe('WorkbenchScreen result refresh shortcuts', () => {
+  const setup = () => {
+    const screen = new WorkbenchScreen()
+    screen.workspace = { name: 'Workspace', path: '/workspace' }
+    const workbench = screen as never as {
+      _refreshResults: ReturnType<typeof vi.fn>
+      _onGlobalKeydown(event: KeyboardEvent): void
+    }
+    workbench._refreshResults = vi.fn()
+    return workbench
+  }
+
+  const keydown = (init: KeyboardEventInit) => new KeyboardEvent('keydown', { cancelable: true, ...init })
+
+  it('refreshes results on F5', () => {
+    const workbench = setup()
+    const event = keydown({ key: 'F5' })
+
+    workbench._onGlobalKeydown(event)
+
+    expect(workbench._refreshResults).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('refreshes results on Ctrl/Cmd+R without hijacking force reload', () => {
+    const workbench = setup()
+    const ctrl = keydown({ key: 'r', ctrlKey: true })
+    const meta = keydown({ key: 'R', metaKey: true })
+    const forceReload = keydown({ key: 'r', ctrlKey: true, shiftKey: true })
+
+    workbench._onGlobalKeydown(ctrl)
+    workbench._onGlobalKeydown(meta)
+    workbench._onGlobalKeydown(forceReload)
+
+    expect(workbench._refreshResults).toHaveBeenCalledTimes(2)
+    expect(ctrl.defaultPrevented).toBe(true)
+    expect(meta.defaultPrevented).toBe(true)
+    expect(forceReload.defaultPrevented).toBe(false)
+  })
+})

@@ -381,7 +381,7 @@ export class WorkbenchScreen extends LitElement {
   // --- global shortcuts -----------------------------------------------------
 
   // ⌘⇧P commands, ⌘P quick open, ⌘K database switch, ⌘B sidebar, ⌘N new
-  // query, ⌘S save, ⌘↵ run. Pressing a palette's own shortcut again closes it.
+  // query, ⌘S save, ⌘↵ run, ⌘R/F5 refresh. Pressing a palette's own shortcut again closes it.
   private _onGlobalKeydown = (event: KeyboardEvent) => {
     // Mounted but hidden on the welcome screen; ignore global keys until a
     // workspace is open.
@@ -389,8 +389,21 @@ export class WorkbenchScreen extends LitElement {
     // The editor's own keymap (Mod-Enter) prevents default when it handles a
     // chord; don't run it twice.
     if (event.defaultPrevented) return
-    if (!event.metaKey && !event.ctrlKey) return
     const key = event.key.toLowerCase()
+    const hasMod = event.metaKey || event.ctrlKey
+
+    if (key === 'f5' && !hasMod && !event.altKey && !event.shiftKey) {
+      event.preventDefault()
+      this._refreshResults()
+      return
+    }
+    if (key === 'r' && hasMod && !event.altKey && !event.shiftKey) {
+      event.preventDefault()
+      this._refreshResults()
+      return
+    }
+
+    if (!hasMod) return
 
     if (key === 'p') {
       event.preventDefault()
