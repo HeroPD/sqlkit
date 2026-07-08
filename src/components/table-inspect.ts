@@ -3,7 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import type { DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
-import type { ColumnAlter } from '../sql-write'
+import type { ColumnAdd, ColumnAlter } from '../sql-write'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
@@ -13,7 +13,8 @@ import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
 type EditField = 'name' | 'dataType' | 'comment' | 'default'
 
 // One column's staged edits — the fields that differ from what was loaded.
-type ColumnDiff = Partial<Omit<ColumnAlter, 'original'>>
+// `drop: true` stages removing the column and replaces any field edits.
+type ColumnDiff = Partial<Omit<ColumnAlter, 'original'>> & { drop?: boolean }
 
 // Right-click menu state. `col`/`field` are set for the columns table (they
 // gate the reset items); the section tables leave them undefined.
@@ -27,8 +28,18 @@ export type ColumnAlterEventDetail = {
   table: TableRef
   engine: Engine
   edits: ColumnAlter[]
+  additions: ColumnAdd[]
+  /** Original names of columns staged for DROP COLUMN. */
+  drops: string[]
   onApplied: () => void
 }
+
+// New-column rows key off a NUL-prefixed sentinel (never a real identifier) so
+// they live in `_edits` alongside real-column diffs and ride the same
+// undo/redo, dirty, and reload machinery. The placeholder name/type keep a
+// fresh row valid without forcing input.
+const ADD_KEY_PREFIX = `${String.fromCharCode(0)}add:`
+const NEW_COLUMN_NAME = 'new_column'
 
 // The DDL words that show up in constraint/index/trigger/policy definitions;
 // matched case-insensitively so SQLite's hand-written DDL highlights too.
@@ -94,9 +105,16 @@ export class TableInspect extends LitElement {
 
   private _historyIndex = 0
 
+  /** Monotonic counter for unique new-column keys; never reused so undo/redo can't collide. */
+  private _addSeq = 0
+
   /** The cell in inline-edit mode; `seed` pre-fills the editor (type templates). */
   @state()
   private _editing: { col: string; field: EditField; seed?: string } | null = null
+
+  /** Save-time validation failure (duplicate names); cleared by the next edit. */
+  @state()
+  private _saveError: string | null = null
 
   /** The option menu open on a nullable cell. Type choices use an input-anchored picker. */
   @state()
@@ -192,6 +210,7 @@ export class TableInspect extends LitElement {
     this._cellMenu = null
     this._typePicker = null
     this._defaultPicker = null
+    this._saveError = null
     this._state = { phase: 'loading' }
     const result =
       object && objectKind
@@ -251,10 +270,17 @@ export class TableInspect extends LitElement {
     if (!menu) return ''
     const items: MenuItem[] = [{ id: 'copy-name', label: 'Copy Name' }]
     if (menu.definition) items.push({ id: 'copy-definition', label: 'Copy Definition' })
-    if (menu.col && menu.field && this._isEdited(menu.col.name, menu.field)) {
-      items.push({ id: 'reset-field', label: `Reset to ${this._resetLabel(menu.col, menu.field)}` })
+    if (menu.col && this._isAddition(menu.col.name)) {
+      items.push({ id: 'remove-column', label: 'Remove Column' })
+    } else if (menu.col && this._isDropped(menu.col.name)) {
+      items.push({ id: 'restore-column', label: 'Restore Column' })
+    } else {
+      if (menu.col && menu.field && this._isEdited(menu.col.name, menu.field)) {
+        items.push({ id: 'reset-field', label: `Reset to ${this._resetLabel(menu.col, menu.field)}` })
+      }
+      if (menu.col && this._edits.has(menu.col.name)) items.push({ id: 'reset-row', label: 'Reset Row' })
+      if (menu.col && this._canDropColumn()) items.push({ id: 'drop-column', label: 'Drop Column' })
     }
-    if (menu.col && this._edits.has(menu.col.name)) items.push({ id: 'reset-row', label: 'Reset Row' })
     return html`
       <context-menu
         .x=${menu.x}
@@ -277,7 +303,10 @@ export class TableInspect extends LitElement {
   private _onMenuPick(id: string, menu: RowMenu) {
     if (id === 'copy-name') return void navigator.clipboard.writeText(menu.name)
     if (id === 'copy-definition') return void navigator.clipboard.writeText(menu.definition ?? '')
-    if (id === 'reset-field' && menu.col && menu.field) this._resetField(menu.col, menu.field)
+    if (id === 'remove-column' && menu.col) this._removeAddition(menu.col.name)
+    else if (id === 'drop-column' && menu.col) this._dropColumn(menu.col)
+    else if (id === 'restore-column' && menu.col) this._resetRow(menu.col)
+    else if (id === 'reset-field' && menu.col && menu.field) this._resetField(menu.col, menu.field)
     else if (id === 'reset-row' && menu.col) this._resetRow(menu.col)
   }
 
@@ -292,19 +321,97 @@ export class TableInspect extends LitElement {
     event.preventDefault()
     const cell = (event.target as HTMLElement).closest<HTMLElement>('td')
     const field = cell?.dataset.field as EditField | 'nullable' | undefined
-    this._menu = { x: event.clientX, y: event.clientY, name: col.name, definition: null, col, field }
+    // Additions key off a hidden sentinel, so the menu copies their visible name.
+    const name = this._isAddition(col.name) ? this._fieldText(col, 'name') : col.name
+    this._menu = { x: event.clientX, y: event.clientY, name, definition: null, col, field }
   }
 
   // --- column editing --------------------------------------------------------
 
   // Editability comes from the engine dialect's capabilities. Object attributes
-  // (function/type inspections) aren't editable.
-  private _canEdit(field: EditField | 'nullable'): boolean {
+  // (function/type inspections) aren't editable, nor is a row staged for drop.
+  private _canEdit(field: EditField | 'nullable', col?: InspectColumn): boolean {
     if (this.object || !this.table || !this.engine) return false
     const dialect = dialectFor(this.engine)
-    if (field === 'name') return dialect.supportsColumnRename
-    if (field === 'comment') return dialect.supportsColumnAlter && dialect.supportsColumnComments
-    return dialect.supportsColumnAlter
+    if (col && this._isDropped(col.name)) return false
+    // A staged new column is fully definable on any engine that can ADD COLUMN;
+    // only its comment needs engine support to be expressible in DDL.
+    if (col && this._isAddition(col.name)) return field === 'comment' ? dialect.supportsColumnComments : true
+    if (field === 'name') return dialect.columnEdits.rename
+    return dialect.columnEdits[field]
+  }
+
+  // Why a cell can't be edited on this engine; shown on hover instead of
+  // leaving it silently inert.
+  private _lockedTip(field: EditField | 'nullable'): string | null {
+    if (this.object) return null
+    if (this.engine === 'sqlite' && field !== 'name') return 'SQLite requires a table rebuild to change this'
+    if (this.engine === 'mysql' && field !== 'name' && field !== 'default') {
+      return 'MySQL requires a full MODIFY COLUMN to change this'
+    }
+    if (this.engine === 'sqlserver' && field === 'default') return 'SQL Server defaults are named constraints — edit them there'
+    return null
+  }
+
+  // --- adding and dropping columns -------------------------------------------
+
+  // Objects (function/type) never qualify; tables follow the engine capability.
+  private _canAddColumn(): boolean {
+    return !this.object && !!this.table && !!this.engine && dialectFor(this.engine).columnEdits.add
+  }
+
+  private _canDropColumn(): boolean {
+    return !this.object && !!this.table && !!this.engine && dialectFor(this.engine).columnEdits.drop
+  }
+
+  private _isDropped(name: string): boolean {
+    return !!this._edits.get(name)?.drop
+  }
+
+  // Staging a drop replaces the row's field edits with the drop marker — one
+  // undo step brings them all back, since history snapshots the whole map.
+  private _dropColumn(col: InspectColumn) {
+    if (this._editing?.col === col.name) this._cancelEdit()
+    if (this._cellMenu?.col.name === col.name) this._cellMenu = null
+    this._applyEdit(col.name, { drop: true })
+  }
+
+  private _isAddition(name: string): boolean {
+    return name.startsWith(ADD_KEY_PREFIX)
+  }
+
+  // The placeholder type a fresh row carries; `text` is deprecated on SQL Server.
+  private _placeholderType(): string {
+    return this.engine === 'sqlserver' ? 'nvarchar(255)' : 'text'
+  }
+
+  // Reconstructs the placeholder column behind an addition key: the defaults a
+  // fresh row carries before any edit. The user-visible name/type live in the diff.
+  private _syntheticColumn(key: string): InspectColumn {
+    return { name: key, dataType: this._placeholderType(), nullable: true, default: null, primaryKey: false, comment: null }
+  }
+
+  // The staged new columns, in insertion order, as synthetic columns to render.
+  private _additionColumns(): InspectColumn[] {
+    return [...this._edits.keys()].filter((name) => this._isAddition(name)).map((key) => this._syntheticColumn(key))
+  }
+
+  // Appends a placeholder row and drops straight into editing its name so the
+  // user can type over "new_column". Recorded on the undo stack like any edit.
+  private _addColumn() {
+    if (!this._canAddColumn()) return
+    const key = `${ADD_KEY_PREFIX}${this._addSeq++}`
+    const next = new Map(this._edits)
+    next.set(key, { name: NEW_COLUMN_NAME })
+    this._commitEdits(next)
+    this._startEdit(key, 'name')
+  }
+
+  private _removeAddition(key: string) {
+    if (this._editing?.col === key) this._editing = null
+    const next = new Map(this._edits)
+    next.delete(key)
+    this._commitEdits(next)
   }
 
   // Effective text for a field: the staged value if edited, else what loaded.
@@ -356,6 +463,7 @@ export class TableInspect extends LitElement {
   // the (capped) undo stack, dropping the redo branch and no-op changes.
   private _commitEdits(next: Map<string, ColumnDiff>) {
     if (this._editsEqual(next, this._edits)) return
+    this._saveError = null
     this._edits = next
     this._history = [...this._history.slice(0, this._historyIndex + 1), next]
     if (this._history.length > MAX_EDIT_HISTORY) this._history = this._history.slice(this._history.length - MAX_EDIT_HISTORY)
@@ -410,7 +518,10 @@ export class TableInspect extends LitElement {
     const value = field === 'comment' ? raw : raw.trim()
     const original = this._fieldOriginal(col, field)
     const edit: ColumnDiff = { ...this._edits.get(col.name) }
-    if (value === original || ((field === 'name' || field === 'dataType') && value === '')) delete edit[field]
+    // A new column's name is never dropped from its diff — an empty one would
+    // fall through to the sentinel key — so it snaps back to the placeholder.
+    if (this._isAddition(col.name) && field === 'name') edit.name = value || NEW_COLUMN_NAME
+    else if (value === original || ((field === 'name' || field === 'dataType') && value === '')) delete edit[field]
     else edit[field] = value
     this._applyEdit(col.name, edit)
     this._editing = null
@@ -478,7 +589,9 @@ export class TableInspect extends LitElement {
   }
 
   private _editingColumn(): InspectColumn | null {
-    if (!this._editing || this._state.phase !== 'done') return null
+    if (!this._editing) return null
+    if (this._isAddition(this._editing.col)) return this._syntheticColumn(this._editing.col)
+    if (this._state.phase !== 'done') return null
     return this._state.inspection.columns.find((column) => column.name === this._editing?.col) ?? null
   }
 
@@ -544,11 +657,26 @@ export class TableInspect extends LitElement {
     if (this._state.phase !== 'done' || !this._edits.size || !this.table || !this.engine) return
     const byName = new Map(this._state.inspection.columns.map((column) => [column.name, column]))
     const edits: ColumnAlter[] = []
+    const additions: ColumnAdd[] = []
+    const drops: string[] = []
     for (const [name, diff] of this._edits) {
+      if (this._isAddition(name)) {
+        additions.push(this._additionSpec(diff))
+        continue
+      }
+      if (diff.drop) {
+        drops.push(name)
+        continue
+      }
       const original = byName.get(name)
       if (original) edits.push({ original, ...diff })
     }
-    if (!edits.length) return
+    if (!edits.length && !additions.length && !drops.length) return
+    const duplicate = this._duplicateName(edits, additions, drops)
+    if (duplicate !== null) {
+      this._saveError = `Duplicate column name "${duplicate}" — rename one before saving.`
+      return
+    }
     this.dispatchEvent(
       new CustomEvent<ColumnAlterEventDetail>('alter-columns', {
         bubbles: true,
@@ -559,6 +687,8 @@ export class TableInspect extends LitElement {
           table: this.table,
           engine: this.engine,
           edits,
+          additions,
+          drops,
           onApplied: () => {
             this._edits = new Map()
             this._editing = null
@@ -567,6 +697,36 @@ export class TableInspect extends LitElement {
         },
       }),
     )
+  }
+
+  // Save-time check: the final column names (after drops, renames, additions)
+  // must be unique, or the DDL is guaranteed to fail at the server.
+  private _duplicateName(edits: ColumnAlter[], additions: ColumnAdd[], drops: string[]): string | null {
+    if (this._state.phase !== 'done') return null
+    const dropped = new Set(drops)
+    const renamed = new Map(edits.filter((edit) => edit.name !== undefined).map((edit) => [edit.original.name, edit.name!]))
+    const finals = this._state.inspection.columns
+      .filter((column) => !dropped.has(column.name))
+      .map((column) => renamed.get(column.name) ?? column.name)
+    finals.push(...additions.map((add) => add.name.trim()).filter(Boolean))
+    const seen = new Set<string>()
+    for (const name of finals) {
+      if (seen.has(name)) return name
+      seen.add(name)
+    }
+    return null
+  }
+
+  // Resolves a new column's diff to its effective spec, filling placeholder
+  // defaults for anything the user left untouched.
+  private _additionSpec(diff: ColumnDiff): ColumnAdd {
+    return {
+      name: diff.name ?? NEW_COLUMN_NAME,
+      dataType: diff.dataType ?? this._placeholderType(),
+      nullable: diff.nullable ?? true,
+      default: diff.default != null && diff.default !== '' ? diff.default : null,
+      comment: diff.comment != null && diff.comment !== '' ? diff.comment : null,
+    }
   }
 
   private _renderBody() {
@@ -621,8 +781,18 @@ export class TableInspect extends LitElement {
 
   private _renderColumnsTable(columns: TableInspection['columns']) {
     const hasComments = this.engine ? dialectFor(this.engine).supportsColumnComments : false
+    const additions = this._additionColumns()
     return html`
-      <h4>${this.object ? 'Attributes' : 'Columns'} <span class="count">${columns.length}</span></h4>
+      <h4>
+        ${this.object ? 'Attributes' : 'Columns'} <span class="count">${columns.length}</span>
+        ${this._canAddColumn()
+          ? html`
+              <button class="add-btn" type="button" title="Add column" aria-label="Add column" @click=${this._addColumn}>
+                <i class="codicon codicon-add" aria-hidden="true"></i>
+              </button>
+            `
+          : ''}
+      </h4>
       <table class="columns-table">
         <colgroup>
           <col class="icon-col" />
@@ -643,35 +813,66 @@ export class TableInspect extends LitElement {
           </tr>
         </thead>
         <tbody>
-          ${columns.map(
-            (column) => html`
-              <tr @contextmenu=${(event: MouseEvent) => this._onColumnMenu(event, column)}>
-                <td class="icon-cell">
-                  ${column.primaryKey ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>` : ''}
-                </td>
-                ${this._renderTextCell(column, 'name', 'mono clip', this._fieldText(column, 'name'))}
-                ${this._renderTextCell(column, 'dataType', 'mono type clip', this._fieldText(column, 'dataType'))}
-                ${this._renderNullableCell(column)}
-                ${this._renderTextCell(column, 'default', 'mono muted clip', this._fieldText(column, 'default'))}
-                ${hasComments ? this._renderTextCell(column, 'comment', 'muted clip', this._fieldText(column, 'comment')) : ''}
-              </tr>
-            `,
-          )}
+          ${columns.map((column) => this._renderColumnRow(column, hasComments, false))}
+          ${additions.map((column) => this._renderColumnRow(column, hasComments, true))}
         </tbody>
       </table>
+      ${this._saveError ? html`<p class="save-error">${this._saveError}</p>` : ''}
     `
   }
 
-  // Type/nullable/default are editable on Postgres but not SQLite (which would
-  // need a table rebuild); explain that on hover rather than leaving them inert.
-  private _rebuildTip(field: EditField | 'nullable'): string | null {
-    return this.engine === 'sqlite' && !this.object && field !== 'name'
-      ? 'SQLite requires a table rebuild to change this'
-      : null
+  // One columns-table row, shared by loaded columns and staged additions. An
+  // addition trades the PK icon for a remove (✕) button and tints the row green;
+  // a staged drop swaps in a restore (↩) button and tints it red.
+  private _renderColumnRow(column: InspectColumn, hasComments: boolean, addition: boolean) {
+    const dropped = !addition && this._isDropped(column.name)
+    return html`
+      <tr
+        class=${addition ? 'added' : dropped ? 'dropped' : ''}
+        @contextmenu=${(event: MouseEvent) => this._onColumnMenu(event, column)}
+      >
+        <td class="icon-cell">
+          ${addition
+            ? html`
+                <button
+                  class="remove-btn"
+                  type="button"
+                  title="Remove column"
+                  aria-label="Remove column"
+                  @click=${() => this._removeAddition(column.name)}
+                >
+                  <i class="codicon codicon-close" aria-hidden="true"></i>
+                </button>
+              `
+            : dropped
+              ? html`
+                  <button
+                    class="restore-btn"
+                    type="button"
+                    title="Restore column"
+                    aria-label="Restore column"
+                    @click=${() => this._resetRow(column)}
+                  >
+                    <i class="codicon codicon-discard" aria-hidden="true"></i>
+                  </button>
+                `
+              : column.primaryKey
+                ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>`
+                : ''}
+        </td>
+        ${this._renderTextCell(column, 'name', 'mono clip', this._fieldText(column, 'name'))}
+        ${this._renderTextCell(column, 'dataType', 'mono type clip', this._fieldText(column, 'dataType'))}
+        ${this._renderNullableCell(column)}
+        ${this._renderTextCell(column, 'default', 'mono muted clip', this._fieldText(column, 'default'))}
+        ${hasComments ? this._renderTextCell(column, 'comment', 'muted clip', this._fieldText(column, 'comment')) : ''}
+      </tr>
+    `
   }
 
   private _renderTextCell(col: InspectColumn, field: EditField, cls: string, display: unknown) {
-    const editable = this._canEdit(field)
+    const editable = this._canEdit(field, col)
+    // A locked-cell tip only when the engine (not a staged drop) is the reason.
+    const tip = editable || this._isDropped(col.name) ? null : this._lockedTip(field)
     const choices = (field === 'dataType' || field === 'default') && editable
     const choiceButton = choices
       ? html`
@@ -712,7 +913,7 @@ export class TableInspect extends LitElement {
       <td
         data-field=${field}
         class=${classes}
-        title=${this._rebuildTip(field) ?? this._fieldText(col, field)}
+        title=${tip ?? this._fieldText(col, field)}
         @click=${editable ? () => this._onCellClick(col, field) : undefined}
       >
         <span class="cell-text">${display}</span>${choiceButton}
@@ -740,13 +941,14 @@ export class TableInspect extends LitElement {
   }
 
   private _renderNullableCell(col: InspectColumn) {
-    const editable = this._canEdit('nullable')
+    const editable = this._canEdit('nullable', col)
+    const tip = editable || this._isDropped(col.name) ? null : this._lockedTip('nullable')
     const classes = `muted${this._isEdited(col.name, 'nullable') ? ' edited' : ''}${editable ? ' editable has-choices nullable-cell' : ''}`
     return html`
       <td
         data-field="nullable"
         class=${classes}
-        title=${this._rebuildTip('nullable') ?? ''}
+        title=${tip ?? ''}
         @click=${editable
           ? (event: MouseEvent) => this._openNullablePicker(event, col)
           : undefined}
@@ -1160,6 +1362,60 @@ export class TableInspect extends LitElement {
       td.edited:hover {
         color: var(--text);
         background: color-mix(in srgb, var(--status-dot-warning) 14%, var(--editor-bg));
+      }
+
+      /* Unsaved new columns: the same low-contrast green insert tint the results
+         grid uses for draft rows. The td.edited rule below keeps green (not the
+         amber edit tint) on a new row's changed cells at higher specificity. */
+      tr.added td,
+      tr.added td.edited {
+        color: var(--text);
+        background: color-mix(in srgb, var(--status-dot-connected) 8%, var(--editor-bg));
+      }
+
+      tr.added:hover td:not(.editable):not(.icon-cell),
+      tr.added td.editable:hover {
+        background: color-mix(in srgb, var(--status-dot-connected) 12%, var(--editor-bg));
+      }
+
+      .remove-btn,
+      .restore-btn {
+        display: inline-flex;
+        padding: 1px;
+        color: var(--text-3);
+        background: transparent;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        --codicon-size: 12px;
+      }
+
+      .remove-btn:hover {
+        color: var(--status-dot-error);
+        background: var(--list-hover);
+      }
+
+      .restore-btn:hover {
+        color: var(--text);
+        background: var(--list-hover);
+      }
+
+      /* Staged drop: red tint + strikethrough, the destructive counterpart of the
+         green insert tint; cells lock (no .editable) until the row is restored. */
+      tr.dropped td,
+      tr.dropped td.edited {
+        color: var(--text-2);
+        background: color-mix(in srgb, var(--status-dot-error) 8%, var(--editor-bg));
+      }
+
+      tr.dropped .cell-text {
+        text-decoration: line-through;
+      }
+
+      .save-error {
+        margin: 6px 0 0;
+        font-size: 12px;
+        color: var(--status-dot-error);
       }
 
       /* Overlays the cell padding (results-panel .cell-edit trick) so opening

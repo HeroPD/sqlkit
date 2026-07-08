@@ -200,6 +200,9 @@ export type InspectColumn = {
   default: string | null
   primaryKey: boolean
   comment: string | null
+  /** Non-default collation (SQL Server only): ALTER COLUMN must restate it or
+   *  the server silently resets the column to the database default. */
+  collation?: string | null
 }
 
 /** One named-rows block of a table inspection (Indexes, Triggers, …).

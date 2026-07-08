@@ -338,20 +338,30 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const qualified = table.schema ? `${table.schema}.${table.name}` : table.name
 
       const [columns, foreignKeys, checks, indexes, triggers] = await Promise.all([
-        metaRows<{ name: string; data_type: string; nullable: boolean; default_expr: string | null; pk: number; identity: boolean }>(
+        metaRows<{
+          name: string
+          data_type: string
+          nullable: boolean
+          default_expr: string | null
+          pk: number
+          identity: boolean
+          collation: string | null
+        }>(
           `select c.name as name,
                   concat(ty.name,
                          case when ty.name in ('varchar','nvarchar','char','nchar','varbinary') then
                                 concat('(', iif(c.max_length = -1, 'max',
                                   cast(iif(ty.name like 'n%', c.max_length / 2, c.max_length) as varchar(10))), ')')
                               when ty.name in ('decimal','numeric') then concat('(', c.precision, ',', c.scale, ')')
+                              when ty.name in ('time','datetime2','datetimeoffset') then concat('(', c.scale, ')')
                               else '' end) as data_type,
                   c.is_nullable as nullable,
                   dc.definition as default_expr,
                   iif(exists (select 1 from sys.index_columns ic
                               join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
                               where i.is_primary_key = 1 and ic.object_id = c.object_id and ic.column_id = c.column_id), 1, 0) as pk,
-                  c.is_identity as [identity]
+                  c.is_identity as [identity],
+                  nullif(c.collation_name, convert(sysname, databasepropertyex(db_name(), 'Collation'))) as collation
            from sys.columns c
            join sys.types ty on ty.user_type_id = c.user_type_id
            left join sys.default_constraints dc on dc.object_id = c.default_object_id
@@ -421,6 +431,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           default: row.default_expr ?? (row.identity ? 'identity' : null),
           primaryKey: !!row.pk,
           comment: null,
+          collation: row.collation,
         })),
         sections: sections.filter((section) => section.rows.length),
       }

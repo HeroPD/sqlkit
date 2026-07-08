@@ -127,46 +127,107 @@ export type ColumnAlter = {
   comment?: string | null
 }
 
-// Builds the ALTER/COMMENT/RENAME statements for staged column edits, one per
-// changed property. Engines with supportsColumnAlter get the full set; the rest
-// only RENAME COLUMN. Statements that keep a column's name run first
-// (referencing the original name); RENAME runs last so every prior statement
-// targets a name that still exists.
+// A brand-new column staged in the Inspect tab (no `original` to diff against).
+export type ColumnAdd = {
+  name: string
+  dataType: string
+  nullable: boolean
+  default: string | null
+  comment: string | null
+}
+
+// Builds the ADD statements for staged new columns (T-SQL has no COLUMN keyword).
+// Comments ride inline on MySQL, as COMMENT ON on Postgres. A column with a
+// blank name or type is skipped — the row is still a placeholder.
+export function buildColumnAdd(table: TableRef, additions: ColumnAdd[], engine: Engine): string[] {
+  const dialect = dialectFor(engine)
+  const qualified = quoteQualified(table, dialect)
+  const statements: string[] = []
+  for (const add of additions) {
+    if (!add.name.trim() || !add.dataType.trim()) continue
+    const col = dialect.quoteIdent(add.name.trim())
+    let sql = `ALTER TABLE ${qualified} ADD${engine === 'sqlserver' ? '' : ' COLUMN'} ${col} ${add.dataType.trim()}`
+    if (add.default !== null && add.default !== '') sql += ` DEFAULT ${add.default}`
+    if (!add.nullable) sql += ' NOT NULL'
+    const comment = add.comment !== null && add.comment !== '' && dialect.supportsColumnComments ? add.comment : null
+    if (comment !== null && engine === 'mysql') sql += ` COMMENT ${quoteLiteral(comment)}`
+    statements.push(sql)
+    if (comment !== null && engine === 'postgresql') {
+      statements.push(`COMMENT ON COLUMN ${qualified}.${col} IS ${quoteLiteral(comment)}`)
+    }
+  }
+  return statements
+}
+
+// One DROP COLUMN per staged drop — the one column alter every engine spells alike.
+export function buildColumnDrop(table: TableRef, columns: string[], engine: Engine): string[] {
+  const dialect = dialectFor(engine)
+  const qualified = quoteQualified(table, dialect)
+  return columns.map((name) => `ALTER TABLE ${qualified} DROP COLUMN ${dialect.quoteIdent(name)}`)
+}
+
+// sp_rename takes the column path as one literal; parts are bracket-quoted so
+// dotted/odd names survive, while the new name must stay bare (unquoted).
+function spRename(table: TableRef, from: string, to: string): string {
+  const dialect = dialectFor('sqlserver')
+  const path = [...(table.schema ? [table.schema] : []), table.name, from].map((part) => dialect.quoteIdent(part)).join('.')
+  return `EXEC sp_rename N${quoteLiteral(path)}, N${quoteLiteral(to)}, 'COLUMN'`
+}
+
+// Builds the ALTER/COMMENT/RENAME statements for staged column edits, gated per
+// field by the dialect's columnEdits. Statements that keep a column's name run
+// first (referencing the original name); RENAME runs last so every prior
+// statement targets a name that still exists.
 export function buildColumnAlter(table: TableRef, edits: ColumnAlter[], engine: Engine): string[] {
   const dialect = dialectFor(engine)
+  const caps = dialect.columnEdits
   const qualified = quoteQualified(table, dialect)
   const alters: string[] = []
   const renames: string[] = []
   for (const edit of edits) {
     const col = dialect.quoteIdent(edit.original.name)
-    if (dialect.supportsColumnAlter) {
-      if (edit.dataType !== undefined && edit.dataType !== edit.original.dataType) {
-        alters.push(`ALTER TABLE ${qualified} ALTER COLUMN ${col} TYPE ${edit.dataType}`)
+    const dataType = caps.dataType && edit.dataType !== undefined && edit.dataType !== edit.original.dataType ? edit.dataType : undefined
+    const nullable = caps.nullable && edit.nullable !== undefined && edit.nullable !== edit.original.nullable ? edit.nullable : undefined
+    if (engine === 'sqlserver') {
+      // T-SQL restates the full definition in one ALTER COLUMN; a custom collation
+      // must be restated too or the server resets it to the database default.
+      if (dataType !== undefined || nullable !== undefined) {
+        const type = dataType ?? edit.original.dataType
+        const collate = edit.original.collation && /char|text/i.test(type) ? ` COLLATE ${edit.original.collation}` : ''
+        alters.push(
+          `ALTER TABLE ${qualified} ALTER COLUMN ${col} ${type}${collate} ${(nullable ?? edit.original.nullable) ? 'NULL' : 'NOT NULL'}`,
+        )
       }
-      if (edit.nullable !== undefined && edit.nullable !== edit.original.nullable) {
-        alters.push(`ALTER TABLE ${qualified} ALTER COLUMN ${col} ${edit.nullable ? 'DROP NOT NULL' : 'SET NOT NULL'}`)
-      }
-      if (edit.default !== undefined) {
-        const next = edit.default ?? ''
-        const current = edit.original.default ?? ''
-        if (next !== current) {
-          alters.push(
-            next === ''
-              ? `ALTER TABLE ${qualified} ALTER COLUMN ${col} DROP DEFAULT`
-              : `ALTER TABLE ${qualified} ALTER COLUMN ${col} SET DEFAULT ${next}`,
-          )
-        }
-      }
-      if (edit.comment !== undefined) {
-        const next = edit.comment ?? ''
-        const current = edit.original.comment ?? ''
-        if (next !== current) {
-          alters.push(`COMMENT ON COLUMN ${qualified}.${col} IS ${next === '' ? 'NULL' : quoteLiteral(next)}`)
-        }
+    } else {
+      if (dataType !== undefined) alters.push(`ALTER TABLE ${qualified} ALTER COLUMN ${col} TYPE ${dataType}`)
+      if (nullable !== undefined) {
+        alters.push(`ALTER TABLE ${qualified} ALTER COLUMN ${col} ${nullable ? 'DROP NOT NULL' : 'SET NOT NULL'}`)
       }
     }
-    if (edit.name !== undefined && edit.name !== edit.original.name) {
-      renames.push(`ALTER TABLE ${qualified} RENAME COLUMN ${col} TO ${dialect.quoteIdent(edit.name)}`)
+    if (caps.default && edit.default !== undefined) {
+      const next = edit.default ?? ''
+      const current = edit.original.default ?? ''
+      if (next !== current) {
+        alters.push(
+          next === ''
+            ? `ALTER TABLE ${qualified} ALTER COLUMN ${col} DROP DEFAULT`
+            : `ALTER TABLE ${qualified} ALTER COLUMN ${col} SET DEFAULT ${next}`,
+        )
+      }
+    }
+    if (caps.comment && edit.comment !== undefined) {
+      const next = edit.comment ?? ''
+      const current = edit.original.comment ?? ''
+      if (next !== current) {
+        alters.push(`COMMENT ON COLUMN ${qualified}.${col} IS ${next === '' ? 'NULL' : quoteLiteral(next)}`)
+      }
+    }
+    if (caps.rename && edit.name !== undefined && edit.name !== edit.original.name) {
+      renames.push(
+        engine === 'sqlserver'
+          ? spRename(table, edit.original.name, edit.name)
+          : `ALTER TABLE ${qualified} RENAME COLUMN ${col} TO ${dialect.quoteIdent(edit.name)}`,
+      )
     }
   }
   return [...alters, ...renames]

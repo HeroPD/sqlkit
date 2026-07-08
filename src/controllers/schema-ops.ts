@@ -1,7 +1,7 @@
 import type { ConnectionProfile, DdlResult, Engine, TableRef } from '../electron'
 import type { DialogsController } from './dialogs'
 import { dialectFor } from '../dialect'
-import { buildColumnAlter, quoteQualified, type ColumnAlter } from '../sql-write'
+import { buildColumnAdd, buildColumnAlter, buildColumnDrop, quoteQualified, type ColumnAdd, type ColumnAlter } from '../sql-write'
 import { TABLE_KIND_LABELS } from '../table-kinds'
 
 // Staged column edits from the Inspect tab, plus how to reach the connection and
@@ -12,6 +12,8 @@ export type ColumnAlterSpec = {
   table: TableRef
   engine: Engine
   edits: ColumnAlter[]
+  additions: ColumnAdd[]
+  drops: string[]
   onApplied: () => void
 }
 
@@ -90,7 +92,12 @@ export class SchemaOpsController {
   // run it atomically. On success the inspect tab reloads and metadata refreshes
   // so autocomplete/column lists pick up renames.
   alterColumns(spec: ColumnAlterSpec) {
-    const statements = buildColumnAlter(spec.table, spec.edits, spec.engine)
+    // Drops run first so a rename or addition can reuse a freed name.
+    const statements = [
+      ...buildColumnDrop(spec.table, spec.drops, spec.engine),
+      ...buildColumnAlter(spec.table, spec.edits, spec.engine),
+      ...buildColumnAdd(spec.table, spec.additions, spec.engine),
+    ]
     if (!statements.length) return
     this.deps.dialogs.review = {
       sql: statements.map((statement) => `${statement};`).join('\n\n'),

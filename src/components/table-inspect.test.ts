@@ -15,7 +15,7 @@ const internals = (view: TableInspect) =>
     _load(): Promise<void>
     _state: { phase: string; inspection?: TableInspection }
     willUpdate(changed: Map<string, unknown>): void
-    _canEdit(field: 'name' | 'dataType' | 'comment' | 'default' | 'nullable'): boolean
+    _canEdit(field: 'name' | 'dataType' | 'comment' | 'default' | 'nullable', col?: InspectColumn): boolean
     _commitText(col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default', raw: string): void
     _setNullable(col: InspectColumn, value: boolean): void
     _fieldNullable(col: InspectColumn): boolean
@@ -37,6 +37,15 @@ const internals = (view: TableInspect) =>
     _resetRow(col: InspectColumn): void
     _onMenuPick(id: string, menu: { name: string; definition: string | null; col?: InspectColumn; field?: string }): void
     _menu: { x: number; y: number; name: string; definition: string | null; col?: InspectColumn; field?: string } | null
+    _canAddColumn(): boolean
+    _isAddition(name: string): boolean
+    _addColumn(): void
+    _removeAddition(key: string): void
+    _additionColumns(): InspectColumn[]
+    _canDropColumn(): boolean
+    _isDropped(name: string): boolean
+    _dropColumn(col: InspectColumn): void
+    _saveError: string | null
   }
 
 const inspectCol = (over: Partial<InspectColumn>): InspectColumn => ({
@@ -144,6 +153,43 @@ describe('TableInspect column editing', () => {
     expect(internals(lite)._canEdit('dataType')).toBe(false)
     expect(internals(lite)._canEdit('default')).toBe(false)
     expect(internals(lite)._canEdit('nullable')).toBe(false)
+
+    const my = new TableInspect()
+    my.table = { schema: null, name: 't', kind: 'table' }
+    my.engine = 'mysql'
+    expect(internals(my)._canEdit('name')).toBe(true)
+    expect(internals(my)._canEdit('default')).toBe(true)
+    expect(internals(my)._canEdit('dataType')).toBe(false)
+    expect(internals(my)._canEdit('nullable')).toBe(false)
+    expect(internals(my)._canEdit('comment')).toBe(false)
+
+    const ms = new TableInspect()
+    ms.table = { schema: 'dbo', name: 't', kind: 'table' }
+    ms.engine = 'sqlserver'
+    expect(internals(ms)._canEdit('name')).toBe(true)
+    expect(internals(ms)._canEdit('dataType')).toBe(true)
+    expect(internals(ms)._canEdit('nullable')).toBe(true)
+    expect(internals(ms)._canEdit('default')).toBe(false)
+  })
+
+  it('lets a staged addition edit every definable field, even on locked engines', () => {
+    stubInspect()
+    const lite = new TableInspect()
+    lite.table = { schema: null, name: 't', kind: 'table' }
+    lite.engine = 'sqlite'
+    internals(lite)._addColumn()
+    const added = internals(lite)._additionColumns()[0]!
+    expect(internals(lite)._canEdit('dataType', added)).toBe(true)
+    expect(internals(lite)._canEdit('nullable', added)).toBe(true)
+    expect(internals(lite)._canEdit('default', added)).toBe(true)
+    // Comments still need engine support to be expressible in the ADD DDL.
+    expect(internals(lite)._canEdit('comment', added)).toBe(false)
+
+    const my = new TableInspect()
+    my.table = { schema: null, name: 't', kind: 'table' }
+    my.engine = 'mysql'
+    internals(my)._addColumn()
+    expect(internals(my)._canEdit('comment', internals(my)._additionColumns()[0])).toBe(true)
   })
 
   it('stages an emptied default as a drop, not a revert', () => {
@@ -741,6 +787,229 @@ describe('TableInspect undo/redo and reset', () => {
     await internals(view)._load()
     expect(view.hasPendingChanges()).toBe(false)
     expect(view.undo()).toBe(false)
+    view.remove()
+  })
+})
+
+const loaded = async (engine: 'postgresql' | 'sqlite' | 'mysql' | 'sqlserver', cols: InspectColumn[] = [inspectCol({ name: 'age' })]) => {
+  const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: cols, sections: [] } }))
+  ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+  const view = new TableInspect()
+  view.profileId = 'p1'
+  view.engine = engine
+  view.table = { schema: 'public', name: 'users', kind: 'table' }
+  document.body.append(view)
+  await internals(view)._load()
+  await view.updateComplete
+  return view
+}
+
+describe('TableInspect adding columns', () => {
+  it('offers add/drop on every engine for tables, never for objects', async () => {
+    const pg = await loaded('postgresql')
+    expect(internals(pg)._canAddColumn()).toBe(true)
+    expect(internals(pg)._canDropColumn()).toBe(true)
+    pg.remove()
+
+    // ADD/DROP COLUMN are the alters SQLite does support without a rebuild.
+    const lite = await loaded('sqlite')
+    expect(internals(lite)._canAddColumn()).toBe(true)
+    expect(internals(lite)._canDropColumn()).toBe(true)
+    lite.remove()
+
+    // An object (function/type) inspection never qualifies. Left unmounted so
+    // the reactive load doesn't fire an unstubbed inspectObject.
+    const obj = new TableInspect()
+    obj.engine = 'postgresql'
+    obj.object = { schema: 'public', name: 'mood', detail: 'enum' }
+    obj.objectKind = 'type'
+    expect(internals(obj)._canAddColumn()).toBe(false)
+    expect(internals(obj)._canDropColumn()).toBe(false)
+  })
+
+  it('appends a placeholder row and drops straight into editing its name', async () => {
+    const view = await loaded('postgresql')
+    internals(view)._addColumn()
+
+    const additions = internals(view)._additionColumns()
+    expect(additions).toHaveLength(1)
+    expect(internals(view)._editing?.field).toBe('name')
+    expect(internals(view)._editing?.col).toBe(additions[0]!.name)
+    expect(view.hasPendingChanges()).toBe(true)
+
+    // The row renders green with a remove button; the name cell shows the placeholder.
+    await view.updateComplete
+    const addBtn = view.renderRoot.querySelector('h4 .add-btn')
+    const addedRow = view.renderRoot.querySelector('tr.added')
+    expect(addBtn).not.toBeNull()
+    expect(addedRow).not.toBeNull()
+    expect(addedRow!.querySelector('.remove-btn')).not.toBeNull()
+    expect(view.renderRoot.querySelector<HTMLInputElement>('tr.added .cell-input')?.value).toBe('new_column')
+    view.remove()
+  })
+
+  it('emits the new column in additions on save, with placeholder and edited values', async () => {
+    const view = await loaded('postgresql')
+    internals(view)._addColumn()
+    const key = internals(view)._additionColumns()[0]!.name
+    const synthetic = internals(view)._additionColumns()[0]!
+
+    // Rename it and give it a non-null default; leave type at the placeholder.
+    internals(view)._commitText(synthetic, 'name', 'nickname')
+    internals(view)._commitText(synthetic, 'default', "''")
+
+    let detail: ColumnAlterEventDetail | null = null
+    view.addEventListener('alter-columns', (event) => (detail = (event as CustomEvent<ColumnAlterEventDetail>).detail))
+    view.save()
+
+    const applied = detail as unknown as ColumnAlterEventDetail
+    expect(applied.edits).toEqual([])
+    expect(applied.additions).toEqual([{ name: 'nickname', dataType: 'text', nullable: true, default: "''", comment: null }])
+    // The row keys off a hidden sentinel, never leaked as the column's real name.
+    expect(internals(view)._isAddition(key)).toBe(true)
+    expect(applied.additions[0]!.name).not.toBe(key)
+    view.remove()
+  })
+
+  it('reverts a blanked new-column name to the placeholder rather than the sentinel key', async () => {
+    const view = await loaded('postgresql')
+    internals(view)._addColumn()
+    const col = internals(view)._additionColumns()[0]!
+    internals(view)._commitText(col, 'name', '')
+
+    let detail: ColumnAlterEventDetail | null = null
+    view.addEventListener('alter-columns', (event) => (detail = (event as CustomEvent<ColumnAlterEventDetail>).detail))
+    view.save()
+    expect((detail as unknown as ColumnAlterEventDetail).additions[0]!.name).toBe('new_column')
+    view.remove()
+  })
+
+  it('removes a staged new column and clears the dirty state', async () => {
+    const view = await loaded('postgresql')
+    internals(view)._addColumn()
+    const key = internals(view)._additionColumns()[0]!.name
+    expect(view.hasPendingChanges()).toBe(true)
+
+    internals(view)._removeAddition(key)
+    expect(internals(view)._additionColumns()).toHaveLength(0)
+    expect(view.hasPendingChanges()).toBe(false)
+    view.remove()
+  })
+
+  it('undoes and redoes an add as one step', async () => {
+    const view = await loaded('postgresql')
+    internals(view)._addColumn()
+    expect(internals(view)._additionColumns()).toHaveLength(1)
+
+    // The add itself is undoable; a mid-edit cell defers to native undo, so commit first.
+    internals(view)._editing = null
+    expect(view.undo()).toBe(true)
+    expect(internals(view)._additionColumns()).toHaveLength(0)
+    expect(view.redo()).toBe(true)
+    expect(internals(view)._additionColumns()).toHaveLength(1)
+    view.remove()
+  })
+})
+
+describe('TableInspect dropping columns', () => {
+  it('stages a drop over any field edits and one undo restores them', async () => {
+    const column = inspectCol({ name: 'age' })
+    const view = await loaded('postgresql', [column])
+    internals(view)._commitText(column, 'name', 'age_years')
+
+    internals(view)._dropColumn(column)
+    expect(internals(view)._isDropped('age')).toBe(true)
+    expect(internals(view)._edits.get('age')).toEqual({ drop: true })
+
+    expect(view.undo()).toBe(true)
+    expect(internals(view)._isDropped('age')).toBe(false)
+    expect(internals(view)._edits.get('age')).toEqual({ name: 'age_years' })
+    view.remove()
+  })
+
+  it('locks a dropped row and renders it with a restore button', async () => {
+    const column = inspectCol({ name: 'age' })
+    const view = await loaded('postgresql', [column])
+    internals(view)._dropColumn(column)
+    await view.updateComplete
+
+    expect(internals(view)._canEdit('name', column)).toBe(false)
+    expect(internals(view)._canEdit('dataType', column)).toBe(false)
+    const row = view.renderRoot.querySelector('tr.dropped')
+    expect(row).not.toBeNull()
+    row!.querySelector<HTMLButtonElement>('.restore-btn')!.click()
+    expect(internals(view)._isDropped('age')).toBe(false)
+    expect(view.hasPendingChanges()).toBe(false)
+    view.remove()
+  })
+
+  it('offers Restore Column from the row menu in place of the reset items', async () => {
+    const column = inspectCol({ name: 'age' })
+    const view = await loaded('postgresql', [column])
+    internals(view)._dropColumn(column)
+
+    internals(view)._onMenuPick('restore-column', { name: 'age', definition: null, col: column })
+    expect(view.hasPendingChanges()).toBe(false)
+    view.remove()
+  })
+
+  it('emits drops on save, separate from edits and additions', async () => {
+    const age = inspectCol({ name: 'age' })
+    const nick = inspectCol({ name: 'nickname', dataType: 'text' })
+    const view = await loaded('postgresql', [age, nick])
+    internals(view)._dropColumn(age)
+    internals(view)._commitText(nick, 'name', 'alias')
+
+    let detail: ColumnAlterEventDetail | null = null
+    view.addEventListener('alter-columns', (event) => (detail = (event as CustomEvent<ColumnAlterEventDetail>).detail))
+    view.save()
+
+    const applied = detail as unknown as ColumnAlterEventDetail
+    expect(applied.drops).toEqual(['age'])
+    expect(applied.edits).toEqual([{ original: nick, name: 'alias' }])
+    expect(applied.additions).toEqual([])
+    view.remove()
+  })
+})
+
+describe('TableInspect save validation', () => {
+  it('blocks a rename that collides with an existing column', async () => {
+    const age = inspectCol({ name: 'age' })
+    const nick = inspectCol({ name: 'nickname', dataType: 'text' })
+    const view = await loaded('postgresql', [age, nick])
+    internals(view)._commitText(age, 'name', 'nickname')
+
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
+    view.save()
+    expect(onSave).not.toHaveBeenCalled()
+    expect(internals(view)._saveError).toContain('"nickname"')
+
+    // The next edit clears the error; renaming away saves cleanly.
+    internals(view)._commitText(age, 'name', 'age_years')
+    expect(internals(view)._saveError).toBeNull()
+    view.save()
+    expect(onSave).toHaveBeenCalledTimes(1)
+    view.remove()
+  })
+
+  it('blocks an addition named after an existing column, unless that column is dropped', async () => {
+    const age = inspectCol({ name: 'age' })
+    const view = await loaded('postgresql', [age])
+    internals(view)._addColumn()
+    const added = internals(view)._additionColumns()[0]!
+    internals(view)._commitText(added, 'name', 'age')
+
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
+    view.save()
+    expect(onSave).not.toHaveBeenCalled()
+    expect(internals(view)._saveError).toContain('"age"')
+
+    // Dropping the original frees the name (drops run before adds).
+    internals(view)._dropColumn(age)
+    view.save()
+    expect(onSave).toHaveBeenCalledTimes(1)
     view.remove()
   })
 })

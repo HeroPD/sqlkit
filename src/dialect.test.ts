@@ -50,16 +50,12 @@ describe('dialectFor: bindBoolean', () => {
 })
 
 describe('dialectFor: column edit capabilities', () => {
-  it('allows in-place alters only where the ALTER syntax matches', () => {
-    expect(dialectFor('postgresql').supportsColumnAlter).toBe(true)
-    expect(dialectFor('sqlite').supportsColumnAlter).toBe(false)
-    expect(dialectFor('mysql').supportsColumnAlter).toBe(false)
-  })
-
-  it('allows renames on engines with standard RENAME COLUMN', () => {
-    expect(dialectFor('postgresql').supportsColumnRename).toBe(true)
-    expect(dialectFor('sqlite').supportsColumnRename).toBe(true)
-    expect(dialectFor('sqlserver').supportsColumnRename).toBe(false)
+  it('gates each column edit per engine', () => {
+    const caps = (engine: 'postgresql' | 'sqlite' | 'mysql' | 'sqlserver') => dialectFor(engine).columnEdits
+    expect(caps('postgresql')).toEqual({ rename: true, dataType: true, nullable: true, default: true, comment: true, add: true, drop: true })
+    expect(caps('sqlite')).toEqual({ rename: true, dataType: false, nullable: false, default: false, comment: false, add: true, drop: true })
+    expect(caps('mysql')).toEqual({ rename: true, dataType: false, nullable: false, default: true, comment: false, add: true, drop: true })
+    expect(caps('sqlserver')).toEqual({ rename: true, dataType: true, nullable: true, default: false, comment: false, add: true, drop: true })
   })
 
   it('lists common column types only for wired-up engines', () => {

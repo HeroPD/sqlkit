@@ -3,7 +3,9 @@ import type { ColumnRef, InspectColumn, TableRef } from './electron'
 import { dialectFor } from './dialect'
 import {
   buildBatchUpdate,
+  buildColumnAdd,
   buildColumnAlter,
+  buildColumnDrop,
   buildDeleteRows,
   buildInsert,
   buildInsertDefault,
@@ -275,5 +277,98 @@ describe('buildColumnAlter', () => {
     expect(
       buildColumnAlter(notes, [{ original, name: 'years', dataType: 'REAL', nullable: false, default: '0' }], 'sqlite'),
     ).toEqual(['ALTER TABLE "notes" RENAME COLUMN "age" TO "years"'])
+  })
+
+  it('supports MySQL default and rename, ignoring type/nullable/comment diffs', () => {
+    const original = inspectCol({ name: 'age', dataType: 'int', nullable: true, default: null, comment: null })
+    expect(
+      buildColumnAlter(users, [{ original, name: 'years', dataType: 'bigint', nullable: false, default: '0', comment: 'n' }], 'mysql'),
+    ).toEqual([
+      'ALTER TABLE `public`.`users` ALTER COLUMN `age` SET DEFAULT 0',
+      'ALTER TABLE `public`.`users` RENAME COLUMN `age` TO `years`',
+    ])
+    expect(buildColumnAlter(users, [{ original, default: '' }], 'mysql')).toEqual([])
+    expect(buildColumnAlter(users, [{ original: inspectCol({ default: '0' }), default: '' }], 'mysql')).toEqual([
+      'ALTER TABLE `public`.`users` ALTER COLUMN `age` DROP DEFAULT',
+    ])
+  })
+
+  it('restates the full SQL Server type and nullability in one ALTER COLUMN', () => {
+    const original = inspectCol({ name: 'age', dataType: 'int', nullable: true })
+    expect(buildColumnAlter(users, [{ original, dataType: 'bigint', nullable: false }], 'sqlserver')).toEqual([
+      'ALTER TABLE [public].[users] ALTER COLUMN [age] bigint NOT NULL',
+    ])
+    // A lone nullable change re-emits the original type (with its precision).
+    const stamp = inspectCol({ name: 'at', dataType: 'datetime2(3)', nullable: true })
+    expect(buildColumnAlter(users, [{ original: stamp, nullable: false }], 'sqlserver')).toEqual([
+      'ALTER TABLE [public].[users] ALTER COLUMN [at] datetime2(3) NOT NULL',
+    ])
+    // A custom collation is restated on string types, or ALTER COLUMN resets it.
+    const tag = inspectCol({ name: 'tag', dataType: 'nvarchar(50)', nullable: true, collation: 'Latin1_General_CS_AS' })
+    expect(buildColumnAlter(users, [{ original: tag, nullable: false }], 'sqlserver')).toEqual([
+      'ALTER TABLE [public].[users] ALTER COLUMN [tag] nvarchar(50) COLLATE Latin1_General_CS_AS NOT NULL',
+    ])
+    // ...but never onto a non-string target type.
+    expect(buildColumnAlter(users, [{ original: tag, dataType: 'int' }], 'sqlserver')).toEqual([
+      'ALTER TABLE [public].[users] ALTER COLUMN [tag] int NULL',
+    ])
+    // Default diffs are ignored: SQL Server defaults are named constraints.
+    expect(buildColumnAlter(users, [{ original, default: '0' }], 'sqlserver')).toEqual([])
+  })
+
+  it('renames SQL Server columns via sp_rename with a quoted column path', () => {
+    const original = inspectCol({ name: 'age' })
+    expect(buildColumnAlter(users, [{ original, name: 'years' }], 'sqlserver')).toEqual([
+      `EXEC sp_rename N'[public].[users].[age]', N'years', 'COLUMN'`,
+    ])
+  })
+})
+
+describe('buildColumnAdd', () => {
+  it('builds a plain nullable ADD COLUMN', () => {
+    expect(buildColumnAdd(users, [{ name: 'nickname', dataType: 'text', nullable: true, default: null, comment: null }], 'postgresql')).toEqual([
+      'ALTER TABLE "public"."users" ADD COLUMN "nickname" text',
+    ])
+  })
+
+  it('adds DEFAULT then NOT NULL, and a separate COMMENT statement', () => {
+    expect(
+      buildColumnAdd(users, [{ name: 'score', dataType: 'integer', nullable: false, default: '0', comment: "player's score" }], 'postgresql'),
+    ).toEqual([
+      'ALTER TABLE "public"."users" ADD COLUMN "score" integer DEFAULT 0 NOT NULL',
+      `COMMENT ON COLUMN "public"."users"."score" IS 'player''s score'`,
+    ])
+  })
+
+  it('skips a row with a blank name or type', () => {
+    expect(buildColumnAdd(users, [{ name: '', dataType: 'text', nullable: true, default: null, comment: null }], 'postgresql')).toEqual([])
+    expect(buildColumnAdd(users, [{ name: 'x', dataType: '  ', nullable: true, default: null, comment: null }], 'postgresql')).toEqual([])
+  })
+
+  it('rides the comment inline on MySQL and drops it where unsupported', () => {
+    const add = { name: 'score', dataType: 'int', nullable: false, default: '0', comment: "the player's score" }
+    expect(buildColumnAdd(users, [add], 'mysql')).toEqual([
+      "ALTER TABLE `public`.`users` ADD COLUMN `score` int DEFAULT 0 NOT NULL COMMENT 'the player''s score'",
+    ])
+    expect(buildColumnAdd({ schema: null, name: 'notes', kind: 'table' }, [add], 'sqlite')).toEqual([
+      'ALTER TABLE "notes" ADD COLUMN "score" int DEFAULT 0 NOT NULL',
+    ])
+  })
+
+  it('spells SQL Server ADD without the COLUMN keyword', () => {
+    expect(buildColumnAdd(users, [{ name: 'score', dataType: 'int', nullable: true, default: null, comment: null }], 'sqlserver')).toEqual([
+      'ALTER TABLE [public].[users] ADD [score] int',
+    ])
+  })
+})
+
+describe('buildColumnDrop', () => {
+  it('emits one DROP COLUMN per name in the engine quoting style', () => {
+    expect(buildColumnDrop(users, ['age', 'nickname'], 'postgresql')).toEqual([
+      'ALTER TABLE "public"."users" DROP COLUMN "age"',
+      'ALTER TABLE "public"."users" DROP COLUMN "nickname"',
+    ])
+    expect(buildColumnDrop(users, ['age'], 'sqlserver')).toEqual(['ALTER TABLE [public].[users] DROP COLUMN [age]'])
+    expect(buildColumnDrop(users, [], 'mysql')).toEqual([])
   })
 })

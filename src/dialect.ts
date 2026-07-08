@@ -26,19 +26,27 @@ export type Dialect = {
   /** How a JS boolean binds as a parameter — SQLite has no boolean type and
    *  rejects a boolean bind, so it stores 1/0; other engines take the boolean. */
   bindBoolean(value: boolean): unknown
-  /** Whether columns can be altered in place (type/nullable/default/comment).
-   *  SQLite can only RENAME without a table rebuild; MySQL/SQL Server spell the
-   *  alters differently, so they stay off until their drivers are wired up. */
-  supportsColumnAlter: boolean
-  /** Whether the standard ALTER TABLE … RENAME COLUMN works; SQL Server needs
-   *  sp_rename, and MySQL stays off until its driver lands. */
-  supportsColumnRename: boolean
+  /** Per-field column-editor capabilities: gates both the Inspect tab's editable
+   *  cells and the statements sql-write emits for this engine. */
+  columnEdits: ColumnEditCapabilities
   /** Common column types offered by the inspector's type picker, spelled as
    *  valid DDL for this engine; empty when the engine isn't wired up. */
   commonColumnTypes: string[]
   /** Common default-value expressions for the inspector's default picker, valid
    *  for this engine; empty when the engine isn't wired up. */
   commonDefaultValues: string[]
+}
+
+// The column-editor operations an engine can run in place, without a table
+// rebuild. `add`/`drop` are whole-column; the rest edit one property.
+export type ColumnEditCapabilities = {
+  rename: boolean
+  dataType: boolean
+  nullable: boolean
+  default: boolean
+  comment: boolean
+  add: boolean
+  drop: boolean
 }
 
 // SQL-standard double quotes (Postgres, SQLite), MySQL backticks, SQL Server
@@ -81,20 +89,13 @@ const columnCommentsFor: Record<Engine, boolean> = {
   sqlserver: false,
 }
 
-// In-place column alters, gating the Postgres-flavored ALTER/COMMENT statements
-// that sql-write builds. Only engines sharing that syntax may turn this on.
-const columnAlterFor: Record<Engine, boolean> = {
-  postgresql: true,
-  sqlite: false,
-  mysql: false,
-  sqlserver: false,
-}
-
-const columnRenameFor: Record<Engine, boolean> = {
-  postgresql: true,
-  sqlite: true,
-  mysql: true,
-  sqlserver: false,
+// False cells await unbuilt machinery: SQLite table rebuilds, MySQL full MODIFY
+// COLUMN (would drop untracked charset/auto_increment), SQL Server default constraints.
+const columnEditsFor: Record<Engine, ColumnEditCapabilities> = {
+  postgresql: { rename: true, dataType: true, nullable: true, default: true, comment: true, add: true, drop: true },
+  sqlite: { rename: true, dataType: false, nullable: false, default: false, comment: false, add: true, drop: true },
+  mysql: { rename: true, dataType: false, nullable: false, default: true, comment: false, add: true, drop: true },
+  sqlserver: { rename: true, dataType: true, nullable: true, default: false, comment: false, add: true, drop: true },
 }
 
 // Common DDL type names for the inspector picker. Entries with (…) are templates
@@ -170,8 +171,7 @@ const makeDialect = (engine: Engine): Dialect => {
     displayConstraintName: (name) => (suffix ? name.replace(suffix, '') : name),
     supportsColumnComments: columnCommentsFor[engine],
     bindBoolean: (value) => (engine === 'sqlite' ? (value ? 1 : 0) : value),
-    supportsColumnAlter: columnAlterFor[engine],
-    supportsColumnRename: columnRenameFor[engine],
+    columnEdits: columnEditsFor[engine],
     commonColumnTypes: columnTypesFor[engine],
     commonDefaultValues: defaultValuesFor[engine],
   }
