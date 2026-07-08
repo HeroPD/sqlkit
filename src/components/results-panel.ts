@@ -29,6 +29,11 @@ type RowRef = { kind: 'result'; row: number } | { kind: 'draft'; index: number }
 
 const NUM_COL_MIN_WIDTH = 30
 const NUM_COL_MAX_WIDTH = 96
+// Floor a column can be dragged to, so a header stays grabbable.
+const MIN_COL_WIDTH = 48
+// Pointer travel before a grip press counts as a drag, so a plain click never
+// freezes or persists column widths.
+const RESIZE_DRAG_THRESHOLD = 3
 // Rows rendered beyond the viewport on each side — covers fast scrolls and the
 // sticky header's overlap without exact offset math.
 const OVERSCAN = 8
@@ -130,6 +135,11 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   sort: QuerySort | null = null
 
+  /** Persisted per-tab column widths (col index → px), adopted when a result
+   * loads; the grid emits `resize-columns` to write dragged widths back. */
+  @property({ attribute: false })
+  columnWidths: ReadonlyMap<number, number> = new Map()
+
   /** The cell being edited inline, by row reference. `seed` is the character that
    * started a type-to-edit (replaces the value); null edits the existing value.
    * `sel` snapshots the selection at edit start so the committed value fills it. */
@@ -172,6 +182,16 @@ export class ResultsPanel extends LitElement {
   // Widths measured once per result, keyed by session so appends don't reflow.
   private _widthsCache: { key: unknown; widths: number[] } | null = null
 
+  // Columns the user has dragged to a custom width (index → px). Cleared on a
+  // new result; once any exists, auto-fill stops so the widths stay exact.
+  private _widthOverrides = new Map<number, number>()
+
+  @state() private _resizing: { col: number; startX: number; startWidth: number; moved: boolean } | null = null
+
+  // Rendered column geometry (leading # column + each data column's width), so
+  // keyboard nav can scroll a selected column into view without re-measuring.
+  private _colLayout: { numColWidth: number; widths: number[] } | null = null
+
   // Display-order map (result rows + interleaved drafts), rebuilt when the rows
   // or drafts arrays change. Lets selection work in one coordinate space.
   private _displayCache: { rows: unknown; drafts: unknown; order: RowRef[]; resultToDisplay: number[]; draftToDisplay: number[] } | null = null
@@ -202,6 +222,10 @@ export class ResultsPanel extends LitElement {
     const key = this.run.phase === 'done' ? (this.run.result.sessionId ?? this.run.result) : this.run.phase
     if (key === this._lastKey) return // an append to the same result, not a new one
     this._lastKey = key
+    // Adopt this tab's persisted widths (empty for a new result shape, which
+    // then auto-measures). Local overrides drive rendering; drags write back.
+    this._widthOverrides = new Map(this.columnWidths)
+    this._resizing = null
     // Land the selection on the first cell of a fresh result, so keyboard work
     // and "add row below" have a defined anchor without a click.
     this._sel =
@@ -268,6 +292,7 @@ export class ResultsPanel extends LitElement {
     this._resizeObs?.disconnect()
     if (this._scrollRaf) cancelAnimationFrame(this._scrollRaf)
     this._endDrag()
+    this._endColResize()
   }
 
   private _bodyEl() {
@@ -848,7 +873,7 @@ export class ResultsPanel extends LitElement {
     const r = Math.max(0, Math.min(len - 1, s.r1 + dRow))
     const c = Math.max(0, Math.min(cols - 1, s.c1 + dCol))
     this._sel = extend ? { ...s, r1: r, c1: c } : { r0: r, c0: c, r1: r, c1: c }
-    this._scrollDisplayIntoView(r)
+    this._scrollCellIntoView(r, c)
   }
 
   // In the inline editor, Tab/Shift-Tab moves one cell horizontally, wrapping to
@@ -868,7 +893,7 @@ export class ResultsPanel extends LitElement {
       r = Math.max(0, r - 1)
     }
     this._sel = { r0: r, c0: c, r1: r, c1: c }
-    this._scrollDisplayIntoView(r)
+    this._scrollCellIntoView(r, c)
   }
 
   private _openRecordAtSelection() {
@@ -905,7 +930,9 @@ export class ResultsPanel extends LitElement {
     }
   }
 
-  private _scrollDisplayIntoView(display: number) {
+  // Keeps the focused cell in view as the selection moves; `col < 0` skips the
+  // x-axis. Vertical uses the row height, horizontal the rendered column widths.
+  private _scrollCellIntoView(display: number, col: number) {
     const ref = this._refAt(display)
     const body = this._bodyEl()
     if (!ref || !body) return
@@ -914,6 +941,14 @@ export class ResultsPanel extends LitElement {
     const bottom = top + rowH
     if (top < body.scrollTop) body.scrollTop = top
     else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight
+
+    const layout = this._colLayout
+    if (!layout || col < 0 || col >= layout.widths.length) return
+    let left = layout.numColWidth
+    for (let i = 0; i < col; i += 1) left += layout.widths[i] ?? 0
+    const right = left + (layout.widths[col] ?? 0)
+    if (left < body.scrollLeft) body.scrollLeft = left
+    else if (right > body.scrollLeft + body.clientWidth) body.scrollLeft = right - body.clientWidth
   }
 
   private _copySelection() {
@@ -964,6 +999,8 @@ export class ResultsPanel extends LitElement {
       if (this.rowEditable) this._duplicateSelection()
       return
     }
+    // ⌘Z / ⌘⇧Z (staged-edit undo/redo) is handled at the workbench level so it
+    // works from anywhere on the tab, not just when the grid holds focus.
     if (event.metaKey || event.ctrlKey || event.altKey || !this._sel) return
     switch (event.key) {
       case 'ArrowDown': event.preventDefault(); return this._moveFocus(1, 0, event.shiftKey)
@@ -1009,7 +1046,7 @@ export class ResultsPanel extends LitElement {
     if (ref.kind === 'result' && !this.editable) return
     this._editing = { ref, col, seed, sel: this._sel ? { ...this._sel } : null }
     this._editFocusPending = true
-    this._scrollDisplayIntoView(this._displayIndexOfRef(ref))
+    this._scrollCellIntoView(this._displayIndexOfRef(ref), col)
   }
 
   private _onEditKeydown = (event: KeyboardEvent) => {
@@ -1033,32 +1070,54 @@ export class ResultsPanel extends LitElement {
     event.stopPropagation()
   }
 
-  // Commits the inline edit, filling every cell of the snapshotted selection
-  // with the value: draft cells stage onto the row, result cells stage a pending
-  // edit (unchanged is a no-op). Nothing writes to the DB until ⌘S / Save.
+  // Commits the inline edit onto the snapshotted selection. A single cell keeps
+  // the per-cell events; a multi-cell fill collapses into one staged step so ⌘Z
+  // reverses the whole gesture (and it doesn't clone the edit map once per cell).
   private _commitEdit(input: HTMLInputElement) {
     const editing = this._editing
     this._editing = null
     if (!editing) return
     const value = input.value
     if (editing.seed === null && value === this._editCellText(editing.ref, editing.col)) return
-    for (const { ref, col } of this._editTargets(editing)) {
-      if (ref.kind === 'draft') {
-        this.dispatchEvent(new CustomEvent('draft-edit', { detail: { index: ref.index, col, value }, bubbles: true, composed: true }))
-      } else if (this.run.phase === 'done') {
-        const original = this.run.result.rows[ref.row]?.[col]
-        const originalText = original === null || original === undefined ? '' : formatCell(original)
-        const key = `${ref.row}:${col}`
-        const pending = this.edits.get(key)
-        const current = pending ?? originalText
-        if (value !== current) {
-          if (pending !== undefined && value === originalText) {
-            this.dispatchEvent(new CustomEvent('cell-edit-clear', { detail: { row: ref.row, col }, bubbles: true, composed: true }))
-          } else {
-            this.dispatchEvent(new CustomEvent('cell-edit', { detail: { row: ref.row, col, value }, bubbles: true, composed: true }))
-          }
-        }
-      }
+    const targets = this._editTargets(editing)
+    if (targets.length > 1) return this._commitFill(targets, value)
+    const target = targets[0]
+    const change = target && this._classifyEdit(target.ref, target.col, value)
+    if (change) this.dispatchEvent(new CustomEvent(change.event, { detail: change.detail, bubbles: true, composed: true }))
+  }
+
+  // What a value does to one cell: stage a draft cell, stage/clear a result edit,
+  // or nothing when it matches the current value.
+  private _classifyEdit(ref: RowRef, col: number, value: string): { event: string; detail: Record<string, unknown> } | null {
+    if (ref.kind === 'draft') {
+      const current = this.drafts[ref.index]?.cells[col] ?? ''
+      return value === current ? null : { event: 'draft-edit', detail: { index: ref.index, col, value } }
+    }
+    if (this.run.phase !== 'done') return null
+    const original = this.run.result.rows[ref.row]?.[col]
+    const originalText = original === null || original === undefined ? '' : formatCell(original)
+    const pending = this.edits.get(`${ref.row}:${col}`)
+    const current = pending ?? originalText
+    if (value === current) return null
+    if (pending !== undefined && value === originalText) return { event: 'cell-edit-clear', detail: { row: ref.row, col } }
+    return { event: 'cell-edit', detail: { row: ref.row, col, value } }
+  }
+
+  // Bundles every changed cell of a fill into one event so the owner stages them
+  // in a single undoable step.
+  private _commitFill(targets: Array<{ ref: RowRef; col: number }>, value: string) {
+    const edits: Array<{ row: number; col: number; value: string }> = []
+    const clears: Array<{ row: number; col: number }> = []
+    const draftCells: Array<{ index: number; col: number; value: string }> = []
+    for (const { ref, col } of targets) {
+      const change = this._classifyEdit(ref, col, value)
+      if (!change) continue
+      if (change.event === 'draft-edit') draftCells.push(change.detail as { index: number; col: number; value: string })
+      else if (change.event === 'cell-edit-clear') clears.push(change.detail as { row: number; col: number })
+      else edits.push(change.detail as { row: number; col: number; value: string })
+    }
+    if (edits.length || clears.length || draftCells.length) {
+      this.dispatchEvent(new CustomEvent('cells-fill', { detail: { edits, clears, draftCells }, bubbles: true, composed: true }))
     }
   }
 
@@ -1149,7 +1208,10 @@ export class ResultsPanel extends LitElement {
       const parsed = activeSort(run.sql, result.columns)
       if (parsed) current = { column: result.columns[parsed.index]!, direction: parsed.dir }
     }
-    const widths = this._columnWidths(result)
+    // Measured widths, with any column the user dragged swapped in (reuse the
+    // cached array unchanged in the common no-override case).
+    const measured = this._columnWidths(result)
+    const widths = this._widthOverrides.size ? measured.map((width, index) => this._widthOverrides.get(index) ?? width) : measured
     // table-layout: fixed only engages with a definite width; with width:
     // auto the browser falls back to AUTO layout and the colgroup widths
     // become minimums a long nowrap cell can blow past. min-width: 100% in
@@ -1157,9 +1219,12 @@ export class ResultsPanel extends LitElement {
     const numColWidth = numberColumnWidth(result)
     const viewportWidth = Math.max(0, this._viewportW - 1)
     const baseTableWidth = numColWidth + widths.reduce((sum, width) => sum + width, 0)
-    const fill = widths.length && viewportWidth > baseTableWidth ? viewportWidth - baseTableWidth : 0
+    // Stretch the last column to fill the panel only until the user takes over
+    // sizing — then their widths are honored exactly (empty space or scroll).
+    const fill = !this._widthOverrides.size && widths.length && viewportWidth > baseTableWidth ? viewportWidth - baseTableWidth : 0
     const tableWidth = baseTableWidth + fill
     const displayWidths = fill ? widths.map((width, index) => (index === widths.length - 1 ? width + fill : width)) : widths
+    this._colLayout = { numColWidth, widths: displayWidths }
     // Only the visible window of loaded rows is in the DOM; spacer rows above
     // and below stand in for the rest so the scrollbar reflects the full set.
     const { first, last, rowH } = this._window()
@@ -1184,6 +1249,7 @@ export class ResultsPanel extends LitElement {
       )
     return html`
       <table
+        class=${this._resizing ? 'resizing' : ''}
         style="width: ${tableWidth}px"
         tabindex="0"
         @contextmenu=${this._onTableContextMenu}
@@ -1248,7 +1314,16 @@ export class ResultsPanel extends LitElement {
   // A column header with an optional sort button. The button shows the active
   // direction when this column is sorted; clicking it cycles asc → desc → unsorted.
   private _renderHeader(column: string, col: number, sortable: boolean, dir: SortDir | null) {
-    if (!sortable) return html`<th><div class="th-inner"><span class="th-name" title=${column}>${column}</span></div></th>`
+    // A thin grip on the header's right edge, dragged to resize the column;
+    // double-click restores the measured width.
+    const grip = html`<span
+      class="col-resize"
+      @pointerdown=${(event: PointerEvent) => this._onColResizeStart(event, col)}
+      @dblclick=${(event: MouseEvent) => this._onColResizeReset(event, col)}
+    ></span>`
+    if (!sortable) {
+      return html`<th><div class="th-inner"><span class="th-name" title=${column}>${column}</span></div>${grip}</th>`
+    }
     const next = dir === 'asc' ? 'descending' : dir === 'desc' ? 'unsorted' : 'ascending'
     return html`
       <th class=${dir ? 'sorted' : ''}>
@@ -1263,8 +1338,74 @@ export class ResultsPanel extends LitElement {
             <i class="codicon codicon-${dir === 'desc' ? 'arrow-down' : 'arrow-up'}" aria-hidden="true"></i>
           </button>
         </div>
+        ${grip}
       </th>
     `
+  }
+
+  // Drag handle: start tracking from the column's current rendered width. Freeze
+  // and persist wait for real movement (_onColResizeMove), so a click is a no-op.
+  private _onColResizeStart(event: PointerEvent, col: number) {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation() // not a cell selection
+    const startWidth = this._colLayout?.widths[col] ?? this._widthOverrides.get(col) ?? MIN_COL_WIDTH
+    this._resizing = { col, startX: event.clientX, startWidth, moved: false }
+    window.addEventListener('pointermove', this._onColResizeMove)
+    window.addEventListener('pointerup', this._endColResize)
+    window.addEventListener('pointercancel', this._endColResize)
+  }
+
+  private _onColResizeMove = (event: PointerEvent) => {
+    const resizing = this._resizing
+    if (!resizing) return
+    const dx = event.clientX - resizing.startX
+    if (!resizing.moved && Math.abs(dx) < RESIZE_DRAG_THRESHOLD) return
+    if (!resizing.moved) {
+      resizing.moved = true
+      // First real movement: freeze every column at its rendered width (which
+      // includes the last column's fill) so turning off auto-fill can't jump them.
+      if (!this._widthOverrides.size && this._colLayout) {
+        this._colLayout.widths.forEach((width, index) => {
+          if (width > 0) this._widthOverrides.set(index, Math.round(width))
+        })
+      }
+    }
+    const width = Math.max(MIN_COL_WIDTH, Math.round(resizing.startWidth + dx))
+    this._widthOverrides.set(resizing.col, width)
+    this.requestUpdate()
+  }
+
+  // Always tears down the window listeners (even after a mid-drag refresh nulled
+  // _resizing, and on disconnect), and persists only when a real drag happened.
+  private _endColResize = () => {
+    const resizing = this._resizing
+    this._resizing = null
+    window.removeEventListener('pointermove', this._onColResizeMove)
+    window.removeEventListener('pointerup', this._endColResize)
+    window.removeEventListener('pointercancel', this._endColResize)
+    if (resizing?.moved) this._persistWidths()
+  }
+
+  // Double-click the grip to drop this column back to its measured width.
+  private _onColResizeReset(event: MouseEvent, col: number) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (!this._widthOverrides.delete(col)) return
+    this.requestUpdate()
+    this._persistWidths()
+  }
+
+  // Hands the current widths to the owner so they persist per tab; the owner
+  // tags them with the result's columns and feeds them back via `columnWidths`.
+  private _persistWidths() {
+    this.dispatchEvent(
+      new CustomEvent('resize-columns', {
+        detail: { widths: [...this._widthOverrides.entries()] },
+        bubbles: true,
+        composed: true,
+      }),
+    )
   }
 
   // Cycles the column's sort and asks the owner to rewrite + re-run the query.
@@ -1542,6 +1683,42 @@ export class ResultsPanel extends LitElement {
 
       .th-sort.active {
         color: var(--accent);
+      }
+
+      /* A grab strip on the header's inner right edge (kept inside the th, which
+         clips overflow for the label ellipsis). The visible 2px bar lights up on
+         hover; while a drag is in flight the whole table shows the resize cursor. */
+      .col-resize {
+        position: absolute;
+        top: 0;
+        right: 0;
+        z-index: 2;
+        width: 8px;
+        height: 100%;
+        cursor: col-resize;
+        touch-action: none;
+      }
+
+      .col-resize::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 2px;
+        height: 100%;
+        background: transparent;
+      }
+
+      .col-resize:hover::after {
+        background: var(--accent);
+      }
+
+      /* Keep the resize cursor over the whole grid while a drag is in flight,
+         even as the pointer strays off the 7px grip. */
+      table.resizing,
+      table.resizing th,
+      table.resizing td {
+        cursor: col-resize;
       }
 
       td {

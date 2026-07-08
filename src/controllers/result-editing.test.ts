@@ -60,6 +60,7 @@ function make() {
   const clearEdits = vi.fn(() => {
     edits = []
   })
+  const clearStagedHistory = vi.fn()
   const ctrl = new ResultEditingController({
     activeTab: () => activeTab,
     activeDbId: () => profile.id,
@@ -74,6 +75,7 @@ function make() {
     dropDrafts,
     edits: () => edits,
     clearEdits,
+    clearStagedHistory,
   })
   return {
     ctrl,
@@ -81,6 +83,7 @@ function make() {
     runSql,
     dropDrafts,
     clearEdits,
+    clearStagedHistory,
     setActiveChild: (next: string | null) => (activeChildDb = next),
     setActiveTab: (next: SqlTabState | null) => (activeTab = next),
     setDrafts: (next: Array<{ after: number; cells: Array<string | null> }>) => (drafts = next),
@@ -132,7 +135,7 @@ describe('ResultEditingController', () => {
   it('saves edits and new rows together as one batch: UPDATE then an INSERT per row', async () => {
     const runBatch = vi.fn(() => Promise.resolve({ success: true }))
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
-    const { ctrl, dialogs, runSql, dropDrafts, clearEdits, setDrafts, setEdits } = make()
+    const { ctrl, dialogs, runSql, dropDrafts, clearEdits, clearStagedHistory, setDrafts, setEdits } = make()
 
     setEdits([{ row: 0, col: 1, value: 'Grace' }])
     // Row 1 fills only name (id untouched → DB default); row 2 fills both.
@@ -156,6 +159,8 @@ describe('ResultEditingController', () => {
     ])
     expect(clearEdits).toHaveBeenCalledWith('tab-a')
     expect(dropDrafts).toHaveBeenCalledWith('tab-a', [0, 1])
+    // A committed batch invalidates undo history so ⌘Z can't restore saved rows.
+    expect(clearStagedHistory).toHaveBeenCalledWith('tab-a')
     expect(runSql).toHaveBeenCalledOnce()
   })
 

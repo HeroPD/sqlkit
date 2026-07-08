@@ -22,12 +22,21 @@ const internals = (view: TableInspect) =>
     _edits: Map<string, Record<string, unknown>>
     _editing: { col: string; field: string } | null
     _typeItems(col: InspectColumn, filter?: string): Array<{ id: string; label: string; checked?: boolean }>
-    _onCellMenuPick(menu: { col: InspectColumn; kind: 'nullable' | 'type' }, id: string): void
+    _defaultItems(col: InspectColumn, filter?: string): Array<{ id: string; label: string; checked?: boolean }>
+    _pickType(col: InspectColumn, id: string): void
     _onCellClick(col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default'): void
     _openTypeMenu(event: MouseEvent, col: InspectColumn): void
+    _openNullablePicker(event: MouseEvent, col: InspectColumn): void
+    _openDefaultMenu(event: MouseEvent, col: InspectColumn): void
     _onEditKeydown(event: KeyboardEvent, col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default'): void
-    _cellMenu: { kind: string; filter?: string } | null
-    _blurCommitAt: number
+    _onEditInput(event: Event, col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default'): void
+    _cellMenu: { kind: string; x: number; y: number; width: number; active: number } | null
+    _typePicker: { x: number; y: number; width: number; kind?: string; filter: string; active: number } | null
+    _defaultPicker: { x: number; y: number; width: number; kind?: string; filter: string; active: number } | null
+    _resetField(col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default' | 'nullable'): void
+    _resetRow(col: InspectColumn): void
+    _onMenuPick(id: string, menu: { name: string; definition: string | null; col?: InspectColumn; field?: string }): void
+    _menu: { x: number; y: number; name: string; definition: string | null; col?: InspectColumn; field?: string } | null
   }
 
 const inspectCol = (over: Partial<InspectColumn>): InspectColumn => ({
@@ -48,6 +57,7 @@ const stubInspect = () => {
 }
 
 const inspection = (title: string): TableInspection => ({ columns: [], sections: [{ title, rows: [] }] })
+const chooseOption = (button: HTMLButtonElement) => button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
 
 describe('TableInspect stale-load guard', () => {
   it('ignores a result for a child the user already switched away from', async () => {
@@ -148,48 +158,44 @@ describe('TableInspect column editing', () => {
     expect(view.hasPendingChanges()).toBe(false)
   })
 
-  it('offers the engine types with the current one check-marked, plus Custom…', () => {
+  it('offers the engine types with the current one check-marked', () => {
     stubInspect()
     const view = new TableInspect()
     view.engine = 'postgresql'
     const items = internals(view)._typeItems(inspectCol({ dataType: 'integer' }))
 
-    // 'integer' and the menu's 'int' entry abbreviate to the same type.
-    expect(items.find((item) => item.checked)?.label).toBe('int')
-    expect(items.at(-1)).toEqual({ id: 'custom', label: 'Custom…' })
+    expect(items.find((item) => item.checked)?.label).toBe('integer')
+    expect(items.some((item) => item.id === 'custom')).toBe(false)
     expect(items.length).toBeGreaterThan(10)
   })
 
-  it('check-marks a parameterized template by base type name', () => {
+  it('does not check-mark unrelated parameterized templates by base type name', () => {
     stubInspect()
     const view = new TableInspect()
     view.engine = 'postgresql'
     const items = internals(view)._typeItems(inspectCol({ dataType: 'character varying(64)' }))
-    expect(items.find((item) => item.checked)?.label).toBe('varchar(255)')
+    expect(items.find((item) => item.checked)).toBeUndefined()
   })
 
-  it('stages a bare type pick and routes templates/Custom… to the inline editor', () => {
+  it('stages a bare type pick and routes templates to the inline editor', () => {
     stubInspect()
     const view = new TableInspect()
     view.engine = 'postgresql'
     const column = inspectCol({ name: 'age', dataType: 'integer' })
 
-    internals(view)._onCellMenuPick({ col: column, kind: 'type' }, 'type:bigint')
+    internals(view)._pickType(column, 'type:bigint')
     expect(internals(view)._edits.get('age')).toEqual({ dataType: 'bigint' })
 
-    internals(view)._onCellMenuPick({ col: column, kind: 'type' }, 'type:integer')
+    internals(view)._pickType(column, 'type:integer')
     expect(view.hasPendingChanges()).toBe(false)
 
     // A template pick doesn't commit — it opens the editor seeded for adjustment.
-    internals(view)._onCellMenuPick({ col: column, kind: 'type' }, 'type:numeric(10,2)')
+    internals(view)._pickType(column, 'type:numeric(10,2)')
     expect(internals(view)._editing).toEqual({ col: 'age', field: 'dataType', seed: 'numeric(10,2)' })
     expect(view.hasPendingChanges()).toBe(false)
-
-    internals(view)._onCellMenuPick({ col: column, kind: 'type' }, 'custom')
-    expect(internals(view)._editing).toEqual({ col: 'age', field: 'dataType' })
   })
 
-  it('edits the type inline on cell click and opens the menu from the end arrow', () => {
+  it('edits the type inline on cell click and from the end arrow', () => {
     stubInspect()
     const view = new TableInspect()
     view.engine = 'postgresql'
@@ -199,32 +205,112 @@ describe('TableInspect column editing', () => {
     inner._onCellClick(column, 'dataType')
     expect(inner._editing).toEqual({ col: 'age', field: 'dataType' })
     expect(inner._cellMenu).toBeNull()
+    expect(inner._typePicker).toBeNull()
 
     inner._openTypeMenu(new MouseEvent('click', { clientX: 5, clientY: 6 }), column)
-    expect(inner._cellMenu).toMatchObject({ kind: 'type', x: 5, y: 6 })
+    expect(inner._editing).toEqual({ col: 'age', field: 'dataType' })
+    expect(inner._cellMenu).toBeNull()
   })
 
-  it('swallows the click that blurred an open editor instead of opening the next cell', () => {
+  it('opens the full type list from the end arrow', async () => {
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    chooseOption(view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.choices-btn')[0]!)
+    await view.updateComplete
+    await view.updateComplete
+
+    const labels = [...view.shadowRoot!.querySelectorAll('.type-option')].map((option) => option.textContent?.trim())
+    expect(labels).toContain('text')
+    expect(labels).toContain('jsonb')
+    expect(labels.length).toBeGreaterThan(10)
+    const bigint = [...view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.type-option')].find(
+      (option) => option.textContent?.trim() === 'bigint',
+    )
+    expect(bigint).toBeDefined()
+    chooseOption(bigint!)
+    expect(internals(view)._edits.get('age')).toEqual({ dataType: 'bigint' })
+    view.remove()
+  })
+
+  it('keeps a type picker selection when the previous input blurs', async () => {
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    chooseOption(view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.choices-btn')[0]!)
+    await view.updateComplete
+    await view.updateComplete
+
+    const input = view.shadowRoot!.querySelector<HTMLInputElement>('.cell-input')!
+    const bigint = [...view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.type-option')].find(
+      (option) => option.textContent?.trim() === 'bigint',
+    )
+    expect(bigint).toBeDefined()
+    chooseOption(bigint!)
+    input.dispatchEvent(new FocusEvent('blur'))
+    await view.updateComplete
+
+    expect(internals(view)._edits.get('age')).toEqual({ dataType: 'bigint' })
+    expect(view.shadowRoot!.querySelector('td.type')?.textContent?.trim()).toBe('bigint')
+    view.remove()
+  })
+
+  it('keeps the type chevron visible while the type field is focused', async () => {
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[0]!.click()
+    await view.updateComplete
+
+    expect(view.shadowRoot!.querySelector('.cell-input')).not.toBeNull()
+    expect(view.shadowRoot!.querySelector('.choices-btn')).not.toBeNull()
+    view.remove()
+  })
+
+  it('clicking another editable cell immediately starts editing it', () => {
     stubInspect()
     const view = new TableInspect()
     view.engine = 'postgresql'
     const inner = internals(view)
     const column = inspectCol({ name: 'age', dataType: 'integer' })
 
-    // The blur handler stamps _blurCommitAt just before this click lands.
-    inner._blurCommitAt = performance.now()
-    inner._onCellClick(column, 'name')
-    expect(inner._editing).toBeNull()
-    inner._openTypeMenu(new MouseEvent('click'), column)
-    expect(inner._cellMenu).toBeNull()
-
-    // A later, separate click edits normally.
-    inner._blurCommitAt = performance.now() - 1000
+    inner._editing = { col: 'age', field: 'dataType' }
     inner._onCellClick(column, 'name')
     expect(inner._editing).toEqual({ col: 'age', field: 'name' })
+
+    inner._editing = { col: 'age', field: 'name' }
+    inner._openTypeMenu(new MouseEvent('click'), column)
+    expect(inner._editing).toEqual({ col: 'age', field: 'dataType' })
   })
 
-  it('opens filtered type completion on Ctrl+Space in the type editor', () => {
+  it('opens and filters the type picker under the type editor', () => {
     stubInspect()
     const view = new TableInspect()
     view.engine = 'postgresql'
@@ -237,21 +323,44 @@ describe('TableInspect column editing', () => {
         ...init,
         preventDefault: () => {},
         stopPropagation: () => {},
-        target: { value, getBoundingClientRect: () => ({ left: 4, bottom: 20 }) },
+        target: { value, getBoundingClientRect: () => ({ left: 4, bottom: 20, width: 140 }) },
       }) as never as KeyboardEvent
+    const input = (value: string) =>
+      ({ target: { value, getBoundingClientRect: () => ({ left: 4, bottom: 20, width: 140 }) } }) as never as Event
+
+    inner._onEditInput(input('tim'), column, 'dataType')
+    expect(inner._typePicker).toBeNull()
+    inner._onEditKeydown(key({ key: 'ArrowDown' }, 'tim'), column, 'dataType')
+    expect(inner._typePicker).toMatchObject({ filter: '', active: 0 })
+    expect(inner._typeItems(column, '').length).toBeGreaterThan(10)
+    inner._typePicker = null
 
     inner._onEditKeydown(key({ key: ' ', ctrlKey: true }, 'time'), column, 'dataType')
-    expect(inner._cellMenu).toMatchObject({ kind: 'type', filter: 'time', x: 4, y: 22 })
+    expect(inner._typePicker).toMatchObject({ filter: 'time', x: 4, y: 22, width: 140, active: 0 })
     const labels = inner._typeItems(column, 'time').map((item) => item.label)
-    expect(labels).toEqual(['time', 'timetz', 'timestamp', 'timestamptz', 'Custom…'])
+    expect(labels).toEqual(expect.arrayContaining(['time', 'time without time zone', 'time with time zone', 'timetz', 'timestamp']))
 
-    // No prefix match falls back to the full list rather than an empty menu.
-    expect(inner._typeItems(column, 'zzz').length).toBeGreaterThan(10)
+    inner._onEditInput(input('tim'), column, 'dataType')
+    expect(inner._typePicker).toMatchObject({ filter: 'tim', active: -1 })
+    expect(inner._typeItems(column, 'zzz')).toEqual([])
+
+    // Arrow selection makes Enter accept a highlighted type.
+    inner._onEditKeydown(key({ key: 'ArrowDown' }, 'tim'), column, 'dataType')
+    expect(inner._typePicker).toMatchObject({ active: 0 })
+    inner._onEditKeydown(key({ key: 'Enter' }, 'tim'), column, 'dataType')
+    expect(inner._edits.get('created')).toEqual({ dataType: 'time' })
+
+    // Without a highlighted option, Enter commits free text instead.
+    inner._editing = { col: 'created', field: 'dataType' }
+    inner._onEditInput(input('citext'), column, 'dataType')
+    inner._onEditKeydown(key({ key: 'Enter' }, 'citext'), column, 'dataType')
+    expect(inner._edits.get('created')).toEqual({ dataType: 'citext' })
 
     // Escape closes the completion menu but keeps the edit session alive.
     inner._editing = { col: 'created', field: 'dataType' }
+    inner._onEditKeydown(key({ key: ' ', ctrlKey: true }, 'time'), column, 'dataType')
     inner._onEditKeydown(key({ key: 'Escape' }, 'time'), column, 'dataType')
-    expect(inner._cellMenu).toBeNull()
+    expect(inner._typePicker).toBeNull()
     expect(inner._editing).not.toBeNull()
     inner._onEditKeydown(key({ key: 'Escape' }, 'time'), column, 'dataType')
     expect(inner._editing).toBeNull()
@@ -269,6 +378,170 @@ describe('TableInspect column editing', () => {
     internals(view)._setNullable(column, true)
     expect(view.hasPendingChanges()).toBe(false)
     expect(internals(view)._fieldNullable(column)).toBe(true)
+  })
+
+  it('opens nullable choices in the same anchored picker style', async () => {
+    const column = inspectCol({ name: 'age', nullable: true })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[1]!.click()
+    await view.updateComplete
+
+    const options = [...view.shadowRoot!.querySelectorAll('.type-option')].map((option) => option.textContent?.trim())
+    expect(options).toEqual(['yes✓', 'no'])
+    chooseOption(view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.type-option')[1]!)
+    expect(internals(view)._edits.get('age')).toEqual({ nullable: false })
+    view.remove()
+  })
+
+  it('closes nullable choices when clicking outside', async () => {
+    const column = inspectCol({ name: 'age', nullable: true })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[1]!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true }))
+    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[1]!.click()
+    await view.updateComplete
+    expect(internals(view)._cellMenu).not.toBeNull()
+
+    window.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true }))
+    await view.updateComplete
+    expect(internals(view)._cellMenu).toBeNull()
+    view.remove()
+  })
+
+  it('toggles the nullable picker shut on a second click of the same cell', async () => {
+    const column = inspectCol({ name: 'age', nullable: true })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    const cell = view.shadowRoot!.querySelector<HTMLElement>('td.nullable-cell')!
+    cell.click()
+    expect(internals(view)._cellMenu).not.toBeNull()
+    cell.click()
+    expect(internals(view)._cellMenu).toBeNull()
+    view.remove()
+  })
+
+  it('commits a typed cell edit when a chevron opens another cell', async () => {
+    const column = inspectCol({ name: 'age', dataType: 'integer', nullable: true })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    // Edit the name cell, type a value, then open the type picker via its chevron
+    // (a mousedown that suppresses blur) — the typed rename must not be lost.
+    view.shadowRoot!.querySelector<HTMLElement>('td[data-field="name"]')!.click()
+    await view.updateComplete
+    view.shadowRoot!.querySelector<HTMLInputElement>('.cell-input')!.value = 'age_years'
+    internals(view)._openTypeMenu(new MouseEvent('mousedown'), column)
+    expect(internals(view)._edits.get('age')).toEqual({ name: 'age_years' })
+    view.remove()
+  })
+
+  it('opens and filters the default picker under the default editor', () => {
+    stubInspect()
+    const view = new TableInspect()
+    view.engine = 'postgresql'
+    const inner = internals(view)
+    const column = inspectCol({ name: 'created_at', default: 'now()' })
+
+    const key = (init: Partial<KeyboardEvent>, value: string) =>
+      ({
+        ...init,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+        target: { value, getBoundingClientRect: () => ({ left: 4, bottom: 20, width: 140 }) },
+      }) as never as KeyboardEvent
+    const input = (value: string) =>
+      ({ target: { value, getBoundingClientRect: () => ({ left: 4, bottom: 20, width: 140 }) } }) as never as Event
+
+    expect(inner._defaultItems(column).find((item) => item.checked)?.label).toBe('now()')
+    inner._onEditInput(input('cur'), column, 'default')
+    expect(inner._defaultPicker).toBeNull()
+    inner._onEditKeydown(key({ key: 'ArrowDown' }, 'cur'), column, 'default')
+    expect(inner._defaultPicker).toMatchObject({ filter: '', active: 0 })
+    inner._defaultPicker = null
+
+    inner._onEditKeydown(key({ key: ' ', ctrlKey: true }, 'current'), column, 'default')
+    expect(inner._defaultPicker).toMatchObject({ filter: 'current', active: 0 })
+    expect(inner._defaultItems(column, 'current').map((item) => item.label)).toEqual([
+      'CURRENT_DATE',
+      'CURRENT_TIME',
+      'CURRENT_TIMESTAMP',
+    ])
+
+    inner._onEditInput(input('current_t'), column, 'default')
+    expect(inner._defaultPicker).toMatchObject({ filter: 'current_t', active: -1 })
+    inner._onEditKeydown(key({ key: 'ArrowDown' }, 'current_t'), column, 'default')
+    inner._onEditKeydown(key({ key: 'Enter' }, 'current_t'), column, 'default')
+    expect(inner._edits.get('created_at')).toEqual({ default: 'CURRENT_TIME' })
+
+    inner._editing = { col: 'created_at', field: 'default' }
+    inner._onEditKeydown(key({ key: 'Enter' }, 'gen_random_uuid()'), column, 'default')
+    expect(inner._edits.get('created_at')).toEqual({ default: 'gen_random_uuid()' })
+  })
+
+  it('keeps a default picker selection when the previous input blurs', async () => {
+    const column = inspectCol({ name: 'created_at', default: 'now()' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    chooseOption(view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.choices-btn')[2]!)
+    await view.updateComplete
+    await view.updateComplete
+
+    const input = view.shadowRoot!.querySelector<HTMLInputElement>('.cell-input')!
+    const currentTimestamp = [...view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.type-option')].find(
+      (option) => option.textContent?.trim() === 'CURRENT_TIMESTAMP',
+    )
+    expect(currentTimestamp).toBeDefined()
+    chooseOption(currentTimestamp!)
+    input.dispatchEvent(new FocusEvent('blur'))
+    await view.updateComplete
+
+    expect(internals(view)._edits.get('created_at')).toEqual({ default: 'CURRENT_TIMESTAMP' })
+    view.remove()
   })
 
   it('emits inspect-dirty when edits are staged and again when cleared (drives the tab marker)', async () => {
@@ -323,6 +596,151 @@ describe('TableInspect column editing', () => {
     // onApplied clears the staged edits.
     applied.onApplied()
     expect(view.hasPendingChanges()).toBe(false)
+    view.remove()
+  })
+})
+
+describe('TableInspect undo/redo and reset', () => {
+  it('undoes and redoes staged edits one commit at a time', () => {
+    stubInspect()
+    const view = new TableInspect()
+    const inner = internals(view)
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+
+    inner._commitText(column, 'name', 'age_years')
+    inner._commitText(column, 'dataType', 'bigint')
+    expect(inner._edits.get('age')).toEqual({ name: 'age_years', dataType: 'bigint' })
+
+    expect(view.undo()).toBe(true)
+    expect(inner._edits.get('age')).toEqual({ name: 'age_years' })
+    expect(view.undo()).toBe(true)
+    expect(view.hasPendingChanges()).toBe(false)
+    expect(view.undo()).toBe(false)
+
+    expect(view.redo()).toBe(true)
+    expect(inner._edits.get('age')).toEqual({ name: 'age_years' })
+    expect(view.redo()).toBe(true)
+    expect(inner._edits.get('age')).toEqual({ name: 'age_years', dataType: 'bigint' })
+    expect(view.redo()).toBe(false)
+  })
+
+  it('drops the redo branch when a new edit follows an undo', () => {
+    stubInspect()
+    const view = new TableInspect()
+    const inner = internals(view)
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+
+    inner._commitText(column, 'dataType', 'bigint')
+    view.undo()
+    inner._commitText(column, 'dataType', 'smallint')
+    expect(view.redo()).toBe(false)
+    expect(inner._edits.get('age')).toEqual({ dataType: 'smallint' })
+  })
+
+  it('defers to native input undo while a cell is being edited', () => {
+    stubInspect()
+    const view = new TableInspect()
+    const inner = internals(view)
+    const column = inspectCol({ name: 'age' })
+
+    inner._commitText(column, 'name', 'age_years')
+    inner._editing = { col: 'age', field: 'name' }
+    expect(view.undo()).toBe(false)
+    expect(view.redo()).toBe(false)
+  })
+
+  it('does not record a no-op commit as an undo step', () => {
+    stubInspect()
+    const view = new TableInspect()
+    const inner = internals(view)
+    const column = inspectCol({ name: 'age' })
+
+    inner._commitText(column, 'name', 'age_years')
+    // Re-committing the same value stages nothing new — one undo clears it.
+    inner._commitText(column, 'name', 'age_years')
+    expect(view.undo()).toBe(true)
+    expect(view.hasPendingChanges()).toBe(false)
+  })
+
+  it('resets a single field to its loaded value and stays undoable', () => {
+    stubInspect()
+    const view = new TableInspect()
+    const inner = internals(view)
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+
+    inner._commitText(column, 'name', 'age_years')
+    inner._commitText(column, 'dataType', 'bigint')
+    inner._resetField(column, 'dataType')
+    expect(inner._edits.get('age')).toEqual({ name: 'age_years' })
+
+    expect(view.undo()).toBe(true)
+    expect(inner._edits.get('age')).toEqual({ name: 'age_years', dataType: 'bigint' })
+  })
+
+  it('resets a whole row and stays undoable', () => {
+    stubInspect()
+    const view = new TableInspect()
+    const inner = internals(view)
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+
+    inner._commitText(column, 'name', 'age_years')
+    inner._commitText(column, 'dataType', 'bigint')
+    inner._resetRow(column)
+    expect(view.hasPendingChanges()).toBe(false)
+
+    expect(view.undo()).toBe(true)
+    expect(inner._edits.get('age')).toEqual({ name: 'age_years', dataType: 'bigint' })
+  })
+
+  it('drops just the right-clicked field when reset from the menu', () => {
+    stubInspect()
+    const view = new TableInspect()
+    const inner = internals(view)
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+
+    inner._commitText(column, 'name', 'age_years')
+    inner._commitText(column, 'dataType', 'bigint')
+    inner._onMenuPick('reset-field', { name: 'age', definition: null, col: column, field: 'dataType' })
+    expect(inner._edits.get('age')).toEqual({ name: 'age_years' })
+  })
+
+  it('reads the right-clicked field from the cell into the row menu', async () => {
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    const typeCell = view.shadowRoot!.querySelector<HTMLElement>('td[data-field="dataType"]')!
+    typeCell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 5, clientY: 6 }))
+    await view.updateComplete
+
+    expect(internals(view)._menu).toMatchObject({ name: 'age', field: 'dataType' })
+    view.remove()
+  })
+
+  it('clears the undo history when the tab reloads a new structure', async () => {
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+
+    internals(view)._commitText(column, 'dataType', 'bigint')
+    await internals(view)._load()
+    expect(view.hasPendingChanges()).toBe(false)
+    expect(view.undo()).toBe(false)
     view.remove()
   })
 })

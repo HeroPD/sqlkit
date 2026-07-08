@@ -36,6 +36,9 @@ export type Dialect = {
   /** Common column types offered by the inspector's type picker, spelled as
    *  valid DDL for this engine; empty when the engine isn't wired up. */
   commonColumnTypes: string[]
+  /** Common default-value expressions for the inspector's default picker, valid
+   *  for this engine; empty when the engine isn't wired up. */
+  commonDefaultValues: string[]
 }
 
 // SQL-standard double quotes (Postgres, SQLite), MySQL backticks, SQL Server
@@ -94,15 +97,42 @@ const columnRenameFor: Record<Engine, boolean> = {
   sqlserver: false,
 }
 
-// Short spellings that are valid DDL (int, timestamptz, float8 …); SQLite's
-// are its storage classes. Entries with (…) are templates — the picker opens
-// them in the inline editor with the parameters selected for adjustment.
+// Common DDL type names for the inspector picker. Entries with (…) are templates
+// — the picker opens them in the inline editor with the parameters selected for adjustment.
 const columnTypesFor: Record<Engine, string[]> = {
   postgresql: [
-    'text', 'varchar(255)', 'char(1)', 'bool',
-    'smallint', 'int', 'bigint', 'numeric(10,2)', 'real', 'float8',
-    'date', 'time', 'timetz', 'timestamp', 'timestamptz', 'interval',
-    'uuid', 'json', 'jsonb', 'bytea', 'inet',
+    'smallint', 'integer', 'bigint', 'decimal', 'numeric', 'real', 'double precision', 'smallserial', 'serial', 'bigserial',
+    'int2', 'int4', 'int8', 'int', 'float4', 'float8', 'float', 'serial2', 'serial4', 'serial8',
+    'character', 'character varying', 'char', 'varchar', 'text', 'name',
+    'boolean', 'bool',
+    'date', 'time', 'time without time zone', 'time with time zone', 'timetz',
+    'timestamp', 'timestamp without time zone', 'timestamp with time zone', 'timestamptz', 'interval',
+    'uuid',
+    'json', 'jsonb', 'jsonpath',
+    'bytea',
+    'money',
+    'inet', 'cidr', 'macaddr', 'macaddr8',
+    'point', 'line', 'lseg', 'box', 'path', 'polygon', 'circle',
+    'tsvector', 'tsquery',
+    'xml',
+    'bit', 'bit varying', 'varbit',
+    'int4range', 'int8range', 'numrange', 'tsrange', 'tstzrange', 'daterange',
+    'int4multirange', 'int8multirange', 'nummultirange', 'tsmultirange', 'tstzmultirange', 'datemultirange',
+    'oid', 'regclass', 'regcollation', 'regconfig', 'regdictionary', 'regnamespace', 'regoper', 'regoperator',
+    'regproc', 'regprocedure', 'regrole', 'regtype',
+    'xid', 'xid8', 'cid', 'tid', 'pg_lsn', 'pg_snapshot', 'txid_snapshot',
+    'smallint[]', 'integer[]', 'bigint[]', 'decimal[]', 'numeric[]', 'real[]', 'double precision[]',
+    'text[]', 'varchar[]', 'char[]', 'boolean[]', 'date[]', 'time[]', 'timetz[]', 'timestamp[]', 'timestamptz[]',
+    'interval[]', 'uuid[]', 'json[]', 'jsonb[]', 'bytea[]', 'money[]', 'inet[]', 'cidr[]', 'macaddr[]', 'macaddr8[]',
+    'point[]', 'line[]', 'lseg[]', 'box[]', 'path[]', 'polygon[]', 'circle[]', 'tsvector[]', 'tsquery[]', 'xml[]',
+    'int4range[]', 'int8range[]', 'numrange[]', 'tsrange[]', 'tstzrange[]', 'daterange[]',
+    'varchar(255)', 'char(1)', 'character(1)', 'character varying(255)', 'numeric(10, 2)',
+    'decimal(10, 2)', 'float(24)', 'bit(1)', 'bit varying(8)', 'varbit(8)',
+    'time(6)', 'time(6) without time zone', 'time(6) with time zone',
+    'timestamp(6)', 'timestamp(6) without time zone', 'timestamp(6) with time zone',
+    'interval(6)', 'interval year', 'interval month', 'interval day', 'interval hour', 'interval minute', 'interval second',
+    'interval year to month', 'interval day to hour', 'interval day to minute', 'interval day to second',
+    'interval hour to minute', 'interval hour to second', 'interval minute to second',
   ],
   sqlite: ['text', 'integer', 'real', 'numeric', 'blob'],
   mysql: [
@@ -117,6 +147,15 @@ const columnTypesFor: Record<Engine, string[]> = {
     'date', 'time', 'datetime2', 'datetimeoffset',
     'uniqueidentifier', 'varbinary(max)', 'xml',
   ],
+}
+
+// Common default-value expressions for the inspector picker, valid per engine —
+// now()/booleans aren't universal (SQL Server needs GETDATE()/1/0; SQLite 1/0).
+const defaultValuesFor: Record<Engine, string[]> = {
+  postgresql: ['NULL', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'now()', 'true', 'false', '0', '1', "''"],
+  sqlite: ['NULL', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', '0', '1', "''"],
+  mysql: ['NULL', 'CURRENT_DATE', 'CURRENT_TIMESTAMP', 'now()', 'true', 'false', '0', '1', "''"],
+  sqlserver: ['NULL', 'GETDATE()', 'SYSDATETIME()', '0', '1', "''"],
 }
 
 const makeDialect = (engine: Engine): Dialect => {
@@ -134,6 +173,7 @@ const makeDialect = (engine: Engine): Dialect => {
     supportsColumnAlter: columnAlterFor[engine],
     supportsColumnRename: columnRenameFor[engine],
     commonColumnTypes: columnTypesFor[engine],
+    commonDefaultValues: defaultValuesFor[engine],
   }
 }
 

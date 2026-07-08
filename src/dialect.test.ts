@@ -63,9 +63,35 @@ describe('dialectFor: column edit capabilities', () => {
   })
 
   it('lists common column types only for wired-up engines', () => {
-    expect(dialectFor('postgresql').commonColumnTypes).toContain('timestamptz')
+    expect(dialectFor('postgresql').commonColumnTypes).toEqual(expect.arrayContaining([
+      'integer',
+      'int',
+      'character varying',
+      'varchar',
+      'timestamptz',
+      'jsonpath',
+      'macaddr8',
+      'tsvector',
+      'int4range',
+      'int4multirange',
+      'regclass',
+      'pg_lsn',
+      'uuid[]',
+      'varchar(255)',
+      'timestamp(6) with time zone',
+      'interval day to second',
+    ]))
     expect(dialectFor('sqlite').commonColumnTypes).toContain('integer')
     expect(dialectFor('mysql').commonColumnTypes).toContain('datetime')
     expect(dialectFor('sqlserver').commonColumnTypes).toContain('nvarchar(255)')
+  })
+
+  it('offers engine-appropriate default-value expressions', () => {
+    expect(dialectFor('postgresql').commonDefaultValues).toContain('now()')
+    expect(dialectFor('postgresql').commonDefaultValues).toContain('true')
+    // SQL Server spells these differently and rejects now()/booleans as defaults.
+    expect(dialectFor('sqlserver').commonDefaultValues).toContain('GETDATE()')
+    expect(dialectFor('sqlserver').commonDefaultValues).not.toContain('now()')
+    expect(dialectFor('sqlite').commonDefaultValues).not.toContain('now()')
   })
 })

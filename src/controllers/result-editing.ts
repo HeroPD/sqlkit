@@ -30,6 +30,8 @@ type Deps = {
   dropDrafts: (tabId: string, indexes: number[]) => void
   edits: () => Array<{ row: number; col: number; value: string }>
   clearEdits: (tabId: string) => void
+  // Drops the tab's staged undo/redo history — a saved batch is a commit point.
+  clearStagedHistory?: (tabId: string) => void
 }
 
 // Owns result-grid write behavior: validation, prompts, review SQL, execution,
@@ -118,6 +120,9 @@ export class ResultEditingController {
     const { hadEdits, draftCount, tabId, refreshSql } = applied
     if (tabId && hadEdits) this.deps.clearEdits(tabId)
     if (tabId && draftCount > 0) this.deps.dropDrafts(tabId, Array.from({ length: draftCount }, (_, index) => index))
+    // The write is committed; any pre-save undo history would restore already-
+    // saved rows/edits, so drop it (the dropDrafts above may have recorded a step).
+    if (tabId) this.deps.clearStagedHistory?.(tabId)
     if (refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)
   }
 

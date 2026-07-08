@@ -332,10 +332,12 @@ describe('results-panel draft rows', () => {
     el.remove()
   })
 
-  it('type-to-edit on a multi-cell selection fills the whole selection', async () => {
+  it('type-to-edit on a multi-cell selection fills the whole selection in one batch', async () => {
     const el = await mountGrid(3)
-    const edits: Array<{ row: number; col: number; value: string }> = []
-    el.addEventListener('cell-edit', (e) => edits.push((e as CustomEvent<{ row: number; col: number; value: string }>).detail))
+    const fills: Array<{ edits: unknown[]; clears: unknown[]; draftCells: unknown[] }> = []
+    const perCell = vi.fn()
+    el.addEventListener('cells-fill', (e) => fills.push((e as CustomEvent<{ edits: unknown[]; clears: unknown[]; draftCells: unknown[] }>).detail))
+    el.addEventListener('cell-edit', perCell)
 
     // Select column 0 of rows 0..2 (anchor at top), then type — fills all three.
     key(el, { key: 'ArrowDown', shiftKey: true })
@@ -349,11 +351,18 @@ describe('results-panel draft rows', () => {
     expect(input.value).toBe('X')
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
 
-    expect(edits).toEqual([
-      { row: 0, col: 0, value: 'X' },
-      { row: 1, col: 0, value: 'X' },
-      { row: 2, col: 0, value: 'X' },
-    ])
+    // One batch event covers the whole fill (not one per-cell event).
+    expect(perCell).not.toHaveBeenCalled()
+    expect(fills).toHaveLength(1)
+    expect(fills[0]).toEqual({
+      edits: [
+        { row: 0, col: 0, value: 'X' },
+        { row: 1, col: 0, value: 'X' },
+        { row: 2, col: 0, value: 'X' },
+      ],
+      clears: [],
+      draftCells: [],
+    })
     el.remove()
   })
 
@@ -548,6 +557,168 @@ describe('results-panel DBeaver-style editing', () => {
 
     expect((deleteRows.mock.calls[0]![0] as CustomEvent).detail).toEqual({ rows: [0] })
     expect((draftRemove.mock.calls[0]![0] as CustomEvent).detail).toEqual({ indexes: [0] })
+    el.remove()
+  })
+})
+
+describe('results-panel column resize', () => {
+  // The first <col> is the # column; the rest map to data columns.
+  const dataCols = (el: HTMLElement) => [...el.shadowRoot!.querySelectorAll<HTMLElement>('colgroup col')].slice(1)
+
+  it('renders a resize grip per data column', async () => {
+    const el = await mountGrid(3)
+    expect(el.shadowRoot!.querySelectorAll('.col-resize')).toHaveLength(2) // 2 data columns
+    el.remove()
+  })
+
+  it('widens a column as its grip is dragged, and stops auto-filling', async () => {
+    const el = await mountGrid(2)
+    const grip = el.shadowRoot!.querySelectorAll<HTMLElement>('.col-resize')[0]!
+    const startWidth = parseFloat(dataCols(el)[0]!.style.width)
+
+    grip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }))
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 160 }))
+    await el.updateComplete
+
+    // Dragged 60px to the right → the frozen start width grows by 60.
+    expect(parseFloat(dataCols(el)[0]!.style.width)).toBe(startWidth + 60)
+    window.dispatchEvent(new PointerEvent('pointerup', {}))
+    el.remove()
+  })
+
+  it('clamps a column to a minimum width when dragged far left', async () => {
+    const el = await mountGrid(2)
+    const grip = el.shadowRoot!.querySelectorAll<HTMLElement>('.col-resize')[0]!
+
+    grip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 300 }))
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 0 }))
+    await el.updateComplete
+
+    expect(parseFloat(dataCols(el)[0]!.style.width)).toBe(48) // MIN_COL_WIDTH
+    window.dispatchEvent(new PointerEvent('pointerup', {}))
+    el.remove()
+  })
+
+  it('treats a grip click (sub-threshold nudge) as a no-op, not a resize', async () => {
+    const el = await mountGrid(2)
+    const resized = vi.fn()
+    el.addEventListener('resize-columns', resized)
+    const grip = el.shadowRoot!.querySelectorAll<HTMLElement>('.col-resize')[0]!
+    const startWidth = parseFloat(dataCols(el)[0]!.style.width)
+
+    grip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }))
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 101 })) // 1px, below threshold
+    window.dispatchEvent(new PointerEvent('pointerup', {}))
+    await el.updateComplete
+
+    // Nothing frozen and nothing persisted, so auto-fill stays available.
+    expect(resized).not.toHaveBeenCalled()
+    expect(parseFloat(dataCols(el)[0]!.style.width)).toBe(startWidth)
+    el.remove()
+  })
+
+  it('restores the measured width on double-clicking the grip', async () => {
+    const el = await mountGrid(2)
+    const grip = el.shadowRoot!.querySelectorAll<HTMLElement>('.col-resize')[0]!
+    const startWidth = parseFloat(dataCols(el)[0]!.style.width)
+
+    grip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }))
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 200 }))
+    window.dispatchEvent(new PointerEvent('pointerup', {}))
+    await el.updateComplete
+    expect(parseFloat(dataCols(el)[0]!.style.width)).not.toBe(startWidth)
+
+    grip.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await el.updateComplete
+    expect(parseFloat(dataCols(el)[0]!.style.width)).toBe(startWidth)
+    el.remove()
+  })
+
+  it('re-measures from scratch when a new result has no persisted widths', async () => {
+    const el = await mountGrid(2)
+    const grip = el.shadowRoot!.querySelectorAll<HTMLElement>('.col-resize')[0]!
+    const startWidth = parseFloat(dataCols(el)[0]!.style.width)
+
+    grip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }))
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 200 }))
+    window.dispatchEvent(new PointerEvent('pointerup', {}))
+    await el.updateComplete
+    expect(parseFloat(dataCols(el)[0]!.style.width)).not.toBe(startWidth)
+
+    // A fresh result with no adopted widths (columnWidths prop still empty).
+    el.run = { phase: 'done', result: { columns: ['a', 'b'], rows: [['a0', 'b0']], rowCount: 1, durationMs: 1 } }
+    await el.updateComplete
+    expect(parseFloat(dataCols(el)[0]!.style.width)).toBe(startWidth)
+    el.remove()
+  })
+
+  it('emits resize-columns so the owner can persist dragged widths', async () => {
+    const el = await mountGrid(2)
+    const resized = vi.fn()
+    el.addEventListener('resize-columns', resized)
+    const grip = el.shadowRoot!.querySelectorAll<HTMLElement>('.col-resize')[0]!
+
+    grip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }))
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 160 }))
+    window.dispatchEvent(new PointerEvent('pointerup', {}))
+
+    expect(resized).toHaveBeenCalledOnce()
+    const { widths } = (resized.mock.calls[0]![0] as CustomEvent<{ widths: Array<[number, number]> }>).detail
+    // Freeze-all captures every column (2); the dragged one grew by the 60px drag.
+    const map = new Map(widths)
+    expect(map.size).toBe(2)
+    const startWidth = 60 // the measured width mountGrid renders for these cells
+    expect(map.get(0)).toBe(startWidth + 60)
+    el.remove()
+  })
+
+  it('adopts persisted widths from the columnWidths prop when a result loads', async () => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.columnWidths = new Map([[0, 240]])
+    el.run = { phase: 'done', result: { columns: ['a', 'b'], rows: [['a0', 'b0']], rowCount: 1, durationMs: 1 } }
+    document.body.append(el)
+    await el.updateComplete
+
+    const cols = [...el.shadowRoot!.querySelectorAll<HTMLElement>('colgroup col')].slice(1)
+    expect(parseFloat(cols[0]!.style.width)).toBe(240)
+    el.remove()
+  })
+})
+
+describe('results-panel keyboard scroll-into-view', () => {
+  // jsdom has no layout, so fake a narrow viewport with writable scroll offsets.
+  const fakeViewport = (el: HTMLElement) => {
+    const body = el.shadowRoot!.querySelector<HTMLElement>('.body')!
+    const state = { left: 0, top: 0 }
+    Object.defineProperty(body, 'clientWidth', { configurable: true, value: 50 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(body, 'scrollLeft', { configurable: true, get: () => state.left, set: (v: number) => (state.left = v) })
+    Object.defineProperty(body, 'scrollTop', { configurable: true, get: () => state.top, set: (v: number) => (state.top = v) })
+    return state
+  }
+
+  it('scrolls right to keep the selected column in view (ArrowRight)', async () => {
+    const el = await mountGrid(1) // 2 columns, wider than the faked 50px viewport
+    const view = fakeViewport(el)
+
+    key(el, { key: 'ArrowRight' }) // col 0 → col 1, off to the right
+    await el.updateComplete
+    expect(view.left).toBeGreaterThan(0)
+    el.remove()
+  })
+
+  it('scrolls back left when the selection returns to an earlier column', async () => {
+    const el = await mountGrid(1)
+    const view = fakeViewport(el)
+
+    key(el, { key: 'ArrowRight' })
+    const scrolledRight = view.left
+    expect(scrolledRight).toBeGreaterThan(0)
+
+    key(el, { key: 'ArrowLeft' }) // back to col 0
+    await el.updateComplete
+    expect(view.left).toBeLessThan(scrolledRight)
     el.remove()
   })
 })

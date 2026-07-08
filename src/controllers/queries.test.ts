@@ -243,6 +243,201 @@ describe('QueriesController drafts', () => {
   })
 })
 
+describe('QueriesController column widths', () => {
+  const cols = ['id', 'name']
+
+  it('stores and returns widths keyed by tab', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setColumnWidths('t1', cols, new Map([[0, 200]]))
+    expect([...controller.columnWidthsFor('t1', cols)]).toEqual([[0, 200]])
+    expect(controller.columnWidthsFor('t2', cols).size).toBe(0)
+    expect(controller.columnWidthsFor(null, cols).size).toBe(0)
+  })
+
+  it('re-measures (returns empty) when the result columns differ', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setColumnWidths('t1', cols, new Map([[0, 200]]))
+    // Same tab, but a query with a different shape — the old widths don't apply.
+    expect(controller.columnWidthsFor('t1', ['id', 'name', 'email']).size).toBe(0)
+    // The identical column set still gets them (survives a sort re-run).
+    expect(controller.columnWidthsFor('t1', ['id', 'name']).size).toBe(1)
+  })
+
+  it('clears a tab’s widths when set to an empty map', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setColumnWidths('t1', cols, new Map([[0, 200]]))
+    controller.setColumnWidths('t1', cols, new Map())
+    expect(controller.columnWidthsFor('t1', cols).size).toBe(0)
+  })
+
+  it('drops widths when the tab closes and moves them on rename', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setColumnWidths('t1', cols, new Map([[1, 150]]))
+    controller.renameTab('t1', 't2')
+    expect([...controller.columnWidthsFor('t2', cols)]).toEqual([[1, 150]])
+    controller.dropTab('t2')
+    expect(controller.columnWidthsFor('t2', cols).size).toBe(0)
+  })
+})
+
+describe('QueriesController staged undo/redo', () => {
+  it('steps cell edits back and forward one commit at a time', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'a')
+    controller.setEdit('t1', 1, 0, 'b')
+    expect(controller.editsFor('t1').size).toBe(2)
+
+    expect(controller.undoStaged('t1')).toBe(true)
+    expect(controller.editsList('t1')).toEqual([{ row: 0, col: 0, value: 'a' }])
+    expect(controller.undoStaged('t1')).toBe(true)
+    expect(controller.editsFor('t1').size).toBe(0)
+    expect(controller.undoStaged('t1')).toBe(false)
+
+    expect(controller.redoStaged('t1')).toBe(true)
+    expect(controller.editsList('t1')).toEqual([{ row: 0, col: 0, value: 'a' }])
+    expect(controller.redoStaged('t1')).toBe(true)
+    expect(controller.editsFor('t1').size).toBe(2)
+    expect(controller.redoStaged('t1')).toBe(false)
+  })
+
+  it('undoes across interleaved drafts and cell edits', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'x')
+    controller.addDraft('t1', 1)
+    expect(controller.draftsFor('t1')).toHaveLength(1)
+
+    controller.undoStaged('t1') // undo the draft
+    expect(controller.draftsFor('t1')).toEqual([])
+    expect(controller.editsList('t1')).toEqual([{ row: 0, col: 0, value: 'x' }])
+
+    controller.undoStaged('t1') // undo the edit
+    expect(controller.editsFor('t1').size).toBe(0)
+  })
+
+  it('restores everything after undoing a discard-all, and can redo it', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'a')
+    controller.addDraft('t1', 1)
+    controller.clearStaged('t1')
+    expect(controller.editsFor('t1').size).toBe(0)
+    expect(controller.draftsFor('t1')).toEqual([])
+
+    expect(controller.undoStaged('t1')).toBe(true)
+    expect(controller.editsList('t1')).toEqual([{ row: 0, col: 0, value: 'a' }])
+    expect(controller.draftsFor('t1')).toHaveLength(1)
+
+    expect(controller.redoStaged('t1')).toBe(true)
+    expect(controller.editsFor('t1').size).toBe(0)
+    expect(controller.draftsFor('t1')).toEqual([])
+  })
+
+  it('does not record a no-op edit (same value) as an undo step', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'a')
+    controller.setEdit('t1', 0, 0, 'a') // identical → no new step
+    expect(controller.undoStaged('t1')).toBe(true)
+    expect(controller.editsFor('t1').size).toBe(0)
+  })
+
+  it('drops the redo branch when a new edit follows an undo', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'a')
+    controller.setEdit('t1', 0, 0, 'b')
+    controller.undoStaged('t1')
+    controller.setEdit('t1', 1, 0, 'c')
+    expect(controller.redoStaged('t1')).toBe(false)
+    expect(controller.editsList('t1')).toEqual([
+      { row: 0, col: 0, value: 'a' },
+      { row: 1, col: 0, value: 'c' },
+    ])
+  })
+
+  it('invalidates undo history on a same-shape rerun (edits keyed to old rows)', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'stale')
+
+    const done = controller.execute(runArgs)
+    settle({ success: true, result })
+    await done
+
+    expect(controller.undoStaged('t1')).toBe(false)
+  })
+
+  it('drops a surviving redo branch on rerun so a stale edit cannot be replayed', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'stale')
+    // Undo leaves the edits map empty but the redo branch still holds the edit.
+    expect(controller.undoStaged('t1')).toBe(true)
+    expect(controller.editsFor('t1').size).toBe(0)
+
+    const done = controller.execute(runArgs)
+    settle({ success: true, result })
+    await done
+
+    // The rerun must invalidate that history — redo cannot retarget row 0.
+    expect(controller.redoStaged('t1')).toBe(false)
+    expect(controller.editsFor('t1').size).toBe(0)
+  })
+
+  it('applies a multi-cell fill as a single undo step', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.applyFill('t1', {
+      edits: [
+        { row: 0, col: 0, value: 'X' },
+        { row: 1, col: 0, value: 'X' },
+        { row: 2, col: 0, value: 'X' },
+      ],
+      clears: [],
+      draftCells: [],
+    })
+    expect(controller.editsFor('t1').size).toBe(3)
+    // The whole gesture is one snapshot: one undo clears all three cells.
+    expect(controller.undoStaged('t1')).toBe(true)
+    expect(controller.editsFor('t1').size).toBe(0)
+    expect(controller.undoStaged('t1')).toBe(false)
+  })
+
+  it('combines edits, clears, and draft cells in one fill snapshot', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'old')
+    controller.addDraft('t1', 2)
+    controller.applyFill('t1', {
+      edits: [{ row: 1, col: 0, value: 'Y' }],
+      clears: [{ row: 0, col: 0 }],
+      draftCells: [{ index: 0, col: 1, value: 'Z' }],
+    })
+    expect(controller.editsList('t1')).toEqual([{ row: 1, col: 0, value: 'Y' }])
+    expect(controller.draftsFor('t1')[0]!.cells).toEqual([null, 'Z'])
+    // One undo reverses the whole fill: edit gone, clear restored, draft cell back.
+    controller.undoStaged('t1')
+    expect(controller.editsList('t1')).toEqual([{ row: 0, col: 0, value: 'old' }])
+    expect(controller.draftsFor('t1')[0]!.cells).toEqual([null, null])
+  })
+
+  it('invalidates undo history at a save commit point', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('t1', 0, 0, 'a')
+    controller.clearStagedHistory('t1')
+    expect(controller.undoStaged('t1')).toBe(false)
+  })
+
+  it('returns false with no tab or no history', () => {
+    const controller = new QueriesController(host(), () => true)
+    expect(controller.undoStaged(null)).toBe(false)
+    expect(controller.redoStaged('never-touched')).toBe(false)
+  })
+
+  it('moves undo history with a tab rename', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setEdit('old', 0, 0, 'a')
+    controller.renameTab('old', 'new')
+    expect(controller.undoStaged('new')).toBe(true)
+    expect(controller.editsFor('new').size).toBe(0)
+  })
+})
+
 describe('QueriesController paging', () => {
   it('appends a fetched page on loadMore', async () => {
     const api = stubSqlkit({ fetchRows: vi.fn(() => Promise.resolve({ success: true, rows: [[2], [3]] })) })

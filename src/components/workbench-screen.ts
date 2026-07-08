@@ -207,6 +207,7 @@ export class WorkbenchScreen extends LitElement {
     dropDrafts: (tabId, indexes) => this._queries.dropDrafts(tabId, indexes),
     edits: () => this._queries.editsList(this._ctx.activeTabId),
     clearEdits: (tabId) => this._queries.clearEdits(tabId),
+    clearStagedHistory: (tabId) => this._queries.clearStagedHistory(tabId),
   })
 
   // Server-side schema mutations (drop/truncate/matview refresh, create/drop
@@ -382,6 +383,17 @@ export class WorkbenchScreen extends LitElement {
 
   // ⌘⇧P commands, ⌘P quick open, ⌘K database switch, ⌘B sidebar, ⌘N new
   // query, ⌘S save, ⌘↵ run, ⌘R/F5 refresh. Pressing a palette's own shortcut again closes it.
+  // True when the keystroke is inside an editable text field, which owns its own
+  // native undo — inputs, textareas, or contenteditable (CodeMirror's editor).
+  private _inTextField(event: KeyboardEvent): boolean {
+    return event.composedPath().some(
+      (node) =>
+        node instanceof HTMLInputElement ||
+        node instanceof HTMLTextAreaElement ||
+        (node instanceof HTMLElement && (node.isContentEditable || node.tagName === 'SQL-EDITOR')),
+    )
+  }
+
   private _onGlobalKeydown = (event: KeyboardEvent) => {
     // Mounted but hidden on the welcome screen; ignore global keys until a
     // workspace is open.
@@ -404,6 +416,23 @@ export class WorkbenchScreen extends LitElement {
     }
 
     if (!hasMod) return
+
+    // ⌘Z / ⌘⇧Z steps the active tab's staged edits from anywhere in the
+    // workbench — unless focus is in a text field, which keeps its native undo.
+    if (key === 'z' && !event.altKey) {
+      if (this._inTextField(event)) return
+      const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
+      if (activeTab?.kind === 'inspect' || activeTab?.kind === 'inspect-object') {
+        const inspect = this.renderRoot.querySelector('table-inspect')
+        if (event.shiftKey ? inspect?.redo() : inspect?.undo()) event.preventDefault()
+        return
+      }
+      if (this._ctx.activeSqlTab() && !this._layout.panelCollapsed) {
+        const tabId = this._ctx.activeTabId
+        if (event.shiftKey ? this._queries.redoStaged(tabId) : this._queries.undoStaged(tabId)) event.preventDefault()
+      }
+      return
+    }
 
     if (key === 'p') {
       event.preventDefault()
@@ -915,10 +944,12 @@ export class WorkbenchScreen extends LitElement {
             .drafts=${this._queries.draftsFor(this._ctx.activeTabId)}
             .edits=${this._queries.editsFor(this._ctx.activeTabId)}
             .sort=${this._queries.sortFor(this._ctx.activeTabId)}
+            .columnWidths=${this._resultColumnWidths()}
             @cancel-query=${this._onCancelQuery}
             @load-more=${this._onLoadMore}
             @cell-edit=${this._onCellEdit}
             @cell-edit-clear=${this._onCellEditClear}
+            @cells-fill=${this._onCellsFill}
             @add-row=${this._onAddRow}
             @duplicate-rows=${this._onDuplicateRows}
             @delete-rows=${this._onDeleteRows}
@@ -926,6 +957,7 @@ export class WorkbenchScreen extends LitElement {
             @draft-remove=${this._onDraftRemove}
             @save-rows=${() => this._resultEditing.saveChanges()}
             @discard-changes=${this._onDiscardChanges}
+            @resize-columns=${this._onResizeColumns}
             @sort-column=${this._onSortColumn}
             @toggle-collapse=${() => this._layout.togglePanelCollapse()}
             style="height: ${this._layout.panelStyleHeight()}"
@@ -1174,6 +1206,18 @@ export class WorkbenchScreen extends LitElement {
     if (this._ctx.activeTabId) this._queries.clearEdit(this._ctx.activeTabId, row, col)
   }
 
+  // A multi-cell fill from the grid: stage every changed cell in one undo step.
+  private _onCellsFill(event: Event) {
+    const detail = (
+      event as CustomEvent<{
+        edits: Array<{ row: number; col: number; value: string }>
+        clears: Array<{ row: number; col: number }>
+        draftCells: Array<{ index: number; col: number; value: string }>
+      }>
+    ).detail
+    if (this._ctx.activeTabId) this._queries.applyFill(this._ctx.activeTabId, detail)
+  }
+
   // Stages an empty new row in the grid (committed later via ⌘S / Save rows),
   // inserting below the selected row and expanding the panel if it was collapsed.
   private _onAddRow(event: Event) {
@@ -1203,6 +1247,21 @@ export class WorkbenchScreen extends LitElement {
 
   private _onDiscardChanges() {
     if (this._ctx.activeTabId) this._queries.clearStaged(this._ctx.activeTabId)
+  }
+
+  // The active result's persisted column widths, keyed by the columns they were
+  // set against (a differently-shaped result re-measures).
+  private _resultColumnWidths() {
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    return this._queries.columnWidthsFor(this._ctx.activeTabId, run.phase === 'done' ? run.result.columns : [])
+  }
+
+  private _onResizeColumns(event: Event) {
+    const tabId = this._ctx.activeTabId
+    const run = this._queries.runFor(tabId)
+    if (!tabId || run.phase !== 'done') return
+    const { widths } = (event as CustomEvent<{ widths: Array<[number, number]> }>).detail
+    this._queries.setColumnWidths(tabId, run.result.columns, new Map(widths))
   }
 
   // A header sort button: re-run the result's own query with a column sort the

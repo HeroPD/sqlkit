@@ -211,3 +211,92 @@ describe('WorkbenchScreen result refresh shortcuts', () => {
     expect(forceReload.defaultPrevented).toBe(false)
   })
 })
+
+describe('WorkbenchScreen undo/redo shortcut', () => {
+  const setup = (
+    opts: { tabKind?: string; undoRet?: boolean; redoRet?: boolean; collapsed?: boolean; hasSqlTab?: boolean } = {},
+  ) => {
+    const screen = new WorkbenchScreen()
+    screen.workspace = { name: 'Workspace', path: '/workspace' }
+    const inspectUndo = vi.fn(() => opts.undoRet ?? true)
+    const inspectRedo = vi.fn(() => opts.redoRet ?? true)
+    const undoStaged = vi.fn(() => opts.undoRet ?? true)
+    const redoStaged = vi.fn(() => opts.redoRet ?? true)
+    const workbench = screen as never as {
+      _ctx: { activeTabId: string | null; tabs: Array<{ id: string; kind: string }>; activeSqlTab: () => unknown }
+      _layout: { panelCollapsed: boolean }
+      _queries: { undoStaged: typeof undoStaged; redoStaged: typeof redoStaged }
+      renderRoot: { querySelector: (sel: string) => unknown }
+      _onGlobalKeydown(event: KeyboardEvent): void
+    }
+    workbench._ctx.activeTabId = 't1'
+    workbench._ctx.tabs = [{ id: 't1', kind: opts.tabKind ?? 'inspect' }]
+    workbench._ctx.activeSqlTab = () => (opts.hasSqlTab === false ? null : { id: 't1', kind: 'sql' })
+    workbench._layout.panelCollapsed = opts.collapsed ?? false
+    workbench._queries.undoStaged = undoStaged
+    workbench._queries.redoStaged = redoStaged
+    workbench.renderRoot = { querySelector: () => ({ undo: inspectUndo, redo: inspectRedo }) }
+    return { workbench, inspectUndo, inspectRedo, undoStaged, redoStaged }
+  }
+
+  const keydown = (init: KeyboardEventInit, fromEditor = false) => {
+    const event = new KeyboardEvent('keydown', { cancelable: true, ...init })
+    if (fromEditor) Object.defineProperty(event, 'composedPath', { value: () => [document.createElement('sql-editor')] })
+    return event
+  }
+
+  it('routes ⌘Z to inspect undo and ⌘⇧Z to redo on an Inspect tab', () => {
+    const { workbench, inspectUndo, inspectRedo } = setup({ tabKind: 'inspect' })
+
+    const z = keydown({ key: 'z', metaKey: true })
+    workbench._onGlobalKeydown(z)
+    expect(inspectUndo).toHaveBeenCalledOnce()
+    expect(z.defaultPrevented).toBe(true)
+
+    const shiftZ = keydown({ key: 'z', metaKey: true, shiftKey: true })
+    workbench._onGlobalKeydown(shiftZ)
+    expect(inspectRedo).toHaveBeenCalledOnce()
+    expect(shiftZ.defaultPrevented).toBe(true)
+  })
+
+  it('leaves the event for native undo when inspect declines it (mid cell-edit)', () => {
+    const { workbench, inspectUndo } = setup({ tabKind: 'inspect', undoRet: false, redoRet: false })
+    const z = keydown({ key: 'z', metaKey: true })
+
+    workbench._onGlobalKeydown(z)
+    expect(inspectUndo).toHaveBeenCalledOnce()
+    expect(z.defaultPrevented).toBe(false)
+  })
+
+  it('routes ⌘Z / ⌘⇧Z to the result grid on a SQL tab, from anywhere in the workbench', () => {
+    const { workbench, undoStaged, redoStaged } = setup({ tabKind: 'sql' })
+
+    const z = keydown({ key: 'z', metaKey: true })
+    workbench._onGlobalKeydown(z)
+    expect(undoStaged).toHaveBeenCalledWith('t1')
+    expect(z.defaultPrevented).toBe(true)
+
+    const shiftZ = keydown({ key: 'z', metaKey: true, shiftKey: true })
+    workbench._onGlobalKeydown(shiftZ)
+    expect(redoStaged).toHaveBeenCalledWith('t1')
+    expect(shiftZ.defaultPrevented).toBe(true)
+  })
+
+  it('leaves ⌘Z alone when the keystroke came from the editor', () => {
+    const { workbench, undoStaged } = setup({ tabKind: 'sql' })
+    const z = keydown({ key: 'z', metaKey: true }, true)
+
+    workbench._onGlobalKeydown(z)
+    expect(undoStaged).not.toHaveBeenCalled()
+    expect(z.defaultPrevented).toBe(false)
+  })
+
+  it('does not touch the result grid when the panel is collapsed', () => {
+    const { workbench, undoStaged } = setup({ tabKind: 'sql', collapsed: true })
+    const z = keydown({ key: 'z', metaKey: true })
+
+    workbench._onGlobalKeydown(z)
+    expect(undoStaged).not.toHaveBeenCalled()
+    expect(z.defaultPrevented).toBe(false)
+  })
+})
