@@ -18,6 +18,9 @@ const UNENCRYPTED_SECRETS_WARNING =
   'No OS key store (keychain) is available on this system, so connection passwords are saved unencrypted in ' +
   "this workspace's .sqlkit/config.json. A .gitignore keeps that file out of version control — avoid syncing or sharing it."
 
+const WEAK_STORAGE_WARNING =
+  'Electron is using Linux basic_text storage because no supported keyring is available. Saved passwords are only weakly obfuscated, not protected by an OS keychain. Configure libsecret/KWallet or avoid saving credentials.'
+
 // Owns the workspace's saved connection profiles (.sqlkit/config.json): the
 // list, its load/persist/save round trips, profile lookups, and resolving the
 // child database a profile should target. Distinct from ConnectionsController,
@@ -93,13 +96,16 @@ export class ConfigController {
   // the context to restore: the saved active profile (or the first one) and its
   // default child. A read error is surfaced; the on-disk file is left untouched.
   async load(): Promise<{ profileId: string | null; child: string | null }> {
-    const { config, error, unencryptedSecrets } = await window.sqlkit.getWorkspaceConfig()
+    const { config, error, unencryptedSecrets, weakCredentialStorage } = await window.sqlkit.getWorkspaceConfig()
     if (error) this.deps.dialogs.notice('Workspace config could not be read', `${error}\n\n${CONFIG_READ_ERROR}`)
     // Fires on open and after every save (via _loadConfig), so this one spot
     // covers the open-migration and persist() re-saves too; shown once a session.
     if (unencryptedSecrets && !this._warnedUnencrypted) {
       this._warnedUnencrypted = true
       this.deps.dialogs.notice('Passwords stored unencrypted', UNENCRYPTED_SECRETS_WARNING)
+    } else if (weakCredentialStorage && !this._warnedUnencrypted) {
+      this._warnedUnencrypted = true
+      this.deps.dialogs.notice('Passwords use weak Linux storage', WEAK_STORAGE_WARNING)
     }
     this.connections = config.connections
     const restored =

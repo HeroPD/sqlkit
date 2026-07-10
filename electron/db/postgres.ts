@@ -1,5 +1,5 @@
 import pg from 'pg'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
@@ -8,7 +8,7 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
-import { assertSelfContainedTransaction } from './sql-script'
+import { assertSelfContainedTransaction, isCappableRead } from './sql-script'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
@@ -21,6 +21,7 @@ export function sslOptions(profile: ConnectionProfile): boolean | ConnectionOpti
   const caPath = ssl.ca.trim()
   if (caPath) {
     try {
+      if (statSync(expandHome(caPath)).size > 5 * 1024 * 1024) throw new Error('certificate file exceeds 5 MB')
       options.ca = readFileSync(expandHome(caPath), 'utf8')
     } catch (error) {
       throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`, { cause: error })
@@ -46,6 +47,16 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   // target, and the first's completion then cleared it.
   const running = new Set<{ executionId?: string; pid: number | null; cancelRequested: boolean }>()
   const ssl = sslOptions(profile)
+  const losslessTypes = new pg.TypeOverrides()
+
+  // node-postgres otherwise turns timestamp/date values into JavaScript Date
+  // objects, losing the original timezone/precision (and interpreting a
+  // timestamp-without-zone in the workstation timezone). Keep temporal wire
+  // values as text. Array forms remain PostgreSQL array literals for the same
+  // reason; callers can inspect them without a lossy intermediate conversion.
+  for (const oid of [1082, 1083, 1114, 1184, 1186, 1266, 1115, 1182, 1183, 1185, 1187, 1270]) {
+    losslessTypes.setTypeParser(oid, (value) => value)
+  }
 
   const makePool = (database: string) => {
     const pool = new pg.Pool({
@@ -55,6 +66,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       password: profile.password,
       database,
       ssl,
+      types: losslessTypes,
       max: 4,
       connectionTimeoutMillis: 8000,
     })
@@ -79,6 +91,36 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   }
 
   const dialect = dialectFor(profile.engine)
+
+  const resetUserSession = async (client: pg.PoolClient) => {
+    // User SQL runs on pooled physical sessions. Always leave the session at
+    // its connection defaults before another tab can borrow it: ROLLBACK also
+    // catches implicit/unrecognised transaction starts, while DISCARD removes
+    // SET state, temp objects, prepared statements and LISTEN registrations.
+    await client.query('ROLLBACK')
+    await client.query('DISCARD ALL')
+  }
+
+  const cancelBackends = async (pids: number[], database: string) => {
+    const client = new pg.Client({
+      host: endpoint.host,
+      port: endpoint.port,
+      user: profile.username,
+      password: profile.password,
+      database,
+      ssl,
+      connectionTimeoutMillis: 8000,
+    })
+    try {
+      await client.connect()
+      return await Promise.all(pids.map((pid) => client
+        .query<{ ok: boolean }>('select pg_cancel_backend($1) as ok', [pid])
+        .then((result) => result.rows[0]?.ok === true)
+        .catch(() => false)))
+    } finally {
+      await client.end().catch(() => {})
+    }
+  }
 
   return {
     async connect() {
@@ -132,7 +174,10 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           released = true
           throw new Error('Query cancelled.')
         }
-        const result = await streamQuery(client, finalSql, params, started)
+        const result = await streamQuery(client, finalSql, params, started, isCappableRead(finalSql)
+          ? async () => { if (entry.pid !== null) await cancelBackends([entry.pid], childDb ?? active) }
+          : undefined)
+        await resetUserSession(client)
         client.release()
         released = true
         return result
@@ -260,31 +305,10 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // Nothing running, or running but no PID captured yet (queued checkout):
       // either way there's nothing to target, so report it honestly.
       if (!pids.length) return { running: entries.length, cancelled: queued.length }
-      const client = new pg.Client({
-        host: endpoint.host,
-        port: endpoint.port,
-        user: profile.username,
-        password: profile.password,
-        database: active,
-        ssl,
-        connectionTimeoutMillis: 8000,
-      })
-      try {
-        await client.connect()
-        // pg_cancel_backend returns false for a PID that's already gone or that
-        // we lack permission to signal; count only the ones it actually hit.
-        const sent = await Promise.all(
-          pids.map((pid) =>
-            client
-              .query<{ ok: boolean }>('select pg_cancel_backend($1) as ok', [pid])
-              .then((result) => result.rows[0]?.ok === true)
-              .catch(() => false),
-          ),
-        )
-        return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
-      } finally {
-        await client.end().catch(() => {})
-      }
+      // pg_cancel_backend returns false for a PID that's already gone or that
+      // we lack permission to signal; count only the ones it actually hit.
+      const sent = await cancelBackends(pids, active)
+      return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
     async listTables(childDb = null) {
@@ -634,16 +658,24 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
 // Streams rows so a huge result can't OOM the main process: pg only buffers
 // when nothing listens for 'row'. rowMode array keeps duplicate column names.
-function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], started: number): Promise<QueryResult> {
+function streamQuery(
+  client: pg.PoolClient,
+  sql: string,
+  params: unknown[],
+  started: number,
+  stopAtLimit?: () => Promise<unknown>,
+): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     const buffers = new Map<object, { rows: unknown[][]; total: number; bytes: number; limited: boolean }>()
     let bufferedBytes = 0
+    let limitCancellation = false
     const config: pg.QueryArrayConfig = { text: sql, values: params, rowMode: 'array' }
     const query = new pg.Query(config)
     query.on('row', (row: unknown[], result?: object) => {
       const key = result ?? query
       const buffer = buffers.get(key) ?? { rows: [], total: 0, bytes: 0, limited: false }
       buffer.total += 1
+      let capacityExceeded = false
       if (buffer.rows.length < MAX_BUFFERED_ROWS) {
         const bounded = boundedRow(row, bufferedBytes)
         if (bounded) {
@@ -651,13 +683,33 @@ function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], star
           buffer.bytes += bounded.bytes
           bufferedBytes += bounded.bytes
           buffer.limited ||= bounded.truncated
-        } else buffer.limited = true
-      } else buffer.limited = true
+        } else {
+          buffer.limited = true
+          capacityExceeded = true
+        }
+      } else {
+        buffer.limited = true
+        capacityExceeded = true
+      }
       buffers.set(key, buffer)
+      if (capacityExceeded && !limitCancellation && stopAtLimit) {
+        limitCancellation = true
+        // Pause this result socket before yielding to the out-of-band cancel;
+        // otherwise a fast server can synchronously emit the entire result
+        // before the cancel connection gets an event-loop turn.
+        const stream = (client as unknown as { connection?: { stream?: { pause(): void; resume(): void } } }).connection?.stream
+        stream?.pause()
+        void stopAtLimit().catch(() => {}).finally(() => stream?.resume())
+      }
     })
-    query.on('error', reject)
-    query.on('end', (result) => {
-      const results = (Array.isArray(result) ? result : [result]) as pg.QueryArrayResult[]
+    const finish = (result?: pg.QueryArrayResult | pg.QueryArrayResult[]) => {
+      const results = result
+        ? (Array.isArray(result) ? result : [result])
+        : [...buffers.keys()].filter((entry): entry is pg.QueryArrayResult => 'fields' in entry)
+      if (!results.length) {
+        reject(new Error('Query result metadata was unavailable after cancellation.'))
+        return
+      }
       void Promise.all(
         results.map(async (entry): Promise<QueryResultSet> => {
           const buffer = buffers.get(entry as object) ?? { rows: [], total: 0, bytes: 0, limited: false }
@@ -665,8 +717,9 @@ function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], star
             columns: entry.fields.map((field) => field.name),
             columnSources: await columnSourcesForFields(client, entry.fields),
             rows: buffer.rows,
-            rowCount: entry.rowCount ?? buffer.total,
+            rowCount: limitCancellation ? buffer.total : (entry.rowCount ?? buffer.total),
             truncated: buffer.limited || buffer.total > buffer.rows.length,
+            rowCountExact: !limitCancellation,
           }
         }),
       )
@@ -679,7 +732,9 @@ function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], star
           })
         })
         .catch(reject)
-    })
+    }
+    query.on('error', (error) => limitCancellation ? finish() : reject(error))
+    query.on('end', finish)
     client.query(query)
   })
 }

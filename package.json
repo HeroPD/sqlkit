@@ -14,6 +14,7 @@
     "test:watch": "vitest",
     "electron": "npm run build && electron .",
     "build": "tsc -b && vite build",
+    "smoke": "npm run build && electron . --smoke-test",
     "preview": "vite preview",
     "pack": "npm run build && dotenv -e .env -- electron-builder --dir",
     "dist": "npm run build && dotenv -e .env -- electron-builder"

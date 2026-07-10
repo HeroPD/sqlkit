@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ColumnRef, QueryResult, TableRef } from './electron'
-import { buildEditSpecs, singleTableEditContext, type ResultEditInput } from './result-editing'
+import { buildEditSpecs, rowKeysForDelete, singleTableEditContext, type ResultEditInput } from './result-editing'
 
 const accounts: TableRef = { schema: 'public', name: 'accounts', kind: 'table' }
 const companies: TableRef = { schema: 'public', name: 'companies', kind: 'table' }
@@ -69,6 +69,35 @@ describe('result edit context', () => {
     expect(buildEditSpecs(editInput, [{ row: 0, col: 4 }], 'Globex')).toMatchObject({ ok: false })
   })
 
+  it('deletes with every original column value and blocks partial projections', () => {
+    const complete = input({
+      columns: ['id', 'name', 'company_id'],
+      columnSources: [source(accounts, 'id'), source(accounts, 'name'), source(accounts, 'company_id')],
+      rows: [[1, 'Ada', null]],
+      rowCount: 1,
+      durationMs: 1,
+    }, 'select id, name, company_id from public.accounts')
+    const ctx = singleTableEditContext(complete)
+    expect(ctx).not.toBeNull()
+    expect(rowKeysForDelete(ctx!, [0])).toEqual({
+      ok: true,
+      value: [[
+        { name: 'id', value: 1 },
+        { name: 'name', value: 'Ada' },
+        { name: 'company_id', value: null },
+      ]],
+    })
+
+    const partial = input({
+      columns: ['id', 'name'],
+      columnSources: [source(accounts, 'id'), source(accounts, 'name')],
+      rows: [[1, 'Ada']],
+      rowCount: 1,
+      durationMs: 1,
+    }, 'select id, name from public.accounts')
+    expect(rowKeysForDelete(singleTableEditContext(partial)!, [0])).toMatchObject({ ok: false })
+  })
+
   it('does not fall back to result column names when metadata says the PK is absent', () => {
     const sql = 'select name as id from public.accounts'
     const result: QueryResult = {
@@ -99,6 +128,21 @@ describe('result edit context', () => {
       ok: true,
       value: { table: accounts, edits: [{ column: 'name', pks: [{ name: 'id', value: 1 }] }] },
     })
+  })
+
+  it('maps single-table star results, including SQL Server TOP, without source metadata', () => {
+    const sql = 'select top (200) * from [public].[accounts]'
+    const result: QueryResult = {
+      columns: ['id', 'name', 'company_id'],
+      rows: [[1, 'Ada', null]],
+      rowCount: 1,
+      durationMs: 1,
+    }
+    const editInput = input(result, sql, accounts)
+    const ctx = singleTableEditContext(editInput)
+    expect(ctx).not.toBeNull()
+    expect(buildEditSpecs(editInput, [{ row: 0, col: 1 }], 'Grace')).toMatchObject({ ok: true })
+    expect(rowKeysForDelete(ctx!, [0])).toMatchObject({ ok: true })
   })
 
   it('does not infer editability from source-less computed columns aliased as table columns', () => {

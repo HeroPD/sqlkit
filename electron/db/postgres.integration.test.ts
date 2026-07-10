@@ -116,17 +116,47 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
-  it('buffers at most MAX_BUFFERED_ROWS but counts them all', async () => {
+  it('stops a single read once the result buffer is full', async () => {
     const driver = await connectDriver()
     try {
-      const result = await driver.query('select generate_series(1, $1) as n', [MAX_BUFFERED_ROWS + 25])
+      const count = MAX_BUFFERED_ROWS + 1_000_000
+      const result = await driver.query('select generate_series(1, $1) as n', [count])
       expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
-      expect(result.rowCount).toBe(MAX_BUFFERED_ROWS + 25)
+      expect(result.rowCount).toBeGreaterThanOrEqual(MAX_BUFFERED_ROWS)
+      expect(result.rowCount).toBeLessThan(count)
       expect(result.truncated).toBe(true)
+      expect(result.rowCountExact).toBe(false)
     } finally {
       await driver.disconnect()
     }
   }, 20000)
+
+  it('does not leak session state between pooled query runs', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query("set application_name = 'sqlkit-leaked-state'")
+      expect((await driver.query("select current_setting('application_name')")).rows[0]?.[0]).not.toBe('sqlkit-leaked-state')
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('preserves temporal and exact numeric values as text', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query(
+        "select date '2026-07-10', timestamp '2026-07-10 03:04:05.123456', timestamptz '2026-07-10 03:04:05.123456+08', 12345678901234567890.1234::numeric",
+      )
+      expect(result.rows[0]).toEqual([
+        '2026-07-10',
+        '2026-07-10 03:04:05.123456',
+        '2026-07-09 19:04:05.123456+00',
+        '12345678901234567890.1234',
+      ])
+    } finally {
+      await driver.disconnect()
+    }
+  })
 
   it('reports the schema/table/column source of each result column', async () => {
     const driver = await connectDriver()

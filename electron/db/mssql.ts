@@ -1,5 +1,5 @@
 import sql from 'mssql'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
@@ -7,13 +7,84 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
-import { assertSelfContainedTransaction, splitSqlServerBatches } from './sql-script'
+import { assertSelfContainedTransaction, isCappableRead, splitSqlServerBatches } from './sql-script'
 
 // Always-present databases; hidden from all-databases children except master,
 // which is a legitimate browsing target (it's the default sa database).
 const SYSTEM_DBS = ['tempdb', 'model', 'msdb']
 
 const isCancelled = (error: unknown) => (error as { code?: string }).code === 'ECANCEL'
+
+const mssqlTypeExpression = `concat(
+  case when ty.is_user_defined = 1
+       then concat(quotename(schema_name(ty.schema_id)), '.', quotename(ty.name))
+       else ty.name end,
+  case when ty.is_user_defined = 1 then ''
+       when ty.name in ('varchar','nvarchar','char','nchar','varbinary','binary') then
+         concat('(', iif(c.max_length = -1, 'max',
+           cast(iif(ty.name like 'n%', c.max_length / 2, c.max_length) as varchar(10))), ')')
+       when ty.name in ('decimal','numeric') then concat('(', c.precision, ',', c.scale, ')')
+       when ty.name = 'float' then concat('(', c.precision, ')')
+       when ty.name in ('time','datetime2','datetimeoffset') then concat('(', c.scale, ')')
+       else '' end)`
+
+type MssqlColumn = {
+  name: string
+  type?: unknown
+  precision?: number
+  scale?: number
+}
+
+type PreciseDate = Date & { nanosecondsDelta?: number }
+
+const pad = (value: number, width = 2) => String(value).padStart(width, '0')
+
+const temporalText = (value: PreciseDate, type: unknown, scale = 7): string => {
+  const date = `${pad(value.getUTCFullYear(), 4)}-${pad(value.getUTCMonth() + 1)}-${pad(value.getUTCDate())}`
+  if (type === sql.Date) return date
+  const fractionTicks = (value.getUTCMilliseconds() * 10_000) + Math.round((value.nanosecondsDelta ?? 0) * 10_000_000)
+  const fraction = scale ? `.${pad(fractionTicks, 7).slice(0, scale)}` : ''
+  const time = `${pad(value.getUTCHours())}:${pad(value.getUTCMinutes())}:${pad(value.getUTCSeconds())}${fraction}`
+  if (type === sql.Time) return time
+  return `${date} ${time}`
+}
+
+const exactFixed = (value: number, precision: number, scale: number, column: string): string => {
+  // tedious has already converted decimal to a binary float. Up to 15
+  // significant decimal digits can be round-tripped reliably; above that we
+  // must refuse the lossy value instead of displaying/editing corrupted data.
+  if (precision > 15 || !Number.isFinite(value)) {
+    throw new Error(`SQL Server column "${column}" has precision ${precision}, which its JavaScript driver cannot return losslessly. CAST it to varchar in the query.`)
+  }
+  return value.toFixed(scale)
+}
+
+export function normalizeMssqlRow(row: unknown[], columns: MssqlColumn[]): unknown[] {
+  return row.map((value, index) => {
+    if (value === null || value === undefined) return value
+    const column = columns[index]
+    const type = column?.type
+    if ((type === sql.Decimal || type === sql.Numeric) && typeof value === 'number') {
+      return exactFixed(value, column?.precision ?? 38, column?.scale ?? 0, column?.name ?? `#${index + 1}`)
+    }
+    if (type === sql.Money && typeof value === 'number') {
+      return exactFixed(value, 19, 4, column?.name ?? `#${index + 1}`)
+    }
+    if (type === sql.SmallMoney && typeof value === 'number') {
+      return exactFixed(value, 10, 4, column?.name ?? `#${index + 1}`)
+    }
+    if (type === sql.DateTimeOffset && value instanceof Date) {
+      // Tedious currently discards the original offset while decoding this
+      // TDS type. Returning its UTC Date would silently change the value.
+      throw new Error(`SQL Server column "${column?.name ?? `#${index + 1}`}" is datetimeoffset, whose original offset is discarded by the driver. CAST it to varchar in the query.`)
+    }
+    if (value instanceof Date && [sql.Date, sql.Time, sql.DateTime, sql.SmallDateTime, sql.DateTime2].includes(type as never)) {
+      const defaultScale = type === sql.SmallDateTime ? 0 : type === sql.DateTime ? 3 : 7
+      return temporalText(value, type, column?.scale ?? defaultScale)
+    }
+    return value
+  })
+}
 
 /** "Microsoft SQL Server 2022 (RTM-CU14) (KB…) - 16.0.x …" → "Microsoft SQL Server 2022". */
 export function mssqlVersion(raw: string): string {
@@ -36,6 +107,7 @@ export function mssqlTls(profile: ConnectionProfile): { encrypt: boolean; trustS
   const caPath = profile.ssl?.ca.trim()
   if (!caPath) return { encrypt: true, trustServerCertificate: false }
   try {
+    if (statSync(expandHome(caPath)).size > 5 * 1024 * 1024) throw new Error('certificate file exceeds 5 MB')
     return { encrypt: true, trustServerCertificate: false, ca: readFileSync(expandHome(caPath), 'utf8') }
   } catch (error) {
     throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`, { cause: error })
@@ -72,6 +144,20 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         ...(tls.ca ? { cryptoCredentialsDetails: { ca: tls.ca } } : {}),
       },
     })
+    // node-mssql does not reset tedious sessions when returning them to its
+    // pool. Delay every release until the TDS RESETCONNECTION request has
+    // rolled back implicit transactions and cleared SET/temp/session state.
+    type ResettableConnection = { reset(callback: (error?: Error) => void): void; close(): void }
+    type PoolWithRelease = { release(connection: ResettableConnection): sql.ConnectionPool }
+    const poolWithRelease = pool as unknown as PoolWithRelease
+    const originalRelease = poolWithRelease.release.bind(poolWithRelease)
+    poolWithRelease.release = (connection) => {
+      connection.reset((error) => {
+        if (error) connection.close()
+        originalRelease(connection)
+      })
+      return pool
+    }
     pool.on('error', (error: Error) => events.onError(error.message))
     return pool
   }
@@ -144,16 +230,18 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
         const resultSets: QueryResultSet[] = []
         const budget = { bytes: 0 }
-        for (const batch of splitSqlServerBatches(finalSql)) {
+        const batches = splitSqlServerBatches(finalSql)
+        for (const batch of batches) {
           entry.request = bind(pool.request(), params)
           if (entry.cancelRequested) throw new Error('Query cancelled.')
-          result = await streamQuery(entry.request, batch, started, budget)
+          result = await streamQuery(entry.request, batch, started, budget, batches.length === 1 && isCappableRead(batch))
           resultSets.push(...(result.resultSets ?? [{
             columns: result.columns,
             columnSources: result.columnSources,
             rows: result.rows,
             rowCount: result.rowCount,
             truncated: result.truncated,
+            rowCountExact: result.rowCountExact,
           }]))
         }
         const selected = resultSets[resultSets.length - 1] ?? result
@@ -173,12 +261,17 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       if (!statements.length) return { success: true }
       const pool = await poolForQuery(childDb)
       const transaction = new sql.Transaction(pool)
+      const entry = { request: null as sql.Request | null, cancelRequested: false }
+      running.add(entry)
       let index = -1
       try {
         await transaction.begin()
+        if (entry.cancelRequested) throw new Error('Query cancelled.')
         for (index = 0; index < statements.length; index += 1) {
           const statement = statements[index]!
-          const result = await bind(new sql.Request(transaction), statement.params).query(statement.sql)
+          entry.request = bind(new sql.Request(transaction), statement.params)
+          if (entry.cancelRequested) throw new Error('Query cancelled.')
+          const result = await entry.request.query(statement.sql)
           // A write that matched nothing means the row moved or vanished since
           // the user reviewed it — abort the whole batch rather than half-apply.
           const affected = result.rowsAffected[0] ?? 0
@@ -200,8 +293,10 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
-          error: isCancelled(error) ? 'Save cancelled.' : (error as Error).message,
+          error: isCancelled(error) || (error as Error).message === 'Query cancelled.' ? 'Save cancelled.' : (error as Error).message,
         }
+      } finally {
+        running.delete(entry)
       }
     },
 
@@ -210,13 +305,18 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // SQL Server DDL is transactional, so all-or-nothing like Postgres.
       const pool = await poolForQuery(childDb)
       const transaction = new sql.Transaction(pool)
+      const entry = { request: null as sql.Request | null, cancelRequested: false }
+      running.add(entry)
       let index = -1
       try {
         await transaction.begin()
+        if (entry.cancelRequested) throw new Error('Query cancelled.')
         for (index = 0; index < statements.length; index += 1) {
           // batch() not query(): DDL like CREATE VIEW must be alone in a batch,
           // and sp_executesql (query with params) counts as one.
-          await new sql.Request(transaction).batch(statements[index]!)
+          entry.request = new sql.Request(transaction)
+          if (entry.cancelRequested) throw new Error('Query cancelled.')
+          await entry.request.batch(statements[index]!)
         }
         await transaction.commit()
         return { success: true }
@@ -225,8 +325,10 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
-          error: isCancelled(error) ? 'Save cancelled.' : (error as Error).message,
+          error: isCancelled(error) || (error as Error).message === 'Query cancelled.' ? 'Save cancelled.' : (error as Error).message,
         }
+      } finally {
+        running.delete(entry)
       }
     },
 
@@ -294,12 +396,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         fk: number
       }>(
         `select s.name as table_schema, t.name as table_name, c.name as name,
-                concat(ty.name,
-                       case when ty.name in ('varchar','nvarchar','char','nchar','varbinary') then
-                              concat('(', iif(c.max_length = -1, 'max',
-                                cast(iif(ty.name like 'n%', c.max_length / 2, c.max_length) as varchar(10))), ')')
-                            when ty.name in ('decimal','numeric') then concat('(', c.precision, ',', c.scale, ')')
-                            else '' end) as data_type,
+                ${mssqlTypeExpression} as data_type,
                 c.is_nullable as nullable,
                 iif(exists (select 1 from sys.index_columns ic
                             join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
@@ -345,9 +442,12 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async inspectObject(object, _objectKind, childDb = null) {
+      const qualified = object.schema
+        ? `${dialect.quoteIdent(object.schema)}.${dialect.quoteIdent(object.name)}`
+        : dialect.quoteIdent(object.name)
       const rows = await metaRows<{ definition: string | null }>(
         'select object_definition(object_id(@p1)) as definition',
-        [object.schema ? `${object.schema}.${object.name}` : object.name],
+        [qualified],
         childDb,
       )
       const definition = rows[0]?.definition
@@ -380,7 +480,9 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
     async inspectTable(table, childDb = null) {
       type Row = { name: string; definition: string }
-      const qualified = table.schema ? `${table.schema}.${table.name}` : table.name
+      const qualified = table.schema
+        ? `${dialect.quoteIdent(table.schema)}.${dialect.quoteIdent(table.name)}`
+        : dialect.quoteIdent(table.name)
 
       const [columns, foreignKeys, checks, indexes, triggers] = await Promise.all([
         metaRows<{
@@ -390,22 +492,18 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           default_expr: string | null
           pk: number
           identity: boolean
+          computed: boolean
           collation: string | null
         }>(
           `select c.name as name,
-                  concat(ty.name,
-                         case when ty.name in ('varchar','nvarchar','char','nchar','varbinary') then
-                                concat('(', iif(c.max_length = -1, 'max',
-                                  cast(iif(ty.name like 'n%', c.max_length / 2, c.max_length) as varchar(10))), ')')
-                              when ty.name in ('decimal','numeric') then concat('(', c.precision, ',', c.scale, ')')
-                              when ty.name in ('time','datetime2','datetimeoffset') then concat('(', c.scale, ')')
-                              else '' end) as data_type,
+                  ${mssqlTypeExpression} as data_type,
                   c.is_nullable as nullable,
                   dc.definition as default_expr,
                   iif(exists (select 1 from sys.index_columns ic
                               join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
                               where i.is_primary_key = 1 and ic.object_id = c.object_id and ic.column_id = c.column_id), 1, 0) as pk,
                   c.is_identity as [identity],
+                  c.is_computed as computed,
                   nullif(c.collation_name, convert(sysname, databasepropertyex(db_name(), 'Collation'))) as collation
            from sys.columns c
            join sys.types ty on ty.user_type_id = c.user_type_id
@@ -477,6 +575,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           primaryKey: !!row.pk,
           comment: null,
           collation: row.collation,
+          generated: !!row.computed,
         })),
         sections: sections.filter((section) => section.rows.length),
       }
@@ -501,6 +600,7 @@ function streamQuery(
   sqlText: string,
   started: number,
   budget: { bytes: number } = { bytes: 0 },
+  stopAtLimit = false,
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     request.stream = true
@@ -512,15 +612,19 @@ function streamQuery(
     let affected = 0
     let limited = false
     let active = false
+    let fields: MssqlColumn[] = []
+    let conversionError: Error | null = null
+    let limitCancellation = false
     const resultSets: QueryResultSet[] = []
     const pushCurrent = () => {
       if (!active) return
-      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length })
+      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length, rowCountExact: !limitCancellation })
       active = false
     }
-    request.on('recordset', (recordset: Array<{ name: string }>) => {
+    request.on('recordset', (recordset: MssqlColumn[]) => {
       pushCurrent()
       sawRecordset = true
+      fields = recordset
       columns = recordset.map((column) => column.name)
       rows = []
       total = 0
@@ -528,21 +632,44 @@ function streamQuery(
       active = true
     })
     request.on('row', (row: unknown[]) => {
+      if (conversionError) return
+      let normalized: unknown[]
+      try {
+        normalized = normalizeMssqlRow(row, fields)
+      } catch (error) {
+        conversionError = error as Error
+        try { request.cancel() } catch { /* request may already be complete */ }
+        return
+      }
       total += 1
+      let capacityExceeded = false
       if (rows.length < MAX_BUFFERED_ROWS) {
-        const bounded = boundedRow(row, budget.bytes)
+        const bounded = boundedRow(normalized, budget.bytes)
         if (bounded) {
           rows.push(bounded.row)
           budget.bytes += bounded.bytes
           limited ||= bounded.truncated
-        } else limited = true
-      } else limited = true
+        } else {
+          limited = true
+          capacityExceeded = true
+        }
+      } else {
+        limited = true
+        capacityExceeded = true
+      }
+      if (capacityExceeded && !limitCancellation && stopAtLimit) {
+        limitCancellation = true
+        request.cancel()
+      }
     })
     request.on('rowsaffected', (count: number) => {
       affected += count
     })
-    request.on('error', reject)
-    request.on('done', () => {
+    const finish = () => {
+      if (conversionError) {
+        reject(conversionError)
+        return
+      }
       pushCurrent()
       if (!sawRecordset) resultSets.push({ columns: [], rows: [], rowCount: affected })
       const selected = resultSets[resultSets.length - 1] ?? { columns: [], rows: [], rowCount: affected }
@@ -551,7 +678,13 @@ function streamQuery(
         durationMs: performance.now() - started,
         ...(resultSets.length > 1 ? { resultSets } : {}),
       })
+    }
+    request.on('error', (error) => {
+      if (conversionError) reject(conversionError)
+      else if (limitCancellation) finish()
+      else reject(error instanceof Error ? error : new Error(String(error)))
     })
+    request.on('done', finish)
     void request.query(sqlText).catch(() => {
       // Errors surface via the 'error' event in stream mode; swallow the
       // duplicate rejection from the promise API.

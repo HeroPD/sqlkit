@@ -162,22 +162,52 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
-  it('buffers at most MAX_BUFFERED_ROWS but counts them all', async () => {
+  it('stops a single read once the result buffer is full', async () => {
     const driver = await connectDriver()
     try {
-      const count = MAX_BUFFERED_ROWS + 25
+      const count = MAX_BUFFERED_ROWS + 1_000_000
       // A cross join over information_schema generates rows without recursive
       // CTEs, whose depth cap is spelled differently on MySQL vs MariaDB.
       const result = await driver.query(
         `select a.table_name from information_schema.columns a cross join information_schema.columns b limit ${count}`,
       )
       expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
-      expect(result.rowCount).toBe(count)
+      expect(result.rowCount).toBeGreaterThanOrEqual(MAX_BUFFERED_ROWS)
+      expect(result.rowCount).toBeLessThan(count)
       expect(result.truncated).toBe(true)
+      expect(result.rowCountExact).toBe(false)
     } finally {
       await driver.disconnect()
     }
   }, 30000)
+
+  it('does not leak user variables between pooled query runs', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('set @sqlkit_leaked_state = 7')
+      expect((await driver.query('select @sqlkit_leaked_state')).rows).toEqual([[null]])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('executes mysql-client DELIMITER routine scripts', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('drop procedure if exists sqlkit_delimiter_test')
+      await driver.query(`DELIMITER $$
+CREATE PROCEDURE sqlkit_delimiter_test()
+BEGIN
+  SELECT 'inside;body' AS value;
+END$$
+DELIMITER ;`)
+      const called = await driver.query('call sqlkit_delimiter_test()')
+      expect(called.resultSets?.find((set) => set.columns[0] === 'value')?.rows ?? called.rows).toEqual([['inside;body']])
+    } finally {
+      await driver.query('drop procedure if exists sqlkit_delimiter_test').catch(() => {})
+      await driver.disconnect()
+    }
+  })
 
   it('reports the schema/table/column source of each result column', async () => {
     const driver = await connectDriver()

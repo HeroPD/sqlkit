@@ -47,6 +47,31 @@ describe('dialect script handling', () => {
     )
   })
 
+  it('only replaces custom delimiters outside MySQL strings and comments', () => {
+    expect(preprocessMysqlDelimiters([
+      'DELIMITER $$',
+      "SELECT '$$' AS quoted$$ SELECT 2$$ -- $$",
+      '/* $$',
+      'DELIMITER ;',
+      '$$ */',
+      'DELIMITER ;',
+    ].join('\n'))).toBe([
+      "SELECT '$$' AS quoted; SELECT 2; -- $$",
+      '/* $$',
+      'DELIMITER ;',
+      '$$ */',
+    ].join('\n'))
+  })
+
+  it('handles escaped and doubled quotes while using a custom delimiter', () => {
+    expect(preprocessMysqlDelimiters("DELIMITER //\nSELECT 'can\\'t //', \"a\"\"//b\"//\nDELIMITER ;"))
+      .toBe("SELECT 'can\\'t //', \"a\"\"//b\";")
+  })
+
+  it('does not mistake MySQL subtraction for a -- comment', () => {
+    expect(preprocessMysqlDelimiters('DELIMITER $$\nSELECT 3--2$$\nDELIMITER ;')).toBe('SELECT 3--2;')
+  })
+
   it('splits only top-level semicolons', () => {
     expect(splitTopLevelStatements("select ';'; select (1 + 2);")).toEqual(["select ';'", 'select (1 + 2)'])
   })

@@ -7,7 +7,6 @@ const desc = (column: string): OrderByTerm => ({ column, dir: 'desc' })
 describe('isReorderableQuery', () => {
   it('accepts a single read statement', () => {
     expect(isReorderableQuery('SELECT * FROM users')).toBe(true)
-    expect(isReorderableQuery('  with t as (select 1) select * from t')).toBe(true)
     expect(isReorderableQuery('SELECT * FROM users;')).toBe(true)
     expect(isReorderableQuery('SELECT * FROM users;  \n')).toBe(true)
   })
@@ -17,6 +16,10 @@ describe('isReorderableQuery', () => {
     expect(isReorderableQuery('UPDATE users SET name = 1')).toBe(false)
     expect(isReorderableQuery('SELECT 1; SELECT 2')).toBe(false)
     expect(isReorderableQuery('-- a comment\nDELETE FROM users')).toBe(false)
+    expect(isReorderableQuery('WITH changed AS (DELETE FROM users RETURNING *) SELECT * FROM changed')).toBe(false)
+    expect(isReorderableQuery('SELECT * INTO archived_users FROM users')).toBe(false)
+    expect(isReorderableQuery('SELECT * FROM users FOR UPDATE')).toBe(false)
+    expect(isReorderableQuery('SELECT * FROM users OPTION (RECOMPILE)')).toBe(false)
   })
 
   it('ignores semicolons inside strings', () => {

@@ -66,6 +66,7 @@ function normalizeConnections(connections: ConnectionProfile[]): ConnectionProfi
 // dropping it instead would silently wipe saved passwords on every config
 // rewrite (e.g. a context switch) and break the current session.
 const SECRET_PREFIX = 'enc:v1:'
+const MAX_CONFIG_BYTES = 5 * 1024 * 1024
 
 const encryptSecret = (value: string): string => {
   if (!value || value.startsWith(SECRET_PREFIX) || !safeStorage.isEncryptionAvailable()) return value
@@ -84,6 +85,18 @@ const connectionHasPlaintextSecret = (connection: ConnectionProfile) =>
 // plaintext. The renderer warns the user once per workspace open.
 const hasUnencryptedSecrets = (connections: ConnectionProfile[]) =>
   !safeStorage.isEncryptionAvailable() && connections.some(connectionHasPlaintextSecret)
+
+export const isWeakStorageBackend = (platform: NodeJS.Platform, backend: string) =>
+  platform === 'linux' && backend === 'basic_text'
+
+const hasWeaklyProtectedSecrets = (connections: ConnectionProfile[]) => {
+  if (!connections.some((connection) => connection.password || connection.ssh?.password || connection.ssh?.passphrase)) return false
+  try {
+    return isWeakStorageBackend(process.platform, safeStorage.getSelectedStorageBackend())
+  } catch {
+    return false
+  }
+}
 
 // Keeps config.json — and the temp file the atomic write leaves on a crash —
 // out of version control; both hold credentials, plaintext on a keyless system.
@@ -177,7 +190,9 @@ type ConfigOutcome =
 function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
   let raw: string
   try {
-    raw = fs.readFileSync(workspaceConfigPathFor(workspacePath), 'utf8')
+    const file = workspaceConfigPathFor(workspacePath)
+    if (fs.statSync(file).size > MAX_CONFIG_BYTES) return { status: 'error', error: `${file} exceeds the 5 MB configuration limit.` }
+    raw = fs.readFileSync(file, 'utf8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'missing' }
     return { status: 'error', error: (error as Error).message }
@@ -213,7 +228,11 @@ export function readWorkspaceConfig(workspacePath: string | null): WorkspaceConf
   if (!workspacePath) return { config: defaultWorkspaceConfig() }
   const outcome = loadWorkspaceConfig(workspacePath)
   if (outcome.status === 'ok') {
-    return { config: outcome.config, unencryptedSecrets: hasUnencryptedSecrets(outcome.config.connections) }
+    return {
+      config: outcome.config,
+      unencryptedSecrets: hasUnencryptedSecrets(outcome.config.connections),
+      weakCredentialStorage: hasWeaklyProtectedSecrets(outcome.config.connections),
+    }
   }
   if (outcome.status === 'missing') return { config: defaultWorkspaceConfig() }
   // Hand back empty connections so the UI still renders, but flag the error so
@@ -267,7 +286,9 @@ const globalConfigPath = () => path.join(app.getPath('userData'), 'config.json')
 
 export function readGlobalConfig(): GlobalConfig {
   try {
-    return JSON.parse(fs.readFileSync(globalConfigPath(), 'utf8')) as GlobalConfig
+    const file = globalConfigPath()
+    if (fs.statSync(file).size > MAX_CONFIG_BYTES) return { recentWorkspaces: [], lastWorkspace: null }
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as GlobalConfig
   } catch {
     return { recentWorkspaces: [], lastWorkspace: null }
   }

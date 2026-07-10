@@ -42,7 +42,7 @@ describe('ResultSessionStore.open', () => {
     expect(store.size).toBe(1)
   })
 
-  it('bounds every embedded result set before it crosses IPC', () => {
+  it('pages every embedded result set without marking it truncated', () => {
     const store = new ResultSessionStore(seqIds())
     const many = Array.from({ length: PAGE_SIZE + 10 }, (_, index) => [index])
     const out = store.open('p1', {
@@ -53,8 +53,26 @@ describe('ResultSessionStore.open', () => {
       ],
     })
     expect(out.resultSets?.[0]?.rows).toHaveLength(PAGE_SIZE)
-    expect(out.resultSets?.[0]?.truncated).toBe(true)
+    expect(out.resultSets?.[0]?.truncated).toBeUndefined()
+    expect(out.resultSets?.[0]?.sessionId).toBe('s1')
+    expect(out.resultSets?.[0]?.bufferedRowCount).toBe(PAGE_SIZE + 10)
     expect(out.resultSets?.[1]?.rows).toHaveLength(PAGE_SIZE)
+    expect(out.resultSets?.[1]?.sessionId).toBe(out.sessionId)
+    expect(store.fetch(out.resultSets![0]!.sessionId!, PAGE_SIZE, PAGE_SIZE)).toHaveLength(10)
+  })
+
+  it('byte-bounds an IPC page even when it contains fewer than 200 rows', () => {
+    const store = new ResultSessionStore(seqIds())
+    const wide = 'x'.repeat(700_000)
+    const out = store.open('p1', {
+      columns: ['payload'],
+      rows: Array.from({ length: 5 }, () => [wide]),
+      rowCount: 5,
+      durationMs: 1,
+    })
+    expect(out.rows).toHaveLength(2)
+    expect(out.sessionId).toBe('s0')
+    expect(store.fetch(out.sessionId!, 2, PAGE_SIZE)).toHaveLength(2)
   })
 })
 
@@ -96,11 +114,26 @@ describe('ResultSessionStore lifecycle', () => {
     expect(store.fetch(b.sessionId!, 0, 1)).toHaveLength(1)
   })
 
-  it('evicts the oldest session once past the cap (8)', () => {
+  it('does not evict small result sets merely because a script produced several', () => {
     const store = new ResultSessionStore(seqIds())
     const first = store.open('p1', result(300))
-    for (let i = 0; i < 8; i += 1) store.open('p1', result(300)) // 9 total → evict the first
+    for (let i = 0; i < 8; i += 1) store.open('p1', result(300))
+    expect(store.fetch(first.sessionId!, 0, 1)).toHaveLength(1)
+    expect(store.size).toBe(9)
+  })
+
+  it('evicts oldest buffers when the aggregate byte ceiling is exceeded', () => {
+    const store = new ResultSessionStore(seqIds())
+    const cell = 'x'.repeat(40_000)
+    const bulky = (): QueryResult => ({
+      columns: ['payload'],
+      rows: Array.from({ length: 201 }, () => [cell]),
+      rowCount: 201,
+      durationMs: 1,
+    })
+    const first = store.open('p1', bulky())
+    for (let index = 0; index < 8; index += 1) store.open('p1', bulky())
     expect(store.fetch(first.sessionId!, 0, 1)).toBeNull()
-    expect(store.size).toBe(8)
+    expect(store.size).toBeLessThan(9)
   })
 })

@@ -72,7 +72,7 @@ const echo = (port: number, payload: string): Promise<string> =>
 
 describe('openSshTunnel: forwarding', () => {
   it('opens a tunnel and forwards bytes to the remote', async () => {
-    const tunnel = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined)
+    const tunnel = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined, () => true)
     try {
       expect(tunnel.localPort).toBeGreaterThan(0)
       expect(await echo(tunnel.localPort, 'ping')).toBe('ping')
@@ -82,7 +82,7 @@ describe('openSshTunnel: forwarding', () => {
   }, 15000)
 
   it('stops accepting connections on the local port after close', async () => {
-    const tunnel = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined)
+    const tunnel = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined, () => true)
     await tunnel.close()
     const refused = await new Promise<boolean>((resolve) => {
       const socket = net.connect(tunnel.localPort, '127.0.0.1')
@@ -97,6 +97,12 @@ describe('openSshTunnel: forwarding', () => {
 })
 
 describe('openSshTunnel: host-key pinning', () => {
+  it('rejects an unknown host when the fingerprint is not approved', async () => {
+    await expect(openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined, () => false)).rejects.toThrow(
+      /Unknown SSH host key/,
+    )
+  }, 15000)
+
   it('rejects with an actionable error when the pinned host key changed', async () => {
     const store = { [`127.0.0.1:${sshPort}`]: Buffer.from('a-different-host-key').toString('base64') }
     fs.writeFileSync(path.join(state.userData, 'known_hosts.json'), JSON.stringify(store))

@@ -3,10 +3,12 @@ import type { ColumnRef, InspectColumn, TableRef } from './electron'
 import { dialectFor } from './dialect'
 import {
   buildBatchUpdate,
+  buildBatchUpdates,
   buildColumnAdd,
   buildColumnAlter,
   buildColumnDrop,
   buildDeleteRows,
+  buildDeleteRowBatches,
   buildInsert,
   buildInsertDefault,
   coerceValue,
@@ -208,6 +210,42 @@ describe('buildDeleteRows', () => {
 
     expect(sql).toBe('DELETE FROM "line_items"\n WHERE ("order_id" = ? AND "sku" = ?)')
     expect(params).toEqual([10, 'A1'])
+  })
+
+  it('uses IS NULL for optimistic row guards', () => {
+    const built = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: 1 }, { name: 'deleted_at', value: null }]],
+      engine: 'postgresql',
+    })
+    expect(built.sql).toContain('"deleted_at" IS NULL')
+    expect(built.params).toEqual([1])
+  })
+
+  it('splits SQL Server writes below its parameter ceiling', () => {
+    const edits = Array.from({ length: 700 }, (_, index) => ({
+      column: 'name',
+      columnMeta: col({ name: 'name' }),
+      value: `new-${index}`,
+      originalValue: `old-${index}`,
+      pks: [{ name: 'id', value: index }],
+    }))
+    const updates = buildBatchUpdates({ table: users, edits, engine: 'sqlserver' })
+    expect(updates.length).toBeGreaterThan(1)
+    expect(updates.every((statement) => statement.params.length <= 2_000)).toBe(true)
+    expect(updates.reduce((total, statement) => total + statement.expectedRows, 0)).toBe(700)
+
+    const deletes = buildDeleteRowBatches({
+      table: users,
+      rows: Array.from({ length: 1_000 }, (_, index) => [
+        { name: 'id', value: index },
+        { name: 'name', value: `n-${index}` },
+        { name: 'version', value: index },
+      ]),
+      engine: 'sqlserver',
+    })
+    expect(deletes.length).toBeGreaterThan(1)
+    expect(deletes.every((statement) => statement.params.length <= 2_000)).toBe(true)
   })
 
   it('throws without rows or primary keys', () => {

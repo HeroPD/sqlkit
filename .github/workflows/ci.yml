@@ -4,10 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
-# A newer push to the same branch/PR cancels the in-flight run.
+# A newer run of the same event type and ref cancels the in-flight run.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -80,3 +81,69 @@ jobs:
       # vitest run — unit tests plus the Postgres integration suites (TEST_DATABASE_URL is set).
       - name: Tests
         run: npm test
+
+      - name: Production build
+        run: npm run build
+
+
+  package:
+    name: Package (${{ matrix.platform }})
+    # Packaging is intentionally opt-in because the cross-platform matrix is
+    # comparatively expensive. Run it from GitHub Actions via "Run workflow".
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            command: npx electron-builder --linux dir --x64 --publish never
+          - os: macos-latest
+            platform: mac
+            command: npx electron-builder --mac dir --x64 --arm64 --publish never
+          - os: windows-latest
+            platform: windows
+            command: npx electron-builder --win dir --x64 --publish never
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Build unpacked application
+        run: ${{ matrix.command }}
+      - name: Launch packaged renderer
+        if: matrix.platform == 'linux'
+        run: xvfb-run -a release/linux-unpacked/sqlkit --smoke-test
+
+  mariadb:
+    name: MariaDB compatibility
+    runs-on: ubuntu-latest
+    env:
+      TEST_MYSQL_URL: mysql://root:root@localhost:3306/testsqlkit
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: testsqlkit
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: MySQL driver suite against MariaDB
+        run: npx vitest run electron/db/mysql.integration.test.ts

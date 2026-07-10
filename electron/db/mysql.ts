@@ -5,7 +5,7 @@ import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 import { sslOptions } from './postgres'
-import { assertSelfContainedTransaction, preprocessMysqlDelimiters } from './sql-script'
+import { assertSelfContainedTransaction, isCappableRead, preprocessMysqlDelimiters } from './sql-script'
 
 // Schemas MySQL ships with; never listed as children or browsable databases.
 const SYSTEM_SCHEMAS = ['mysql', 'information_schema', 'performance_schema', 'sys']
@@ -18,7 +18,12 @@ type StreamableQuery = {
   on(event: 'error', listener: (error: Error) => void): StreamableQuery
   on(event: 'end', listener: () => void): StreamableQuery
 }
-type RawConnection = { threadId: number; query(options: { sql: string; values: unknown[]; rowsAsArray: boolean }): StreamableQuery }
+type RawConnection = {
+  threadId: number
+  query(options: { sql: string; values: unknown[]; rowsAsArray: boolean }): StreamableQuery
+  pause(): void
+  resume(): void
+}
 
 type FieldMeta = { name: string; db?: string; schema?: string; orgTable?: string; orgName?: string }
 
@@ -59,6 +64,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       ssl,
       connectionLimit: 4,
       connectTimeout: 8000,
+      // RESET CONNECTION on release rolls back implicit transactions and
+      // removes SET/session/temp-table state before another tab borrows it.
+      resetOnRelease: true,
       multipleStatements: true,
       // Lossless values: temporals as strings, BIGINT past 2^53 as strings
       // (safe-range ones stay numbers), DECIMAL as strings (mysql2 default).
@@ -96,6 +104,23 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   }
 
   const dialect = dialectFor(profile.engine)
+
+  const killQueries = async (ids: number[], database: string) => {
+    const conn = await mysql.createConnection({
+      host: endpoint.host,
+      port: endpoint.port,
+      user: profile.username,
+      password: profile.password,
+      database: database || undefined,
+      ssl,
+      connectTimeout: 8000,
+    })
+    try {
+      return await Promise.all(ids.map((id) => conn.query(`kill query ${id}`).then(() => true).catch(() => false)))
+    } finally {
+      await conn.end().catch(() => {})
+    }
+  }
 
   return {
     async connect() {
@@ -151,7 +176,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           conn = null
           throw new Error('Query cancelled.')
         }
-        const result = await streamQuery(raw, finalSql, params, started)
+        const result = await streamQuery(raw, finalSql, params, started, isCappableRead(finalSql)
+          ? async () => { if (entry.threadId !== null) await killQueries([entry.threadId], childDb ?? active) }
+          : undefined)
         conn.release()
         conn = null
         return result
@@ -294,28 +321,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       for (const entry of queued) entry.cancelRequested = true
       const ids = entries.map((entry) => entry.threadId).filter((id): id is number => id !== null)
       if (!ids.length) return { running: entries.length, cancelled: queued.length }
-      const conn = await mysql.createConnection({
-        host: endpoint.host,
-        port: endpoint.port,
-        user: profile.username,
-        password: profile.password,
-        database: active || undefined,
-        ssl,
-        connectTimeout: 8000,
-      })
-      try {
-        const sent = await Promise.all(
-          ids.map((id) =>
-            conn
-              .query(`kill query ${id}`)
-              .then(() => true)
-              .catch(() => false),
-          ),
-        )
-        return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
-      } finally {
-        await conn.end().catch(() => {})
-      }
+      const sent = await killQueries(ids, active)
+      return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
     async listTables(childDb = null) {
@@ -510,7 +517,13 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
 // Streams rows so a huge or multi-result query can't OOM the main process.
 // The byte budget is shared by every result set in this execution.
-function streamQuery(raw: RawConnection, sql: string, params: unknown[], started: number): Promise<QueryResult> {
+function streamQuery(
+  raw: RawConnection,
+  sql: string,
+  params: unknown[],
+  started: number,
+  stopAtLimit?: () => Promise<unknown>,
+): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     let columns: string[] = []
     let columnSources: QueryResult['columnSources']
@@ -519,10 +532,18 @@ function streamQuery(raw: RawConnection, sql: string, params: unknown[], started
     let bufferedBytes = 0
     let limited = false
     let active = false
+    let limitCancellation = false
     const resultSets: QueryResultSet[] = []
     const pushCurrent = () => {
       if (!active) return
-      resultSets.push({ columns, columnSources, rows, rowCount: total, truncated: limited || total > rows.length })
+      resultSets.push({
+        columns,
+        columnSources,
+        rows,
+        rowCount: total,
+        truncated: limited || total > rows.length,
+        rowCountExact: !limitCancellation,
+      })
       active = false
     }
     const query = raw.query({ sql, values: params, rowsAsArray: true })
@@ -545,14 +566,26 @@ function streamQuery(raw: RawConnection, sql: string, params: unknown[], started
     query.on('result', (row) => {
       if (Array.isArray(row)) {
         total += 1
+        let capacityExceeded = false
         if (rows.length < MAX_BUFFERED_ROWS) {
           const bounded = boundedRow(row as unknown[], bufferedBytes)
           if (bounded) {
             rows.push(bounded.row)
             bufferedBytes += bounded.bytes
             limited ||= bounded.truncated
-          } else limited = true
-        } else limited = true
+          } else {
+            limited = true
+            capacityExceeded = true
+          }
+        } else {
+          limited = true
+          capacityExceeded = true
+        }
+        if (capacityExceeded && !limitCancellation && stopAtLimit) {
+          limitCancellation = true
+          raw.pause()
+          void stopAtLimit().catch(() => {}).finally(() => raw.resume())
+        }
       } else {
         // An OK packet (INSERT/UPDATE/…): rowCount is the affected count.
         pushCurrent()
@@ -564,8 +597,7 @@ function streamQuery(raw: RawConnection, sql: string, params: unknown[], started
         active = true
       }
     })
-    query.on('error', reject)
-    query.on('end', () => {
+    const finish = () => {
       pushCurrent()
       const selected = resultSets[resultSets.length - 1] ?? { columns: [], rows: [], rowCount: 0 }
       resolve({
@@ -573,6 +605,8 @@ function streamQuery(raw: RawConnection, sql: string, params: unknown[], started
         durationMs: performance.now() - started,
         ...(resultSets.length > 1 ? { resultSets } : {}),
       })
-    })
+    }
+    query.on('error', (error) => limitCancellation ? finish() : reject(error))
+    query.on('end', finish)
   })
 }

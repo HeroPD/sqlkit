@@ -18,6 +18,9 @@ type Scan = {
   bodyEnd: number
   // A second top-level statement follows the first ';'.
   multiStatement: boolean
+  // Clauses that either write/lock or must remain after ORDER BY and are not
+  // safely handled by this deliberately small rewriter.
+  unsafeClause: boolean
 }
 
 // One left-to-right pass that records the outer query's clause boundaries while
@@ -33,6 +36,7 @@ function scan(sql: string): Scan {
   let tailFrom = -1
   let bodyEnd = n
   let multiStatement = false
+  let unsafeClause = false
 
   while (i < n) {
     const c = sql[i]!
@@ -90,6 +94,7 @@ function scan(sql: string): Scan {
       let j = i + 1
       while (j < n && WORD.test(sql[j]!)) j += 1
       const word = lower.slice(i, j)
+      if (word === 'into' || word === 'for' || word === 'option') unsafeClause = true
       if (word === 'order' && orderFrom < 0) {
         let k = j
         while (k < n && /\s/.test(sql[k]!)) k += 1
@@ -107,7 +112,7 @@ function scan(sql: string): Scan {
     }
     i += 1
   }
-  return { orderFrom, orderTermsFrom, tailFrom, bodyEnd, multiStatement }
+  return { orderFrom, orderTermsFrom, tailFrom, bodyEnd, multiStatement, unsafeClause }
 }
 
 const leadingKeyword = (sql: string): string => {
@@ -137,9 +142,10 @@ const leadingKeyword = (sql: string): string => {
 // BY we can safely rewrite. Non-SELECT or multi-statement SQL is left alone.
 export function isReorderableQuery(sql: string): boolean {
   if (!sql.trim()) return false
-  if (scan(sql).multiStatement) return false
+  const scanned = scan(sql)
+  if (scanned.multiStatement || scanned.unsafeClause) return false
   const head = leadingKeyword(sql)
-  return head === 'select' || head === 'with' || head === 'table' || head === 'values'
+  return head === 'select'
 }
 
 // Strips a trailing direction (and NULLS FIRST/LAST) off one ORDER BY term.

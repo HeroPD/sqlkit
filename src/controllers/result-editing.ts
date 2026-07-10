@@ -3,7 +3,7 @@ import type { QueryRun } from '../components/results-panel'
 import type { SqlTabState } from './contexts'
 import type { DialogsController } from './dialogs'
 import type { BatchResult, BatchStatement, ColumnRef, ConnectionProfile, TableRef } from '../electron'
-import { buildBatchUpdate, buildDeleteRows, buildInsert } from '../sql-write'
+import { buildBatchUpdates, buildDeleteRowBatches, buildInsert } from '../sql-write'
 import { previewSql } from '../components/review-query-dialog'
 import {
   buildInsertRows,
@@ -70,7 +70,7 @@ export class ResultEditingController {
     if (editsList.length) {
       const built = buildPendingUpdate(input, editsList)
       if (!built.ok) return this.notice(built.issue)
-      statements.push(buildBatchUpdate({ table: built.value.table, edits: built.value.edits, engine: profile.engine }))
+      statements.push(...buildBatchUpdates({ table: built.value.table, edits: built.value.edits, engine: profile.engine }))
     }
 
     if (drafts.length) {
@@ -132,21 +132,22 @@ export class ResultEditingController {
     if (!ctx || !profile || !rows.length) return
     const keys = rowKeysForDelete(ctx, rows)
     if (!keys.ok) return this.notice(keys.issue)
-    const { sql, params, expectedRows } = buildDeleteRows({ table: ctx.table, rows: keys.value, engine: profile.engine })
-    this.reviewWrite(profile, sql, params, expectedRows)
+    const statements = buildDeleteRowBatches({ table: ctx.table, rows: keys.value, engine: profile.engine })
+    this.reviewWrite(profile, statements)
   }
 
-  private reviewWrite(profile: ConnectionProfile, sql: string, params: unknown[], expectedRows: number) {
+  private reviewWrite(profile: ConnectionProfile, statements: BatchStatement[]) {
     const childDb = this.deps.activeChildDb()
     const tab = this.deps.activeTab()
     const refreshSql = tab ? firstStatement(tab.content) || tab.content : null
-    this.deps.dialogs.review = { sql, params, run: () => void this.runWrite(profile, childDb, sql, params, expectedRows, tab?.id ?? null, refreshSql) }
+    const sql = statements.map((statement) => previewSql(statement.sql, statement.params)).join(';\n\n')
+    this.deps.dialogs.review = { sql, params: [], run: () => void this.runWrite(profile, childDb, statements, tab?.id ?? null, refreshSql) }
   }
 
-  private async runWrite(profile: ConnectionProfile, childDb: string | null, sql: string, params: unknown[], expectedRows: number, tabId: string | null, refreshSql: string | null) {
+  private async runWrite(profile: ConnectionProfile, childDb: string | null, statements: BatchStatement[], tabId: string | null, refreshSql: string | null) {
     let outcome: BatchResult
     try {
-      outcome = await window.sqlkit.runBatch(profile.id, childDb, [{ sql, params, expectedRows }])
+      outcome = await window.sqlkit.runBatch(profile.id, childDb, statements)
     } catch (error) {
       this.deps.dialogs.notice('Write failed', (error as Error).message)
       return

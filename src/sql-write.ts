@@ -118,6 +118,46 @@ export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: 
   return { sql: `UPDATE ${quoteQualified(spec.table, dialect)}\n   SET\n${set}\n WHERE ${where}`, params, expectedRows: uniqueRows }
 }
 
+const parameterLimit = (engine: Engine) => engine === 'sqlserver' ? 2_000 : engine === 'sqlite' ? 900 : 60_000
+
+const comparableKey = (value: unknown): string => {
+  if (typeof value === 'bigint') return `bigint:${value.toString()}`
+  if (value instanceof Uint8Array) return `bytes:${Array.from(value).join(',')}`
+  try {
+    return `${typeof value}:${JSON.stringify(value)}`
+  } catch {
+    throw new Error('Cannot group an unserializable row key')
+  }
+}
+
+/** Splits a large staged update at row boundaries so no statement exceeds the
+ * backend's bind-parameter ceiling. The driver still executes every statement
+ * in one transaction, preserving all-or-nothing save semantics. */
+export function buildBatchUpdates(spec: BatchUpdateSpec): Array<ReturnType<typeof buildBatchUpdate>> {
+  const groups = new Map<string, BatchUpdateEdit[]>()
+  for (const edit of spec.edits) {
+    const key = JSON.stringify(edit.pks.map((pk) => [pk.name, comparableKey(pk.value)]))
+    groups.set(key, [...(groups.get(key) ?? []), edit])
+  }
+  const result: Array<ReturnType<typeof buildBatchUpdate>> = []
+  let pending: BatchUpdateEdit[] = []
+  for (const group of groups.values()) {
+    const candidate = buildBatchUpdate({ ...spec, edits: [...pending, ...group] })
+    if (candidate.params.length <= parameterLimit(spec.engine)) {
+      pending.push(...group)
+      continue
+    }
+    if (!pending.length) throw new Error('One edited row requires more bind parameters than this database supports.')
+    result.push(buildBatchUpdate({ ...spec, edits: pending }))
+    pending = [...group]
+    if (buildBatchUpdate({ ...spec, edits: pending }).params.length > parameterLimit(spec.engine)) {
+      throw new Error('One edited row requires more bind parameters than this database supports.')
+    }
+  }
+  if (pending.length) result.push(buildBatchUpdate({ ...spec, edits: pending }))
+  return result
+}
+
 export function buildInsertDefault(table: TableRef, dialect: Dialect): { sql: string; params: unknown[]; expectedRows: number } {
   return { sql: `INSERT INTO ${quoteQualified(table, dialect)} DEFAULT VALUES`, params: [], expectedRows: 1 }
 }
@@ -218,6 +258,9 @@ export function buildColumnAlter(table: TableRef, edits: ColumnAlter[], engine: 
     const col = dialect.quoteIdent(edit.original.name)
     const dataType = caps.dataType && edit.dataType !== undefined && edit.dataType !== edit.original.dataType ? edit.dataType : undefined
     const nullable = caps.nullable && edit.nullable !== undefined && edit.nullable !== edit.original.nullable ? edit.nullable : undefined
+    if (edit.original.generated && (dataType !== undefined || nullable !== undefined)) {
+      throw new Error(`Cannot alter the type or nullability of generated column ${edit.original.name}`)
+    }
     if (engine === 'sqlserver') {
       // T-SQL restates the full definition in one ALTER COLUMN; a custom collation
       // must be restated too or the server resets it to the database default.
@@ -273,8 +316,27 @@ export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: un
   }
   const condition = (pks: RowKey) => {
     if (pks.length === 0) throw new Error('Cannot build a DELETE without a primary key')
-    return pks.map((pk) => `${dialect.quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
+    return pks.map((pk) => pk.value === null
+      ? `${dialect.quoteIdent(pk.name)} IS NULL`
+      : `${dialect.quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
   }
   const where = spec.rows.map((pks) => `(${condition(pks)})`).join(' OR ')
   return { sql: `DELETE FROM ${quoteQualified(spec.table, dialect)}\n WHERE ${where}`, params, expectedRows: spec.rows.length }
+}
+
+export function buildDeleteRowBatches(spec: DeleteRowsSpec): Array<ReturnType<typeof buildDeleteRows>> {
+  const result: Array<ReturnType<typeof buildDeleteRows>> = []
+  let pending: RowKey[] = []
+  for (const row of spec.rows) {
+    const candidate = buildDeleteRows({ ...spec, rows: [...pending, row] })
+    if (candidate.params.length <= parameterLimit(spec.engine)) {
+      pending.push(row)
+      continue
+    }
+    if (!pending.length) throw new Error('One deleted row requires more bind parameters than this database supports.')
+    result.push(buildDeleteRows({ ...spec, rows: pending }))
+    pending = [row]
+  }
+  if (pending.length) result.push(buildDeleteRows({ ...spec, rows: pending }))
+  return result
 }

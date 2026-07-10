@@ -1,8 +1,12 @@
 import fs from 'node:fs'
+import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import type { FileInfo, FileReadResult, FileSaveResult, FilesResult } from '../src/electron'
 
 const isSqlFile = (name: string) => path.extname(name).toLowerCase() === '.sql'
+const MAX_SQL_FILE_BYTES = 10 * 1024 * 1024
+const MAX_TREE_ITEMS = 20_000
+const MAX_TREE_DEPTH = 64
 
 const toRelative = (root: string, absPath: string) => path.relative(root, absPath).split(path.sep).join('/')
 
@@ -70,16 +74,18 @@ export function resolveContextRoot(workspacePath: string, folder: string): strin
   return path.join(workspacePath, ...segments)
 }
 
-function collectFiles(root: string, dir: string, files: FileInfo[]): FileInfo[] {
+function collectFiles(root: string, dir: string, files: FileInfo[], depth = 0): FileInfo[] {
+  if (depth > MAX_TREE_DEPTH) throw new Error(`Workspace folders may not be nested more than ${MAX_TREE_DEPTH} levels.`)
   // Dotfiles (.sqlkit, .DS_Store, .git…) stay out of the tree.
   const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => !entry.name.startsWith('.'))
 
   for (const entry of entries) {
+    if (files.length >= MAX_TREE_ITEMS) throw new Error(`This database folder contains more than ${MAX_TREE_ITEMS.toLocaleString()} items. Narrow the folder before opening it.`)
     const entryPath = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       // Folders are listed too so empty ones still show in the tree.
       files.push({ type: 'folder', name: entry.name, path: entryPath, relativePath: toRelative(root, entryPath) })
-      collectFiles(root, entryPath, files)
+      collectFiles(root, entryPath, files, depth + 1)
       continue
     }
     if (!entry.isFile()) continue
@@ -88,6 +94,22 @@ function collectFiles(root: string, dir: string, files: FileInfo[]): FileInfo[] 
     files.push({ type: 'file', name: entry.name, path: entryPath, relativePath: toRelative(root, entryPath) })
   }
 
+  return files
+}
+
+async function collectFilesAsync(root: string, dir: string, files: FileInfo[], depth = 0): Promise<FileInfo[]> {
+  if (depth > MAX_TREE_DEPTH) throw new Error(`Workspace folders may not be nested more than ${MAX_TREE_DEPTH} levels.`)
+  const entries = (await fsp.readdir(dir, { withFileTypes: true })).filter((entry) => !entry.name.startsWith('.'))
+  for (const entry of entries) {
+    if (files.length >= MAX_TREE_ITEMS) throw new Error(`This database folder contains more than ${MAX_TREE_ITEMS.toLocaleString()} items. Narrow the folder before opening it.`)
+    const entryPath = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      files.push({ type: 'folder', name: entry.name, path: entryPath, relativePath: toRelative(root, entryPath) })
+      await collectFilesAsync(root, entryPath, files, depth + 1)
+    } else if (entry.isFile()) {
+      files.push({ type: 'file', name: entry.name, path: entryPath, relativePath: toRelative(root, entryPath) })
+    }
+  }
   return files
 }
 
@@ -114,6 +136,26 @@ export function listWorkspaceFiles(workspacePath: string | null, folder: string)
   }
 }
 
+export async function listWorkspaceFilesAsync(workspacePath: string | null, folder: string): Promise<FilesResult> {
+  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  const root = resolveContextRoot(workspacePath, folder)
+  if (!root) return { success: false, error: 'Invalid database folder' }
+  try {
+    await fsp.access(root)
+  } catch {
+    return { success: true, files: [] }
+  }
+  if (!isInsideWorkspace(workspacePath, root)) return { success: false, error: 'Database folder is outside the workspace' }
+  if (isInternalWorkspacePath(workspacePath, root)) return { success: false, error: 'The .sqlkit folder is internal' }
+  try {
+    const files = await collectFilesAsync(root, root, [])
+    files.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+    return { success: true, files }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+}
+
 // Reads a .sql file, refusing paths that escape the workspace root — the
 // renderer only ever hands back paths it got from listSqlFiles, but IPC input
 // is untrusted by construction.
@@ -127,7 +169,21 @@ export function readWorkspaceFile(workspacePath: string | null, filePath: string
   if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be opened' }
 
   try {
+    if (fs.statSync(resolved).size > MAX_SQL_FILE_BYTES) return { success: false, error: 'SQL files larger than 10 MB cannot be opened.' }
     return { success: true, content: fs.readFileSync(resolved, 'utf8') }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+}
+
+export async function readWorkspaceFileAsync(workspacePath: string | null, filePath: string): Promise<FileReadResult> {
+  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  const resolved = path.resolve(filePath)
+  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: 'Path is outside the workspace' }
+  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be opened' }
+  try {
+    if ((await fsp.stat(resolved)).size > MAX_SQL_FILE_BYTES) return { success: false, error: 'SQL files larger than 10 MB cannot be opened.' }
+    return { success: true, content: await fsp.readFile(resolved, 'utf8') }
   } catch (error) {
     return { success: false, error: (error as Error).message }
   }
@@ -145,10 +201,27 @@ export function saveWorkspaceFile(workspacePath: string | null, filePath: string
   }
   if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
   if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be saved' }
+  if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: 'SQL files larger than 10 MB cannot be saved.' }
 
   try {
     fs.mkdirSync(path.dirname(resolved), { recursive: true })
     fs.writeFileSync(resolved, content, 'utf8')
+    return { success: true, path: resolved, name: path.basename(resolved) }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+}
+
+export async function saveWorkspaceFileAsync(workspacePath: string | null, filePath: string, content: string): Promise<FileSaveResult> {
+  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  const resolved = path.resolve(filePath)
+  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: 'Files must stay inside the workspace' }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be saved' }
+  if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: 'SQL files larger than 10 MB cannot be saved.' }
+  try {
+    await fsp.mkdir(path.dirname(resolved), { recursive: true })
+    await fsp.writeFile(resolved, content, 'utf8')
     return { success: true, path: resolved, name: path.basename(resolved) }
   } catch (error) {
     return { success: false, error: (error as Error).message }

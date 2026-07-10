@@ -22,6 +22,7 @@ export type SingleTableEditContext = {
   table: TableRef
   columns: ColumnRef[]
   result: QueryResult
+  sql: string
   pkIndexes: Array<{ name: string; index: number }>
 }
 
@@ -58,7 +59,8 @@ export function singleTableEditContext(input: ResultEditInput): SingleTableEditC
   if (run.result.columnSources?.some((source) => source.table !== null && !tableMatchesSource(table, source))) return null
   const columns = columnsForTable(input.columns, table)
   const pkIndexes = primaryKeyIndexes(run.result, table, columns, true, run.sql ?? tab.content)
-  return pkIndexes.length ? { table, columns, result: run.result, pkIndexes } : null
+  const sql = run.sql ?? tab.content
+  return pkIndexes.length ? { table, columns, result: run.result, sql, pkIndexes } : null
 }
 
 export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEditContext | null {
@@ -82,7 +84,9 @@ export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEd
   const columns = columnsForTable(input.columns, table)
   const columnMeta = columns.find((column) => column.name.toLowerCase() === source.column!.toLowerCase())
   const pkIndexes = primaryKeyIndexes(input.run.result, table, columns, false, input.run.sql ?? input.tab?.content ?? '')
-  return columnMeta && pkIndexes.length ? { table, columns, result: input.run.result, pkIndexes, columnName: columnMeta.name, columnMeta } : null
+  return columnMeta && pkIndexes.length
+    ? { table, columns, result: input.run.result, sql: input.run.sql ?? input.tab?.content ?? '', pkIndexes, columnName: columnMeta.name, columnMeta }
+    : null
 }
 
 export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value: string): EditResult<{ table: TableRef; edits: BatchUpdateEdit[] }> {
@@ -182,6 +186,23 @@ export function buildPendingUpdate(
 }
 
 export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): EditResult<RowKey[]> {
+  const hasSources = ctx.result.columnSources !== undefined
+  const guards = ctx.columns.map((column) => {
+    const sourceIndex = ctx.result.columnSources?.findIndex(
+      (source) => tableMatchesSource(ctx.table, source) && source.column?.toLowerCase() === column.name.toLowerCase(),
+    )
+    const fallbackIndex = !hasSources ? simpleColumnProjectionIndex(ctx.result.columns, ctx.sql, column.name) : -1
+    return { name: column.name, index: sourceIndex !== undefined && sourceIndex >= 0 ? sourceIndex : fallbackIndex }
+  })
+  if (guards.some((guard) => guard.index < 0)) {
+    return {
+      ok: false,
+      issue: {
+        title: 'Cannot safely delete this row',
+        detail: 'Refresh with every table column in the result before deleting. SqlKit uses the original row values to avoid deleting a row changed by another session.',
+      },
+    }
+  }
   const keys: RowKey[] = []
   for (const rowIndex of rows) {
     if (!ctx.result.rows[rowIndex]) {
@@ -191,7 +212,11 @@ export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): E
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
       return { ok: false, issue: { title: 'Cannot delete this row', detail: 'Its primary key value is missing from the result.' } }
     }
-    keys.push(pks)
+    const byName = new Map(pks.map((key) => [key.name.toLowerCase(), key]))
+    for (const guard of guards) {
+      if (!byName.has(guard.name.toLowerCase())) byName.set(guard.name.toLowerCase(), { name: guard.name, value: ctx.result.rows[rowIndex]?.[guard.index] })
+    }
+    keys.push([...byName.values()])
   }
   return keys.length ? { ok: true, value: keys } : { ok: false, issue: { title: 'Cannot delete rows', detail: 'No rows are selected.' } }
 }
@@ -223,24 +248,30 @@ function simpleColumnProjectionIndex(resultColumns: string[], sql: string, colum
   const index = resultColumns.findIndex((column) => column.toLowerCase() === columnName.toLowerCase())
   if (index < 0) return -1
   const projections = selectProjections(sql)
+  if (projections.length === 1 && /^(?:(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s*\.\s*)?\*$/.test(projections[0]!)) return index
   return projectionIsSimpleColumn(projections[index] ?? '', columnName) ? index : -1
 }
 
 function selectProjections(sql: string) {
   const match = /^\s*select\s+([\s\S]+?)\s+from\s/i.exec(sql)
   if (!match?.[1]) return []
+  // Result names are trustworthy for a single-table star projection. Remove
+  // read modifiers that precede the projection list (notably SQL Server TOP).
+  const projectionSql = match[1]
+    .replace(/^\s*distinct\s+/i, '')
+    .replace(/^\s*top\s*(?:\(\s*\d+\s*\)|\d+)\s+(?:percent\s+)?(?:with\s+ties\s+)?/i, '')
   const parts: string[] = []
   let depth = 0
   let start = 0
-  for (let i = 0; i < match[1].length; i += 1) {
-    if (match[1][i] === '(') depth += 1
-    else if (match[1][i] === ')') depth = Math.max(0, depth - 1)
-    else if (match[1][i] === ',' && depth === 0) {
-      parts.push(match[1].slice(start, i).trim())
+  for (let i = 0; i < projectionSql.length; i += 1) {
+    if (projectionSql[i] === '(') depth += 1
+    else if (projectionSql[i] === ')') depth = Math.max(0, depth - 1)
+    else if (projectionSql[i] === ',' && depth === 0) {
+      parts.push(projectionSql.slice(start, i).trim())
       start = i + 1
     }
   }
-  parts.push(match[1].slice(start).trim())
+  parts.push(projectionSql.slice(start).trim())
   return parts
 }
 

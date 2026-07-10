@@ -553,6 +553,7 @@ export class TableInspect extends LitElement {
     // A staged new column is fully definable on any engine that can ADD COLUMN;
     // only its comment needs engine support to be expressible in DDL.
     if (col && this._isAddition(col.name)) return field === 'comment' ? dialect.supportsColumnComments : true
+    if (col?.generated && field !== 'name') return false
     if (field === 'name') return dialect.columnEdits.rename
     return dialect.columnEdits[field]
   }

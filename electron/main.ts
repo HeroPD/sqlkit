@@ -33,12 +33,12 @@ import {
 import {
   createWorkspaceFile,
   externalOpenAction,
-  listWorkspaceFiles,
-  readWorkspaceFile,
+  listWorkspaceFilesAsync,
+  readWorkspaceFileAsync,
   renameWorkspaceFile,
   resolveContextRoot,
   resolveWorkspaceItem,
-  saveWorkspaceFile,
+  saveWorkspaceFileAsync,
   startWorkspaceWatcher,
   stopWorkspaceWatcher,
 } from './files'
@@ -61,19 +61,22 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
+const smokeTest = process.argv.includes('--smoke-test')
+if (smokeTest) app.commandLine.appendSwitch('no-sandbox')
 const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
 const workspacePaths = new Map<number, string>()
 const dbManagers = new Map<number, ConnectionManager>()
 let quitting = false
 const IPC_PATH_LIMIT = 20_000
 const IPC_FILE_LIMIT = 64 * 1024 * 1024
+const IPC_SQL_FILE_LIMIT = 10 * 1024 * 1024
 
 // Only these schemes are ever handed to the OS; a renderer navigated somewhere
 // unexpected can't use this to launch arbitrary protocol handlers.
 const EXTERNAL_SCHEMES = new Set(['http:', 'https:', 'mailto:'])
 const openExternalSafely = (url: string) => {
   try {
-    if (EXTERNAL_SCHEMES.has(new URL(url).protocol)) void shell.openExternal(url)
+    if (EXTERNAL_SCHEMES.has(new URL(url).protocol)) void shell.openExternal(url).catch(() => {})
   } catch {
     // Unparseable URL — ignore.
   }
@@ -206,7 +209,15 @@ function createWindow() {
   const contentsId = window.webContents.id
   window.on('closed', () => cleanupWindow(contentsId))
 
-  window.once('ready-to-show', () => window.show())
+  if (smokeTest) {
+    window.webContents.once('did-finish-load', () => app.exit(0))
+    window.webContents.once('did-fail-load', (_event, code, description) => {
+      console.error(`Renderer smoke test failed (${code}): ${description}`)
+      app.exit(1)
+    })
+  }
+
+  window.once('ready-to-show', () => { if (!smokeTest) window.show() })
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalSafely(url)
@@ -225,12 +236,12 @@ function createWindow() {
   })
 
   if (devServerUrl) {
-    void window.loadURL(devServerUrl)
+    void window.loadURL(devServerUrl).catch((error) => { if (smokeTest) console.error(error) })
     window.webContents.openDevTools({ mode: 'detach' })
     return
   }
 
-  void window.loadFile(join(__dirname, '../dist/index.html'))
+  void window.loadFile(join(__dirname, '../dist/index.html')).catch((error) => { if (smokeTest) console.error(error) })
 }
 
 function registerWorkspaceIpc() {
@@ -297,18 +308,18 @@ function registerWorkspaceIpc() {
   })
 
   ipcMain.handle('file:list', (event, folder: string) =>
-    listWorkspaceFiles(workspaceFor(event.sender), stringValue(folder, 'Folder', IPC_PATH_LIMIT)),
+    listWorkspaceFilesAsync(workspaceFor(event.sender), stringValue(folder, 'Folder', IPC_PATH_LIMIT)),
   )
 
   ipcMain.handle('file:read', (event, filePath: string) =>
-    readWorkspaceFile(workspaceFor(event.sender), stringValue(filePath, 'File path', IPC_PATH_LIMIT)),
+    readWorkspaceFileAsync(workspaceFor(event.sender), stringValue(filePath, 'File path', IPC_PATH_LIMIT)),
   )
 
   ipcMain.handle('file:save', (event, filePath: string, content: string) =>
-    saveWorkspaceFile(
+    saveWorkspaceFileAsync(
       workspaceFor(event.sender),
       stringValue(filePath, 'File path', IPC_PATH_LIMIT),
-      stringValue(content, 'File content', IPC_FILE_LIMIT),
+      stringValue(content, 'File content', IPC_SQL_FILE_LIMIT),
     ),
   )
 
@@ -372,7 +383,7 @@ function registerWorkspaceIpc() {
   ipcMain.handle('file:save-as', async (event, folder: string, suggestedName: string, content: string) => {
     folder = stringValue(folder, 'Folder', IPC_PATH_LIMIT)
     suggestedName = stringValue(suggestedName, 'Suggested file name', 1_000)
-    content = stringValue(content, 'File content', IPC_FILE_LIMIT)
+    content = stringValue(content, 'File content', IPC_SQL_FILE_LIMIT)
     const workspace = workspaceFor(event.sender)
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!workspace || !window) return { success: false, error: 'No workspace open' }
@@ -389,7 +400,7 @@ function registerWorkspaceIpc() {
     if (result.canceled || !result.filePath) return { success: false, canceled: true }
 
     const filePath = result.filePath.toLowerCase().endsWith('.sql') ? result.filePath : `${result.filePath}.sql`
-    return saveWorkspaceFile(workspace, filePath, content)
+    return saveWorkspaceFileAsync(workspace, filePath, content)
   })
 
   // Results export: anywhere on disk (not workspace-rooted like save-as).
@@ -678,6 +689,9 @@ void app.whenReady().then(() => {
       createWindow()
     }
   })
+}).catch((error: unknown) => {
+  console.error('SqlKit failed to start:', error)
+  app.exit(1)
 })
 
 app.on('window-all-closed', () => {

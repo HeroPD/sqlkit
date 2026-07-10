@@ -8,6 +8,7 @@ import {
   openWorkspace,
   readWorkspaceConfig,
   readWorkspaceConfigForRenderer,
+  isWeakStorageBackend,
   writeWorkspaceConfig,
 } from './workspace'
 
@@ -27,8 +28,17 @@ vi.mock('electron', () => ({
       if (!text.startsWith('SEALED:')) throw new Error('cannot decrypt on this machine')
       return text.slice('SEALED:'.length)
     },
+    getSelectedStorageBackend: () => 'gnome_libsecret',
   },
 }))
+
+describe('credential storage strength', () => {
+  it('recognizes Electron basic_text as weak only on Linux', () => {
+    expect(isWeakStorageBackend('linux', 'basic_text')).toBe(true)
+    expect(isWeakStorageBackend('darwin', 'basic_text')).toBe(false)
+    expect(isWeakStorageBackend('linux', 'gnome_libsecret')).toBe(false)
+  })
+})
 
 let workspaceDir = ''
 

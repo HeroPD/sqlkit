@@ -5,6 +5,7 @@ import path from 'node:path'
 
 // host:port -> base64 of the raw SSH host-key blob pinned on first use.
 type Store = Record<string, string>
+const MAX_STORE_BYTES = 1024 * 1024
 
 // OpenSSH-style fingerprint of a raw host-key blob — matches `ssh-keygen -lf`,
 // so the strings we show line up with what the user can verify out of band.
@@ -13,6 +14,7 @@ export const hostKeyFingerprint = (key: Buffer): string =>
 
 const readStore = (file: string): Store => {
   try {
+    if (fs.statSync(file).size > MAX_STORE_BYTES) return {}
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
     return parsed && typeof parsed === 'object' ? (parsed as Store) : {}
   } catch {
@@ -29,11 +31,11 @@ const writeStore = (file: string, store: Store) => {
 
 export type HostKeyOutcome =
   | { trusted: true; firstUse: boolean }
-  | { trusted: false; presented: string; pinned: string }
+  | { trusted: false; firstUse: true; presented: string }
+  | { trusted: false; firstUse: false; presented: string; pinned: string }
 
-// Trust-on-first-use check against a JSON known-hosts store: an unknown host is
-// recorded and trusted; a host whose key still matches the pinned one is
-// trusted; a host whose key changed is rejected (possible MITM). Takes the
+// Check against a JSON known-hosts store. An unknown host is reported for an
+// explicit user decision; it is never silently trusted. Takes the
 // store path explicitly so the policy is unit-testable without Electron paths.
 export function verifyHostKey(file: string, hostId: string, key: Buffer): HostKeyOutcome {
   const presented = key.toString('base64')
@@ -41,22 +43,22 @@ export function verifyHostKey(file: string, hostId: string, key: Buffer): HostKe
   const pinned = store[hostId]
 
   if (!pinned) {
-    store[hostId] = presented
-    try {
-      writeStore(file, store)
-    } catch {
-      // A read-only store shouldn't block connecting; trust degrades to
-      // per-session, still strictly better than accepting any key.
-    }
-    return { trusted: true, firstUse: true }
+    return { trusted: false, firstUse: true, presented: hostKeyFingerprint(key) }
   }
 
   if (pinned === presented) return { trusted: true, firstUse: false }
   return {
     trusted: false,
+    firstUse: false,
     presented: hostKeyFingerprint(key),
     pinned: hostKeyFingerprint(Buffer.from(pinned, 'base64')),
   }
+}
+
+export function trustHostKey(file: string, hostId: string, key: Buffer): void {
+  const store = readStore(file)
+  store[hostId] = key.toString('base64')
+  writeStore(file, store)
 }
 
 const storePath = () => path.join(app.getPath('userData'), 'known_hosts.json')
@@ -64,11 +66,29 @@ const storePath = () => path.join(app.getPath('userData'), 'known_hosts.json')
 // Builds an ssh2 hostVerifier keyed on host:port. Returns true to accept the
 // handshake; on a pinned-key mismatch it calls onReject with a message a human
 // can act on and returns false so ssh2 aborts the connection.
-export function makeHostVerifier(host: string, port: number, onReject: (message: string) => void) {
+export function makeHostVerifier(
+  host: string,
+  port: number,
+  onReject: (message: string) => void,
+  approveFirstUse?: (hostId: string, fingerprint: string) => boolean,
+) {
   const hostId = `${host}:${port}`
   return (key: Buffer): boolean => {
     const outcome = verifyHostKey(storePath(), hostId, key)
     if (outcome.trusted) return true
+    if (outcome.firstUse) {
+      if (!approveFirstUse?.(hostId, outcome.presented)) {
+        onReject(`Unknown SSH host key for ${hostId}: ${outcome.presented}. Verify the fingerprint with the server administrator before trusting it.`)
+        return false
+      }
+      try {
+        trustHostKey(storePath(), hostId, key)
+        return true
+      } catch (error) {
+        onReject(`Could not save the trusted SSH host key for ${hostId}: ${(error as Error).message}`)
+        return false
+      }
+    }
     onReject(
       `Host key verification failed for ${hostId}: the server presented ${outcome.presented} but ` +
         `${outcome.pinned} was pinned on a previous connection. If this change is unexpected the ` +

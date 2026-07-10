@@ -92,6 +92,16 @@ export function splitTopLevelStatements(sql: string): string[] {
   return statements
 }
 
+// Conservative eligibility for stopping result production at the client cap.
+// Never interrupt scripts/CTEs or SELECT INTO: cancellation there could skip a
+// later statement or leave intentional side effects only partly performed.
+export function isCappableRead(sql: string): boolean {
+  const statements = splitTopLevelStatements(sql)
+  if (statements.length !== 1) return false
+  const masked = maskSql(statements[0]!).trimStart()
+  return /^select\b/i.test(masked) && !/\binto\b/i.test(masked)
+}
+
 // Pooled server queries cannot safely leave a transaction open for a later run:
 // that later run may get another connection. Self-contained transaction scripts
 // remain supported because one driver.query call keeps one checked-out connection.
@@ -145,19 +155,66 @@ export function splitSqlServerBatches(sql: string): string[] {
 /** Removes mysql-client DELIMITER directives and restores terminators to `;`. */
 export function preprocessMysqlDelimiters(sql: string): string {
   let delimiter = ';'
+  let state: 'normal' | 'single' | 'double' | 'backtick' | 'block' = 'normal'
   const output: string[] = []
   for (const line of sql.split(/\r?\n/)) {
-    const directive = /^\s*delimiter\s+(\S+)\s*$/i.exec(line)
+    const directive = state === 'normal' ? /^\s*delimiter\s+(\S+)\s*$/i.exec(line) : null
     if (directive) {
       delimiter = directive[1]!
       continue
     }
-    if (delimiter !== ';' && line.trimEnd().endsWith(delimiter)) {
-      const end = line.lastIndexOf(delimiter)
-      output.push(`${line.slice(0, end)};${line.slice(end + delimiter.length)}`)
-    } else {
-      output.push(line)
+    let transformed = ''
+    for (let index = 0; index < line.length;) {
+      const char = line[index]!
+      const next = line[index + 1]
+      if (state === 'block') {
+        transformed += char
+        index += 1
+        if (char === '*' && next === '/') {
+          transformed += '/'
+          index += 1
+          state = 'normal'
+        }
+        continue
+      }
+      if (state !== 'normal') {
+        transformed += char
+        index += 1
+        const quote = state === 'single' ? "'" : state === 'double' ? '"' : '`'
+        if (char === '\\' && index < line.length) {
+          transformed += line[index]!
+          index += 1
+        } else if (char === quote && next === quote) {
+          transformed += next
+          index += 1
+        } else if (char === quote) {
+          state = 'normal'
+        }
+        continue
+      }
+      if (char === '-' && next === '-' && (line[index + 2] === undefined || /\s/.test(line[index + 2]!))) {
+        transformed += line.slice(index)
+        index = line.length
+      } else if (char === '#') {
+        transformed += line.slice(index)
+        index = line.length
+      } else if (char === '/' && next === '*') {
+        transformed += '/*'
+        index += 2
+        state = 'block'
+      } else if (char === "'" || char === '"' || char === '`') {
+        transformed += char
+        state = char === "'" ? 'single' : char === '"' ? 'double' : 'backtick'
+        index += 1
+      } else if (delimiter !== ';' && line.startsWith(delimiter, index)) {
+        transformed += ';'
+        index += delimiter.length
+      } else {
+        transformed += char
+        index += 1
+      }
     }
+    output.push(transformed)
   }
   return output.join('\n')
 }

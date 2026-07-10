@@ -1,4 +1,5 @@
 import type { ConnectionProfile, TestSshResult } from '../../src/electron'
+import { dialog } from 'electron'
 import { openSshTunnel } from './sshTunnel'
 
 // A tunnel exposes a local TCP port that forwards to the real database host.
@@ -27,6 +28,17 @@ const remoteTarget = (profile: ConnectionProfile) => ({
 
 const usesTunnel = (profile: ConnectionProfile) => profile.engine !== 'sqlite' && profile.ssh?.enabled === true
 
+const approveFirstUse = (hostId: string, fingerprint: string) => dialog.showMessageBoxSync({
+  type: 'warning',
+  title: 'Verify SSH host key',
+  message: `Trust this SSH host key for ${hostId}?`,
+  detail: `Fingerprint: ${fingerprint}\n\nVerify this fingerprint with the server administrator. Trusting an unverified key can expose the database connection to interception.`,
+  buttons: ['Cancel', 'Trust Host Key'],
+  defaultId: 0,
+  cancelId: 0,
+  noLink: true,
+}) === 1
+
 // Resolve the transport for a connection: open an SSH tunnel if the profile
 // asks for one, then report the host/port a driver should actually dial. The
 // returned tunnel (if any) is owned by the caller — the connection manager —
@@ -40,7 +52,7 @@ export async function resolveEndpoint(
   if (usesTunnel(profile)) {
     let tunnel: Tunnel
     try {
-      tunnel = await openSshTunnel(profile.ssh!, host, port, onTunnelError)
+      tunnel = await openSshTunnel(profile.ssh!, host, port, onTunnelError, approveFirstUse)
     } catch (error) {
       throw new Error(`SSH tunnel failed: ${(error as Error).message}`, { cause: error })
     }
@@ -60,7 +72,7 @@ export async function testSshTunnel(profile: ConnectionProfile): Promise<TestSsh
   const tookMs = () => Math.round(performance.now() - started)
   let tunnel: Tunnel | null = null
   try {
-    tunnel = await openSshTunnel(profile.ssh!, host, port, () => {})
+    tunnel = await openSshTunnel(profile.ssh!, host, port, () => {}, approveFirstUse)
     return { success: true, tookMs: tookMs() }
   } catch (error) {
     return { success: false, error: (error as Error).message, tookMs: tookMs() }

@@ -96,6 +96,8 @@ export type WorkspaceConfigResult = {
   error?: string
   /** True when the loaded config holds secrets stored unencrypted (no OS key store). */
   unencryptedSecrets?: boolean
+  /** Linux safeStorage is using basic_text rather than a real keyring. */
+  weakCredentialStorage?: boolean
 }
 
 // --- Live connections ---------------------------------------------------
@@ -130,18 +132,20 @@ export type QueryResultSet = {
   rows: unknown[][]
   /** Rows returned for reads, rows affected for writes. */
   rowCount: number
-  /** Result exceeded the buffer cap; rowCount still reports the full count. */
+  /** Result exceeded the buffer cap. */
   truncated?: boolean
+  /** False when execution was stopped at the cap and rowCount is only a lower bound. */
+  rowCountExact?: boolean
+  /** Set when more rows are buffered in the main process than were sent. */
+  sessionId?: string
+  /** Total rows available through fetchRows; present with sessionId. */
+  bufferedRowCount?: number
 }
 
 export type QueryResult = QueryResultSet & {
   durationMs: number
   /** Every result set in statement order when a script produced more than one. */
   resultSets?: QueryResultSet[]
-  /** Set when more rows are buffered in the main process than were sent; page them via fetchRows. */
-  sessionId?: string
-  /** Total rows buffered in the main process (>= rows.length); present with sessionId. */
-  bufferedRowCount?: number
 }
 
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
@@ -221,6 +225,8 @@ export type InspectColumn = {
   /** Non-default collation (SQL Server only): ALTER COLUMN must restate it or
    *  the server silently resets the column to the database default. */
   collation?: string | null
+  /** Server-generated/computed column; its physical definition cannot be altered directly. */
+  generated?: boolean
 }
 
 /** One named-rows block of a table inspection (Indexes, Triggers, …).

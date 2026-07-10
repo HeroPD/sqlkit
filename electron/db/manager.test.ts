@@ -259,6 +259,7 @@ describe('connection manager: query + paging', () => {
     if (!response.success) throw new Error(response.error)
     expect(response.result.rows).toHaveLength(PAGE_SIZE)
     expect(response.result.sessionId).toBeUndefined() // no buffer registered that nobody could free
+    expect(response.result.truncated).toBe(true)
   })
 
   it('does not attach an old query result after reconnecting the same profile', async () => {

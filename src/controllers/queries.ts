@@ -1,5 +1,5 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ConnectionProfile, QueryResponse, QuerySort } from '../electron'
+import type { ConnectionProfile, QueryResponse, QueryResult, QueryResultSet, QuerySort } from '../electron'
 import type { QueryRun } from '../components/results-panel'
 import type { DraftRow } from '../result-editing'
 import type { HistoryItem } from '../components/history-view'
@@ -23,6 +23,25 @@ const MAX_TASKS = 50
 
 // Rows pulled per lazy fetch as the grid scrolls into not-yet-loaded territory.
 const FETCH_PAGE = 200
+const MAX_RETAINED_RESULT_BYTES = 64 * 1024 * 1024
+
+const retainedValueBytes = (value: unknown): number => {
+  if (typeof value === 'string') return value.length * 2
+  if (value instanceof Uint8Array) return value.byteLength
+  if (value === null || value === undefined || typeof value !== 'object') return 16
+  try { return (JSON.stringify(value)?.length ?? 0) * 2 } catch { return 64 }
+}
+
+const retainedResultBytes = (result: QueryResult): number => {
+  const seen = new Set<unknown[][]>()
+  let bytes = 0
+  for (const rows of [result.rows, ...(result.resultSets?.map((set) => set.rows) ?? [])]) {
+    if (seen.has(rows)) continue
+    seen.add(rows)
+    for (const row of rows) for (const value of row) bytes += retainedValueBytes(value)
+  }
+  return bytes
+}
 
 // Shared empty edits map, so a tab with no pending edits returns a stable
 // reference (no spurious re-renders).
@@ -119,8 +138,27 @@ export class QueriesController implements ReactiveController {
   /** A run belongs to the tab that started it, wherever the user is now. */
   setRun(tabId: string, run: QueryRun) {
     if (!this.tabExists(tabId)) return
-    this.runs = new Map(this.runs).set(tabId, run)
+    const next = new Map(this.runs)
+    next.delete(tabId)
+    next.set(tabId, run)
+    this.runs = next
+    this.evictRetainedResults(tabId)
     this.host.requestUpdate()
+  }
+
+  private evictRetainedResults(protectedTabId: string) {
+    let total = [...this.runs.values()].reduce((bytes, entry) =>
+      bytes + (entry.phase === 'done' ? retainedResultBytes(entry.result) : 0), 0)
+    if (total <= MAX_RETAINED_RESULT_BYTES) return
+    const next = new Map(this.runs)
+    for (const [tabId, entry] of next) {
+      if (total <= MAX_RETAINED_RESULT_BYTES) break
+      if (tabId === protectedTabId || entry.phase !== 'done') continue
+      total -= retainedResultBytes(entry.result)
+      this.closeResultSessions(entry.result)
+      next.set(tabId, { phase: 'error', error: 'This result was released to keep SqlKit memory usage bounded. Run the query again to reload it.' })
+    }
+    this.runs = next
   }
 
   // --- draft (unsaved new) rows --------------------------------------------
@@ -387,12 +425,12 @@ export class QueriesController implements ReactiveController {
     // freshly-cleared history/tasks. Free its main-process buffer too — reset()
     // never saw this run, so it couldn't close the session itself.
     if (this.generation !== gen) {
-      if (response.success && response.result.sessionId) void window.sqlkit.closeSession(response.result.sessionId)
+      if (response.success) this.closeResultSessions(response.result)
       return
     }
 
     if (!this.tabExists(tabId)) {
-      if (response.success && response.result.sessionId) void window.sqlkit.closeSession(response.result.sessionId)
+      if (response.success) this.closeResultSessions(response.result)
       this.finishTask(task.id, response, task.startedAt)
       this.host.requestUpdate()
       return
@@ -454,14 +492,19 @@ export class QueriesController implements ReactiveController {
 
   // Pulls the next page of a paged result from the main-process buffer and
   // appends it. Called as the grid scrolls toward the end of what's loaded.
-  async loadMore(tabId: string) {
+  async loadMore(tabId: string, resultSetIndex?: number) {
     const run = this.runs.get(tabId)
     if (run?.phase !== 'done') return
-    const { result } = run
+    const isEarlierSet = resultSetIndex !== undefined
+      && !!run.result.resultSets
+      && resultSetIndex >= 0
+      && resultSetIndex < run.result.resultSets.length - 1
+    const result = isEarlierSet ? run.result.resultSets![resultSetIndex]! : run.result
     if (result.sessionId === undefined || result.bufferedRowCount === undefined) return
-    if (result.rows.length >= result.bufferedRowCount || this.fetching.has(tabId)) return
+    const fetchKey = `${tabId}:${isEarlierSet ? resultSetIndex : 'final'}`
+    if (result.rows.length >= result.bufferedRowCount || this.fetching.has(fetchKey)) return
 
-    this.fetching.add(tabId)
+    this.fetching.add(fetchKey)
     const gen = this.generation
     try {
       const response = await window.sqlkit.fetchRows(result.sessionId, result.rows.length, FETCH_PAGE)
@@ -469,31 +512,47 @@ export class QueriesController implements ReactiveController {
       // The run may have been superseded (new query) while fetching; only touch
       // it when it's still the same buffered result.
       const current = this.runs.get(tabId)
-      if (current?.phase !== 'done' || current.result.sessionId !== result.sessionId) return
+      if (current?.phase !== 'done') return
+      const currentResult = isEarlierSet ? current.result.resultSets?.[resultSetIndex] : current.result
+      if (currentResult?.sessionId !== result.sessionId) return
+
+      const replaceResult = (nextSet: QueryResultSet): QueryResult => {
+        if (!isEarlierSet) return { ...current.result, ...nextSet, durationMs: current.result.durationMs }
+        const sets = [...current.result.resultSets!]
+        sets[resultSetIndex] = nextSet
+        return { ...current.result, resultSets: sets }
+      }
 
       // Buffer gone (evicted / disconnected) or nothing more came back: pin
       // bufferedRowCount to what's loaded so the grid stops asking.
       if (!response.success || response.rows.length === 0) {
-        if (current.result.bufferedRowCount !== current.result.rows.length) {
-          this.setRun(tabId, { phase: 'done', result: { ...current.result, bufferedRowCount: current.result.rows.length }, sql: current.sql })
+        if (currentResult.bufferedRowCount !== currentResult.rows.length) {
+          this.setRun(tabId, { phase: 'done', result: replaceResult({ ...currentResult, bufferedRowCount: currentResult.rows.length }), sql: current.sql })
         }
         return
       }
       this.setRun(tabId, {
         phase: 'done',
-        result: { ...current.result, rows: [...current.result.rows, ...response.rows] },
+        result: replaceResult({ ...currentResult, rows: [...currentResult.rows, ...response.rows] }),
         sql: current.sql,
       })
     } finally {
-      this.fetching.delete(tabId)
+      this.fetching.delete(fetchKey)
     }
   }
 
   // Frees a run's main-process row buffer, if it has one.
   private closeRunSession(run: QueryRun | undefined) {
-    if (run?.phase === 'done' && run.result.sessionId) {
-      void window.sqlkit.closeSession(run.result.sessionId)
-    }
+    if (run?.phase !== 'done') return
+    this.closeResultSessions(run.result)
+  }
+
+  private closeResultSessions(result: QueryResult) {
+    const ids = new Set([
+      result.sessionId,
+      ...(result.resultSets?.map((set) => set.sessionId) ?? []),
+    ].filter((id): id is string => !!id))
+    for (const id of ids) void window.sqlkit.closeSession(id).catch(() => {})
   }
 
   // --- tab lifecycle hooks, called by the workbench's tab management -------

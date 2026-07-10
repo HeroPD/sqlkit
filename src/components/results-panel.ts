@@ -238,6 +238,8 @@ export class ResultsPanel extends LitElement {
     this._widthsCache = null
     this._scrollTop = 0
     this._resetScroll = true
+    this.requestUpdate()
+    requestAnimationFrame(() => this._maybeLoadMore())
   }
 
   protected willUpdate(changed: PropertyValues) {
@@ -376,7 +378,11 @@ export class ResultsPanel extends LitElement {
     if (result.sessionId === undefined || result.bufferedRowCount === undefined) return
     if (result.rows.length >= result.bufferedRowCount) return
     if (this._window().last >= result.rows.length) {
-      this.dispatchEvent(new CustomEvent('load-more', { bubbles: true, composed: true }))
+      this.dispatchEvent(new CustomEvent('load-more', {
+        detail: { resultSetIndex: this._resultSetIndex },
+        bubbles: true,
+        composed: true,
+      }))
     }
   }
 
@@ -548,7 +554,7 @@ export class ResultsPanel extends LitElement {
           ? html`
               <select class="result-set-select" aria-label="Result set" @change=${this._selectResultSet} .value=${String(this._resultSetIndex)}>
                 ${this.run.result.resultSets!.map((set, index) =>
-                  html`<option value=${index}>Result ${index + 1} · ${set.rowCount} row${set.rowCount === 1 ? '' : 's'}</option>`,
+                  html`<option value=${index}>Result ${index + 1} · ${set.rowCount}${set.rowCountExact === false ? '+' : ''} row${set.rowCount === 1 ? '' : 's'}</option>`,
                 )}
               </select>
             `
@@ -1220,13 +1226,12 @@ export class ResultsPanel extends LitElement {
     const result = this._shownResult()
     if (!result) return ''
     const buffered = result.bufferedRowCount
-    // A truncated result whose driver couldn't report the true total (sqlite,
-    // which would have to scan every row) shows the loaded count as a floor
-    // ("N+ rows"); when the total is known (postgres) show it with a caveat.
-    const totalKnown = !result.truncated || buffered === undefined || result.rowCount > buffered
+    // A safe server SELECT is stopped at the buffer cap, so its observed count
+    // is a lower bound ("N+ rows"). Scripts that must drain may know the total.
+    const totalKnown = result.rowCountExact !== false && (!result.truncated || buffered === undefined || result.rowCount > buffered)
     const rows = totalKnown
       ? `${result.rowCount.toLocaleString()} row${result.rowCount === 1 ? '' : 's'}`
-      : `${buffered.toLocaleString()}+ rows`
+      : `${(buffered ?? result.rows.length).toLocaleString()}+ rows`
     // Only a result past the buffer cap is partial; everything else is fully
     // scrollable (paged in on demand), so no "showing first N" caveat.
     const capped =

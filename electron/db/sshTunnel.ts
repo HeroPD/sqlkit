@@ -27,6 +27,7 @@ function buildConnectConfig(ssh: SshConfig): ConnectConfig {
     const keyPath = expandHome(ssh.keyPath.trim())
     if (!keyPath) throw new Error('SSH private key path is required')
     try {
+      if (fs.statSync(keyPath).size > 1024 * 1024) throw new Error('private key file exceeds 1 MB')
       config.privateKey = fs.readFileSync(keyPath)
     } catch (error) {
       throw new Error(`Failed to read SSH key at ${keyPath}: ${(error as Error).message}`, { cause: error })
@@ -51,6 +52,7 @@ export function openSshTunnel(
   remoteHost: string,
   remotePort: number,
   onError: (message: string) => void,
+  approveFirstUse?: (hostId: string, fingerprint: string) => boolean,
 ): Promise<Tunnel> {
   return new Promise((resolve, reject) => {
     const client = new Client()
@@ -124,9 +126,12 @@ export function openSshTunnel(
       const config = buildConnectConfig(ssh)
       // Pin the bastion's host key on first use and reject if it ever changes;
       // without this ssh2 accepts any key, leaving the tunnel open to MITM.
-      config.hostVerifier = makeHostVerifier(config.host as string, config.port as number, (message) => {
-        rejectionMessage = message
-      })
+      config.hostVerifier = makeHostVerifier(
+        config.host as string,
+        config.port as number,
+        (message) => { rejectionMessage = message },
+        approveFirstUse,
+      )
       client.connect(config)
     } catch (error) {
       fail(error as Error)

@@ -1198,8 +1198,9 @@ export class WorkbenchScreen extends LitElement {
   }
 
   // The results grid scrolled near the end of what's loaded: page in more rows.
-  private _onLoadMore() {
-    if (this._ctx.activeTabId) void this._queries.loadMore(this._ctx.activeTabId)
+  private _onLoadMore(event: Event) {
+    const index = (event as CustomEvent<{ resultSetIndex?: number }>).detail?.resultSetIndex
+    if (this._ctx.activeTabId) void this._queries.loadMore(this._ctx.activeTabId, index)
   }
 
   // A result-cell edit stages a pending change (committed later via ⌘S / Save),
@@ -1279,7 +1280,13 @@ export class WorkbenchScreen extends LitElement {
     const { column, direction } = (event as CustomEvent<SortColumnDetail>).detail
     const run = this._queries.runFor(this._ctx.activeTabId)
     if (run.phase !== 'done' || !run.sql || !isReorderableQuery(run.sql)) return
-    void this._runSql(run.sql, direction ? { column, direction } : undefined)
+    const sql = run.sql
+    this._dialogs.confirm = {
+      message: 'Re-run this query to sort the result?',
+      detail: 'Database sorting executes the query again. Confirm only if repeating any functions in the SELECT is safe.',
+      confirmLabel: 'Re-run and Sort',
+      action: () => void this._runSql(sql, direction ? { column, direction } : undefined),
+    }
   }
 
   private _onDeleteRows(event: Event) {

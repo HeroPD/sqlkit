@@ -50,6 +50,8 @@ describeDb('mssql driver (integration)', () => {
     await fixtures.request().batch('create index books_author_idx on books(author_id)')
     await fixtures.request().batch('create view book_titles as select title from books')
     await fixtures.request().batch('create function sqlkit_add_one(@x int) returns int as begin return @x + 1 end')
+    await fixtures.request().batch('create type amount_alias from decimal(19,4)')
+    await fixtures.request().batch('create table type_shapes (id int, fixed binary(8), approximate float(24), amount amount_alias, calculated as id + 1)')
     await fixtures.request().batch("insert into authors (name, bio) values ('Ada', 'pioneer'), ('Alan', null)")
   }, 30000)
 
@@ -179,7 +181,7 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
-  it('buffers at most MAX_BUFFERED_ROWS but counts them all', async () => {
+  it('stops a single read once the result buffer is full', async () => {
     const driver = await connectDriver()
     try {
       const count = MAX_BUFFERED_ROWS + 25
@@ -188,12 +190,35 @@ describeDb('mssql driver (integration)', () => {
          from sys.all_objects a cross join sys.all_objects b`,
       )
       expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
-      expect(result.rowCount).toBe(count)
+      expect(result.rowCount).toBeGreaterThanOrEqual(MAX_BUFFERED_ROWS)
+      expect(result.rowCount).toBeLessThan(count)
       expect(result.truncated).toBe(true)
+      expect(result.rowCountExact).toBe(false)
     } finally {
       await driver.disconnect()
     }
   }, 30000)
+
+  it('resets pooled TDS session state after each query', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table #sqlkit_leaked_state (id int)')
+      expect((await driver.query("select object_id('tempdb..#sqlkit_leaked_state')")).rows).toEqual([[null]])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('returns safe decimal and datetime2 values as exact text', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query("select cast(12.34 as decimal(8,2)), cast('2026-07-10T03:04:05.1234567' as datetime2(7))")
+      expect(result.rows).toEqual([['12.34', '2026-07-10 03:04:05.1234567']])
+      await expect(driver.query('select cast(9007199254740993 as decimal(19,0))')).rejects.toThrow(/CAST it to varchar/)
+    } finally {
+      await driver.disconnect()
+    }
+  })
 
   it('cancels an in-flight query in-band', async () => {
     const driver = await connectDriver()
@@ -207,6 +232,21 @@ describeDb('mssql driver (integration)', () => {
       expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
       await cancelled
     } finally {
+      await driver.disconnect()
+    }
+  }, 20000)
+
+  it('cancels an in-flight transactional DDL batch', async () => {
+    const driver = await connectDriver()
+    try {
+      const running = driver.runDdl!(["waitfor delay '00:00:30'", 'create table should_not_exist (id int)'])
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const outcome = await driver.cancel?.()
+      expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
+      await expect(running).resolves.toMatchObject({ success: false, error: 'Save cancelled.' })
+      expect((await driver.query("select object_id('dbo.should_not_exist')")).rows).toEqual([[null]])
+    } finally {
+      await driver.query('drop table if exists should_not_exist').catch(() => {})
       await driver.disconnect()
     }
   }, 20000)
@@ -275,6 +315,21 @@ describeDb('mssql driver (integration)', () => {
       const indexes = inspection.sections.find((section) => section.title === 'Indexes')
       expect(indexes?.rows.some((row) => row.name === 'books_author_idx')).toBe(true)
       expect(indexes?.rows.every((row) => !/^PK_/.test(row.name))).toBe(true)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('reconstructs SQL Server column definitions without losing modifiers', async () => {
+    const driver = await connectDriver()
+    try {
+      const inspection = await driver.inspectTable({ schema: 'dbo', name: 'type_shapes', kind: 'table' })
+      const byName = new Map(inspection.columns.map((column) => [column.name, column]))
+      expect(byName.get('fixed')?.dataType).toBe('binary(8)')
+      // SQL Server canonicalizes float(1..24) to its exact `real` synonym.
+      expect(byName.get('approximate')?.dataType).toBe('real')
+      expect(byName.get('amount')?.dataType).toBe('[dbo].[amount_alias]')
+      expect(byName.get('calculated')?.generated).toBe(true)
     } finally {
       await driver.disconnect()
     }
