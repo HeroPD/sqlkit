@@ -101,7 +101,7 @@ export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
       return { ok: false, issue: { title: 'Cannot edit this row', detail: 'Its primary key value is missing from the result.' } }
     }
-    specs.push({ column: ctx.columnName, columnMeta: ctx.columnMeta, value, pks })
+    specs.push({ column: ctx.columnName, columnMeta: ctx.columnMeta, value, originalValue: row[cell.col], pks })
   }
   return table && specs.length ? { ok: true, value: { table, edits: specs } } : { ok: false, issue: cannotEditColumn }
 }
@@ -170,7 +170,13 @@ export function buildPendingUpdate(
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
       return { ok: false, issue: { title: 'Cannot save an edit', detail: 'A row\'s primary key value is missing from the result.' } }
     }
-    specs.push({ column: ctx.columnName, columnMeta: ctx.columnMeta, value: edit.value, pks })
+    specs.push({
+      column: ctx.columnName,
+      columnMeta: ctx.columnMeta,
+      value: edit.value,
+      originalValue: ctx.result.rows[edit.row]?.[edit.col],
+      pks,
+    })
   }
   return table && specs.length ? { ok: true, value: { table, edits: specs } } : { ok: false, issue: cannotEditColumn }
 }

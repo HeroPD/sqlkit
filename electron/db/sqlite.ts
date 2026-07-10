@@ -38,7 +38,11 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
   let channel: SqliteChannel | null = null
   let file = ''
   let nextId = 1
-  const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
+  const pending = new Map<number, {
+    executionId?: string
+    resolve: (value: unknown) => void
+    reject: (error: Error) => void
+  }>()
 
   const rejectAll = (message: string) => {
     for (const entry of pending.values()) entry.reject(new Error(message))
@@ -63,7 +67,7 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
     channel = opened
   }
 
-  const request = <T>(message: SqliteRequestBody, timeoutMs?: number): Promise<T> => {
+  const request = <T>(message: SqliteRequestBody, timeoutMs?: number, executionId?: string): Promise<T> => {
     const target = channel
     if (!target) return Promise.reject(new Error('Not connected'))
     const id = nextId++
@@ -78,6 +82,7 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
           }, timeoutMs)
         : null
       pending.set(id, {
+        executionId,
         resolve: (value) => {
           if (timer) clearTimeout(timer)
           resolve(value as T)
@@ -117,13 +122,16 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       file = ''
     },
 
-    async query(sql, params = [], _childDb = null, sort = null) {
+    async query(sql, params = [], _childDb = null, sort = null, executionId) {
       const finalSql = sort ? dialect.applyOrderBy(sql, sort) : sql
-      return request<QueryResult>({ type: 'query', sql: finalSql, params: params as SqliteParam[] })
+      return request<QueryResult>({ type: 'query', sql: finalSql, params: params as SqliteParam[] }, undefined, executionId)
     },
 
     async runBatch(statements, _childDb = null) {
-      return request<BatchResult>({ type: 'runBatch', statements: statements as { sql: string; params: SqliteParam[] }[] })
+      return request<BatchResult>({
+        type: 'runBatch',
+        statements: statements as { sql: string; params: SqliteParam[]; expectedRows?: number }[],
+      })
     },
 
     async runDdl(statements, _childDb = null) {
@@ -142,9 +150,16 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       return request<TableInspection>({ type: 'inspectTable', table })
     },
 
-    async cancel() {
-      const running = pending.size
+    async cancel(executionId) {
+      const queryEntries = executionId === undefined
+        ? [...pending.values()]
+        : [...pending.values()].filter((entry) => entry.executionId !== undefined)
+      const targets = queryEntries.filter((entry) => executionId === undefined || entry.executionId === executionId)
+      const running = targets.length
       if (!running) return { running: 0, cancelled: 0 }
+      // SQLite has one synchronous worker. Refuse to kill unrelated executions;
+      // the selected query can be interrupted safely when it is the only one.
+      if (targets.length !== queryEntries.length || targets.length !== pending.size) return { running, cancelled: 0 }
       // No interrupt in node:sqlite: kill the worker (which rolls its connection
       // back cleanly) and bring a fresh one up on the same file so work continues.
       teardown('Query cancelled.')

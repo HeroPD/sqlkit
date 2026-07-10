@@ -18,9 +18,11 @@ export type Endpoint = {
   tunnel: Tunnel | null
 }
 
+const DEFAULT_PORT = { postgresql: 5432, mysql: 3306, sqlserver: 1433, sqlite: 0 } as const
+
 const remoteTarget = (profile: ConnectionProfile) => ({
   host: profile.host.trim() || 'localhost',
-  port: Number(profile.port) || 5432,
+  port: Number(profile.port) || DEFAULT_PORT[profile.engine],
 })
 
 const usesTunnel = (profile: ConnectionProfile) => profile.engine !== 'sqlite' && profile.ssh?.enabled === true

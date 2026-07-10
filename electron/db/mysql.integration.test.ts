@@ -153,6 +153,10 @@ describeDb('mysql driver (integration)', () => {
       const result = await driver.query('set @x = 1; select 1 as a; select 2 as b')
       expect(result.columns).toEqual(['b'])
       expect(result.rows).toEqual([[2]])
+      expect(result.resultSets?.slice(-2).map((set) => ({ columns: set.columns, rows: set.rows }))).toEqual([
+        { columns: ['a'], rows: [[1]] },
+        { columns: ['b'], rows: [[2]] },
+      ])
     } finally {
       await driver.disconnect()
     }
@@ -192,9 +196,10 @@ describeDb('mysql driver (integration)', () => {
     try {
       // A killed SLEEP() returns 1 rather than erroring, so assert on the
       // cancel outcome and that the statement ends promptly either way.
-      const running = driver.query('select sleep(30) as s').catch(() => null)
+      const running = driver.query('select sleep(30) as s', [], null, null, 'slow-query').catch(() => null)
       await new Promise((resolve) => setTimeout(resolve, 400))
-      const outcome = await driver.cancel?.()
+      expect(await driver.cancel?.('other-query')).toEqual({ running: 0, cancelled: 0 })
+      const outcome = await driver.cancel?.('slow-query')
       expect(outcome?.running).toBeGreaterThanOrEqual(1)
       expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
       const started = performance.now()

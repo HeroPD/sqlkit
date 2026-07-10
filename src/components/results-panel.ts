@@ -13,7 +13,7 @@ import type { ExportConfirmDetail } from './export-dialog'
 /** What the results panel is currently showing. */
 export type QueryRun =
   | { phase: 'idle' }
-  | { phase: 'running'; note?: string }
+  | { phase: 'running'; executionId: string; profileId: string; note?: string }
   | { phase: 'done'; result: QueryResult; sql?: string }
   | { phase: 'error'; error: string }
 
@@ -40,9 +40,16 @@ const OVERSCAN = 8
 // Row height used before the first real row is measured; matches the pinned
 // cell height in CSS (tbody tr td height) so rows stay uniform.
 const ESTIMATED_ROW_HEIGHT = 25
+const bigintReplacer = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value
 
-const formatCell = (value: unknown) => {
-  if (typeof value === 'object' && value !== null) return JSON.stringify(value)
+const formatCell = (value: unknown): string => {
+  if (typeof value === 'object' && value !== null) {
+    try {
+      return JSON.stringify(value, bigintReplacer) ?? '[unserializable value]'
+    } catch {
+      return '[unserializable value]'
+    }
+  }
   return String(value)
 }
 
@@ -155,6 +162,9 @@ export class ResultsPanel extends LitElement {
   private _exportOpen = false
 
   @state()
+  private _resultSetIndex = 0
+
+  @state()
   private _record: { ref: RowRef; col: number } | null = null
 
   /** Selected cell rectangle in display-row space: anchor (r0,c0) → focus (r1,c1).
@@ -204,6 +214,32 @@ export class ResultsPanel extends LitElement {
   // Focus the record view after switching away from the grid table.
   private _recordFocusPending = false
 
+  private _shownResult(): QueryResult | null {
+    if (this.run.phase !== 'done') return null
+    const base = this.run.result
+    const sets = base.resultSets
+    if (!sets?.length || this._resultSetIndex >= sets.length - 1) return base
+    const selected = sets[Math.max(0, this._resultSetIndex)]!
+    return { ...selected, durationMs: base.durationMs }
+  }
+
+  private _canEditShownResult() {
+    if (this.run.phase !== 'done') return false
+    const sets = this.run.result.resultSets
+    return !sets?.length || this._resultSetIndex === sets.length - 1
+  }
+
+  private _selectResultSet = (event: Event) => {
+    this._resultSetIndex = Number((event.target as HTMLSelectElement).value)
+    this._sel = null
+    this._editing = null
+    this._record = null
+    this._displayCache = null
+    this._widthsCache = null
+    this._scrollTop = 0
+    this._resetScroll = true
+  }
+
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('drafts')) {
       // Select a just-added draft once it lands in the property.
@@ -222,6 +258,8 @@ export class ResultsPanel extends LitElement {
     const key = this.run.phase === 'done' ? (this.run.result.sessionId ?? this.run.result) : this.run.phase
     if (key === this._lastKey) return // an append to the same result, not a new one
     this._lastKey = key
+    this._resultSetIndex = this.run.phase === 'done' ? Math.max(0, (this.run.result.resultSets?.length ?? 1) - 1) : 0
+    const shown = this._shownResult()
     // Adopt this tab's persisted widths (empty for a new result shape, which
     // then auto-measures). Local overrides drive rendering; drags write back.
     this._widthOverrides = new Map(this.columnWidths)
@@ -229,7 +267,7 @@ export class ResultsPanel extends LitElement {
     // Land the selection on the first cell of a fresh result, so keyboard work
     // and "add row below" have a defined anchor without a click.
     this._sel =
-      this.run.phase === 'done' && this.run.result.rows.length && this.run.result.columns.length
+      shown?.rows.length && shown.columns.length
         ? { r0: 0, c0: 0, r1: 0, c1: 0 }
         : null
     this._editing = null
@@ -308,7 +346,7 @@ export class ResultsPanel extends LitElement {
 
   // The slice of loaded rows to render for the current scroll position.
   private _window() {
-    const loaded = this.run.phase === 'done' ? this.run.result.rows.length : 0
+    const loaded = this._shownResult()?.rows.length ?? 0
     const rowH = this._rowHeight || ESTIMATED_ROW_HEIGHT
     const viewport = this._viewportH || 400
     const first = Math.max(0, Math.floor(this._scrollTop / rowH) - OVERSCAN)
@@ -333,7 +371,8 @@ export class ResultsPanel extends LitElement {
   // loaded and the main-process buffer still has more.
   private _maybeLoadMore() {
     if (this.run.phase !== 'done') return
-    const { result } = this.run
+    const result = this._shownResult()
+    if (!result) return
     if (result.sessionId === undefined || result.bufferedRowCount === undefined) return
     if (result.rows.length >= result.bufferedRowCount) return
     if (this._window().last >= result.rows.length) {
@@ -350,7 +389,7 @@ export class ResultsPanel extends LitElement {
   // The interleaved display order and the index of each result/draft row within
   // it. Rebuilt only when the rows or drafts arrays change.
   private _display() {
-    const result = this.run.phase === 'done' ? this.run.result : null
+    const result = this._shownResult()
     const rows = result?.rows
     if (!rows) return { order: [] as RowRef[], resultToDisplay: [] as number[], draftToDisplay: [] as number[] }
     const drafts = this.drafts
@@ -398,7 +437,7 @@ export class ResultsPanel extends LitElement {
   // untouched draft cells read as null.
   private _rowValuesAt(ref: RowRef): unknown[] {
     if (this.run.phase !== 'done') return []
-    if (ref.kind === 'result') return this.run.result.rows[ref.row] ?? []
+    if (ref.kind === 'result') return this._shownResult()?.rows[ref.row] ?? []
     return this.drafts[ref.index]?.cells ?? []
   }
 
@@ -433,10 +472,12 @@ export class ResultsPanel extends LitElement {
 
   private _duplicateCells(row: number): Array<string | null> {
     if (this.run.phase !== 'done') return []
-    return this.run.result.columns.map((_, col) => {
+    const result = this._shownResult()
+    if (!result) return []
+    return result.columns.map((_, col) => {
       const pending = this.edits.get(`${row}:${col}`)
       if (pending !== undefined) return pending
-      const value = this.run.phase === 'done' ? this.run.result.rows[row]?.[col] : null
+      const value = result.rows[row]?.[col]
       return value === null || value === undefined ? '' : formatCell(value)
     })
   }
@@ -492,19 +533,30 @@ export class ResultsPanel extends LitElement {
   }
 
   render() {
-    const exportable = this.run.phase === 'done' && this.run.result.columns.length > 0
+    const result = this._shownResult()
+    const exportable = !!result?.columns.length
+    const canEditResult = this._canEditShownResult()
     const pendingCount = this.drafts.length + this.edits.size
-    const showWriteTools = exportable && (this.rowEditable || pendingCount > 0)
+    const showWriteTools = exportable && canEditResult && (this.rowEditable || pendingCount > 0)
     const canToggleRecord = exportable && (this._record !== null || (this._sel ? this._refAt(this._sel.r1) !== null : false))
-    const selected = this.rowEditable ? this._selectedRefs() : { results: [], drafts: [] }
+    const selected = this.rowEditable && canEditResult ? this._selectedRefs() : { results: [], drafts: [] }
     const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
       <div class="head">
         <span>Results</span>
+        ${this.run.phase === 'done' && (this.run.result.resultSets?.length ?? 0) > 1
+          ? html`
+              <select class="result-set-select" aria-label="Result set" @change=${this._selectResultSet} .value=${String(this._resultSetIndex)}>
+                ${this.run.result.resultSets!.map((set, index) =>
+                  html`<option value=${index}>Result ${index + 1} · ${set.rowCount} row${set.rowCount === 1 ? '' : 's'}</option>`,
+                )}
+              </select>
+            `
+          : ''}
         ${showWriteTools
           ? html`
               <div class="toolbar" aria-label="Result edit actions">
-                ${this.rowEditable
+                ${this.rowEditable && canEditResult
                   ? html`
                       <button class="head-action" title="Add new row" aria-label="Add new row" @click=${this._addRow}>
                         <i class="codicon codicon-add" aria-hidden="true"></i>
@@ -538,7 +590,7 @@ export class ResultsPanel extends LitElement {
                 >
                   <i class="codicon codicon-discard" aria-hidden="true"></i>
                 </button>
-                ${this.rowEditable
+                ${this.rowEditable && canEditResult
                   ? html`
                       <button
                         class="head-action danger"
@@ -597,8 +649,8 @@ export class ResultsPanel extends LitElement {
       ${this._exportOpen && this.run.phase === 'done'
         ? html`
             <export-dialog
-              .total=${this.run.result.bufferedRowCount ?? this.run.result.rows.length}
-              .truncated=${this.run.result.truncated ?? false}
+              .total=${result?.bufferedRowCount ?? result?.rows.length ?? 0}
+              .truncated=${result?.truncated ?? false}
               @dialog-cancel=${() => (this._exportOpen = false)}
               @export-confirm=${this._onExportConfirm}
             ></export-dialog>
@@ -611,7 +663,8 @@ export class ResultsPanel extends LitElement {
     this._exportOpen = false
     if (this.run.phase !== 'done') return
     const { format, rows } = event.detail
-    const { result } = this.run
+    const result = this._shownResult()
+    if (!result) return
     const slice = (await this._allRows(result, rows)).slice(0, rows)
     const content =
       format === 'json' ? toJson(result.columns, slice) : toDelimited(result.columns, slice, format === 'tsv' ? '\t' : ',')
@@ -626,8 +679,14 @@ export class ResultsPanel extends LitElement {
     const total = result.bufferedRowCount ?? result.rows.length
     const need = Math.min(limit ?? total, total)
     if (result.sessionId === undefined || result.rows.length >= need) return result.rows
-    const response = await window.sqlkit.fetchRows(result.sessionId, 0, need)
-    return response.success ? response.rows : result.rows
+    const rows: unknown[][] = []
+    while (rows.length < need) {
+      const response = await window.sqlkit.fetchRows(result.sessionId, rows.length, Math.min(200, need - rows.length))
+      if (!response.success) return result.rows.slice(0, need)
+      if (response.rows.length === 0) break
+      rows.push(...response.rows)
+    }
+    return rows
   }
 
   // One delegated listener instead of one per cell. The data row index is read
@@ -653,8 +712,9 @@ export class ResultsPanel extends LitElement {
   private _renderMenu() {
     const menu = this._menu
     if (!menu || this.run.phase !== 'done') return ''
-    const { result } = this.run
-    const canEdit = this.editable && menu.row >= 0 && menu.col >= 0
+    const result = this._shownResult()
+    if (!result) return ''
+    const canEdit = this.editable && this._canEditShownResult() && menu.row >= 0 && menu.col >= 0
     const items: MenuItem[] = [
       ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'view-record', label: 'View Record' }] : []),
       ...(canEdit ? [{ id: 'edit-cell', label: 'Edit…' }] : []),
@@ -696,7 +756,7 @@ export class ResultsPanel extends LitElement {
   private _renderRecordView() {
     const record = this._record
     if (!record || this.run.phase !== 'done') return ''
-    const columns = this.run.result.columns
+    const columns = this._shownResult()?.columns ?? []
     const rowLabel = record.ref.kind === 'result' ? `Row #${record.ref.row + 1}` : `New row #${record.ref.index + 1}`
     return html`
       <section
@@ -740,7 +800,7 @@ export class ResultsPanel extends LitElement {
   private _recordValue(ref: RowRef, col: number): unknown {
     if (ref.kind === 'draft') return this.drafts[ref.index]?.cells[col] ?? null
     const pending = this.edits.get(`${ref.row}:${col}`)
-    return pending ?? (this.run.phase === 'done' ? this.run.result.rows[ref.row]?.[col] : null)
+    return pending ?? this._shownResult()?.rows[ref.row]?.[col] ?? null
   }
 
   private _recordEditText(value: unknown): string {
@@ -749,7 +809,7 @@ export class ResultsPanel extends LitElement {
   }
 
   private _recordCellEditable(ref: RowRef): boolean {
-    return ref.kind === 'draft' || this.editable
+    return ref.kind === 'draft' || (this.editable && this._canEditShownResult())
   }
 
   private _focusRecordField(col: number) {
@@ -772,8 +832,8 @@ export class ResultsPanel extends LitElement {
       }
       return
     }
-    if (!this.editable || this.run.phase !== 'done') return
-    const original = this.run.result.rows[record.ref.row]?.[col]
+    if (!this.editable || !this._canEditShownResult() || this.run.phase !== 'done') return
+    const original = this._shownResult()?.rows[record.ref.row]?.[col]
     const originalText = original === null || original === undefined ? '' : formatCell(original)
     const key = `${record.ref.row}:${col}`
     const pending = this.edits.get(key)
@@ -869,7 +929,7 @@ export class ResultsPanel extends LitElement {
     const s = this._sel
     if (!s || this.run.phase !== 'done') return
     const len = this._display().order.length
-    const cols = this.run.result.columns.length
+    const cols = this._shownResult()?.columns.length ?? 0
     const r = Math.max(0, Math.min(len - 1, s.r1 + dRow))
     const c = Math.max(0, Math.min(cols - 1, s.c1 + dCol))
     this._sel = extend ? { ...s, r1: r, c1: c } : { r0: r, c0: c, r1: r, c1: c }
@@ -882,7 +942,7 @@ export class ResultsPanel extends LitElement {
     const s = this._sel
     if (!s || this.run.phase !== 'done') return
     const len = this._display().order.length
-    const cols = this.run.result.columns.length
+    const cols = this._shownResult()?.columns.length ?? 0
     let r = s.r1
     let c = s.c1 + (forward ? 1 : -1)
     if (c >= cols) {
@@ -996,7 +1056,7 @@ export class ResultsPanel extends LitElement {
     }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
       event.preventDefault()
-      if (this.rowEditable) this._duplicateSelection()
+      if (this.rowEditable && this._canEditShownResult()) this._duplicateSelection()
       return
     }
     // ⌘Z / ⌘⇧Z (staged-edit undo/redo) is handled at the workbench level so it
@@ -1043,7 +1103,7 @@ export class ResultsPanel extends LitElement {
   // Opens the inline editor on a cell; `seed` (a typed char) replaces the value.
   // The current selection is snapshotted so the committed value fills all of it.
   private _beginEdit(ref: RowRef, col: number, seed: string | null) {
-    if (ref.kind === 'result' && !this.editable) return
+    if (ref.kind === 'result' && (!this.editable || !this._canEditShownResult())) return
     this._editing = { ref, col, seed, sel: this._sel ? { ...this._sel } : null }
     this._editFocusPending = true
     this._scrollCellIntoView(this._displayIndexOfRef(ref), col)
@@ -1094,7 +1154,7 @@ export class ResultsPanel extends LitElement {
       return value === current ? null : { event: 'draft-edit', detail: { index: ref.index, col, value } }
     }
     if (this.run.phase !== 'done') return null
-    const original = this.run.result.rows[ref.row]?.[col]
+    const original = this._shownResult()?.rows[ref.row]?.[col]
     const originalText = original === null || original === undefined ? '' : formatCell(original)
     const pending = this.edits.get(`${ref.row}:${col}`)
     const current = pending ?? originalText
@@ -1124,7 +1184,7 @@ export class ResultsPanel extends LitElement {
   private _editCellText(ref: RowRef, col: number): string {
     if (ref.kind === 'draft') return this.drafts[ref.index]?.cells[col] ?? ''
     if (this.run.phase !== 'done') return ''
-    const original = this.run.result.rows[ref.row]?.[col]
+    const original = this._shownResult()?.rows[ref.row]?.[col]
     const originalText = original === null || original === undefined ? '' : formatCell(original)
     return this.edits.get(`${ref.row}:${col}`) ?? originalText
   }
@@ -1157,7 +1217,8 @@ export class ResultsPanel extends LitElement {
 
   private _status() {
     if (this.run.phase !== 'done') return ''
-    const { result } = this.run
+    const result = this._shownResult()
+    if (!result) return ''
     const buffered = result.bufferedRowCount
     // A truncated result whose driver couldn't report the true total (sqlite,
     // which would have to scan every row) shows the loaded count as a floor
@@ -1194,7 +1255,7 @@ export class ResultsPanel extends LitElement {
       return html`<pre class="error">${run.error}</pre>`
     }
 
-    const { result } = run
+    const result = this._shownResult()!
     if (!result.columns.length) {
       return html`<p class="hint">OK — ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} affected.</p>`
     }
@@ -1411,7 +1472,7 @@ export class ResultsPanel extends LitElement {
   // Cycles the column's sort and asks the owner to rewrite + re-run the query.
   private _sortBy(col: number, dir: SortDir | null) {
     if (this.run.phase !== 'done') return
-    const column = this.run.result.columns[col]
+    const column = this._shownResult()?.columns[col]
     if (column === undefined) return
     const direction: SortDir | null = dir === 'asc' ? 'desc' : dir === 'desc' ? null : 'asc'
     this.dispatchEvent(new CustomEvent<SortColumnDetail>('sort-column', { detail: { column, direction }, bubbles: true, composed: true }))

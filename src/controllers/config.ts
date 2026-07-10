@@ -85,7 +85,8 @@ export class ConfigController {
   // last child the user worked in, then the discovery database.
   defaultChild(profile: ConnectionProfile): string | null {
     if ((profile.databaseMode ?? 'single') !== 'all') return null
-    return this.inUseChild(profile.id) ?? profile.lastChildDb ?? (profile.database.trim() || 'postgres')
+    const discoveryDefault = profile.engine === 'sqlserver' ? 'master' : profile.engine === 'mysql' ? null : 'postgres'
+    return this.inUseChild(profile.id) ?? profile.lastChildDb ?? (profile.database.trim() || discoveryDefault)
   }
 
   // Reads the workspace config from disk, sets the profile list, and returns
@@ -114,7 +115,9 @@ export class ConfigController {
       version: 1,
       connections: this._connections,
       activeDbId: this.deps.activeDbId(),
-    })
+    }).then((result) => {
+      if (!result.success) this.deps.dialogs.notice('Workspace config could not be saved', result.error)
+    }).catch((error: unknown) => this.deps.dialogs.notice('Workspace config could not be saved', (error as Error).message))
   }
 
   // Upserts a profile and writes the config; the caller re-reads via load() to

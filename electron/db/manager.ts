@@ -58,7 +58,9 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     if (!active) return
     remove(profileId)
     sessions.closeProfile(profileId)
-    await active.driver?.disconnect().catch(() => {})
+    await active.driver?.cancel?.().catch(() => {})
+    const closing = active.driver?.disconnect().catch(() => {})
+    if (closing) await Promise.race([closing, new Promise<void>((resolve) => setTimeout(resolve, 3000))])
     await active.tunnel?.close().catch(() => {})
   }
 
@@ -135,11 +137,12 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     sql: string,
     params?: unknown[],
     sort?: QuerySort | null,
+    executionId?: string,
   ): Promise<QueryResponse> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     try {
-      const raw = await driver.query(sql, params, childDb, sort)
+      const raw = await driver.query(sql, params, childDb, sort, executionId)
       // Disconnected mid-query: don't register a buffer no one can page or free
       // (disconnect already swept this profile's sessions). Return a single
       // page, sessionless, so it can't leak.
@@ -188,11 +191,11 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   const closeSession = (sessionId: string) => sessions.close(sessionId)
 
-  async function cancelQuery(profileId: string): Promise<{ success: boolean; error?: string }> {
+  async function cancelQuery(profileId: string, executionId?: string): Promise<{ success: boolean; error?: string }> {
     const driver = connectedDriver(profileId)
     if (!driver?.cancel) return { success: false, error: 'Cancel is not supported on this connection' }
     try {
-      const { running, cancelled } = await driver.cancel()
+      const { running, cancelled } = await driver.cancel(executionId)
       if (cancelled > 0) return { success: true }
       if (running > 0) {
         return { success: false, error: 'The query is starting up and could not be cancelled yet — try again in a moment.' }

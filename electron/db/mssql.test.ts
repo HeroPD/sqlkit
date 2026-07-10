@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { writeFileSync, unlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import type { ConnectionProfile } from '../../src/electron'
 import { mssqlTls, mssqlVersion } from './mssql'
 
@@ -20,8 +23,22 @@ describe('mssqlTls', () => {
     expect(mssqlTls(profile('require'))).toEqual({ encrypt: true, trustServerCertificate: true })
   })
 
-  it('maps verify modes to verified encryption with an optional CA', () => {
-    expect(mssqlTls(profile('verify-full'))).toEqual({ encrypt: true, trustServerCertificate: false, ca: undefined })
-    expect(mssqlTls(profile('verify-ca', '/pem'))).toEqual({ encrypt: true, trustServerCertificate: false, ca: '/pem' })
+  it('maps verify-full to verified encryption and reads an optional CA file', () => {
+    expect(mssqlTls(profile('verify-full'))).toEqual({ encrypt: true, trustServerCertificate: false })
+    const file = join(tmpdir(), `sqlkit-ca-${crypto.randomUUID()}.pem`)
+    try {
+      writeFileSync(file, 'PEM DATA')
+      expect(mssqlTls(profile('verify-full', file))).toEqual({
+        encrypt: true,
+        trustServerCertificate: false,
+        ca: 'PEM DATA',
+      })
+    } finally {
+      unlinkSync(file)
+    }
+  })
+
+  it('rejects verify-ca because tedious cannot disable only hostname verification', () => {
+    expect(() => mssqlTls(profile('verify-ca'))).toThrow(/does not support CA-only/i)
   })
 })

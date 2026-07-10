@@ -2,7 +2,7 @@ import { firstStatement } from '../codemirror/run-query'
 import type { QueryRun } from '../components/results-panel'
 import type { SqlTabState } from './contexts'
 import type { DialogsController } from './dialogs'
-import type { BatchResult, ColumnRef, ConnectionProfile, TableRef } from '../electron'
+import type { BatchResult, BatchStatement, ColumnRef, ConnectionProfile, TableRef } from '../electron'
 import { buildBatchUpdate, buildDeleteRows, buildInsert } from '../sql-write'
 import { previewSql } from '../components/review-query-dialog'
 import {
@@ -65,7 +65,7 @@ export class ResultEditingController {
     const drafts = this.deps.drafts()
     if (!editsList.length && !drafts.length) return
     const input = this.input()
-    const statements: Array<{ sql: string; params: unknown[] }> = []
+    const statements: BatchStatement[] = []
 
     if (editsList.length) {
       const built = buildPendingUpdate(input, editsList)
@@ -100,7 +100,7 @@ export class ResultEditingController {
   private async runChanges(
     profile: ConnectionProfile,
     childDb: string | null,
-    statements: Array<{ sql: string; params: unknown[] }>,
+    statements: BatchStatement[],
     applied: { hadEdits: boolean; draftCount: number; tabId: string | null; refreshSql: string | null },
   ) {
     let outcome: BatchResult
@@ -132,31 +132,27 @@ export class ResultEditingController {
     if (!ctx || !profile || !rows.length) return
     const keys = rowKeysForDelete(ctx, rows)
     if (!keys.ok) return this.notice(keys.issue)
-    const { sql, params } = buildDeleteRows({ table: ctx.table, rows: keys.value, engine: profile.engine })
-    this.reviewWrite(profile, sql, params)
+    const { sql, params, expectedRows } = buildDeleteRows({ table: ctx.table, rows: keys.value, engine: profile.engine })
+    this.reviewWrite(profile, sql, params, expectedRows)
   }
 
-  private reviewWrite(profile: ConnectionProfile, sql: string, params: unknown[]) {
+  private reviewWrite(profile: ConnectionProfile, sql: string, params: unknown[], expectedRows: number) {
     const childDb = this.deps.activeChildDb()
     const tab = this.deps.activeTab()
     const refreshSql = tab ? firstStatement(tab.content) || tab.content : null
-    this.deps.dialogs.review = { sql, params, run: () => void this.runWrite(profile, childDb, sql, params, tab?.id ?? null, refreshSql) }
+    this.deps.dialogs.review = { sql, params, run: () => void this.runWrite(profile, childDb, sql, params, expectedRows, tab?.id ?? null, refreshSql) }
   }
 
-  private async runWrite(profile: ConnectionProfile, childDb: string | null, sql: string, params: unknown[], tabId: string | null, refreshSql: string | null) {
-    let response
+  private async runWrite(profile: ConnectionProfile, childDb: string | null, sql: string, params: unknown[], expectedRows: number, tabId: string | null, refreshSql: string | null) {
+    let outcome: BatchResult
     try {
-      response = await window.sqlkit.runQuery(profile.id, childDb, sql, params)
+      outcome = await window.sqlkit.runBatch(profile.id, childDb, [{ sql, params, expectedRows }])
     } catch (error) {
       this.deps.dialogs.notice('Write failed', (error as Error).message)
       return
     }
-    if (!response.success) {
-      this.deps.dialogs.notice('Write failed', response.error)
-      return
-    }
-    if (response.result.rowCount === 0) {
-      this.deps.dialogs.notice('No rows changed', 'The selected row may have changed or been removed.')
+    if (!outcome.success) {
+      this.deps.dialogs.notice('Write failed', outcome.error)
       return
     }
     if (refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)

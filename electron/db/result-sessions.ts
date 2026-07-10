@@ -8,7 +8,7 @@ export const PAGE_SIZE = 200
 // Buffers held at once across all query tabs. A renderer that forgets to close
 // a session can't leak unboundedly; the oldest buffer is evicted (a later
 // fetch on it returns empty, which the renderer treats as "no more rows").
-const MAX_SESSIONS = 24
+const MAX_SESSIONS = 8
 
 type ResultSession = {
   profileId: string
@@ -30,14 +30,20 @@ export class ResultSessionStore {
   // first-page response (sessionId + total buffered count). Small results and
   // non-row results (writes/DDL) pass through unchanged — no session, no paging.
   open(profileId: string, result: QueryResult): QueryResult {
-    if (result.columns.length === 0 || result.rows.length <= PAGE_SIZE) return result
+    const resultSets = result.resultSets?.map((set) => ({
+      ...set,
+      rows: set.rows.slice(0, PAGE_SIZE),
+      truncated: set.truncated || set.rows.length > PAGE_SIZE,
+    }))
+    const wireResult = resultSets ? { ...result, resultSets } : result
+    if (result.columns.length === 0 || result.rows.length <= PAGE_SIZE) return wireResult
 
     const id = this.makeId()
     this.sessions.set(id, { profileId, rows: result.rows })
     this.evictExcess()
 
     return {
-      ...result,
+      ...wireResult,
       rows: result.rows.slice(0, PAGE_SIZE),
       sessionId: id,
       bufferedRowCount: result.rows.length,

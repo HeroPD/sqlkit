@@ -14,7 +14,7 @@ import type {
 // workspace config, connection-wiping) file behind.
 const writeFileAtomic = (file: string, data: string) => {
   const tmp = `${file}.tmp`
-  fs.writeFileSync(tmp, data)
+  fs.writeFileSync(tmp, data, { mode: 0o600 })
   fs.renameSync(tmp, file)
 }
 
@@ -114,6 +114,58 @@ const mapSecrets = (connection: ConnectionProfile, map: (value: string) => strin
     : {}),
 })
 
+const redactSecrets = (connection: ConnectionProfile): ConnectionProfile => ({
+  ...connection,
+  password: '',
+  passwordSaved: !!connection.password,
+  ...(connection.ssh
+    ? {
+        ssh: {
+          ...connection.ssh,
+          password: '',
+          passphrase: '',
+          passwordSaved: !!connection.ssh.password,
+          passphraseSaved: !!connection.ssh.passphrase,
+        },
+      }
+    : {}),
+})
+
+const stripSecretMarkers = (connection: ConnectionProfile): ConnectionProfile => {
+  const { passwordSaved: _passwordSaved, ...profile } = connection
+  if (!profile.ssh) return profile
+  const { passwordSaved: _sshPasswordSaved, passphraseSaved: _passphraseSaved, ...ssh } = profile.ssh
+  return { ...profile, ssh }
+}
+
+const sameDatabaseCredentialTarget = (incoming: ConnectionProfile, saved: ConnectionProfile | undefined) =>
+  !!saved && incoming.engine === saved.engine && incoming.host === saved.host && incoming.port === saved.port
+  && incoming.username === saved.username
+
+const sameSshCredentialTarget = (incoming: ConnectionProfile, saved: ConnectionProfile | undefined) =>
+  !!incoming.ssh && !!saved?.ssh && incoming.ssh.host === saved.ssh.host && incoming.ssh.port === saved.ssh.port
+  && incoming.ssh.username === saved.ssh.username && incoming.ssh.authType === saved.ssh.authType
+  && incoming.ssh.keyPath === saved.ssh.keyPath
+
+const restoreSavedSecrets = (incoming: ConnectionProfile, saved: ConnectionProfile | undefined): ConnectionProfile => ({
+  ...incoming,
+  password:
+    incoming.password || (incoming.passwordSaved && sameDatabaseCredentialTarget(incoming, saved) ? (saved?.password ?? '') : ''),
+  ...(incoming.ssh
+    ? {
+        ssh: {
+          ...incoming.ssh,
+          password:
+            incoming.ssh.password
+            || (incoming.ssh.passwordSaved && sameSshCredentialTarget(incoming, saved) ? (saved?.ssh?.password ?? '') : ''),
+          passphrase:
+            incoming.ssh.passphrase
+            || (incoming.ssh.passphraseSaved && sameSshCredentialTarget(incoming, saved) ? (saved?.ssh?.passphrase ?? '') : ''),
+        },
+      }
+    : {}),
+})
+
 type ConfigOutcome =
   | { status: 'ok'; config: WorkspaceConfig; decryptFailed: boolean }
   | { status: 'missing' }
@@ -169,10 +221,32 @@ export function readWorkspaceConfig(workspacePath: string | null): WorkspaceConf
   return { config: defaultWorkspaceConfig(), error: outcome.error }
 }
 
+/** Renderer-safe workspace config: secret values never cross IPC. */
+export function readWorkspaceConfigForRenderer(workspacePath: string | null): WorkspaceConfigResult {
+  const result = readWorkspaceConfig(workspacePath)
+  return {
+    ...result,
+    config: { ...result.config, connections: result.config.connections.map(redactSecrets) },
+  }
+}
+
+/** Restores redacted saved credentials immediately before a privileged operation. */
+export function hydrateConnectionProfile(workspacePath: string | null, incoming: ConnectionProfile): ConnectionProfile {
+  if (!workspacePath) return stripSecretMarkers(incoming)
+  const saved = readWorkspaceConfig(workspacePath).config.connections.find((connection) => connection.id === incoming.id)
+  return stripSecretMarkers(restoreSavedSecrets(incoming, saved))
+}
+
 export function writeWorkspaceConfig(workspacePath: string | null, config: WorkspaceConfig): SaveResult {
   if (!workspacePath) return { success: false, error: 'No workspace open' }
   try {
-    const normalized = { ...config, connections: normalizeConnections(config.connections) }
+    const savedById = new Map(
+      readWorkspaceConfig(workspacePath).config.connections.map((connection) => [connection.id, connection]),
+    )
+    const restored = config.connections.map((connection) =>
+      stripSecretMarkers(restoreSavedSecrets(connection, savedById.get(connection.id))),
+    )
+    const normalized = { ...config, connections: normalizeConnections(restored) }
     ensureInternalGitignore(workspacePath)
     // Every connection's files folder exists from the moment it's saved.
     for (const connection of normalized.connections) {

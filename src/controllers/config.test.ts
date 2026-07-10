@@ -117,6 +117,14 @@ describe('ConfigController.defaultChild', () => {
     expect(ctrl.defaultChild({ id: 'a', databaseMode: 'all', database: 'maindb' } as ConnectionProfile)).toBe('maindb')
     expect(ctrl.defaultChild({ id: 'a', databaseMode: 'all', database: '' } as ConnectionProfile)).toBe('postgres')
   })
+
+  it('uses engine-specific discovery defaults when the database is blank', () => {
+    const { ctrl } = make()
+    const base = { id: 'a', databaseMode: 'all' as const, database: '' }
+    expect(ctrl.defaultChild({ ...base, engine: 'postgresql' } as ConnectionProfile)).toBe('postgres')
+    expect(ctrl.defaultChild({ ...base, engine: 'sqlserver' } as ConnectionProfile)).toBe('master')
+    expect(ctrl.defaultChild({ ...base, engine: 'mysql' } as ConnectionProfile)).toBeNull()
+  })
 })
 
 describe('ConfigController.save', () => {

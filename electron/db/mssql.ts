@@ -1,9 +1,13 @@
 import sql from 'mssql'
-import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, TableRef } from '../../src/electron'
+import { readFileSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor } from '../../src/dialect'
-import { BATCH_ZERO_ROWS, MAX_BUFFERED_ROWS } from './limits'
+import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
+import { assertSelfContainedTransaction, splitSqlServerBatches } from './sql-script'
 
 // Always-present databases; hidden from all-databases children except master,
 // which is a legitimate browsing target (it's the default sa database).
@@ -20,11 +24,22 @@ export function mssqlVersion(raw: string): string {
 // TLS mapping: tedious defaults to encrypt-with-verification, which self-signed
 // dev servers (the common case) fail. disable → cleartext; require → encrypt
 // but trust any cert; verify-* → encrypt and verify, with an optional custom CA.
+const expandHome = (value: string) => (value.startsWith('~') ? path.join(os.homedir(), value.slice(1)) : value)
+
 export function mssqlTls(profile: ConnectionProfile): { encrypt: boolean; trustServerCertificate: boolean; ca?: string } {
   const mode = profile.ssl?.mode ?? 'disable'
   if (mode === 'disable') return { encrypt: false, trustServerCertificate: true }
   if (mode === 'require') return { encrypt: true, trustServerCertificate: true }
-  return { encrypt: true, trustServerCertificate: false, ca: profile.ssl?.ca.trim() || undefined }
+  if (mode === 'verify-ca') {
+    throw new Error('SQL Server does not support CA-only verification; use Verify full to verify the certificate and hostname.')
+  }
+  const caPath = profile.ssl?.ca.trim()
+  if (!caPath) return { encrypt: true, trustServerCertificate: false }
+  try {
+    return { encrypt: true, trustServerCertificate: false, ca: readFileSync(expandHome(caPath), 'utf8') }
+  } catch (error) {
+    throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`, { cause: error })
+  }
 }
 
 // SQL Server with all-databases support, mirroring the postgres driver: one
@@ -37,7 +52,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   let childNames: string[] = []
   let active = ''
   // In-flight requests; tedious cancels in-band, so no out-of-band connection.
-  const running = new Set<{ request: sql.Request }>()
+  const running = new Set<{ executionId?: string; request: sql.Request | null; cancelRequested: boolean }>()
   const tls = mssqlTls(profile)
 
   const makePool = (database: string) => {
@@ -117,17 +132,38 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       await Promise.all([...closing.values()].map((pool) => pool.close().catch(() => {})))
     },
 
-    async query(sqlText, params = [], childDb = null, sort = null) {
+    async query(sqlText, params = [], childDb = null, sort = null, executionId) {
       const started = performance.now()
       const finalSql = sort ? dialect.applyOrderBy(sqlText, sort) : sqlText
-      const pool = await poolForQuery(childDb)
-      const request = bind(pool.request(), params)
-      const entry = { request }
+      assertSelfContainedTransaction(finalSql, 'sqlserver')
+      const entry = { executionId, request: null as sql.Request | null, cancelRequested: false }
       running.add(entry)
       try {
-        return await streamQuery(request, finalSql, started)
+        const pool = await poolForQuery(childDb)
+        if (entry.cancelRequested) throw new Error('Query cancelled.')
+        let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
+        const resultSets: QueryResultSet[] = []
+        const budget = { bytes: 0 }
+        for (const batch of splitSqlServerBatches(finalSql)) {
+          entry.request = bind(pool.request(), params)
+          if (entry.cancelRequested) throw new Error('Query cancelled.')
+          result = await streamQuery(entry.request, batch, started, budget)
+          resultSets.push(...(result.resultSets ?? [{
+            columns: result.columns,
+            columnSources: result.columnSources,
+            rows: result.rows,
+            rowCount: result.rowCount,
+            truncated: result.truncated,
+          }]))
+        }
+        const selected = resultSets[resultSets.length - 1] ?? result
+        return {
+          ...selected,
+          durationMs: result.durationMs,
+          ...(resultSets.length > 1 ? { resultSets } : {}),
+        }
       } catch (error) {
-        throw isCancelled(error) ? new Error('Query cancelled.') : error
+        throw isCancelled(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
       } finally {
         running.delete(entry)
       }
@@ -145,9 +181,16 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           const result = await bind(new sql.Request(transaction), statement.params).query(statement.sql)
           // A write that matched nothing means the row moved or vanished since
           // the user reviewed it — abort the whole batch rather than half-apply.
-          if ((result.rowsAffected[0] ?? 0) === 0) {
+          const affected = result.rowsAffected[0] ?? 0
+          if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
             await transaction.rollback()
-            return { success: false, failedIndex: index, error: BATCH_ZERO_ROWS }
+            return {
+              success: false,
+              failedIndex: index,
+              error: statement.expectedRows !== undefined
+                ? `Expected ${statement.expectedRows} affected row(s), but ${affected} matched. Refresh and try again.`
+                : BATCH_ZERO_ROWS,
+            }
           }
         }
         await transaction.commit()
@@ -218,10 +261,12 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       childNames = childNames.filter((child) => child !== name)
     },
 
-    async cancel() {
+    async cancel(executionId) {
       // tedious cancels in-band on the request itself; no KILL needed.
-      const entries = [...running]
-      for (const entry of entries) entry.request.cancel()
+      const entries = [...running].filter((entry) => executionId === undefined || entry.executionId === executionId)
+      for (const entry of entries) entry.cancelRequested = true
+      const cancellable = entries.filter((entry) => entry.request !== null)
+      for (const entry of cancellable) entry.request?.cancel()
       return { running: entries.length, cancelled: entries.length }
     },
 
@@ -449,10 +494,14 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   }
 }
 
-// Streams rows so a huge result can't OOM the main process. Each result set of
-// a multi-statement batch resets the buffer — the last statement's result is
-// the one displayed, matching the other server drivers.
-function streamQuery(request: sql.Request, sqlText: string, started: number): Promise<QueryResult> {
+// Streams rows so a huge or multi-result batch can't OOM the main process.
+// The byte budget is shared by every result set in this execution.
+function streamQuery(
+  request: sql.Request,
+  sqlText: string,
+  started: number,
+  budget: { bytes: number } = { bytes: 0 },
+): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     request.stream = true
     request.arrayRowMode = true
@@ -461,28 +510,46 @@ function streamQuery(request: sql.Request, sqlText: string, started: number): Pr
     let total = 0
     let sawRecordset = false
     let affected = 0
+    let limited = false
+    let active = false
+    const resultSets: QueryResultSet[] = []
+    const pushCurrent = () => {
+      if (!active) return
+      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length })
+      active = false
+    }
     request.on('recordset', (recordset: Array<{ name: string }>) => {
+      pushCurrent()
       sawRecordset = true
       columns = recordset.map((column) => column.name)
       rows = []
       total = 0
+      limited = false
+      active = true
     })
     request.on('row', (row: unknown[]) => {
       total += 1
-      if (rows.length < MAX_BUFFERED_ROWS) rows.push(row)
+      if (rows.length < MAX_BUFFERED_ROWS) {
+        const bounded = boundedRow(row, budget.bytes)
+        if (bounded) {
+          rows.push(bounded.row)
+          budget.bytes += bounded.bytes
+          limited ||= bounded.truncated
+        } else limited = true
+      } else limited = true
     })
     request.on('rowsaffected', (count: number) => {
       affected += count
     })
     request.on('error', reject)
     request.on('done', () => {
-      // A write-only batch has no recordset; report the affected count.
+      pushCurrent()
+      if (!sawRecordset) resultSets.push({ columns: [], rows: [], rowCount: affected })
+      const selected = resultSets[resultSets.length - 1] ?? { columns: [], rows: [], rowCount: affected }
       resolve({
-        columns,
-        rows,
-        rowCount: sawRecordset ? total : affected,
+        ...selected,
         durationMs: performance.now() - started,
-        truncated: total > MAX_BUFFERED_ROWS,
+        ...(resultSets.length > 1 ? { resultSets } : {}),
       })
     })
     void request.query(sqlText).catch(() => {

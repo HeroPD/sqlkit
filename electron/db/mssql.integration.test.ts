@@ -164,6 +164,21 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
+  it('supports GO batches and exposes every result set', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query('select 1 as a\nGO\nselect 2 as b')
+      expect(result.columns).toEqual(['b'])
+      expect(result.rows).toEqual([[2]])
+      expect(result.resultSets?.map((set) => ({ columns: set.columns, rows: set.rows }))).toEqual([
+        { columns: ['a'], rows: [[1]] },
+        { columns: ['b'], rows: [[2]] },
+      ])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('buffers at most MAX_BUFFERED_ROWS but counts them all', async () => {
     const driver = await connectDriver()
     try {
@@ -183,10 +198,11 @@ describeDb('mssql driver (integration)', () => {
   it('cancels an in-flight query in-band', async () => {
     const driver = await connectDriver()
     try {
-      const running = driver.query("waitfor delay '00:00:30'")
+      const running = driver.query("waitfor delay '00:00:30'", [], null, null, 'slow-query')
       const cancelled = expect(running).rejects.toThrow('Query cancelled.')
       await new Promise((resolve) => setTimeout(resolve, 400))
-      const outcome = await driver.cancel?.()
+      expect(await driver.cancel?.('other-query')).toEqual({ running: 0, cancelled: 0 })
+      const outcome = await driver.cancel?.('slow-query')
       expect(outcome?.running).toBeGreaterThanOrEqual(1)
       expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
       await cancelled

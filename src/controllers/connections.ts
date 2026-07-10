@@ -35,7 +35,7 @@ export class ConnectionsController implements ReactiveController {
 
   hostConnected() {
     this.unsubscribe = window.sqlkit.onConnectionStatus((statuses) => this.apply(statuses))
-    void window.sqlkit.getConnectionStatuses().then((statuses) => this.apply(statuses))
+    void window.sqlkit.getConnectionStatuses().then((statuses) => this.apply(statuses)).catch(() => {})
   }
 
   hostDisconnected() {
@@ -153,11 +153,18 @@ export class ConnectionsController implements ReactiveController {
     // Pin the fetch to the child we believe is active, so a concurrent child
     // switch can't make the main process answer for a different database.
     const childDb = activeChildName(this.statuses[profileId])
-    const [tables, columns, objects] = await Promise.all([
-      window.sqlkit.listTables(profileId, childDb),
-      window.sqlkit.listColumns(profileId, childDb),
-      window.sqlkit.listObjects(profileId, childDb),
-    ])
+    let tables: Awaited<ReturnType<typeof window.sqlkit.listTables>>
+    let columns: Awaited<ReturnType<typeof window.sqlkit.listColumns>>
+    let objects: Awaited<ReturnType<typeof window.sqlkit.listObjects>>
+    try {
+      ;[tables, columns, objects] = await Promise.all([
+        window.sqlkit.listTables(profileId, childDb),
+        window.sqlkit.listColumns(profileId, childDb),
+        window.sqlkit.listObjects(profileId, childDb),
+      ])
+    } catch {
+      return
+    }
     if (this.metaGen[profileId] !== gen) return
     if (this.statuses[profileId]?.phase !== 'connected') return
     if (tables.success) this.tables = { ...this.tables, [profileId]: tables.tables }

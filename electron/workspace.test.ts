@@ -3,7 +3,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionProfile } from '../src/electron'
-import { openWorkspace, readWorkspaceConfig, writeWorkspaceConfig } from './workspace'
+import {
+  hydrateConnectionProfile,
+  openWorkspace,
+  readWorkspaceConfig,
+  readWorkspaceConfigForRenderer,
+  writeWorkspaceConfig,
+} from './workspace'
 
 // A reversible stand-in for Electron's OS-keychain safeStorage: "SEALED:" marks
 // a value this machine produced, so a blob from elsewhere fails to decrypt the
@@ -88,6 +94,7 @@ describe('workspace config: credential round-trip', () => {
     expect(stored.connections[0]?.password).toMatch(/^enc:v1:/)
     expect(stored.connections[0]?.ssh.password).toMatch(/^enc:v1:/)
     expect(stored.connections[0]?.ssh.passphrase).toMatch(/^enc:v1:/)
+    if (process.platform !== 'win32') expect(fs.statSync(configPath()).mode & 0o777).toBe(0o600)
 
     const readBack = readWorkspaceConfig(workspaceDir)
     expect(readBack.error).toBeUndefined()
@@ -95,6 +102,56 @@ describe('workspace config: credential round-trip', () => {
     expect(connection?.password).toBe('pg-password-1')
     expect(connection?.ssh?.password).toBe('ssh-password-2')
     expect(connection?.ssh?.passphrase).toBe('key-passphrase-3')
+  })
+
+  it('never returns saved secret values to the renderer and restores them only in main', () => {
+    const saved = profile({
+      password: 'db-secret',
+      ssh: {
+        enabled: true,
+        host: 'bastion',
+        port: '22',
+        username: 'ops',
+        authType: 'password',
+        password: 'ssh-secret',
+        keyPath: '',
+        passphrase: 'key-secret',
+      },
+    })
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [saved] })
+
+    const renderer = readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!
+    expect(renderer.password).toBe('')
+    expect(renderer.passwordSaved).toBe(true)
+    expect(renderer.ssh?.password).toBe('')
+    expect(renderer.ssh?.passwordSaved).toBe(true)
+    expect(renderer.ssh?.passphrase).toBe('')
+    expect(renderer.ssh?.passphraseSaved).toBe(true)
+
+    const hydrated = hydrateConnectionProfile(workspaceDir, renderer)
+    expect(hydrated.password).toBe('db-secret')
+    expect(hydrated.ssh?.password).toBe('ssh-secret')
+    expect(hydrated.ssh?.passphrase).toBe('key-secret')
+    expect(hydrated.passwordSaved).toBeUndefined()
+  })
+
+  it('preserves redacted saved secrets on config persistence and allows explicit replacement', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'old-secret' })] })
+    const renderer = readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [renderer] })
+    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('old-secret')
+
+    writeWorkspaceConfig(workspaceDir, {
+      version: 1,
+      connections: [{ ...renderer, password: 'new-secret', passwordSaved: false }],
+    })
+    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('new-secret')
+  })
+
+  it('does not forward a saved secret to a renderer-modified host', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'host-bound' })] })
+    const renderer = readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!
+    expect(hydrateConnectionProfile(workspaceDir, { ...renderer, host: 'attacker.example' }).password).toBe('')
   })
 
   it('decrypts a config sealed on another machine to empty rather than leaking it', () => {

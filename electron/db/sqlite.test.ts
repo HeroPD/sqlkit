@@ -193,9 +193,11 @@ describe('sqlite driver: cancel', () => {
     const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
     expect(await driver.connect()).toBe('SQLite 3.0.0')
 
-    const running = driver.query('select 1')
+    const running = driver.query('select 1', [], null, null, 'slow-query')
     running.catch(() => {}) // asserted below; keep the rejection from going unhandled mid-cancel
-    const outcome = await driver.cancel?.()
+    expect(await driver.cancel?.('other-query')).toEqual({ running: 0, cancelled: 0 })
+    expect(spawned[0]?.killed).toBe(false)
+    const outcome = await driver.cancel?.('slow-query')
     expect(outcome).toEqual({ running: 1, cancelled: 1 })
     await expect(running).rejects.toThrow('Query cancelled.')
     expect(spawned[0]?.killed).toBe(true)
@@ -294,6 +296,12 @@ describe('sqlite driver: query', () => {
     expect(result.rows).toEqual([[1, 2]])
   })
 
+  it('returns 64-bit integers without throwing or losing precision', async () => {
+    const driver = await memoryDriver()
+    const result = await driver.query('select 9007199254740993 as n, 42 as safe')
+    expect(result.rows).toEqual([[9007199254740993n, 42]])
+  })
+
   it('caps retained rows at MAX_BUFFERED_ROWS and stops scanning once over', async () => {
     const driver = await memoryDriver()
     await driver.query('create table nums(n)')
@@ -341,6 +349,8 @@ describe('sqlite driver: multi-statement', () => {
     const result = await driver.query('create table m(a); insert into m values (5); insert into m values (6); select a from m order by a')
     expect(result.columns).toEqual(['a'])
     expect(result.rows).toEqual([[5], [6]])
+    expect(result.resultSets).toHaveLength(4)
+    expect(result.resultSets?.at(-1)?.rows).toEqual([[5], [6]])
   })
 
   it('does not split on a semicolon inside a string literal', async () => {

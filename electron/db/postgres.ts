@@ -3,11 +3,12 @@ import { readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
-import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor } from '../../src/dialect'
-import { BATCH_ZERO_ROWS, MAX_BUFFERED_ROWS } from './limits'
+import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
+import { assertSelfContainedTransaction } from './sql-script'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
@@ -43,7 +44,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   // tabs can run on one connection at once, so this is a set rather than a
   // single slot — a single slot let a second run clobber the first's cancel
   // target, and the first's completion then cleared it.
-  const running = new Set<{ pid: number | null }>()
+  const running = new Set<{ executionId?: string; pid: number | null; cancelRequested: boolean }>()
   const ssl = sslOptions(profile)
 
   const makePool = (database: string) => {
@@ -112,23 +113,35 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       await Promise.all([...closing.values()].map((pool) => pool.end().catch(() => {})))
     },
 
-    async query(sql, params = [], childDb = null, sort = null) {
+    async query(sql, params = [], childDb = null, sort = null, executionId) {
+      assertSelfContainedTransaction(sql, 'postgresql')
       const started = performance.now()
       const finalSql = sort ? dialect.applyOrderBy(sql, sort) : sql
       const pool = poolForQuery(childDb)
       // Checked out manually (not pool.query) so the backend PID is known
       // while the statement runs and cancel() has a target.
-      const client = await pool.connect()
-      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null }
+      const entry = { executionId, pid: null as number | null, cancelRequested: false }
       running.add(entry)
+      let client: pg.PoolClient | null = null
+      let released = false
       try {
+        client = await pool.connect()
+        entry.pid = (client as unknown as { processID?: number }).processID ?? null
+        if (entry.cancelRequested) {
+          client.release()
+          released = true
+          throw new Error('Query cancelled.')
+        }
         const result = await streamQuery(client, finalSql, params, started)
         client.release()
+        released = true
         return result
       } catch (error) {
         // Mirror pool.query: an errored client is destroyed, not reused.
-        client.release(error as Error)
-        throw (error as { code?: string }).code === '57014' ? new Error('Query cancelled.') : error
+        if (client && !released) client.release(error as Error)
+        throw (error as { code?: string }).code === '57014' || (error as Error).message === 'Query cancelled.'
+          ? new Error('Query cancelled.')
+          : error
       } finally {
         running.delete(entry)
       }
@@ -140,7 +153,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // One checked-out client for the whole batch: a pool-routed sequence would
       // spread the statements across backends, so BEGIN/COMMIT couldn't bind them.
       const client = await pool.connect()
-      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null }
+      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null, cancelRequested: false }
       running.add(entry)
       let index = -1
       try {
@@ -150,10 +163,17 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           const result = await client.query(statement.sql, statement.params)
           // A write that matched nothing means the row moved or vanished since
           // the user reviewed it — abort the whole batch rather than half-apply.
-          if ((result.rowCount ?? 0) === 0) {
+          const affected = result.rowCount ?? 0
+          if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
             await client.query('ROLLBACK')
             client.release()
-            return { success: false, failedIndex: index, error: BATCH_ZERO_ROWS }
+            return {
+              success: false,
+              failedIndex: index,
+              error: statement.expectedRows !== undefined
+                ? `Expected ${statement.expectedRows} affected row(s), but ${affected} matched. Refresh and try again.`
+                : BATCH_ZERO_ROWS,
+            }
           }
         }
         await client.query('COMMIT')
@@ -174,7 +194,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       if (!statements.length) return { success: true }
       const pool = poolForQuery(childDb)
       const client = await pool.connect()
-      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null }
+      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null, cancelRequested: false }
       running.add(entry)
       let index = -1
       try {
@@ -227,17 +247,19 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       childNames = childNames.filter((child) => child !== name)
     },
 
-    async cancel() {
+    async cancel(executionId) {
       // Interrupt every in-flight backend on this connection — the UI's Stop
       // is per-connection. Issue the cancels from a fresh out-of-band
       // connection, not the pool the running queries occupy: with max:4 busy
       // clients a pool-routed cancel would queue behind the very queries it is
       // trying to interrupt. A backend that already finished is a no-op.
-      const entries = [...running]
+      const entries = [...running].filter((entry) => executionId === undefined || entry.executionId === executionId)
+      const queued = entries.filter((entry) => entry.pid === null)
+      for (const entry of queued) entry.cancelRequested = true
       const pids = entries.map((entry) => entry.pid).filter((pid): pid is number => pid !== null)
       // Nothing running, or running but no PID captured yet (queued checkout):
       // either way there's nothing to target, so report it honestly.
-      if (!pids.length) return { running: entries.length, cancelled: 0 }
+      if (!pids.length) return { running: entries.length, cancelled: queued.length }
       const client = new pg.Client({
         host: endpoint.host,
         port: endpoint.port,
@@ -259,7 +281,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
               .catch(() => false),
           ),
         )
-        return { running: entries.length, cancelled: sent.filter(Boolean).length }
+        return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
       } finally {
         await client.end().catch(() => {})
       }
@@ -614,29 +636,48 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 // when nothing listens for 'row'. rowMode array keeps duplicate column names.
 function streamQuery(client: pg.PoolClient, sql: string, params: unknown[], started: number): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
-    const rows: unknown[][] = []
-    let total = 0
+    const buffers = new Map<object, { rows: unknown[][]; total: number; bytes: number; limited: boolean }>()
+    let bufferedBytes = 0
     const config: pg.QueryArrayConfig = { text: sql, values: params, rowMode: 'array' }
     const query = new pg.Query(config)
-    query.on('row', (row: unknown[]) => {
-      total += 1
-      if (rows.length < MAX_BUFFERED_ROWS) rows.push(row)
+    query.on('row', (row: unknown[], result?: object) => {
+      const key = result ?? query
+      const buffer = buffers.get(key) ?? { rows: [], total: 0, bytes: 0, limited: false }
+      buffer.total += 1
+      if (buffer.rows.length < MAX_BUFFERED_ROWS) {
+        const bounded = boundedRow(row, bufferedBytes)
+        if (bounded) {
+          buffer.rows.push(bounded.row)
+          buffer.bytes += bounded.bytes
+          bufferedBytes += bounded.bytes
+          buffer.limited ||= bounded.truncated
+        } else buffer.limited = true
+      } else buffer.limited = true
+      buffers.set(key, buffer)
     })
     query.on('error', reject)
     query.on('end', (result) => {
-      // Multi-statement queries resolve to an array; the last has the final columns.
-      const final = (Array.isArray(result) ? result[result.length - 1] : result) as pg.QueryArrayResult
-      void columnSourcesForFields(client, final.fields)
-        .then((columnSources) =>
+      const results = (Array.isArray(result) ? result : [result]) as pg.QueryArrayResult[]
+      void Promise.all(
+        results.map(async (entry): Promise<QueryResultSet> => {
+          const buffer = buffers.get(entry as object) ?? { rows: [], total: 0, bytes: 0, limited: false }
+          return {
+            columns: entry.fields.map((field) => field.name),
+            columnSources: await columnSourcesForFields(client, entry.fields),
+            rows: buffer.rows,
+            rowCount: entry.rowCount ?? buffer.total,
+            truncated: buffer.limited || buffer.total > buffer.rows.length,
+          }
+        }),
+      )
+        .then((resultSets) => {
+          const selected = resultSets[resultSets.length - 1]!
           resolve({
-            columns: final.fields.map((field) => field.name),
-            columnSources,
-            rows,
-            rowCount: final.rowCount ?? total,
+            ...selected,
             durationMs: performance.now() - started,
-            truncated: total > MAX_BUFFERED_ROWS,
-          }),
-        )
+            ...(resultSets.length > 1 ? { resultSets } : {}),
+          })
+        })
         .catch(reject)
     })
     client.query(query)

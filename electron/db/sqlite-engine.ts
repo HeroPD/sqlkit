@@ -1,6 +1,7 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, TableInspection, TableRef } from '../../src/electron'
-import { BATCH_ZERO_ROWS, MAX_BUFFERED_ROWS } from './limits'
+import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, QueryResultSet, TableInspection, TableRef } from '../../src/electron'
+import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
+import { assertSelfContainedTransaction } from './sql-script'
 
 // The synchronous SQLite core, factored out of any process/threading concern:
 // every function takes the DatabaseSync it operates on. The worker owns the
@@ -10,7 +11,7 @@ import { BATCH_ZERO_ROWS, MAX_BUFFERED_ROWS } from './limits'
 
 export type SqliteParam = string | number | bigint | null | Uint8Array
 
-export const openDatabase = (file: string): DatabaseSync => new DatabaseSync(file)
+export const openDatabase = (file: string): DatabaseSync => new DatabaseSync(file, { readBigInts: true })
 
 export const serverVersion = (db: DatabaseSync): string => {
   const row = db.prepare('select sqlite_version() as version').get() as { version: string }
@@ -18,16 +19,18 @@ export const serverVersion = (db: DatabaseSync): string => {
 }
 
 export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam[] = []): QueryResult {
+  assertSelfContainedTransaction(sql, 'sqlite')
   const started = performance.now()
   const stamp = (result: Omit<QueryResult, 'durationMs'>): QueryResult => ({ ...result, durationMs: performance.now() - started })
 
   const masked = maskSqlite(sql)
   const statements = splitStatements(sql, masked)
+  const budget = { bytes: 0 }
 
   if (statements.length === 0) return stamp({ columns: [], rows: [], rowCount: 0 })
 
   // Single statement (the run-at-caret case): prepare and run, binding params.
-  if (statements.length === 1) return stamp(run(db.prepare(statements[0]!), params))
+  if (statements.length === 1) return stamp(run(db.prepare(statements[0]!), params, budget))
 
   // CREATE TRIGGER bodies carry their own semicolons that a top-level split
   // would break, so let exec run the whole script authoritatively. exec returns
@@ -39,7 +42,7 @@ export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam
     const tail = statements[statements.length - 1]
     if (tail && /^(?:select|values|explain)\b/i.test(tail)) {
       try {
-        return stamp(run(db.prepare(tail), []))
+        return stamp(run(db.prepare(tail), [], budget))
       } catch {
         // Tail wasn't a runnable standalone statement; fall through to empty.
       }
@@ -52,9 +55,10 @@ export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam
   // result — matching Postgres, where the final statement supplies the columns.
   // Params aren't bound to multi-statement runs. A mid-script error throws and
   // surfaces as the query error, leaving earlier statements applied once.
-  let result: Omit<QueryResult, 'durationMs'> = { columns: [], rows: [], rowCount: 0 }
-  for (const statement of statements) result = run(db.prepare(statement), [])
-  return stamp(result)
+  const resultSets: QueryResultSet[] = []
+  for (const statement of statements) resultSets.push(run(db.prepare(statement), [], budget))
+  const result = resultSets[resultSets.length - 1] ?? { columns: [], rows: [], rowCount: 0 }
+  return stamp({ ...result, ...(resultSets.length > 1 ? { resultSets } : {}) })
 }
 
 export function listTables(db: DatabaseSync): TableRef[] {
@@ -219,7 +223,10 @@ function splitStatements(sql: string, masked: string): string[] {
 // Runs every statement inside one transaction on the worker's single handle:
 // all commit, or the first failure (an error or a zero-row write) rolls the
 // whole batch back. The result-grid save path relies on this all-or-nothing.
-export function runBatch(db: DatabaseSync, statements: { sql: string; params: SqliteParam[] }[]): BatchResult {
+export function runBatch(
+  db: DatabaseSync,
+  statements: { sql: string; params: SqliteParam[]; expectedRows?: number }[],
+): BatchResult {
   if (!statements.length) return { success: true }
   db.exec('BEGIN')
   let index = -1
@@ -227,9 +234,16 @@ export function runBatch(db: DatabaseSync, statements: { sql: string; params: Sq
     for (index = 0; index < statements.length; index += 1) {
       const statement = statements[index]!
       const info = db.prepare(statement.sql).run(...statement.params)
-      if (Number(info.changes) === 0) {
+      const affected = Number(info.changes)
+      if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
         db.exec('ROLLBACK')
-        return { success: false, failedIndex: index, error: BATCH_ZERO_ROWS }
+        return {
+          success: false,
+          failedIndex: index,
+          error: statement.expectedRows !== undefined
+            ? `Expected ${statement.expectedRows} affected row(s), but ${affected} matched. Refresh and try again.`
+            : BATCH_ZERO_ROWS,
+        }
       }
     }
     db.exec('COMMIT')
@@ -264,7 +278,7 @@ export function runDdl(db: DatabaseSync, statements: string[]): DdlResult {
   }
 }
 
-function run(statement: StatementSync, params: SqliteParam[]): Omit<QueryResult, 'durationMs'> {
+function run(statement: StatementSync, params: SqliteParam[], budget: { bytes: number }): QueryResultSet {
   const metadata = statement.columns()
   const columns = metadata.map((column) => column.name)
   const columnSources = metadata.some((column) => column.table !== null && column.column !== null)
@@ -290,7 +304,14 @@ function run(statement: StatementSync, params: SqliteParam[]): Omit<QueryResult,
       truncated = true
       break
     }
-    rows.push(row)
+    const bounded = boundedRow(row, budget.bytes)
+    if (!bounded) {
+      truncated = true
+      break
+    }
+    rows.push(bounded.row)
+    budget.bytes += bounded.bytes
+    truncated ||= bounded.truncated
   }
   return { columns, columnSources, rows, rowCount: rows.length, truncated }
 }

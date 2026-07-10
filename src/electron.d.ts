@@ -40,9 +40,13 @@ export type SshConfig = {
   username: string
   authType: SshAuthType
   password: string
+  /** Main-process credential store has a password; the value is redacted in renderer DTOs. */
+  passwordSaved?: boolean
   /** Private key file path; supports a leading ~. */
   keyPath: string
   passphrase: string
+  /** Main-process credential store has a passphrase; the value is redacted in renderer DTOs. */
+  passphraseSaved?: boolean
 }
 
 export type ConnectionProfile = {
@@ -56,6 +60,8 @@ export type ConnectionProfile = {
   port: string
   username: string
   password: string
+  /** Main-process credential store has a password; the value is redacted in renderer DTOs. */
+  passwordSaved?: boolean
   database: string
   /** Absent means 'single'. */
   databaseMode?: DatabaseMode
@@ -116,7 +122,7 @@ export type TestConnectionResult =
 
 export type TestSshResult = { success: true; tookMs: number } | { success: false; error: string; tookMs: number }
 
-export type QueryResult = {
+export type QueryResultSet = {
   columns: string[]
   /** Origin of each result column when the driver can identify it; nulls are expressions. */
   columnSources?: Array<{ schema: string | null; table: string | null; column: string | null }>
@@ -124,9 +130,14 @@ export type QueryResult = {
   rows: unknown[][]
   /** Rows returned for reads, rows affected for writes. */
   rowCount: number
-  durationMs: number
   /** Result exceeded the buffer cap; rowCount still reports the full count. */
   truncated?: boolean
+}
+
+export type QueryResult = QueryResultSet & {
+  durationMs: number
+  /** Every result set in statement order when a script produced more than one. */
+  resultSets?: QueryResultSet[]
   /** Set when more rows are buffered in the main process than were sent; page them via fetchRows. */
   sessionId?: string
   /** Total rows buffered in the main process (>= rows.length); present with sessionId. */
@@ -136,7 +147,12 @@ export type QueryResult = {
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
 
 /** One parameterized statement in an atomic write batch. */
-export type BatchStatement = { sql: string; params: unknown[] }
+export type BatchStatement = {
+  sql: string
+  params: unknown[]
+  /** Exact affected-row count required for optimistic writes. */
+  expectedRows?: number
+}
 
 /** Outcome of an atomic write batch: every statement committed, or none did.
  * `failedIndex` points at the statement that aborted it (absent for a
@@ -145,7 +161,9 @@ export type BatchResult = { success: true } | { success: false; error: string; f
 
 /** Outcome of an atomic DDL batch: same shape as BatchResult, but DDL statements
  * legitimately affect zero rows so there's no rows-affected gate. */
-export type DdlResult = { success: true } | { success: false; error: string; failedIndex?: number }
+export type DdlResult =
+  | { success: true }
+  | { success: false; error: string; failedIndex?: number; partial?: boolean; appliedCount?: number }
 
 /** A column sort the UI injects into a query at run time; the driver builds the
  * engine-correct ORDER BY (its own identifier quoting). */
@@ -260,6 +278,7 @@ export type SqlkitApi = {
     sql: string,
     params?: unknown[],
     sort?: QuerySort | null,
+    executionId?: string,
   ) => Promise<QueryResponse>
   /** Runs statements in one transaction on a single connection: all commit or
    * all roll back. The result-grid save path uses this so a multi-row edit
@@ -273,8 +292,8 @@ export type SqlkitApi = {
   fetchRows: (sessionId: string, offset: number, limit: number) => Promise<FetchRowsResult>
   /** Releases a result's main-process buffer (tab closed / superseded). */
   closeSession: (sessionId: string) => Promise<void>
-  /** Cancels the profile's in-flight query; the pending runQuery rejects. */
-  cancelQuery: (profileId: string) => Promise<{ success: boolean; error?: string }>
+  /** Cancels one in-flight execution; omit executionId only for connection teardown. */
+  cancelQuery: (profileId: string, executionId?: string) => Promise<{ success: boolean; error?: string }>
   /** Server-side CREATE DATABASE on a connected profile (postgres only). */
   createDatabase: (profileId: string, name: string) => Promise<{ success: boolean; error?: string }>
   /** Server-side DROP DATABASE; refuses the connection's in-use child. */

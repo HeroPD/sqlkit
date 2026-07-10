@@ -26,7 +26,8 @@ import {
   isDirectory,
   openWorkspace,
   readGlobalConfig,
-  readWorkspaceConfig,
+  readWorkspaceConfigForRenderer,
+  hydrateConnectionProfile,
   writeWorkspaceConfig,
 } from './workspace'
 import {
@@ -44,6 +45,19 @@ import {
 import { createConnectionManager, testConnection, type ConnectionManager } from './db/manager'
 import { testSshTunnel } from './db/transport'
 import type { BatchStatement, ConnectionProfile, ConnectionStatus, DbObject, DbObjectKind, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
+import {
+  batchStatements,
+  connectionProfile,
+  databaseObject,
+  databaseObjectKind,
+  ddlStatements,
+  nullableStringValue,
+  nonNegativeInteger,
+  queryPayload,
+  stringValue,
+  tableReference,
+  workspaceConfig,
+} from './ipc-validation'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
@@ -51,6 +65,8 @@ const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
 const workspacePaths = new Map<number, string>()
 const dbManagers = new Map<number, ConnectionManager>()
 let quitting = false
+const IPC_PATH_LIMIT = 20_000
+const IPC_FILE_LIMIT = 64 * 1024 * 1024
 
 // Only these schemes are ever handed to the OS; a renderer navigated somewhere
 // unexpected can't use this to launch arbitrary protocol handlers.
@@ -118,6 +134,11 @@ const normalizeWorkspacePath = (wsPath: string) => {
   } catch {
     return resolve(wsPath)
   }
+}
+
+const isAuthorizedRecentWorkspace = (wsPath: string) => {
+  const target = normalizeWorkspacePath(wsPath)
+  return readGlobalConfig().recentWorkspaces.some((workspace) => normalizeWorkspacePath(workspace.path) === target)
 }
 
 function focusWindow(window: BrowserWindow) {
@@ -244,6 +265,14 @@ function registerWorkspaceIpc() {
   })
 
   ipcMain.handle('workspace:open-path', async (event, wsPath: string) => {
+    try {
+      wsPath = stringValue(wsPath, 'Workspace path', 20_000)
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+    if (!isAuthorizedRecentWorkspace(wsPath)) {
+      return { success: false, error: 'This workspace has not been authorized through the folder picker.' }
+    }
     if (focusExistingWorkspace(wsPath, event.sender.id)) return { success: false, canceled: true }
     const opened = openWorkspace(wsPath)
     const window = BrowserWindow.fromWebContents(event.sender)
@@ -267,26 +296,46 @@ function registerWorkspaceIpc() {
     createWindow()
   })
 
-  ipcMain.handle('file:list', (event, folder: string) => listWorkspaceFiles(workspaceFor(event.sender), folder))
+  ipcMain.handle('file:list', (event, folder: string) =>
+    listWorkspaceFiles(workspaceFor(event.sender), stringValue(folder, 'Folder', IPC_PATH_LIMIT)),
+  )
 
-  ipcMain.handle('file:read', (event, filePath: string) => readWorkspaceFile(workspaceFor(event.sender), filePath))
+  ipcMain.handle('file:read', (event, filePath: string) =>
+    readWorkspaceFile(workspaceFor(event.sender), stringValue(filePath, 'File path', IPC_PATH_LIMIT)),
+  )
 
   ipcMain.handle('file:save', (event, filePath: string, content: string) =>
-    saveWorkspaceFile(workspaceFor(event.sender), filePath, content),
+    saveWorkspaceFile(
+      workspaceFor(event.sender),
+      stringValue(filePath, 'File path', IPC_PATH_LIMIT),
+      stringValue(content, 'File content', IPC_FILE_LIMIT),
+    ),
   )
 
   ipcMain.handle('file:create', (event, folder: string, relativePath: string) =>
-    createWorkspaceFile(workspaceFor(event.sender), folder, relativePath),
+    createWorkspaceFile(
+      workspaceFor(event.sender),
+      stringValue(folder, 'Folder', IPC_PATH_LIMIT),
+      stringValue(relativePath, 'Relative path', IPC_PATH_LIMIT),
+    ),
   )
 
   ipcMain.handle('file:rename', (event, filePath: string, newName: string) =>
-    renameWorkspaceFile(workspaceFor(event.sender), filePath, newName),
+    renameWorkspaceFile(
+      workspaceFor(event.sender),
+      stringValue(filePath, 'File path', IPC_PATH_LIMIT),
+      stringValue(newName, 'File name', 1_000),
+    ),
   )
 
   // Confirmation happens in the renderer (in-app modal); this just validates
   // and moves the target to the Trash.
   ipcMain.handle('file:delete', async (event, filePath: string) => {
-    const resolved = resolveWorkspaceItem(workspaceFor(event.sender), filePath, { allowRoot: false })
+    const resolved = resolveWorkspaceItem(
+      workspaceFor(event.sender),
+      stringValue(filePath, 'File path', IPC_PATH_LIMIT),
+      { allowRoot: false },
+    )
     if ('error' in resolved) return { success: false, error: resolved.error }
 
     try {
@@ -301,7 +350,10 @@ function registerWorkspaceIpc() {
   // but only safe document/data types, never an executable or script a stray
   // workspace could use to run code on one click.
   ipcMain.handle('file:open-external', async (event, filePath: string) => {
-    const resolved = resolveWorkspaceItem(workspaceFor(event.sender), filePath)
+    const resolved = resolveWorkspaceItem(
+      workspaceFor(event.sender),
+      stringValue(filePath, 'File path', IPC_PATH_LIMIT),
+    )
     if ('error' in resolved) return { success: false, error: resolved.error }
     const action = externalOpenAction(resolved.path)
     if (action === 'reject') {
@@ -318,6 +370,9 @@ function registerWorkspaceIpc() {
   })
 
   ipcMain.handle('file:save-as', async (event, folder: string, suggestedName: string, content: string) => {
+    folder = stringValue(folder, 'Folder', IPC_PATH_LIMIT)
+    suggestedName = stringValue(suggestedName, 'Suggested file name', 1_000)
+    content = stringValue(content, 'File content', IPC_FILE_LIMIT)
     const workspace = workspaceFor(event.sender)
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!workspace || !window) return { success: false, error: 'No workspace open' }
@@ -339,6 +394,8 @@ function registerWorkspaceIpc() {
 
   // Results export: anywhere on disk (not workspace-rooted like save-as).
   ipcMain.handle('file:export', async (event, suggestedName: string, content: string) => {
+    suggestedName = stringValue(suggestedName, 'Suggested file name', 1_000)
+    content = stringValue(content, 'Export content', IPC_FILE_LIMIT)
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return { success: false, error: 'No window' }
     const extension = (suggestedName.split('.').pop() || 'csv').toLowerCase()
@@ -360,69 +417,163 @@ function registerWorkspaceIpc() {
     return readGlobalConfig().recentWorkspaces.filter((workspace) => isDirectory(workspace.path))
   })
 
-  ipcMain.handle('workspace:get-config', (event) => readWorkspaceConfig(workspaceFor(event.sender)))
+  ipcMain.handle('workspace:get-config', (event) => readWorkspaceConfigForRenderer(workspaceFor(event.sender)))
 
-  ipcMain.handle('workspace:save-config', (event, config: WorkspaceConfig) =>
-    writeWorkspaceConfig(workspaceFor(event.sender), config),
-  )
+  ipcMain.handle('workspace:save-config', (event, config: WorkspaceConfig) => {
+    try {
+      return writeWorkspaceConfig(workspaceFor(event.sender), workspaceConfig(config))
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message }
+    }
+  })
 }
 
 function registerDbIpc() {
   const manager = (event: IpcMainInvokeEvent) => dbManagerFor(event.sender)
   const existingManager = (event: IpcMainInvokeEvent) => dbManagers.get(event.sender.id)
 
-  ipcMain.handle('db:test', (_event, profile: ConnectionProfile) => testConnection(profile))
-  ipcMain.handle('db:test-ssh', (_event, profile: ConnectionProfile) => testSshTunnel(profile))
-  ipcMain.handle('db:connect', (event, profile: ConnectionProfile) => manager(event).connect(profile))
-  ipcMain.handle('db:disconnect', (event, profileId: string) => existingManager(event)?.disconnect(profileId))
+  const hydratedProfile = (event: IpcMainInvokeEvent, profile: ConnectionProfile) =>
+    hydrateConnectionProfile(workspaceFor(event.sender), profile)
+
+  ipcMain.handle('db:test', (event, profile: ConnectionProfile) => {
+    try {
+      return testConnection(hydratedProfile(event, connectionProfile(profile)))
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message, tookMs: 0 }
+    }
+  })
+  ipcMain.handle('db:test-ssh', (event, profile: ConnectionProfile) => {
+    try {
+      return testSshTunnel(hydratedProfile(event, connectionProfile(profile)))
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message, tookMs: 0 }
+    }
+  })
+  ipcMain.handle('db:connect', (event, profile: ConnectionProfile) => {
+    try {
+      return manager(event).connect(hydratedProfile(event, connectionProfile(profile)))
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message }
+    }
+  })
+  ipcMain.handle('db:disconnect', (event, profileId: string) =>
+    existingManager(event)?.disconnect(stringValue(profileId, 'Profile id', 200)),
+  )
   ipcMain.handle('db:disconnect-all', (event) => existingManager(event)?.disconnectAll())
   ipcMain.handle('db:set-active-child', (event, profileId: string, database: string) =>
-    manager(event).setActiveChild(profileId, database),
+    manager(event).setActiveChild(
+      stringValue(profileId, 'Profile id', 200),
+      stringValue(database, 'Database name', 2_000),
+    ),
   )
   ipcMain.handle('db:statuses', (event) => existingManager(event)?.statuses() ?? [])
   ipcMain.handle(
     'db:query',
-    (event, profileId: string, childDb: string | null, sql: string, params?: unknown[], sort?: QuerySort | null) =>
-      manager(event).query(profileId, childDb, sql, params, sort),
+    (event, profileId: string, childDb: string | null, sql: string, params?: unknown[], sort?: QuerySort | null, executionId?: string) => {
+      try {
+        const payload = queryPayload(sql, params, sort, executionId)
+        const parsedProfileId = stringValue(profileId, 'Profile id', 200)
+        const parsedChild = childDb === null ? null : stringValue(childDb, 'Database name', 2_000)
+        return manager(event).query(parsedProfileId, parsedChild, payload.sql, payload.params, payload.sort, payload.executionId)
+      } catch (error) {
+        return { success: false as const, error: (error as Error).message }
+      }
+    },
   )
   ipcMain.handle(
     'db:run-batch',
-    (event, profileId: string, childDb: string | null, statements: BatchStatement[]) =>
-      manager(event).runBatch(profileId, childDb, statements),
+    (event, profileId: string, childDb: string | null, statements: BatchStatement[]) => {
+      try {
+        return manager(event).runBatch(
+          stringValue(profileId, 'Profile id', 200),
+          childDb === null ? null : stringValue(childDb, 'Database name', 2_000),
+          batchStatements(statements),
+        )
+      } catch (error) {
+        return { success: false as const, error: (error as Error).message }
+      }
+    },
   )
   ipcMain.handle(
     'db:run-ddl',
-    (event, profileId: string, childDb: string | null, statements: string[]) =>
-      manager(event).runDdl(profileId, childDb, statements),
+    (event, profileId: string, childDb: string | null, statements: string[]) => {
+      try {
+        return manager(event).runDdl(
+          stringValue(profileId, 'Profile id', 200),
+          childDb === null ? null : stringValue(childDb, 'Database name', 2_000),
+          ddlStatements(statements),
+        )
+      } catch (error) {
+        return { success: false as const, error: (error as Error).message }
+      }
+    },
   )
   ipcMain.handle('db:fetch-rows', (event, sessionId: string, offset: number, limit: number) =>
-    existingManager(event)?.fetchRows(sessionId, offset, limit) ?? { success: false as const, error: 'No active session' },
+    existingManager(event)?.fetchRows(
+      stringValue(sessionId, 'Session id', 200),
+      nonNegativeInteger(offset, 'Row offset', Number.MAX_SAFE_INTEGER),
+      nonNegativeInteger(limit, 'Row limit', 200),
+    ) ?? { success: false as const, error: 'No active session' },
   )
-  ipcMain.handle('db:close-session', (event, sessionId: string) => existingManager(event)?.closeSession(sessionId))
-  ipcMain.handle('db:cancel', (event, profileId: string) => manager(event).cancelQuery(profileId))
+  ipcMain.handle('db:close-session', (event, sessionId: string) =>
+    existingManager(event)?.closeSession(stringValue(sessionId, 'Session id', 200)),
+  )
+  ipcMain.handle('db:cancel', (event, profileId: string, executionId?: string) =>
+    manager(event).cancelQuery(
+      stringValue(profileId, 'Profile id', 200),
+      executionId === undefined ? undefined : stringValue(executionId, 'Execution id', 200),
+    ),
+  )
   ipcMain.handle('db:create-database', (event, profileId: string, name: string) =>
-    manager(event).createDatabase(profileId, name),
+    manager(event).createDatabase(
+      stringValue(profileId, 'Profile id', 200),
+      stringValue(name, 'Database name', 2_000),
+    ),
   )
   ipcMain.handle('db:drop-database', (event, profileId: string, name: string) =>
-    manager(event).dropDatabase(profileId, name),
+    manager(event).dropDatabase(
+      stringValue(profileId, 'Profile id', 200),
+      stringValue(name, 'Database name', 2_000),
+    ),
   )
   ipcMain.handle('db:list-tables', (event, profileId: string, childDb: string | null) =>
-    manager(event).listTables(profileId, childDb),
+    manager(event).listTables(
+      stringValue(profileId, 'Profile id', 200),
+      nullableStringValue(childDb, 'Database name', 2_000),
+    ),
   )
   ipcMain.handle('db:list-columns', (event, profileId: string, childDb: string | null) =>
-    manager(event).listColumns(profileId, childDb),
+    manager(event).listColumns(
+      stringValue(profileId, 'Profile id', 200),
+      nullableStringValue(childDb, 'Database name', 2_000),
+    ),
   )
   ipcMain.handle('db:inspect-table', (event, profileId: string, childDb: string | null, table: TableRef) =>
-    manager(event).inspectTable(profileId, table, childDb),
+    manager(event).inspectTable(
+      stringValue(profileId, 'Profile id', 200),
+      tableReference(table),
+      nullableStringValue(childDb, 'Database name', 2_000),
+    ),
   )
   ipcMain.handle('db:list-objects', (event, profileId: string, childDb: string | null) =>
-    manager(event).listObjects(profileId, childDb),
+    manager(event).listObjects(
+      stringValue(profileId, 'Profile id', 200),
+      nullableStringValue(childDb, 'Database name', 2_000),
+    ),
   )
   ipcMain.handle('db:inspect-object', (event, profileId: string, childDb: string | null, object: DbObject, objectKind: DbObjectKind) =>
-    manager(event).inspectObject(profileId, object, objectKind, childDb),
+    manager(event).inspectObject(
+      stringValue(profileId, 'Profile id', 200),
+      databaseObject(object),
+      databaseObjectKind(objectKind),
+      nullableStringValue(childDb, 'Database name', 2_000),
+    ),
   )
   ipcMain.handle('db:inspect-server', (event, profileId: string, childDb: string | null) =>
-    manager(event).inspectServer(profileId, childDb),
+    manager(event).inspectServer(
+      stringValue(profileId, 'Profile id', 200),
+      nullableStringValue(childDb, 'Database name', 2_000),
+    ),
   )
 
   ipcMain.handle('db:pick-sqlite-file', async (event) => {

@@ -2,11 +2,17 @@
 // renderer-only; the rows here are whatever the panel holds (capped at the
 // IPC boundary), never a re-run of the query.
 
+const bigintReplacer = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value
+
 const cellText = (value: unknown): string => {
   if (value === null || value === undefined) return ''
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean') return String(value)
-  return JSON.stringify(value)
+  try {
+    return JSON.stringify(value, bigintReplacer) ?? '[unserializable value]'
+  } catch {
+    return '[unserializable value]'
+  }
 }
 
 // A spreadsheet reads a field starting with one of these as a formula, so a
@@ -66,7 +72,7 @@ export function toJson(columns: string[], rows: unknown[][]): string {
   })
   return JSON.stringify(
     rows.map((row) => Object.fromEntries(keys.map((key, index) => [key, row[index] ?? null]))),
-    null,
+    bigintReplacer,
     2,
   )
 }

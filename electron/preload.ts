@@ -21,12 +21,13 @@ const api: SqlkitApi = {
     ipcRenderer.on('db:status', handler)
     return () => ipcRenderer.off('db:status', handler)
   },
-  runQuery: (profileId, childDb, sql, params, sort) => ipcRenderer.invoke('db:query', profileId, childDb, sql, params, sort),
+  runQuery: (profileId, childDb, sql, params, sort, executionId) =>
+    ipcRenderer.invoke('db:query', profileId, childDb, sql, params, sort, executionId),
   runBatch: (profileId, childDb, statements) => ipcRenderer.invoke('db:run-batch', profileId, childDb, statements),
   runDdl: (profileId, childDb, statements) => ipcRenderer.invoke('db:run-ddl', profileId, childDb, statements),
   fetchRows: (sessionId, offset, limit) => ipcRenderer.invoke('db:fetch-rows', sessionId, offset, limit),
   closeSession: (sessionId) => ipcRenderer.invoke('db:close-session', sessionId),
-  cancelQuery: (profileId) => ipcRenderer.invoke('db:cancel', profileId),
+  cancelQuery: (profileId, executionId) => ipcRenderer.invoke('db:cancel', profileId, executionId),
   createDatabase: (profileId, name) => ipcRenderer.invoke('db:create-database', profileId, name),
   dropDatabase: (profileId, name) => ipcRenderer.invoke('db:drop-database', profileId, name),
   listTables: (profileId, childDb) => ipcRenderer.invoke('db:list-tables', profileId, childDb),

@@ -40,6 +40,15 @@ describe('dialectFor: applyOrderBy', () => {
   })
 })
 
+describe('dialectFor: table browsing', () => {
+  it('uses TOP for SQL Server and LIMIT for the other engines', () => {
+    expect(dialectFor('sqlserver').browseTable('[dbo].[users]', 200)).toBe('SELECT TOP (200) * FROM [dbo].[users]')
+    expect(dialectFor('postgresql').browseTable('"public"."users"', 200)).toBe('SELECT * FROM "public"."users" LIMIT 200')
+    expect(dialectFor('mysql').browseTable('`users`', 200)).toBe('SELECT * FROM `users` LIMIT 200')
+    expect(dialectFor('sqlite').browseTable('"users"', 200)).toBe('SELECT * FROM "users" LIMIT 200')
+  })
+})
+
 describe('dialectFor: bindBoolean', () => {
   it('binds 1/0 on sqlite and real booleans elsewhere', () => {
     expect(dialectFor('sqlite').bindBoolean(true)).toBe(1)

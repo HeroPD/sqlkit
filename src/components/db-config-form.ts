@@ -128,7 +128,11 @@ export class DbConfigForm extends LitElement {
         ${this._field('Host', this._input(draft, 'host'), 'Hostname, IP, or server name.')}
         ${this._field('Port', this._input(draft, 'port'))}
         ${this._field('User', this._input(draft, 'username'))}
-        ${this._field('Password', this._input(draft, 'password', 'password'))}
+        ${this._field(
+          'Password',
+          this._input(draft, 'password', 'password'),
+          draft.passwordSaved ? 'A password is saved. Leave blank to keep it; typing replaces it.' : '',
+        )}
         ${this._field('Database', this._input(draft, 'database'))}
         ${this._field(
           'Mode',
@@ -183,7 +187,7 @@ export class DbConfigForm extends LitElement {
             <select @change=${(e: Event) => this._patchSsl(ssl, { mode: (e.target as HTMLSelectElement).value as SslMode })}>
               <option value="disable" ?selected=${ssl.mode === 'disable'}>Disable</option>
               <option value="require" ?selected=${ssl.mode === 'require'}>Require encryption</option>
-              <option value="verify-ca" ?selected=${ssl.mode === 'verify-ca'}>Verify CA</option>
+              <option value="verify-ca" ?selected=${ssl.mode === 'verify-ca'} ?disabled=${draft.engine === 'sqlserver'}>Verify CA</option>
               <option value="verify-full" ?selected=${ssl.mode === 'verify-full'}>Verify full</option>
             </select>
           `,
@@ -283,7 +287,13 @@ export class DbConfigForm extends LitElement {
       ${this._field(
         'Auth method',
         html`
-          <select @change=${(e: Event) => this._patchSsh(ssh, { authType: (e.target as HTMLSelectElement).value as SshAuthType })}>
+          <select
+            @change=${(e: Event) => this._patchSsh(ssh, {
+              authType: (e.target as HTMLSelectElement).value as SshAuthType,
+              passwordSaved: false,
+              passphraseSaved: false,
+            })}
+          >
             <option value="key" ?selected=${ssh.authType === 'key'}>Private key</option>
             <option value="password" ?selected=${ssh.authType === 'password'}>Password</option>
           </select>
@@ -311,12 +321,27 @@ export class DbConfigForm extends LitElement {
     `
   }
 
-  private _sshInput(ssh: SshConfig, key: Exclude<keyof SshConfig, 'enabled' | 'authType'>, type: 'text' | 'password' = 'text') {
+  private _sshInput(
+    ssh: SshConfig,
+    key: Exclude<keyof SshConfig, 'enabled' | 'authType' | 'passwordSaved' | 'passphraseSaved'>,
+    type: 'text' | 'password' = 'text',
+  ) {
     return html`
       <input
         type=${type}
         .value=${ssh[key]}
-        @input=${(e: Event) => this._patchSsh(ssh, { [key]: (e.target as HTMLInputElement).value })}
+        @input=${(e: Event) => {
+          const value = (e.target as HTMLInputElement).value
+          const targetChanged = key === 'host' || key === 'port' || key === 'username' || key === 'keyPath'
+          const marker = key === 'password'
+            ? { passwordSaved: false }
+            : key === 'passphrase'
+              ? { passphraseSaved: false }
+              : targetChanged
+                ? { passwordSaved: false, passphraseSaved: false }
+                : {}
+          this._patchSsh(ssh, { [key]: value, ...marker })
+        }}
         autocomplete="off"
         spellcheck="false"
       />
@@ -339,14 +364,18 @@ export class DbConfigForm extends LitElement {
 
   private _input(
     draft: ConnectionProfile,
-    key: Exclude<keyof ConnectionProfile, 'id' | 'engine'>,
+    key: Exclude<keyof ConnectionProfile, 'id' | 'engine' | 'passwordSaved'>,
     type: 'text' | 'password' = 'text',
   ) {
     return html`
       <input
         type=${type}
         .value=${draft[key]}
-        @input=${(e: Event) => this._patch({ [key]: (e.target as HTMLInputElement).value })}
+        @input=${(e: Event) => {
+          const value = (e.target as HTMLInputElement).value
+          const targetChanged = key === 'host' || key === 'port' || key === 'username'
+          this._patch(key === 'password' || targetChanged ? { [key]: value, passwordSaved: false } : { [key]: value })
+        }}
         autocomplete="off"
         spellcheck="false"
       />
@@ -380,7 +409,7 @@ export class DbConfigForm extends LitElement {
         ? (DEFAULT_PORTS[entry.engine] ?? this.profile.port)
         : this.profile.port
     // flavor is set for variants and explicitly cleared for plain engines.
-    this._patch({ engine: entry.engine, flavor: entry.flavor, port })
+    this._patch({ engine: entry.engine, flavor: entry.flavor, port, passwordSaved: false })
   }
 
   private async _onBrowse() {

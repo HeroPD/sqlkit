@@ -107,6 +107,57 @@ describe('results-panel editability', () => {
   })
 })
 
+describe('results-panel multiple and paged results', () => {
+  it('lets the user inspect each result set and keeps earlier sets read-only', async () => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.rowEditable = true
+    el.run = {
+      phase: 'done',
+      result: {
+        columns: ['second'], rows: [[2]], rowCount: 1, durationMs: 1,
+        resultSets: [
+          { columns: ['first'], rows: [[1]], rowCount: 1 },
+          { columns: ['second'], rows: [[2]], rowCount: 1 },
+        ],
+      },
+    }
+    document.body.append(el)
+    await el.updateComplete
+
+    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.result-set-select')!
+    expect(select).toBeTruthy()
+    select.value = '0'
+    select.dispatchEvent(new Event('change'))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('thead th:not(.num)')?.textContent).toContain('first')
+
+    el.shadowRoot!.querySelector<HTMLTableCellElement>('tbody td:not(.num)')!
+      .dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.cell-edit')).toBeNull()
+    el.remove()
+  })
+
+  it('fetches every page needed for export instead of silently stopping at 200 rows', async () => {
+    const all = Array.from({ length: 450 }, (_, index) => [index])
+    const fetchRows = vi.fn((_session: string, offset: number, limit: number) =>
+      Promise.resolve({ success: true as const, rows: all.slice(offset, offset + limit) }),
+    )
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { fetchRows }
+    const el = document.createElement('results-panel')
+    const internal = el as unknown as {
+      _allRows(result: { columns: string[]; rows: unknown[][]; rowCount: number; durationMs: number; sessionId: string; bufferedRowCount: number }, limit: number): Promise<unknown[][]>
+    }
+    const rows = await internal._allRows(
+      { columns: ['n'], rows: all.slice(0, 200), rowCount: 450, durationMs: 1, sessionId: 's1', bufferedRowCount: 450 },
+      450,
+    )
+    expect(rows).toHaveLength(450)
+    expect(fetchRows).toHaveBeenCalledTimes(3)
+  })
+})
+
 describe('results-panel collapse toggle', () => {
   const collapseButton = (el: HTMLElement) =>
     el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label$="results panel"]')!

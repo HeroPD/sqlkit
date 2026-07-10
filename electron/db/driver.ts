@@ -30,7 +30,13 @@ export type Driver = {
   /** Runs in `childDb` when provided; otherwise uses the driver's active
    * database. `sort` injects an ORDER BY the driver builds with its own
    * identifier quoting. */
-  query(sql: string, params?: unknown[], childDb?: string | null, sort?: QuerySort | null): Promise<QueryResult>
+  query(
+    sql: string,
+    params?: unknown[],
+    childDb?: string | null,
+    sort?: QuerySort | null,
+    executionId?: string,
+  ): Promise<QueryResult>
   /** Runs statements in a single transaction on one connection, committing only
    * if every statement succeeds and affects at least one row — otherwise the
    * whole batch rolls back. Undefined for engines without transaction support. */
@@ -44,7 +50,7 @@ export type Driver = {
    * targeted, so the caller can tell "nothing running" (running 0) from "running
    * but un-cancellable" (running > 0, cancelled 0). Engines without server-side
    * cancellation (sqlite) leave it undefined. */
-  cancel?(): Promise<{ running: number; cancelled: number }>
+  cancel?(executionId?: string): Promise<{ running: number; cancelled: number }>
   // Metadata methods target `childDb` when given, else the active child — same
   // contract as query(), so listings never silently follow a different child
   // than the one the caller asked for.

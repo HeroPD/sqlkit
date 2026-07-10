@@ -41,6 +41,21 @@ describe('ResultSessionStore.open', () => {
     expect(out.rowCount).toBe(PAGE_SIZE + 50)
     expect(store.size).toBe(1)
   })
+
+  it('bounds every embedded result set before it crosses IPC', () => {
+    const store = new ResultSessionStore(seqIds())
+    const many = Array.from({ length: PAGE_SIZE + 10 }, (_, index) => [index])
+    const out = store.open('p1', {
+      ...result(PAGE_SIZE + 10),
+      resultSets: [
+        { columns: ['a'], rows: many, rowCount: many.length },
+        { columns: ['b'], rows: many, rowCount: many.length },
+      ],
+    })
+    expect(out.resultSets?.[0]?.rows).toHaveLength(PAGE_SIZE)
+    expect(out.resultSets?.[0]?.truncated).toBe(true)
+    expect(out.resultSets?.[1]?.rows).toHaveLength(PAGE_SIZE)
+  })
 })
 
 describe('ResultSessionStore.fetch', () => {
@@ -81,11 +96,11 @@ describe('ResultSessionStore lifecycle', () => {
     expect(store.fetch(b.sessionId!, 0, 1)).toHaveLength(1)
   })
 
-  it('evicts the oldest session once past the cap (24)', () => {
+  it('evicts the oldest session once past the cap (8)', () => {
     const store = new ResultSessionStore(seqIds())
     const first = store.open('p1', result(300))
-    for (let i = 0; i < 24; i += 1) store.open('p1', result(300)) // 25 total → evict the first
+    for (let i = 0; i < 8; i += 1) store.open('p1', result(300)) // 9 total → evict the first
     expect(store.fetch(first.sessionId!, 0, 1)).toBeNull()
-    expect(store.size).toBe(24)
+    expect(store.size).toBe(8)
   })
 })

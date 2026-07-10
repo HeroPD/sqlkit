@@ -118,7 +118,10 @@ export class SchemaOpsController {
         result.failedIndex !== undefined
           ? `Statement ${result.failedIndex + 1} of ${statements.length} failed: ${result.error}`
           : result.error
-      this.deps.dialogs.notice('Schema change failed', `${reason} No changes were made.`)
+      const outcome = result.partial
+        ? `${result.appliedCount ?? result.failedIndex ?? 0} earlier statement(s) were already committed by MySQL. Reload the schema before continuing.`
+        : 'No changes were made.'
+      this.deps.dialogs.notice('Schema change failed', `${reason} ${outcome}`)
       return
     }
     spec.onApplied()

@@ -1,10 +1,11 @@
 import mysql from 'mysql2/promise'
-import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor } from '../../src/dialect'
-import { BATCH_ZERO_ROWS, MAX_BUFFERED_ROWS } from './limits'
+import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 import { sslOptions } from './postgres'
+import { assertSelfContainedTransaction, preprocessMysqlDelimiters } from './sql-script'
 
 // Schemas MySQL ships with; never listed as children or browsable databases.
 const SYSTEM_SCHEMAS = ['mysql', 'information_schema', 'performance_schema', 'sys']
@@ -42,7 +43,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   let childNames: string[] = []
   let active = ''
   // Thread ids of in-flight user statements, so cancel() can KILL QUERY them.
-  const running = new Set<{ threadId: number | null }>()
+  const running = new Set<{ executionId?: string; threadId: number | null; cancelRequested: boolean }>()
   // The tls ConnectionOptions shape is what mysql2 forwards to tls.connect;
   // its own SslOptions type is just narrower.
   const tls = sslOptions(profile)
@@ -131,23 +132,33 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       await Promise.all([...closing.values()].map((pool) => pool.end().catch(() => {})))
     },
 
-    async query(sql, params = [], childDb = null, sort = null) {
+    async query(sql, params = [], childDb = null, sort = null, executionId) {
       const started = performance.now()
-      const finalSql = sort ? dialect.applyOrderBy(sql, sort) : sql
+      const script = preprocessMysqlDelimiters(sql)
+      assertSelfContainedTransaction(script, 'mysql')
+      const finalSql = sort ? dialect.applyOrderBy(script, sort) : script
       // Checked out manually so the thread id is known while the statement
       // runs and cancel() has a KILL QUERY target.
-      const conn = await poolForQuery(childDb).getConnection()
-      const raw = rawOf(conn)
-      const entry = { threadId: raw.threadId ?? null }
+      const entry = { executionId, threadId: null as number | null, cancelRequested: false }
       running.add(entry)
+      let conn: mysql.PoolConnection | null = null
       try {
+        conn = await poolForQuery(childDb).getConnection()
+        const raw = rawOf(conn)
+        entry.threadId = raw.threadId ?? null
+        if (entry.cancelRequested) {
+          conn.release()
+          conn = null
+          throw new Error('Query cancelled.')
+        }
         const result = await streamQuery(raw, finalSql, params, started)
         conn.release()
+        conn = null
         return result
       } catch (error) {
         // The connection may hold half-read results; drop it rather than reuse.
-        conn.destroy()
-        throw isInterrupted(error) ? new Error('Query cancelled.') : error
+        conn?.destroy()
+        throw isInterrupted(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
       } finally {
         running.delete(entry)
       }
@@ -158,20 +169,48 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // One checked-out connection for the whole batch so the transaction binds
       // every statement.
       const conn = await poolForQuery(childDb).getConnection()
-      const entry = { threadId: rawOf(conn).threadId ?? null }
+      const entry = { threadId: rawOf(conn).threadId ?? null, cancelRequested: false }
       running.add(entry)
       let index = -1
       try {
+        const tableNames = statements.flatMap((statement) => {
+          const match = /^\s*(?:update|insert\s+into|delete\s+from)\s+`((?:``|[^`])+)`/i.exec(statement.sql)
+          return match?.[1] ? [match[1].replaceAll('``', '`')] : []
+        })
+        if (tableNames.length) {
+          const [rows] = await conn.query(
+            `select table_name, engine from information_schema.tables
+             where table_schema = database() and table_name in (${tableNames.map(() => '?').join(', ')})`,
+            tableNames,
+          )
+          const unsafe = (rows as Array<{ table_name: string; engine: string | null }>).filter(
+            (row) => row.engine !== null && !['InnoDB', 'NDBCLUSTER'].includes(row.engine),
+          )
+          if (unsafe.length) {
+            conn.release()
+            return {
+              success: false,
+              error: `Atomic saves are unavailable for non-transactional table(s): ${unsafe.map((row) => row.table_name).join(', ')}`,
+            }
+          }
+        }
         await conn.beginTransaction()
         for (index = 0; index < statements.length; index += 1) {
           const statement = statements[index]!
           const [result] = await conn.query(statement.sql, statement.params)
           // A write that matched nothing means the row moved or vanished since
           // the user reviewed it — abort the whole batch rather than half-apply.
-          if (((result as { affectedRows?: number }).affectedRows ?? 0) === 0) {
+          const affected = (result as { affectedRows?: number }).affectedRows ?? 0
+          if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
             await conn.rollback()
             conn.release()
-            return { success: false, failedIndex: index, error: BATCH_ZERO_ROWS }
+            return {
+              success: false,
+              failedIndex: index,
+              error: statement.expectedRows !== undefined
+                ? `Expected ${statement.expectedRows} affected row(s), but ${affected} matched. Refresh and try again.`
+                : BATCH_ZERO_ROWS,
+            }
           }
         }
         await conn.commit()
@@ -195,7 +234,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // No transaction: MySQL DDL commits implicitly, so statements run one by
       // one and a failure reports how far it got rather than rolling back.
       const conn = await poolForQuery(childDb).getConnection()
-      const entry = { threadId: rawOf(conn).threadId ?? null }
+      const entry = { threadId: rawOf(conn).threadId ?? null, cancelRequested: false }
       running.add(entry)
       let index = -1
       try {
@@ -209,6 +248,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
+          partial: index > 0,
+          appliedCount: Math.max(0, index),
           error: isInterrupted(error) ? 'Save cancelled.' : (error as Error).message,
         }
       } finally {
@@ -244,13 +285,15 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       childNames = childNames.filter((child) => child !== name)
     },
 
-    async cancel() {
+    async cancel(executionId) {
       // KILL QUERY from a fresh out-of-band connection — the pool's clients are
       // occupied by the very statements being cancelled. A thread that already
       // finished is a no-op error, counted as not cancelled.
-      const entries = [...running]
+      const entries = [...running].filter((entry) => executionId === undefined || entry.executionId === executionId)
+      const queued = entries.filter((entry) => entry.threadId === null)
+      for (const entry of queued) entry.cancelRequested = true
       const ids = entries.map((entry) => entry.threadId).filter((id): id is number => id !== null)
-      if (!ids.length) return { running: entries.length, cancelled: 0 }
+      if (!ids.length) return { running: entries.length, cancelled: queued.length }
       const conn = await mysql.createConnection({
         host: endpoint.host,
         port: endpoint.port,
@@ -269,7 +312,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
               .catch(() => false),
           ),
         )
-        return { running: entries.length, cancelled: sent.filter(Boolean).length }
+        return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
       } finally {
         await conn.end().catch(() => {})
       }
@@ -465,17 +508,26 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   }
 }
 
-// Streams rows so a huge result can't OOM the main process. Each result set of
-// a multi-statement run resets the buffer — the last statement's result is the
-// one displayed, matching how a user reads "run whole editor".
+// Streams rows so a huge or multi-result query can't OOM the main process.
+// The byte budget is shared by every result set in this execution.
 function streamQuery(raw: RawConnection, sql: string, params: unknown[], started: number): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     let columns: string[] = []
     let columnSources: QueryResult['columnSources']
     let rows: unknown[][] = []
     let total = 0
+    let bufferedBytes = 0
+    let limited = false
+    let active = false
+    const resultSets: QueryResultSet[] = []
+    const pushCurrent = () => {
+      if (!active) return
+      resultSets.push({ columns, columnSources, rows, rowCount: total, truncated: limited || total > rows.length })
+      active = false
+    }
     const query = raw.query({ sql, values: params, rowsAsArray: true })
     query.on('fields', (fields) => {
+      pushCurrent()
       const list = Array.isArray(fields) ? (fields as FieldMeta[]) : []
       columns = list.map((field) => field.name)
       columnSources = list.some((field) => field.orgTable && field.orgName)
@@ -487,29 +539,40 @@ function streamQuery(raw: RawConnection, sql: string, params: unknown[], started
         : undefined
       rows = []
       total = 0
+      limited = false
+      active = true
     })
     query.on('result', (row) => {
       if (Array.isArray(row)) {
         total += 1
-        if (rows.length < MAX_BUFFERED_ROWS) rows.push(row as unknown[])
+        if (rows.length < MAX_BUFFERED_ROWS) {
+          const bounded = boundedRow(row as unknown[], bufferedBytes)
+          if (bounded) {
+            rows.push(bounded.row)
+            bufferedBytes += bounded.bytes
+            limited ||= bounded.truncated
+          } else limited = true
+        } else limited = true
       } else {
         // An OK packet (INSERT/UPDATE/…): rowCount is the affected count.
+        pushCurrent()
         columns = []
         columnSources = undefined
         rows = []
         total = (row as { affectedRows?: number }).affectedRows ?? 0
+        limited = false
+        active = true
       }
     })
     query.on('error', reject)
-    query.on('end', () =>
+    query.on('end', () => {
+      pushCurrent()
+      const selected = resultSets[resultSets.length - 1] ?? { columns: [], rows: [], rowCount: 0 }
       resolve({
-        columns,
-        columnSources,
-        rows,
-        rowCount: total,
+        ...selected,
         durationMs: performance.now() - started,
-        truncated: total > MAX_BUFFERED_ROWS,
-      }),
-    )
+        ...(resultSets.length > 1 ? { resultSets } : {}),
+      })
+    })
   })
 }

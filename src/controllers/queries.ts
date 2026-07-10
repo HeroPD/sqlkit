@@ -334,9 +334,9 @@ export class QueriesController implements ReactiveController {
   }
 
   /** Marks a tab as running before connection/child alignment awaits. */
-  beginRun(tabId: string, note?: string) {
+  beginRun(tabId: string, executionId: string, profileId: string, note?: string) {
     this.closeRunSession(this.runs.get(tabId))
-    this.setRun(tabId, note ? { phase: 'running', note } : { phase: 'running' })
+    this.setRun(tabId, note ? { phase: 'running', executionId, profileId, note } : { phase: 'running', executionId, profileId })
   }
 
   /** Runs the SQL on an already-connected profile and records the outcome.
@@ -349,16 +349,18 @@ export class QueriesController implements ReactiveController {
     contextKey: string
     sql: string
     sort?: QuerySort | null
+    executionId?: string
   }) {
     const { tabId, profile, childDb, contextKey, sql, sort } = args
+    const executionId = args.executionId ?? crypto.randomUUID()
     if (sort) this.sorts.set(tabId, sort)
     else this.sorts.delete(tabId)
     const gen = this.generation
     // A new query supersedes the tab's old buffered result.
     this.closeRunSession(this.runs.get(tabId))
-    this.setRun(tabId, { phase: 'running' })
+    this.setRun(tabId, { phase: 'running', executionId, profileId: profile.id })
     const task: TaskItem = {
-      id: crypto.randomUUID(),
+      id: executionId,
       profileId: profile.id,
       contextLabel: childDb ? `${profile.name} / ${childDb}` : profile.name,
       sql,
@@ -373,7 +375,7 @@ export class QueriesController implements ReactiveController {
 
     let response: QueryResponse
     try {
-      response = await window.sqlkit.runQuery(profile.id, childDb, sql, undefined, sort)
+      response = await window.sqlkit.runQuery(profile.id, childDb, sql, undefined, sort, executionId)
     } catch (error) {
       // A rejected IPC (channel error, main-side throw) would otherwise leave
       // the run and its task stuck on 'running' forever.

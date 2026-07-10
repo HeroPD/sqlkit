@@ -541,8 +541,9 @@ export class WorkbenchScreen extends LitElement {
     // and be logged under the context Run was pressed in, not the current one.
     const childDb = this._ctx.activeChildDb
     const runContextKey = contextKey(profile.id, childDb)
+    const executionId = crypto.randomUUID()
     const phase = this._live.phase(profile.id)
-    this._queries.beginRun(tabId, phase === 'connected' ? undefined : `Connecting to ${profile.name}…`)
+    this._queries.beginRun(tabId, executionId, profile.id, phase === 'connected' ? undefined : `Connecting to ${profile.name}…`)
 
     if (phase !== 'connected') {
       const connected = await this._live.connect(profile)
@@ -565,13 +566,15 @@ export class WorkbenchScreen extends LitElement {
       contextKey: runContextKey,
       sql: sqlText,
       sort,
+      executionId,
     })
   }
 
   // Double-click browse: a tab named after the table, pre-filled with a capped SELECT and run.
   // Re-browsing reuses the tab and runs its first statement, so trailing half-written SQL doesn't error.
   private _browseTable(profile: ConnectionProfile, table: TableRef) {
-    const sqlText = `SELECT * FROM ${quoteQualified(table, dialectFor(profile.engine))} LIMIT 200`
+    const dialect = dialectFor(profile.engine)
+    const sqlText = dialect.browseTable(quoteQualified(table, dialect), 200)
 
     const id = `browse:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
     // Capture the existing tab's content before addTab activates it: re-browse
@@ -1176,14 +1179,19 @@ export class WorkbenchScreen extends LitElement {
   // The pending runQuery settles on its own with "Query cancelled." — this
   // only asks the server to interrupt the backend.
   private _onCancelQuery() {
-    const profile = this._config.activeProfile()
-    if (profile) void this._cancelQuery(profile.id)
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    if (run.phase === 'running') void this._cancelQuery(run.profileId, run.executionId)
   }
 
   // Stop is best-effort: a query still spinning up has no backend PID to target
   // yet, so the cancel reports why instead of looking like a silent no-op.
-  private async _cancelQuery(profileId: string) {
-    const result = await window.sqlkit.cancelQuery(profileId)
+  private async _cancelQuery(profileId: string, executionId: string) {
+    let result: { success: boolean; error?: string }
+    try {
+      result = await window.sqlkit.cancelQuery(profileId, executionId)
+    } catch (error) {
+      result = { success: false, error: (error as Error).message }
+    }
     // A failed cancel must not be silent — the user thinks the query stopped and
     // keeps waiting. Surface why (backend still starting up, nothing running, …).
     if (!result.success && result.error) this._dialogs.notice('Could not cancel query', result.error)
@@ -1282,8 +1290,8 @@ export class WorkbenchScreen extends LitElement {
   // Stop from the Tasks view: targets the task's own connection, which may
   // not be the active context.
   private _onTaskStop(event: Event) {
-    const { profileId } = (event as CustomEvent<TaskStopDetail>).detail
-    void this._cancelQuery(profileId)
+    const { profileId, taskId } = (event as CustomEvent<TaskStopDetail>).detail
+    void this._cancelQuery(profileId, taskId)
   }
 
   private _onTabSelect(event: Event) {

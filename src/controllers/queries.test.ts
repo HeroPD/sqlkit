@@ -30,7 +30,7 @@ const profile = { id: 'p1', name: 'Local' } as ConnectionProfile
 const result = { columns: ['n'], rows: [[1]], rowCount: 1, durationMs: 3 }
 // A paged result: a first page in `rows` with more buffered behind a session.
 const paged = { columns: ['n'], rows: [[0], [1]], rowCount: 5, durationMs: 1, sessionId: 'sess1', bufferedRowCount: 5 }
-const runArgs = { tabId: 't1', profile, childDb: null, contextKey: 'p1', sql: 'SELECT 1' }
+const runArgs = { tabId: 't1', profile, childDb: null, contextKey: 'p1', sql: 'SELECT 1', executionId: 'exec1' }
 
 // window.sqlkit stub with the query/paging methods the controller calls.
 function stubSqlkit(over: Partial<Record<'runQuery' | 'fetchRows' | 'closeSession', unknown>> = {}) {
@@ -80,7 +80,7 @@ describe('QueriesController.execute', () => {
     settle({ success: true, result })
     await done
 
-    expect(runQuery).toHaveBeenCalledWith('p1', 'analytics', 'SELECT 1', undefined, undefined)
+    expect(runQuery).toHaveBeenCalledWith('p1', 'analytics', 'SELECT 1', undefined, undefined, 'exec1')
   })
 
   it('forwards a column sort to the query IPC and tracks it per tab', async () => {
@@ -91,7 +91,7 @@ describe('QueriesController.execute', () => {
     settle({ success: true, result })
     await done
 
-    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', undefined, { column: 'name', direction: 'desc' })
+    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', undefined, { column: 'name', direction: 'desc' }, 'exec1')
     expect(controller.sortFor('t1')).toEqual({ column: 'name', direction: 'desc' })
   })
 

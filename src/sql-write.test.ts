@@ -90,8 +90,8 @@ describe('buildBatchUpdate', () => {
     expect(sql).toContain('UPDATE "public"."users"')
     expect(sql).toContain('"name" = CASE')
     expect(sql).toContain('"qty" = CASE')
-    expect(sql).toContain('WHERE ("id" = $7) OR ("id" = $8) OR ("id" = $9)')
-    expect(params).toEqual([1, 'Ada', 2, 'Ada', 1, 7, 1, 2, 1])
+    expect(sql).toContain('WHERE ("id" = $7) OR ("id" = $8)')
+    expect(params).toEqual([1, 'Ada', 2, 'Ada', 1, 7, 1, 2])
   })
 
   it('uses SQLite placeholders and coerces nullable empty values per column', () => {
@@ -114,6 +114,20 @@ describe('buildBatchUpdate', () => {
     expect(params).toEqual([7, null, 7])
   })
 
+  it('guards edited values optimistically and requires every target row to match', () => {
+    const built = buildBatchUpdate({
+      table: users,
+      edits: [
+        { column: 'name', columnMeta: col({ name: 'name' }), value: 'new', originalValue: 'old', pks: [{ name: 'id', value: 1 }] },
+        { column: 'name', columnMeta: col({ name: 'name' }), value: 'other', originalValue: null, pks: [{ name: 'id', value: 2 }] },
+      ],
+      engine: 'postgresql',
+    })
+    expect(built.sql).toContain('AND "name" = $2')
+    expect(built.sql).toContain('"name" IS NULL')
+    expect(built.expectedRows).toBe(2)
+  })
+
   it('throws without edits or primary keys', () => {
     expect(() => buildBatchUpdate({ table: users, edits: [], engine: 'postgresql' })).toThrow()
     expect(() =>
@@ -131,6 +145,7 @@ describe('buildInsertDefault', () => {
     expect(buildInsertDefault(users, dialectFor('postgresql'))).toEqual({
       sql: 'INSERT INTO "public"."users" DEFAULT VALUES',
       params: [],
+      expectedRows: 1,
     })
   })
 })
@@ -167,6 +182,7 @@ describe('buildInsert', () => {
     expect(buildInsert({ table: users, columns: [], values: [], engine: 'postgresql' })).toEqual({
       sql: 'INSERT INTO "public"."users" DEFAULT VALUES',
       params: [],
+      expectedRows: 1,
     })
   })
 })

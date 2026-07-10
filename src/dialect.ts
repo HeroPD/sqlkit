@@ -17,6 +17,8 @@ export type Dialect = {
   placeholder(index: number): string
   /** Inserts or replaces the outer query's ORDER BY for a single-column sort. */
   applyOrderBy(sql: string, sort: QuerySort): string
+  /** A small browse query for a table, using this engine's row-limit syntax. */
+  browseTable(qualifiedTable: string, limit: number): string
   /** Strips this engine's auto-generated constraint/index name suffix for display
    *  (e.g. Postgres `_fkey`); returns the name unchanged when there's nothing to strip. */
   displayConstraintName(name: string): string
@@ -168,6 +170,10 @@ const makeDialect = (engine: Engine): Dialect => {
     // SQL Server's driver (tedious) has no positional '?', only named params.
     placeholder: (index) => (engine === 'postgresql' ? `$${index}` : engine === 'sqlserver' ? `@p${index}` : '?'),
     applyOrderBy: (sql, sort) => placeOrderBy(sql, { column: quoteIdent(sort.column), dir: sort.direction }),
+    browseTable: (qualifiedTable, limit) =>
+      engine === 'sqlserver'
+        ? `SELECT TOP (${Math.max(1, Math.trunc(limit))}) * FROM ${qualifiedTable}`
+        : `SELECT * FROM ${qualifiedTable} LIMIT ${Math.max(1, Math.trunc(limit))}`,
     displayConstraintName: (name) => (suffix ? name.replace(suffix, '') : name),
     supportsColumnComments: columnCommentsFor[engine],
     bindBoolean: (value) => (engine === 'sqlite' ? (value ? 1 : 0) : value),

@@ -314,8 +314,10 @@ describe('connection manager: cancelQuery', () => {
   })
 
   it('succeeds when a backend was actually targeted', async () => {
-    const manager = await connected({ cancel: vi.fn(() => Promise.resolve({ running: 2, cancelled: 2 })) })
-    expect(await manager.cancelQuery('p1')).toEqual({ success: true })
+    const cancel = vi.fn(() => Promise.resolve({ running: 1, cancelled: 1 }))
+    const manager = await connected({ cancel })
+    expect(await manager.cancelQuery('p1', 'query-7')).toEqual({ success: true })
+    expect(cancel).toHaveBeenCalledWith('query-7')
   })
 })
 
