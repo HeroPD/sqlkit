@@ -290,6 +290,23 @@ describe('results-panel draft rows', () => {
     el.remove()
   })
 
+  it('stages an explicit NULL for the selection from the context menu', async () => {
+    const el = await mountGrid(2)
+    const fill = vi.fn()
+    el.addEventListener('cells-fill', fill)
+
+    const cell = el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="0"] td:nth-child(2)')!
+    cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+    const menu = el.shadowRoot!.querySelector('context-menu')!
+    menu.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'set-null' } }))
+
+    expect(fill).toHaveBeenCalledOnce()
+    const detail = (fill.mock.calls[0]![0] as CustomEvent).detail as { edits: Array<{ row: number; col: number; value: unknown }> }
+    expect(detail.edits).toEqual([{ row: 0, col: 0, value: SQL_NULL }])
+    el.remove()
+  })
+
   it('refuses to duplicate rows with structured values and disables it for truncated results', async () => {
     const el = document.createElement('results-panel')
     el.editable = true

@@ -619,6 +619,15 @@ export class ResultsPanel extends LitElement {
                         <i class="codicon codicon-add" aria-hidden="true"></i>
                       </button>
                       <button
+                        class="head-action danger"
+                        title="Delete selected rows"
+                        aria-label="Delete selected rows"
+                        ?disabled=${!hasDeletable}
+                        @click=${() => this._deleteSelection()}
+                      >
+                        <i class="codicon codicon-remove" aria-hidden="true"></i>
+                      </button>
+                      <button
                         class="head-action"
                         title=${`Duplicate selected rows (${isMac ? '⌘D' : 'Ctrl+D'})`}
                         aria-label="Duplicate selected rows"
@@ -629,24 +638,6 @@ export class ResultsPanel extends LitElement {
                       </button>
                     `
                   : ''}
-                <button
-                  class="head-action"
-                  title="Set selected cells to NULL"
-                  aria-label="Set selected cells to NULL"
-                  ?disabled=${!this._sel}
-                  @click=${this._setSelectionNull}
-                >
-                  <span aria-hidden="true">NULL</span>
-                </button>
-                <button
-                  class="head-action"
-                  title="Set selected cells to an empty string"
-                  aria-label="Set selected cells to an empty string"
-                  ?disabled=${!this._sel}
-                  @click=${this._setSelectionEmpty}
-                >
-                  <span aria-hidden="true">''</span>
-                </button>
                 <button
                   class="head-action"
                   title=${`Save ${pendingCount} pending change${pendingCount === 1 ? '' : 's'} (${isMac ? '⌘S' : 'Ctrl+S'})`}
@@ -665,19 +656,6 @@ export class ResultsPanel extends LitElement {
                 >
                   <i class="codicon codicon-discard" aria-hidden="true"></i>
                 </button>
-                ${this.rowEditable && canEditResult
-                  ? html`
-                      <button
-                        class="head-action danger"
-                        title="Delete selected rows"
-                        aria-label="Delete selected rows"
-                        ?disabled=${!hasDeletable}
-                        @click=${() => this._deleteSelection()}
-                      >
-                        <i class="codicon codicon-remove" aria-hidden="true"></i>
-                      </button>
-                    `
-                  : ''}
               </div>
             `
           : ''}
@@ -792,7 +770,13 @@ export class ResultsPanel extends LitElement {
     const canEdit = this.editable && this._canEditShownResult() && menu.row >= 0 && menu.col >= 0
     const items: MenuItem[] = [
       ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'view-record', label: 'View Record' }] : []),
-      ...(canEdit ? [{ id: 'edit-cell', label: 'Edit…' }] : []),
+      ...(canEdit
+        ? [
+            { id: 'edit-cell', label: 'Edit…' },
+            { id: 'set-null', label: 'Set NULL' },
+            { id: 'set-empty', label: 'Set Empty String' },
+          ]
+        : []),
       ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'copy-cell', label: 'Copy Cell' }] : []),
       ...(menu.row >= 0 ? [{ id: 'copy-row', label: 'Copy Row' }] : []),
       ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: 'Copy Column Name' }] : []),
@@ -826,6 +810,10 @@ export class ResultsPanel extends LitElement {
     // Edit opens the inline editor on the clicked cell; if it's inside a
     // multi-cell selection, the committed value fills the whole selection.
     if (action === 'edit-cell' && at.row >= 0 && at.col >= 0) this._beginEdit({ kind: 'result', row: at.row }, at.col, null)
+    // Fills the whole selection (the right-click reduced it to the clicked
+    // cell when it was outside), same as a committed edit would.
+    if (action === 'set-null') this._setSelectionNull()
+    if (action === 'set-empty') this._setSelectionEmpty()
   }
 
   private _renderRecordView() {
