@@ -24,10 +24,11 @@ const internals = (view: TableInspect) =>
     _typeItems(col: InspectColumn, filter?: string): Array<{ id: string; label: string; checked?: boolean }>
     _defaultItems(col: InspectColumn, filter?: string): Array<{ id: string; label: string; checked?: boolean }>
     _pickType(col: InspectColumn, id: string): void
-    _onCellClick(col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default'): void
+    _startEdit(colName: string, field: 'name' | 'dataType' | 'comment' | 'default', seed?: string): void
     _openTypeMenu(event: MouseEvent, col: InspectColumn): void
-    _openNullablePicker(event: MouseEvent, col: InspectColumn): void
+    _openNullablePicker(cell: HTMLElement, col: InspectColumn): void
     _openDefaultMenu(event: MouseEvent, col: InspectColumn): void
+    _sel: { grid: number; r0: number; c0: number; r1: number; c1: number } | null
     _onEditKeydown(event: KeyboardEvent, col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default'): void
     _onEditInput(event: Event, col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default'): void
     _cellMenu: { kind: string; x: number; y: number; width: number; active: number } | null
@@ -241,21 +242,25 @@ describe('TableInspect column editing', () => {
     expect(view.hasPendingChanges()).toBe(false)
   })
 
-  it('edits the type inline on cell click and from the end arrow', () => {
-    stubInspect()
-    const view = new TableInspect()
-    view.engine = 'postgresql'
-    const inner = internals(view)
+  it('selects and edits the type cell on a single click, and edits from the end arrow', async () => {
     const column = inspectCol({ name: 'age', dataType: 'integer' })
+    const view = await loaded('postgresql', [column])
+    const inner = internals(view)
+    const cell = view.shadowRoot!.querySelector<HTMLElement>('td[data-field="dataType"]')!
 
-    inner._onCellClick(column, 'dataType')
-    expect(inner._editing).toEqual({ col: 'age', field: 'dataType' })
+    // The press selects; the completed click opens the editor (classic gesture).
+    cell.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, composed: true }))
+    expect(inner._sel).toEqual({ grid: -1, r0: 0, c0: 1, r1: 0, c1: 1 })
+    expect(inner._editing).toBeNull()
+    cell.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
+    expect(inner._editing).toMatchObject({ col: 'age', field: 'dataType' })
     expect(inner._cellMenu).toBeNull()
     expect(inner._typePicker).toBeNull()
 
     inner._openTypeMenu(new MouseEvent('click', { clientX: 5, clientY: 6 }), column)
     expect(inner._editing).toEqual({ col: 'age', field: 'dataType' })
     expect(inner._cellMenu).toBeNull()
+    view.remove()
   })
 
   it('opens the full type list from the end arrow', async () => {
@@ -332,7 +337,9 @@ describe('TableInspect column editing', () => {
     await internals(view)._load()
     await view.updateComplete
 
-    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[0]!.click()
+    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[0]!.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, composed: true }),
+    )
     await view.updateComplete
 
     expect(view.shadowRoot!.querySelector('.cell-input')).not.toBeNull()
@@ -340,7 +347,7 @@ describe('TableInspect column editing', () => {
     view.remove()
   })
 
-  it('clicking another editable cell immediately starts editing it', () => {
+  it('starting an edit on another cell immediately moves the editor there', () => {
     stubInspect()
     const view = new TableInspect()
     view.engine = 'postgresql'
@@ -348,8 +355,8 @@ describe('TableInspect column editing', () => {
     const column = inspectCol({ name: 'age', dataType: 'integer' })
 
     inner._editing = { col: 'age', field: 'dataType' }
-    inner._onCellClick(column, 'name')
-    expect(inner._editing).toEqual({ col: 'age', field: 'name' })
+    inner._startEdit('age', 'name')
+    expect(inner._editing).toEqual({ col: 'age', field: 'name', seed: undefined })
 
     inner._editing = { col: 'age', field: 'name' }
     inner._openTypeMenu(new MouseEvent('click'), column)
@@ -439,7 +446,9 @@ describe('TableInspect column editing', () => {
     await internals(view)._load()
     await view.updateComplete
 
-    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[1]!.click()
+    view.shadowRoot!.querySelector<HTMLElement>('td[data-field="nullable"]')!.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, composed: true }),
+    )
     await view.updateComplete
 
     const options = [...view.shadowRoot!.querySelectorAll('.type-option')].map((option) => option.textContent?.trim())
@@ -462,8 +471,9 @@ describe('TableInspect column editing', () => {
     await internals(view)._load()
     await view.updateComplete
 
-    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[1]!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true }))
-    view.shadowRoot!.querySelectorAll<HTMLElement>('td.has-choices')[1]!.click()
+    view.shadowRoot!.querySelector<HTMLElement>('td[data-field="nullable"]')!.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, composed: true }),
+    )
     await view.updateComplete
     expect(internals(view)._cellMenu).not.toBeNull()
 
@@ -487,9 +497,16 @@ describe('TableInspect column editing', () => {
     await view.updateComplete
 
     const cell = view.shadowRoot!.querySelector<HTMLElement>('td.nullable-cell')!
-    cell.click()
+    cell.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
     expect(internals(view)._cellMenu).not.toBeNull()
-    cell.click()
+    cell.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
+    expect(internals(view)._cellMenu).toBeNull()
+
+    // The cell's chevron toggles it the same way.
+    const chevron = cell.querySelector<HTMLElement>('.choices-btn')!
+    chevron.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true }))
+    expect(internals(view)._cellMenu).not.toBeNull()
+    chevron.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true }))
     expect(internals(view)._cellMenu).toBeNull()
     view.remove()
   })
@@ -509,7 +526,9 @@ describe('TableInspect column editing', () => {
 
     // Edit the name cell, type a value, then open the type picker via its chevron
     // (a mousedown that suppresses blur) — the typed rename must not be lost.
-    view.shadowRoot!.querySelector<HTMLElement>('td[data-field="name"]')!.click()
+    view.shadowRoot!.querySelector<HTMLElement>('td[data-field="name"]')!.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, composed: true }),
+    )
     await view.updateComplete
     view.shadowRoot!.querySelector<HTMLInputElement>('.cell-input')!.value = 'age_years'
     internals(view)._openTypeMenu(new MouseEvent('mousedown'), column)
@@ -968,6 +987,161 @@ describe('TableInspect dropping columns', () => {
     expect(applied.drops).toEqual(['age'])
     expect(applied.edits).toEqual([{ original: nick, name: 'alias' }])
     expect(applied.additions).toEqual([])
+    view.remove()
+  })
+})
+
+describe('TableInspect cell selection', () => {
+  const cellOf = (view: TableInspect, row: number, field: string) =>
+    view.shadowRoot!.querySelector<HTMLElement>(`tr[data-row="${row}"] td[data-field="${field}"]`)!
+  const press = (el: HTMLElement, init: MouseEventInit = {}) =>
+    el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, composed: true, ...init }))
+  const key = (view: TableInspect, init: KeyboardEventInit) =>
+    view.shadowRoot!.querySelector<HTMLElement>('.columns-table')!.dispatchEvent(new KeyboardEvent('keydown', init))
+  const stubClipboard = () => {
+    const writeText = vi.fn(() => Promise.resolve())
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    return writeText
+  }
+  const twoCols = () => [inspectCol({ name: 'age' }), inspectCol({ name: 'nick', dataType: 'text', nullable: false })]
+
+  it('selects on click, extends with shift-click, and marks the cells', async () => {
+    const view = await loaded('postgresql', twoCols())
+    const inner = internals(view)
+
+    press(cellOf(view, 0, 'name'))
+    expect(inner._sel).toEqual({ grid: -1, r0: 0, c0: 0, r1: 0, c1: 0 })
+    press(cellOf(view, 1, 'dataType'), { shiftKey: true })
+    expect(inner._sel).toEqual({ grid: -1, r0: 0, c0: 0, r1: 1, c1: 1 })
+
+    // A shift-click stays selection-only: no editor opens on the completed click.
+    cellOf(view, 1, 'dataType').dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true, shiftKey: true }))
+    expect(inner._editing).toBeNull()
+
+    await view.updateComplete
+    expect(view.shadowRoot!.querySelectorAll('td.selected')).toHaveLength(4)
+    view.remove()
+  })
+
+  it('moves the selection with arrows and grows it with shift', async () => {
+    const view = await loaded('postgresql', twoCols())
+    const inner = internals(view)
+    press(cellOf(view, 0, 'name'))
+
+    key(view, { key: 'ArrowDown' })
+    expect(inner._sel).toEqual({ grid: -1, r0: 1, c0: 0, r1: 1, c1: 0 })
+    key(view, { key: 'ArrowRight', shiftKey: true })
+    expect(inner._sel).toEqual({ grid: -1, r0: 1, c0: 0, r1: 1, c1: 1 })
+    // Clamped at the grid edges.
+    key(view, { key: 'ArrowDown' })
+    expect(inner._sel).toEqual({ grid: -1, r0: 1, c0: 1, r1: 1, c1: 1 })
+    key(view, { key: 'Escape' })
+    expect(inner._sel).toBeNull()
+    view.remove()
+  })
+
+  it('copies the selected rectangle as TSV of the staged values', async () => {
+    const writeText = stubClipboard()
+    const cols = twoCols()
+    const view = await loaded('postgresql', cols)
+    internals(view)._commitText(cols[1]!, 'dataType', 'varchar(80)')
+
+    press(cellOf(view, 0, 'name'))
+    press(cellOf(view, 1, 'nullable'), { shiftKey: true })
+    key(view, { key: 'c', metaKey: true })
+    expect(writeText).toHaveBeenCalledWith('age\tinteger\tyes\nnick\tvarchar(80)\tno')
+    view.remove()
+  })
+
+  it('type-to-edit opens the editor seeded with the typed character', async () => {
+    const view = await loaded('postgresql')
+    const inner = internals(view)
+    press(cellOf(view, 0, 'name'))
+
+    key(view, { key: 'b' })
+    expect(inner._editing).toEqual({ col: 'age', field: 'name', seed: 'b' })
+    await view.updateComplete
+    expect(view.shadowRoot!.querySelector<HTMLInputElement>('.cell-input')?.value).toBe('b')
+    view.remove()
+  })
+
+  it('Enter edits the anchor cell; locked cells stay selectable and copyable', async () => {
+    const writeText = stubClipboard()
+    const view = await loaded('sqlite')
+    const inner = internals(view)
+
+    // SQLite can't alter an existing column's type — Enter must not open an editor…
+    press(cellOf(view, 0, 'dataType'))
+    key(view, { key: 'Enter' })
+    expect(inner._editing).toBeNull()
+    // …but the cell still copies.
+    key(view, { key: 'c', metaKey: true })
+    expect(writeText).toHaveBeenCalledWith('integer')
+
+    // The name cell is editable, so Enter opens it.
+    press(cellOf(view, 0, 'name'))
+    key(view, { key: 'Enter' })
+    expect(inner._editing).toMatchObject({ col: 'age', field: 'name' })
+    view.remove()
+  })
+
+  it('selects and copies section cells (indexes, constraints) too', async () => {
+    const writeText = stubClipboard()
+    const rows = [
+      { name: 'users_pkey', definition: 'PRIMARY KEY (id)' },
+      { name: 'users_email_key', definition: 'UNIQUE (email)' },
+    ]
+    const inspectTable = vi.fn(() =>
+      Promise.resolve<InspectResult>({
+        success: true,
+        inspection: { columns: [inspectCol({ name: 'age' })], sections: [{ title: 'Constraints', rows }] },
+      }),
+    )
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+    const inner = internals(view)
+
+    const nameCell = view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"] tr[data-row="0"] td[data-field="name"]')!
+    press(nameCell)
+    expect(inner._sel).toEqual({ grid: 0, r0: 0, c0: 0, r1: 0, c1: 0 })
+
+    // Extend into the second row's definition and copy: raw names, not display-trimmed.
+    press(view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"] tr[data-row="1"] td[data-field="definition"]')!, {
+      shiftKey: true,
+    })
+    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"]')!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'c', metaKey: true }),
+    )
+    expect(writeText).toHaveBeenCalledWith('users_pkey\tPRIMARY KEY (id)\nusers_email_key\tUNIQUE (email)')
+
+    // Sections are read-only: Enter and typing never open an editor.
+    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'x' }))
+    expect(inner._editing).toBeNull()
+
+    // A click in the columns table moves the selection between grids.
+    press(cellOf(view, 0, 'name'))
+    expect(inner._sel).toEqual({ grid: -1, r0: 0, c0: 0, r1: 0, c1: 0 })
+    view.remove()
+  })
+
+  it('keeps typing in the inline editor out of the grid gestures', async () => {
+    const view = await loaded('postgresql')
+    const inner = internals(view)
+    press(cellOf(view, 0, 'name'))
+    key(view, { key: 'Enter' })
+    await view.updateComplete
+
+    // Keys bubbling from the editor input must not re-enter type-to-edit.
+    const input = view.shadowRoot!.querySelector<HTMLInputElement>('.cell-input')!
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true, composed: true }))
+    expect(inner._editing).toMatchObject({ col: 'age', field: 'name' })
     view.remove()
   })
 })

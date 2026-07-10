@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import type { DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
+import { cellsToTsv } from '../result-export'
 import type { ColumnAdd, ColumnAlter } from '../sql-write'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -40,6 +41,9 @@ export type ColumnAlterEventDetail = {
 // fresh row valid without forcing input.
 const ADD_KEY_PREFIX = `${String.fromCharCode(0)}add:`
 const NEW_COLUMN_NAME = 'new_column'
+
+/** Grid id of the columns table in cell selection; sections use their index. */
+const COLUMNS_GRID = -1
 
 // The DDL words that show up in constraint/index/trigger/policy definitions;
 // matched case-insensitively so SQLite's hand-written DDL highlights too.
@@ -116,6 +120,16 @@ export class TableInspect extends LitElement {
   @state()
   private _saveError: string | null = null
 
+  /** Selected cell rectangle (results-grid style): anchor (r0,c0) → focus
+   * (r1,c1) within one grid — the columns table or one section table. */
+  @state()
+  private _sel: { grid: number; r0: number; c0: number; r1: number; c1: number } | null = null
+
+  private _selDragging = false
+
+  /** Whether the current press swept past its starting cell (a range gesture). */
+  private _selDragMoved = false
+
   /** The option menu open on a nullable cell. Type choices use an input-anchored picker. */
   @state()
   private _cellMenu: { x: number; y: number; width: number; col: InspectColumn; kind: 'nullable'; active: number } | null = null
@@ -140,6 +154,7 @@ export class TableInspect extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback()
     window.removeEventListener('mousedown', this._onWindowMouseDown, true)
+    this._endSelDrag()
   }
 
   // Closes any open picker on an outside mousedown. The nullable cell is spared
@@ -175,6 +190,7 @@ export class TableInspect extends LitElement {
       const seed = this._editing.seed
       const open = seed?.indexOf('(') ?? -1
       if (seed && open >= 0) input.setSelectionRange(open + 1, seed.endsWith(')') ? seed.length - 1 : seed.length)
+      else if (seed) input.setSelectionRange(seed.length, seed.length) // type-to-edit: keep typing after the seed char
       else input.select()
       if (this._editing.field === 'dataType' && this._selectFirstTypeOption) {
         const col = this._editingColumn()
@@ -211,6 +227,7 @@ export class TableInspect extends LitElement {
     this._typePicker = null
     this._defaultPicker = null
     this._saveError = null
+    this._sel = null
     this._state = { phase: 'loading' }
     const result =
       object && objectKind
@@ -312,6 +329,11 @@ export class TableInspect extends LitElement {
 
   private _onRowMenu(event: MouseEvent, name: string, definition: string | null = null) {
     event.preventDefault()
+    // Same as the columns table: right-click lands the selection on the cell.
+    const hit = this._cellAt(event.target as Element)
+    if (hit && !this._isSelected(hit.grid, hit.row, hit.col)) {
+      this._sel = { grid: hit.grid, r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col }
+    }
     this._menu = { x: event.clientX, y: event.clientY, name, definition }
   }
 
@@ -321,9 +343,203 @@ export class TableInspect extends LitElement {
     event.preventDefault()
     const cell = (event.target as HTMLElement).closest<HTMLElement>('td')
     const field = cell?.dataset.field as EditField | 'nullable' | undefined
+    // Right-click outside the current selection collapses it onto that cell.
+    const hit = this._cellAt(event.target as Element)
+    if (hit && !this._isSelected(hit.grid, hit.row, hit.col)) {
+      this._sel = { grid: hit.grid, r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col }
+    }
     // Additions key off a hidden sentinel, so the menu copies their visible name.
     const name = this._isAddition(col.name) ? this._fieldText(col, 'name') : col.name
     this._menu = { x: event.clientX, y: event.clientY, name, definition: null, col, field }
+  }
+
+  // --- cell selection (results-grid style) ------------------------------------
+
+  // The selection's coordinate space: loaded columns then staged additions (rows)
+  // by the engine's visible fields (cols).
+  private _gridRows(): InspectColumn[] {
+    const columns = this._state.phase === 'done' ? this._state.inspection.columns : []
+    return [...columns, ...this._additionColumns()]
+  }
+
+  // A grid's cell fields, in column order. Section tables are name + definition.
+  private _gridFields(grid: number): string[] {
+    if (grid !== COLUMNS_GRID) return ['name', 'definition']
+    const hasComments = this.engine ? dialectFor(this.engine).supportsColumnComments : false
+    return hasComments ? ['name', 'dataType', 'nullable', 'default', 'comment'] : ['name', 'dataType', 'nullable', 'default']
+  }
+
+  private _gridRowCount(grid: number): number {
+    if (grid === COLUMNS_GRID) return this._gridRows().length
+    return this._state.phase === 'done' ? (this._state.inspection.sections[grid]?.rows.length ?? 0) : 0
+  }
+
+  // The grid coordinate of a DOM node's cell; null off any grid (icon cell, header).
+  private _cellAt(node: Element | null): { grid: number; row: number; col: number } | null {
+    const cell = node?.closest<HTMLTableCellElement>('td[data-field]')
+    const grid = Number(cell?.closest('table')?.dataset.grid ?? NaN)
+    const row = Number(cell?.closest('tr')?.dataset.row ?? -1)
+    if (!Number.isFinite(grid) || row < 0) return null
+    const col = this._gridFields(grid).indexOf(cell?.dataset.field ?? '')
+    return col >= 0 ? { grid, row, col } : null
+  }
+
+  private _isSelected(grid: number, row: number, col: number): boolean {
+    const s = this._sel
+    if (!s || s.grid !== grid) return false
+    return row >= Math.min(s.r0, s.r1) && row <= Math.max(s.r0, s.r1) && col >= Math.min(s.c0, s.c1) && col <= Math.max(s.c0, s.c1)
+  }
+
+  // A press selects the cell; shift extends and press-and-drag sweeps a
+  // rectangle. The follow-up click (below) opens the editor for a plain click.
+  private _onGridPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0) return
+    const target = event.target as HTMLElement
+    if (target.closest('.cell-input') || target.closest('button')) return
+    const hit = this._cellAt(target)
+    if (!hit) return
+    ;(event.currentTarget as HTMLElement).focus()
+    event.preventDefault() // keep focus on the table; no native text selection
+    this._selDragMoved = false
+    if (event.shiftKey && this._sel?.grid === hit.grid) {
+      this._sel = { ...this._sel, r1: hit.row, c1: hit.col }
+      return
+    }
+    this._sel = { grid: hit.grid, r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col }
+    this._selDragging = true
+    window.addEventListener('pointermove', this._onSelDragMove)
+    window.addEventListener('pointerup', this._endSelDrag)
+    window.addEventListener('pointercancel', this._endSelDrag)
+  }
+
+  private _onSelDragMove = (event: PointerEvent) => {
+    if (!this._selDragging || !this._sel) return
+    // elementFromPoint must go through the shadow root to see inside it; a drag
+    // never crosses into another grid.
+    const hit = this._cellAt(this.shadowRoot?.elementFromPoint(event.clientX, event.clientY) ?? null)
+    if (!hit || hit.grid !== this._sel.grid || (hit.row === this._sel.r1 && hit.col === this._sel.c1)) return
+    this._selDragMoved = true
+    this._sel = { ...this._sel, r1: hit.row, c1: hit.col }
+  }
+
+  private _endSelDrag = () => {
+    if (!this._selDragging) return
+    this._selDragging = false
+    window.removeEventListener('pointermove', this._onSelDragMove)
+    window.removeEventListener('pointerup', this._endSelDrag)
+    window.removeEventListener('pointercancel', this._endSelDrag)
+  }
+
+  // A completed plain click opens the cell's editor (the classic gesture);
+  // shift-clicks and drags that swept past the starting cell stay selection-only.
+  // Section grids are read-only, so their clicks end at selection.
+  private _onGridClick = (event: MouseEvent) => {
+    if (event.shiftKey || this._selDragMoved) return
+    if ((event.target as HTMLElement).closest('.cell-input, button')) return
+    const hit = this._cellAt(event.target as Element)
+    if (hit && hit.grid === COLUMNS_GRID) this._editCell(hit.row, hit.col, null)
+  }
+
+  // Opens the editor (or the nullable picker) on a grid cell; `seed` carries a
+  // type-to-edit char. Locked cells stay selectable/copyable but never edit.
+  private _editCell(row: number, col: number, seed: string | null) {
+    const column = this._gridRows()[row]
+    const field = this._gridFields(COLUMNS_GRID)[col] as EditField | 'nullable' | undefined
+    if (!column || !field || !this._canEdit(field, column)) return
+    if (field === 'nullable') {
+      if (seed) return
+      const cell = this.shadowRoot?.querySelector<HTMLElement>(`tr[data-row="${row}"] td[data-field="nullable"]`)
+      if (cell) this._openNullablePicker(cell, column)
+      return
+    }
+    this._startEdit(column.name, field, seed ?? undefined)
+  }
+
+  private _onGridKeydown = (event: KeyboardEvent) => {
+    // The inline editor's input lives inside the table; its keys are its own.
+    if (this._editing || (event.target as HTMLElement).closest('.cell-input')) return
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
+      event.preventDefault()
+      this._copySelection()
+      return
+    }
+    if (event.key === 'Escape') {
+      if (this._cellMenu) this._cellMenu = null
+      else this._sel = null
+      return
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey || !this._sel) return
+    const editable = this._sel.grid === COLUMNS_GRID // section grids are read-only
+    const anchor = { row: Math.min(this._sel.r0, this._sel.r1), col: Math.min(this._sel.c0, this._sel.c1) }
+    switch (event.key) {
+      case 'ArrowDown': event.preventDefault(); return this._moveSel(1, 0, event.shiftKey)
+      case 'ArrowUp': event.preventDefault(); return this._moveSel(-1, 0, event.shiftKey)
+      case 'ArrowRight': event.preventDefault(); return this._moveSel(0, 1, event.shiftKey)
+      case 'ArrowLeft': event.preventDefault(); return this._moveSel(0, -1, event.shiftKey)
+      case 'Enter':
+      case 'F2':
+        event.preventDefault()
+        if (editable) this._editCell(anchor.row, anchor.col, null)
+        return
+      default:
+        // Type-to-edit: a printable key opens the editor seeded with that char.
+        if (event.key.length === 1) {
+          event.preventDefault()
+          if (editable) this._editCell(anchor.row, anchor.col, event.key)
+        }
+    }
+  }
+
+  // Moves the focus cell by (dRow, dCol); shift keeps the anchor and grows the
+  // rectangle, otherwise the selection collapses onto the new cell.
+  private _moveSel(dRow: number, dCol: number, extend: boolean) {
+    const s = this._sel
+    const rows = s ? this._gridRowCount(s.grid) : 0
+    const cols = s ? this._gridFields(s.grid).length : 0
+    if (!s || !rows || !cols) return
+    const r = Math.max(0, Math.min(rows - 1, s.r1 + dRow))
+    const c = Math.max(0, Math.min(cols - 1, s.c1 + dCol))
+    this._sel = extend ? { ...s, r1: r, c1: c } : { ...s, r0: r, c0: c, r1: r, c1: c }
+    const cell = this.shadowRoot?.querySelector(
+      `table[data-grid="${s.grid}"] tr[data-row="${r}"] td[data-field="${this._gridFields(s.grid)[c]}"]`,
+    )
+    // jsdom has no scrollIntoView; the guard keeps tests off the DOM shim.
+    if (cell && typeof cell.scrollIntoView === 'function') cell.scrollIntoView({ block: 'nearest' })
+  }
+
+  // A grid cell's effective value for copying: staged column values in the
+  // columns table, raw name/definition in the sections.
+  private _cellValue(grid: number, row: number, field: string): string {
+    if (grid !== COLUMNS_GRID) {
+      const section = this._state.phase === 'done' ? this._state.inspection.sections[grid] : undefined
+      const item = section?.rows[row]
+      return (field === 'name' ? item?.name : item?.definition) ?? ''
+    }
+    const column = this._gridRows()[row]
+    if (!column) return ''
+    if (field === 'nullable') return this._fieldNullable(column) ? 'yes' : 'no'
+    return this._fieldText(column, field as EditField)
+  }
+
+  // Copies the selected rectangle as TSV.
+  private _copySelection() {
+    const s = this._sel
+    if (!s) return
+    const rowCount = this._gridRowCount(s.grid)
+    const fields = this._gridFields(s.grid)
+    if (!rowCount) return
+    const r1 = Math.min(rowCount - 1, Math.max(s.r0, s.r1))
+    const c0 = Math.min(s.c0, s.c1)
+    const c1 = Math.max(s.c0, s.c1)
+    const cells: unknown[][] = []
+    for (let r = Math.max(0, Math.min(s.r0, s.r1)); r <= r1; r += 1) {
+      cells.push(fields.slice(c0, c1 + 1).map((field) => this._cellValue(s.grid, r, field)))
+    }
+    if (cells.length) void navigator.clipboard.writeText(cellsToTsv(cells))
+  }
+
+  private _focusGrid() {
+    this.shadowRoot?.querySelector<HTMLElement>('.columns-table')?.focus()
   }
 
   // --- column editing --------------------------------------------------------
@@ -552,9 +768,16 @@ export class TableInspect extends LitElement {
   private _onEditKeydown(event: KeyboardEvent, col: InspectColumn, field: EditField) {
     if (event.key === 'Enter') {
       event.preventDefault()
-      if (field === 'dataType' && this._acceptTypePicker()) return
-      if (field === 'default' && this._acceptDefaultPicker()) return
+      if (field === 'dataType' && this._acceptTypePicker()) {
+        if (!this._editing) this._focusGrid() // a template pick keeps editing
+        return
+      }
+      if (field === 'default' && this._acceptDefaultPicker()) {
+        this._focusGrid()
+        return
+      }
       this._commitText(col, field, (event.target as HTMLInputElement).value)
+      this._focusGrid() // back to the grid so arrows keep working
     } else if (event.key === 'Escape') {
       event.preventDefault()
       event.stopPropagation()
@@ -562,7 +785,10 @@ export class TableInspect extends LitElement {
       if (this._typePicker) this._typePicker = null
       else if (this._defaultPicker) this._defaultPicker = null
       else if (this._cellMenu) this._cellMenu = null
-      else this._cancelEdit()
+      else {
+        this._cancelEdit()
+        this._focusGrid()
+      }
     } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && field === 'dataType') {
       event.preventDefault()
       this._moveTypePicker(event.target as HTMLInputElement, col, event.key === 'ArrowDown' ? 1 : -1)
@@ -742,26 +968,38 @@ export class TableInspect extends LitElement {
     return html`
       ${columns.length ? this._renderColumnsTable(columns) : ''}
       ${sections.map(
-        (section) => html`
+        (section, grid) => html`
           <h4>
             ${section.title} <span class="count">${section.rows.length}</span>
             <button class="add-btn" type="button" title="Add ${section.title}" aria-label="Add ${section.title}">
               <i class="codicon codicon-add" aria-hidden="true"></i>
             </button>
           </h4>
-          <table class="section-table">
+          <table
+            class="section-table"
+            data-grid=${grid}
+            tabindex="0"
+            @pointerdown=${this._onGridPointerDown}
+            @keydown=${this._onGridKeydown}
+          >
             <colgroup>
               <col class="name-col" />
               <col />
             </colgroup>
             <tbody>
               ${section.rows.map(
-                (row) => html`
-                  <tr @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}>
-                    <td class="mono name-cell" title=${row.name}>
+                (row, index) => html`
+                  <tr data-row=${index} @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}>
+                    <td
+                      data-field="name"
+                      class="mono name-cell${this._isSelected(grid, index, 0) ? ' selected' : ''}"
+                      title=${row.name}
+                    >
                       ${this.engine ? dialectFor(this.engine).displayConstraintName(row.name) : row.name}
                     </td>
-                    <td class="mono def" title=${row.definition}>${highlightDefinition(row.definition)}</td>
+                    <td data-field="definition" class="mono def${this._isSelected(grid, index, 1) ? ' selected' : ''}" title=${row.definition}>
+                      ${highlightDefinition(row.definition)}
+                    </td>
                   </tr>
                 `,
               )}
@@ -793,7 +1031,14 @@ export class TableInspect extends LitElement {
             `
           : ''}
       </h4>
-      <table class="columns-table">
+      <table
+        class="columns-table"
+        data-grid=${COLUMNS_GRID}
+        tabindex="0"
+        @pointerdown=${this._onGridPointerDown}
+        @click=${this._onGridClick}
+        @keydown=${this._onGridKeydown}
+      >
         <colgroup>
           <col class="icon-col" />
           <col class="name-col" />
@@ -813,8 +1058,8 @@ export class TableInspect extends LitElement {
           </tr>
         </thead>
         <tbody>
-          ${columns.map((column) => this._renderColumnRow(column, hasComments, false))}
-          ${additions.map((column) => this._renderColumnRow(column, hasComments, true))}
+          ${columns.map((column, index) => this._renderColumnRow(column, hasComments, false, index))}
+          ${additions.map((column, index) => this._renderColumnRow(column, hasComments, true, columns.length + index))}
         </tbody>
       </table>
       ${this._saveError ? html`<p class="save-error">${this._saveError}</p>` : ''}
@@ -824,10 +1069,11 @@ export class TableInspect extends LitElement {
   // One columns-table row, shared by loaded columns and staged additions. An
   // addition trades the PK icon for a remove (✕) button and tints the row green;
   // a staged drop swaps in a restore (↩) button and tints it red.
-  private _renderColumnRow(column: InspectColumn, hasComments: boolean, addition: boolean) {
+  private _renderColumnRow(column: InspectColumn, hasComments: boolean, addition: boolean, row: number) {
     const dropped = !addition && this._isDropped(column.name)
     return html`
       <tr
+        data-row=${row}
         class=${addition ? 'added' : dropped ? 'dropped' : ''}
         @contextmenu=${(event: MouseEvent) => this._onColumnMenu(event, column)}
       >
@@ -860,19 +1106,20 @@ export class TableInspect extends LitElement {
                 ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>`
                 : ''}
         </td>
-        ${this._renderTextCell(column, 'name', 'mono clip', this._fieldText(column, 'name'))}
-        ${this._renderTextCell(column, 'dataType', 'mono type clip', this._fieldText(column, 'dataType'))}
-        ${this._renderNullableCell(column)}
-        ${this._renderTextCell(column, 'default', 'mono muted clip', this._fieldText(column, 'default'))}
-        ${hasComments ? this._renderTextCell(column, 'comment', 'muted clip', this._fieldText(column, 'comment')) : ''}
+        ${this._renderTextCell(column, 'name', 'mono clip', this._fieldText(column, 'name'), row)}
+        ${this._renderTextCell(column, 'dataType', 'mono type clip', this._fieldText(column, 'dataType'), row)}
+        ${this._renderNullableCell(column, row)}
+        ${this._renderTextCell(column, 'default', 'mono muted clip', this._fieldText(column, 'default'), row)}
+        ${hasComments ? this._renderTextCell(column, 'comment', 'muted clip', this._fieldText(column, 'comment'), row) : ''}
       </tr>
     `
   }
 
-  private _renderTextCell(col: InspectColumn, field: EditField, cls: string, display: unknown) {
+  private _renderTextCell(col: InspectColumn, field: EditField, cls: string, display: unknown, row: number) {
     const editable = this._canEdit(field, col)
     // A locked-cell tip only when the engine (not a staged drop) is the reason.
     const tip = editable || this._isDropped(col.name) ? null : this._lockedTip(field)
+    const selected = this._isSelected(COLUMNS_GRID, row, this._gridFields(COLUMNS_GRID).indexOf(field)) ? ' selected' : ''
     const choices = (field === 'dataType' || field === 'default') && editable
     const choiceButton = choices
       ? html`
@@ -893,7 +1140,7 @@ export class TableInspect extends LitElement {
     const editing = this._editing
     if (editing?.col === col.name && editing.field === field) {
       return html`
-        <td data-field=${field} class=${`${cls}${this._isEdited(col.name, field) ? ' edited' : ''}${choices ? ' has-choices' : ''}`}>
+        <td data-field=${field} class=${`${cls}${this._isEdited(col.name, field) ? ' edited' : ''}${choices ? ' has-choices' : ''}${selected}`}>
           <input
             class="cell-input"
             .value=${editing.seed ?? this._fieldText(col, field)}
@@ -908,22 +1155,12 @@ export class TableInspect extends LitElement {
         </td>
       `
     }
-    const classes = `${cls}${this._isEdited(col.name, field) ? ' edited' : ''}${editable ? ' editable' : ''}${choices ? ' has-choices' : ''}`
+    const classes = `${cls}${this._isEdited(col.name, field) ? ' edited' : ''}${editable ? ' editable' : ''}${choices ? ' has-choices' : ''}${selected}`
     return html`
-      <td
-        data-field=${field}
-        class=${classes}
-        title=${tip ?? this._fieldText(col, field)}
-        @click=${editable ? () => this._onCellClick(col, field) : undefined}
-      >
+      <td data-field=${field} class=${classes} title=${tip ?? this._fieldText(col, field)}>
         <span class="cell-text">${display}</span>${choiceButton}
       </td>
     `
-  }
-
-  // Every cell edits inline on click; the type cell's end arrow opens the full picker.
-  private _onCellClick(col: InspectColumn, field: EditField) {
-    this._startEdit(col.name, field)
   }
 
   private _openTypeMenu(event: MouseEvent, col: InspectColumn) {
@@ -940,22 +1177,26 @@ export class TableInspect extends LitElement {
     this._startEdit(col.name, 'default')
   }
 
-  private _renderNullableCell(col: InspectColumn) {
+  private _renderNullableCell(col: InspectColumn, row: number) {
     const editable = this._canEdit('nullable', col)
     const tip = editable || this._isDropped(col.name) ? null : this._lockedTip('nullable')
-    const classes = `muted${this._isEdited(col.name, 'nullable') ? ' edited' : ''}${editable ? ' editable has-choices nullable-cell' : ''}`
+    const selected = this._isSelected(COLUMNS_GRID, row, this._gridFields(COLUMNS_GRID).indexOf('nullable')) ? ' selected' : ''
+    const classes = `muted${this._isEdited(col.name, 'nullable') ? ' edited' : ''}${editable ? ' editable has-choices nullable-cell' : ''}${selected}`
     return html`
-      <td
-        data-field="nullable"
-        class=${classes}
-        title=${tip ?? ''}
-        @click=${editable
-          ? (event: MouseEvent) => this._openNullablePicker(event, col)
-          : undefined}
-      >
+      <td data-field="nullable" class=${classes} title=${tip ?? ''}>
         <span class="cell-text">${this._fieldNullable(col) ? 'yes' : 'no'}</span>${editable
           ? html`
-              <button class="choices-btn" tabindex="-1" aria-hidden="true">
+              <button
+                class="choices-btn"
+                tabindex="-1"
+                title="Choose nullability"
+                aria-label="Choose nullability"
+                @mousedown=${(event: MouseEvent) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  this._openNullablePicker((event.currentTarget as HTMLElement).closest('td')!, col)
+                }}
+              >
                 <i class="codicon codicon-chevron-down" aria-hidden="true"></i>
               </button>
             `
@@ -964,16 +1205,16 @@ export class TableInspect extends LitElement {
     `
   }
 
-  private _openNullablePicker(event: MouseEvent, col: InspectColumn) {
+  // Anchored on the given cell; a repeat call for the same column toggles it shut.
+  private _openNullablePicker(cell: HTMLElement, col: InspectColumn) {
     this._flushEdit()
     this._typePicker = null
     this._defaultPicker = null
-    // A second click on the same cell toggles the picker shut.
     if (this._cellMenu?.col.name === col.name) {
       this._cellMenu = null
       return
     }
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    const rect = cell.getBoundingClientRect()
     this._cellMenu = { x: rect.left, y: rect.bottom + 2, width: rect.width, col, kind: 'nullable', active: this._fieldNullable(col) ? 0 : 1 }
   }
 
@@ -1261,6 +1502,17 @@ export class TableInspect extends LitElement {
         table-layout: fixed;
       }
 
+      /* Focusable for keyboard nav/copy; drag-selection replaces text selection. */
+      .columns-table,
+      .section-table {
+        user-select: none;
+        outline: none;
+      }
+
+      .columns-table .cell-input {
+        user-select: text;
+      }
+
       .icon-col {
         width: 18px;
       }
@@ -1294,9 +1546,10 @@ export class TableInspect extends LitElement {
         white-space: nowrap;
       }
 
+      /* No pre-wrap: a definition's own newlines (trigger bodies) collapse and
+         the text wraps normally instead of stretching the row. */
       .def {
         color: var(--text-2);
-        white-space: pre-wrap;
         word-break: break-word;
       }
 
@@ -1416,6 +1669,19 @@ export class TableInspect extends LitElement {
         margin: 6px 0 0;
         font-size: 12px;
         color: var(--status-dot-error);
+      }
+
+      /* Cell selection — the results grid's tint; the selector list out-ranks
+         every row tint and hover rule above so selection always reads. */
+      td.selected,
+      td.edited.selected,
+      td.editable.selected:hover,
+      tr.added td.selected,
+      tr.added td.editable.selected:hover,
+      tr.added:hover td.selected:not(.editable):not(.icon-cell),
+      tr.dropped td.selected {
+        background: color-mix(in srgb, var(--accent) 34%, transparent);
+        color: var(--text);
       }
 
       /* Overlays the cell padding (results-panel .cell-edit trick) so opening
