@@ -205,6 +205,43 @@ describe('sqlite driver: cancel', () => {
     expect(spawned).toHaveLength(2)
   })
 
+  it('cancels the active query while preserving unrelated queued work', async () => {
+    const { spawn, spawned } = hangingSpawner()
+    const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
+    await driver.connect()
+
+    const first = driver.query('select 1', [], null, null, 'first')
+    const queued = driver.query('select 2', [], null, null, 'queued')
+    first.catch(() => {})
+    queued.catch(() => {})
+
+    expect(await driver.cancel?.('first')).toEqual({ running: 1, cancelled: 1 })
+    await expect(first).rejects.toThrow('Query cancelled.')
+    expect(spawned).toHaveLength(2)
+    expect(spawned[0]?.killed).toBe(true)
+
+    // The queued request moved onto the replacement worker and can be
+    // cancelled independently instead of making the first Stop a no-op.
+    expect(await driver.cancel?.('queued')).toEqual({ running: 1, cancelled: 1 })
+    await expect(queued).rejects.toThrow('Query cancelled.')
+  })
+
+  it('removes a queued query without disturbing the active one', async () => {
+    const { spawn, spawned } = hangingSpawner()
+    const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
+    await driver.connect()
+
+    const active = driver.query('select 1', [], null, null, 'active')
+    const queued = driver.query('select 2', [], null, null, 'queued')
+    active.catch(() => {})
+
+    expect(await driver.cancel?.('queued')).toEqual({ running: 1, cancelled: 1 })
+    await expect(queued).rejects.toThrow('Query cancelled.')
+    // The running query and its worker were left alone.
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0]?.killed).toBe(false)
+  })
+
   it('reports nothing to cancel when no query is in flight', async () => {
     const { spawn } = hangingSpawner()
     const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
@@ -314,6 +351,7 @@ describe('sqlite driver: query', () => {
     expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
     expect(result.rowCount).toBe(MAX_BUFFERED_ROWS)
     expect(result.truncated).toBe(true)
+    expect(result.rowCountExact).toBe(false)
   })
 
   it('does not flag exactly MAX_BUFFERED_ROWS as truncated', async () => {
@@ -328,6 +366,7 @@ describe('sqlite driver: query', () => {
     expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
     expect(result.rowCount).toBe(MAX_BUFFERED_ROWS)
     expect(result.truncated).toBe(false)
+    expect(result.rowCountExact).toBe(true)
   })
 
   it('surfaces SQL errors', async () => {

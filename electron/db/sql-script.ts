@@ -1,80 +1,10 @@
 import type { Engine } from '../../src/electron'
+import { maskSql } from '../../src/sql-mask'
 
-// Masks quoted text and comments while preserving offsets/newlines, so client-side
-// batch handling never treats their contents as SQL control syntax.
-export function maskSql(sql: string): string {
-  const chars = sql.split('')
-  let i = 0
-  const blank = (from: number, to: number) => {
-    for (let p = from; p < to; p += 1) if (chars[p] !== '\n' && chars[p] !== '\r') chars[p] = ' '
-  }
-  while (i < sql.length) {
-    const ch = sql[i]
-    if (ch === '-' && sql[i + 1] === '-') {
-      const end = sql.indexOf('\n', i + 2)
-      const to = end < 0 ? sql.length : end
-      blank(i, to)
-      i = to
-      continue
-    }
-    if (ch === '/' && sql[i + 1] === '*') {
-      const end = sql.indexOf('*/', i + 2)
-      const to = end < 0 ? sql.length : end + 2
-      blank(i, to)
-      i = to
-      continue
-    }
-    if (ch === '$') {
-      const tag = /^\$[A-Za-z0-9_]*\$/.exec(sql.slice(i))?.[0]
-      if (tag) {
-        const end = sql.indexOf(tag, i + tag.length)
-        const to = end < 0 ? sql.length : end + tag.length
-        blank(i, to)
-        i = to
-        continue
-      }
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      let p = i + 1
-      while (p < sql.length) {
-        if (sql[p] === ch && sql[p + 1] === ch) {
-          p += 2
-          continue
-        }
-        if (sql[p] === ch) {
-          p += 1
-          break
-        }
-        p += 1
-      }
-      blank(i, p)
-      i = p
-      continue
-    }
-    if (ch === '[') {
-      let p = i + 1
-      while (p < sql.length) {
-        if (sql[p] === ']' && sql[p + 1] === ']') {
-          p += 2
-          continue
-        }
-        if (sql[p] === ']') {
-          p += 1
-          break
-        }
-        p += 1
-      }
-      blank(i, p)
-      i = p
-      continue
-    }
-    i += 1
-  }
-  return chars.join('')
-}
+export { maskSql }
 
-export function splitTopLevelStatements(sql: string): string[] {
-  const masked = maskSql(sql)
+export function splitTopLevelStatements(sql: string, engine?: Engine): string[] {
+  const masked = maskSql(sql, engine)
   const statements: string[] = []
   let depth = 0
   let start = 0
@@ -92,24 +22,14 @@ export function splitTopLevelStatements(sql: string): string[] {
   return statements
 }
 
-// Conservative eligibility for stopping result production at the client cap.
-// Never interrupt scripts/CTEs or SELECT INTO: cancellation there could skip a
-// later statement or leave intentional side effects only partly performed.
-export function isCappableRead(sql: string): boolean {
-  const statements = splitTopLevelStatements(sql)
-  if (statements.length !== 1) return false
-  const masked = maskSql(statements[0]!).trimStart()
-  return /^select\b/i.test(masked) && !/\binto\b/i.test(masked)
-}
-
 // Pooled server queries cannot safely leave a transaction open for a later run:
 // that later run may get another connection. Self-contained transaction scripts
 // remain supported because one driver.query call keeps one checked-out connection.
 export function assertSelfContainedTransaction(sql: string, engine: Engine) {
   let depth = 0
   let sawControl = false
-  for (const statement of splitTopLevelStatements(sql)) {
-    const head = maskSql(statement).trimStart().toLowerCase()
+  for (const statement of splitTopLevelStatements(sql, engine)) {
+    const head = maskSql(statement, engine).trimStart().toLowerCase()
     const begins = engine === 'sqlserver'
       ? /^begin\s+tran(?:saction)?\b/.test(head)
       : /^(?:begin(?:\s+(?:work|transaction))?|start\s+transaction)\b/.test(head)
@@ -134,7 +54,7 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine) {
 
 /** SQL Server's GO is a client batch separator, not T-SQL. */
 export function splitSqlServerBatches(sql: string): string[] {
-  const masked = maskSql(sql)
+  const masked = maskSql(sql, 'sqlserver')
   const batches: string[] = []
   let start = 0
   const line = /^\s*go(?:\s+(\d+))?\s*$/gim

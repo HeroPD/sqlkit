@@ -162,20 +162,19 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
-  it('stops a single read once the result buffer is full', async () => {
+  it('drains a capped read without cancelling statement semantics', async () => {
     const driver = await connectDriver()
     try {
-      const count = MAX_BUFFERED_ROWS + 1_000_000
+      const count = MAX_BUFFERED_ROWS + 25
       // A cross join over information_schema generates rows without recursive
       // CTEs, whose depth cap is spelled differently on MySQL vs MariaDB.
       const result = await driver.query(
         `select a.table_name from information_schema.columns a cross join information_schema.columns b limit ${count}`,
       )
       expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
-      expect(result.rowCount).toBeGreaterThanOrEqual(MAX_BUFFERED_ROWS)
-      expect(result.rowCount).toBeLessThan(count)
+      expect(result.rowCount).toBe(count)
       expect(result.truncated).toBe(true)
-      expect(result.rowCountExact).toBe(false)
+      expect(result.rowCountExact).toBe(true)
     } finally {
       await driver.disconnect()
     }

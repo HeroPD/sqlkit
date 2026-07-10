@@ -8,12 +8,20 @@ export const quoteLiteral = (value: string) => `'${value.replaceAll("'", "''")}'
 export const quoteQualified = (table: TableRef, dialect: Dialect) =>
   table.schema ? `${dialect.quoteIdent(table.schema)}.${dialect.quoteIdent(table.name)}` : dialect.quoteIdent(table.name)
 
-// Turns a cell's string input into a bound parameter, guided by the column's
-// declared type: empty + nullable → NULL; numeric/boolean parsed; anything else
-// passed as text for the engine to cast. Unparseable input falls back to text
-// so a typo surfaces as a DB error rather than a silent wrong value.
-export function coerceValue(value: string, column: ColumnRef | undefined, engine?: Engine): unknown {
-  if (value === '' && (column?.nullable ?? true)) return null
+// Explicit SQL NULL as editor state. Distinct from '' so clearing a text cell
+// and setting NULL are different, user-visible actions.
+export type SqlNull = { readonly kind: 'sql-null' }
+export type CellInput = string | SqlNull
+export const SQL_NULL: SqlNull = Object.freeze({ kind: 'sql-null' })
+export const isSqlNull = (value: unknown): value is SqlNull =>
+  typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'sql-null'
+
+// Turns an explicit editor value into a bound parameter, guided by the column's
+// declared type: numeric/boolean parsed when lossless; anything else passed as
+// text for the engine to cast. Unparseable input falls back to text so a typo
+// surfaces as a DB error rather than a silent wrong value.
+export function coerceValue(value: CellInput, column: ColumnRef | undefined, engine?: Engine): unknown {
+  if (isSqlNull(value)) return null
   const type = column?.dataType?.toLowerCase() ?? ''
   if (/int|serial|numeric|decimal|real|double|float|money/.test(type)) {
     const trimmed = value.trim()
@@ -35,12 +43,12 @@ export function coerceValue(value: string, column: ColumnRef | undefined, engine
 export type BatchUpdateEdit = {
   column: string
   columnMeta: ColumnRef | undefined
-  /** Raw string from the edit prompt; coerced per target column. */
-  value: string
+  /** Raw editor value from the edit prompt; coerced per target column. */
+  value: CellInput
   /** Value that was displayed when the edit was staged, for optimistic concurrency. */
   originalValue?: unknown
   /** Primary-key column/value pairs identifying the row to update. */
-  pks: { name: string; value: unknown }[]
+  pks: RowKey
 }
 
 export type BatchUpdateSpec = {
@@ -49,12 +57,52 @@ export type BatchUpdateSpec = {
   engine: Engine
 }
 
-export type RowKey = { name: string; value: unknown }[]
+export type RowKey = { name: string; value: unknown; columnMeta?: ColumnRef }[]
 
 export type DeleteRowsSpec = {
   table: TableRef
   rows: RowKey[]
   engine: Engine
+}
+
+const baseType = (column: ColumnRef | undefined) => column?.dataType.toLowerCase().match(/^[\w ]+/)?.[0]?.trim() ?? ''
+
+// Types an optimistic guard can't compare with equality on this engine —
+// rejected before the save preview rather than failing inside the transaction.
+export function supportsOptimisticComparison(engine: Engine, column: ColumnRef | undefined): boolean {
+  const type = baseType(column)
+  if (engine === 'postgresql') return type !== 'json' && type !== 'xml'
+  if (engine === 'sqlserver') return !['text', 'ntext', 'image', 'xml', 'geography', 'geometry', 'hierarchyid'].includes(type)
+  return true
+}
+
+const isTextType = (column: ColumnRef | undefined) =>
+  /^(?:n?varchar|n?char|text|tinytext|mediumtext|longtext|citext)/.test(baseType(column))
+
+// A null-safe, case-exact equality predicate per engine. Plain `col = ?` misses
+// case-only concurrent changes under case-insensitive collations and never
+// matches NULL, so guards built from displayed values would silently pass or fail.
+const comparisonPredicate = (
+  engine: Engine,
+  dialect: Dialect,
+  key: { name: string; value: unknown; columnMeta?: ColumnRef },
+  bind: (value: unknown) => string,
+) => {
+  const identifier = dialect.quoteIdent(key.name)
+  if (key.value === null || key.value === undefined) return `${identifier} IS NULL`
+  if (!supportsOptimisticComparison(engine, key.columnMeta)) {
+    throw new Error(`Column ${key.name} (${key.columnMeta?.dataType ?? 'unknown type'}) cannot be compared safely for an optimistic write.`)
+  }
+  const parameter = bind(key.value)
+  if (engine === 'postgresql') return `${identifier} IS NOT DISTINCT FROM ${parameter}`
+  if (engine === 'mysql') return isTextType(key.columnMeta)
+    ? `BINARY ${identifier} <=> BINARY ${parameter}`
+    : `${identifier} <=> ${parameter}`
+  if (engine === 'sqlite') return `${identifier} COLLATE BINARY IS ${parameter}`
+  if (isTextType(key.columnMeta)) {
+    return `${identifier} COLLATE Latin1_General_100_BIN2 = ${parameter} COLLATE Latin1_General_100_BIN2`
+  }
+  return `${identifier} = ${parameter}`
 }
 
 // Builds one atomic UPDATE for multiple cells. Each target column gets a CASE
@@ -70,9 +118,9 @@ export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: 
     params.push(value)
     return dialect.placeholder(params.length)
   }
-  const keyCondition = (pks: { name: string; value: unknown }[]) => {
+  const keyCondition = (pks: RowKey) => {
     if (pks.length === 0) throw new Error('Cannot build an UPDATE without a primary key')
-    return pks.map((pk) => `${dialect.quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
+    return pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind)).join(' AND ')
   }
 
   const keyValue = (value: unknown) => {
@@ -93,11 +141,11 @@ export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: 
     for (const edit of edits) {
       if (!('originalValue' in edit) || seen.has(edit.column)) continue
       seen.add(edit.column)
-      predicates.push(
-        edit.originalValue === null || edit.originalValue === undefined
-          ? `${dialect.quoteIdent(edit.column)} IS NULL`
-          : `${dialect.quoteIdent(edit.column)} = ${bind(edit.originalValue)}`,
-      )
+      predicates.push(comparisonPredicate(spec.engine, dialect, {
+        name: edit.column,
+        value: edit.originalValue,
+        columnMeta: edit.columnMeta,
+      }, bind))
     }
     return predicates.join(' AND ')
   }
@@ -168,8 +216,8 @@ export type InsertSpec = {
    * table's own DEFAULT applies — the one portable way to express defaults
    * (SQLite rejects the DEFAULT keyword inside a VALUES list). */
   columns: { name: string; columnMeta: ColumnRef | undefined }[]
-  /** Raw cell strings aligned to `columns`, coerced per column. */
-  values: string[]
+  /** Raw editor values aligned to `columns`, coerced per column. */
+  values: CellInput[]
   engine: Engine
 }
 
@@ -316,9 +364,7 @@ export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: un
   }
   const condition = (pks: RowKey) => {
     if (pks.length === 0) throw new Error('Cannot build a DELETE without a primary key')
-    return pks.map((pk) => pk.value === null
-      ? `${dialect.quoteIdent(pk.name)} IS NULL`
-      : `${dialect.quoteIdent(pk.name)} = ${bind(pk.value)}`).join(' AND ')
+    return pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind)).join(' AND ')
   }
   const where = spec.rows.map((pks) => `(${condition(pks)})`).join(' OR ')
   return { sql: `DELETE FROM ${quoteQualified(spec.table, dialect)}\n WHERE ${where}`, params, expectedRows: spec.rows.length }

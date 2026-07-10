@@ -5,7 +5,7 @@ import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 import { sslOptions } from './postgres'
-import { assertSelfContainedTransaction, isCappableRead, preprocessMysqlDelimiters } from './sql-script'
+import { assertSelfContainedTransaction, preprocessMysqlDelimiters } from './sql-script'
 
 // Schemas MySQL ships with; never listed as children or browsable databases.
 const SYSTEM_SCHEMAS = ['mysql', 'information_schema', 'performance_schema', 'sys']
@@ -176,9 +176,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           conn = null
           throw new Error('Query cancelled.')
         }
-        const result = await streamQuery(raw, finalSql, params, started, isCappableRead(finalSql)
-          ? async () => { if (entry.threadId !== null) await killQueries([entry.threadId], childDb ?? active) }
-          : undefined)
+        const result = await streamQuery(raw, finalSql, params, started)
         conn.release()
         conn = null
         return result
@@ -516,13 +514,14 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 }
 
 // Streams rows so a huge or multi-result query can't OOM the main process.
-// The byte budget is shared by every result set in this execution.
+// The byte budget is shared by every result set in this execution. Rows beyond
+// the caps are drained without being kept: killing the statement instead could
+// sever a SELECT with side effects partway through.
 function streamQuery(
   raw: RawConnection,
   sql: string,
   params: unknown[],
   started: number,
-  stopAtLimit?: () => Promise<unknown>,
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     let columns: string[] = []
@@ -532,7 +531,6 @@ function streamQuery(
     let bufferedBytes = 0
     let limited = false
     let active = false
-    let limitCancellation = false
     const resultSets: QueryResultSet[] = []
     const pushCurrent = () => {
       if (!active) return
@@ -542,7 +540,7 @@ function streamQuery(
         rows,
         rowCount: total,
         truncated: limited || total > rows.length,
-        rowCountExact: !limitCancellation,
+        rowCountExact: true,
       })
       active = false
     }
@@ -566,7 +564,6 @@ function streamQuery(
     query.on('result', (row) => {
       if (Array.isArray(row)) {
         total += 1
-        let capacityExceeded = false
         if (rows.length < MAX_BUFFERED_ROWS) {
           const bounded = boundedRow(row as unknown[], bufferedBytes)
           if (bounded) {
@@ -575,16 +572,9 @@ function streamQuery(
             limited ||= bounded.truncated
           } else {
             limited = true
-            capacityExceeded = true
           }
         } else {
           limited = true
-          capacityExceeded = true
-        }
-        if (capacityExceeded && !limitCancellation && stopAtLimit) {
-          limitCancellation = true
-          raw.pause()
-          void stopAtLimit().catch(() => {}).finally(() => raw.resume())
         }
       } else {
         // An OK packet (INSERT/UPDATE/…): rowCount is the affected count.
@@ -606,7 +596,7 @@ function streamQuery(
         ...(resultSets.length > 1 ? { resultSets } : {}),
       })
     }
-    query.on('error', (error) => limitCancellation ? finish() : reject(error))
+    query.on('error', reject)
     query.on('end', finish)
   })
 }

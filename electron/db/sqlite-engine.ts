@@ -299,19 +299,23 @@ function run(statement: StatementSync, params: SqliteParam[], budget: { bytes: n
   statement.setReturnArrays(true)
   const rows: unknown[][] = []
   let truncated = false
+  let stoppedEarly = false
   for (const row of statement.iterate(...params) as unknown as Iterable<unknown[]>) {
     if (rows.length >= MAX_BUFFERED_ROWS) {
       truncated = true
+      stoppedEarly = true
       break
     }
     const bounded = boundedRow(row, budget.bytes)
     if (!bounded) {
       truncated = true
+      stoppedEarly = true
       break
     }
     rows.push(bounded.row)
     budget.bytes += bounded.bytes
     truncated ||= bounded.truncated
   }
-  return { columns, columnSources, rows, rowCount: rows.length, truncated }
+  // Stopping early leaves the true count unknown; per-cell truncation does not.
+  return { columns, columnSources, rows, rowCount: rows.length, truncated, rowCountExact: !stoppedEarly }
 }

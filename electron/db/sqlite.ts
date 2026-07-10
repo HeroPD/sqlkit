@@ -38,25 +38,75 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
   let channel: SqliteChannel | null = null
   let file = ''
   let nextId = 1
-  const pending = new Map<number, {
+  // The worker is synchronous, so exactly one request is in flight (activeId);
+  // the rest wait in `queue`. Explicit serialization is what lets cancel()
+  // target one execution without disturbing unrelated queued work.
+  type Pending = {
+    message: SqliteRequestBody
     executionId?: string
+    timeoutMs?: number
+    timer: ReturnType<typeof setTimeout> | null
     resolve: (value: unknown) => void
     reject: (error: Error) => void
-  }>()
+  }
+  const pending = new Map<number, Pending>()
+  const queue: number[] = []
+  let activeId: number | null = null
+
+  const removeFromQueue = (id: number) => {
+    const index = queue.indexOf(id)
+    if (index >= 0) queue.splice(index, 1)
+  }
+
+  const rejectEntry = (id: number, message: string) => {
+    const entry = pending.get(id)
+    if (!entry) return
+    if (entry.timer) clearTimeout(entry.timer)
+    pending.delete(id)
+    removeFromQueue(id)
+    if (activeId === id) activeId = null
+    entry.reject(new Error(message))
+  }
 
   const rejectAll = (message: string) => {
-    for (const entry of pending.values()) entry.reject(new Error(message))
-    pending.clear()
+    for (const id of [...pending.keys()]) rejectEntry(id, message)
+    queue.length = 0
+    activeId = null
+  }
+
+  const pump = () => {
+    if (!channel || activeId !== null) return
+    let id = queue.shift()
+    while (id !== undefined && !pending.has(id)) id = queue.shift()
+    if (id === undefined) return
+    const entry = pending.get(id)!
+    const target = channel
+    activeId = id
+    if (entry.timeoutMs) {
+      entry.timer = setTimeout(() => {
+        // A worker that never answered is wedged: drop it so the next call respawns.
+        if (activeId !== id || channel !== target) return
+        channel = null
+        target.kill()
+        rejectEntry(id, 'SQLite engine timed out')
+        rejectAll('SQLite engine stopped after a timeout')
+      }, entry.timeoutMs)
+    }
+    target.post({ id, ...entry.message })
   }
 
   const spawnChannel = () => {
     const opened = spawn()
     opened.onMessage((message) => {
+      if (channel !== opened || activeId !== message.id) return
       const entry = pending.get(message.id)
       if (!entry) return
+      if (entry.timer) clearTimeout(entry.timer)
       pending.delete(message.id)
+      activeId = null
       if (message.ok) entry.resolve(message.value)
       else entry.reject(new Error(message.error))
+      pump()
     })
     opened.onExit(() => {
       // Ignore the exit of a channel we've already replaced (reconnect/cancel).
@@ -67,32 +117,27 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
     channel = opened
   }
 
-  const request = <T>(message: SqliteRequestBody, timeoutMs?: number, executionId?: string): Promise<T> => {
-    const target = channel
-    if (!target) return Promise.reject(new Error('Not connected'))
+  const request = <T>(
+    message: SqliteRequestBody,
+    timeoutMs?: number,
+    executionId?: string,
+    priority = false,
+  ): Promise<T> => {
+    if (!channel) return Promise.reject(new Error('Not connected'))
     const id = nextId++
     return new Promise<T>((resolve, reject) => {
-      const timer = timeoutMs
-        ? setTimeout(() => {
-            if (!pending.delete(id)) return
-            // A worker that never answered is wedged: drop it so the next call respawns.
-            if (channel === target) channel = null
-            target.kill()
-            reject(new Error('SQLite engine timed out'))
-          }, timeoutMs)
-        : null
       pending.set(id, {
+        message,
         executionId,
-        resolve: (value) => {
-          if (timer) clearTimeout(timer)
-          resolve(value as T)
-        },
-        reject: (error) => {
-          if (timer) clearTimeout(timer)
-          reject(error)
-        },
+        timeoutMs,
+        timer: null,
+        resolve: (value) => resolve(value as T),
+        reject,
       })
-      target.post({ id, ...message })
+      // `open` must run before queued work replayed onto a fresh worker.
+      if (priority) queue.unshift(id)
+      else queue.push(id)
+      pump()
     })
   }
 
@@ -105,7 +150,7 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
 
   const open = (dbFile: string): Promise<string> => {
     spawnChannel()
-    return request<string>({ type: 'open', file: dbFile }, OPEN_TIMEOUT_MS)
+    return request<string>({ type: 'open', file: dbFile }, OPEN_TIMEOUT_MS, undefined, true)
   }
 
   return {
@@ -151,19 +196,27 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
     },
 
     async cancel(executionId) {
-      const queryEntries = executionId === undefined
-        ? [...pending.values()]
-        : [...pending.values()].filter((entry) => entry.executionId !== undefined)
-      const targets = queryEntries.filter((entry) => executionId === undefined || entry.executionId === executionId)
+      const targets = [...pending.entries()].filter(([, entry]) =>
+        entry.executionId !== undefined && (executionId === undefined || entry.executionId === executionId),
+      )
       const running = targets.length
       if (!running) return { running: 0, cancelled: 0 }
-      // SQLite has one synchronous worker. Refuse to kill unrelated executions;
-      // the selected query can be interrupted safely when it is the only one.
-      if (targets.length !== queryEntries.length || targets.length !== pending.size) return { running, cancelled: 0 }
-      // No interrupt in node:sqlite: kill the worker (which rolls its connection
-      // back cleanly) and bring a fresh one up on the same file so work continues.
-      teardown('Query cancelled.')
-      if (file) await open(file)
+
+      const cancellingActive = activeId !== null && targets.some(([id]) => id === activeId)
+      for (const [id] of targets) rejectEntry(id, 'Query cancelled.')
+
+      // A queued query can be removed without disturbing the running request.
+      // Cancelling the active synchronous query requires replacing the worker
+      // (node:sqlite has no interrupt); unrelated queued work stays pending and
+      // resumes once the replacement worker has opened the database.
+      if (cancellingActive) {
+        const closing = channel
+        channel = null
+        closing?.kill()
+        if (file) await open(file)
+      } else {
+        pump()
+      }
       return { running, cancelled: running }
     },
   }

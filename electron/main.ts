@@ -84,10 +84,20 @@ const openExternalSafely = (url: string) => {
 
 // The app's own document: the dev server in dev, the built index.html in prod.
 // Navigation to anything else (including other file:// paths) is not the app.
-const isAppUrl = (url: string) =>
-  devServerUrl
-    ? url.startsWith(devServerUrl)
-    : url === appFileUrl || url.startsWith(`${appFileUrl}#`) || url.startsWith(`${appFileUrl}?`)
+// Dev compares parsed origins — a prefix check would accept lookalike hosts
+// such as localhost:5173.evil.example.
+const isAppUrl = (url: string) => {
+  if (!devServerUrl) return url === appFileUrl || url.startsWith(`${appFileUrl}#`) || url.startsWith(`${appFileUrl}?`)
+  try {
+    const candidate = new URL(url)
+    const appUrl = new URL(devServerUrl)
+    const basePath = appUrl.pathname.endsWith('/') ? appUrl.pathname : `${appUrl.pathname}/`
+    return candidate.origin === appUrl.origin
+      && (candidate.pathname === appUrl.pathname || candidate.pathname.startsWith(basePath))
+  } catch {
+    return false
+  }
+}
 
 // Content-Security-Policy applied to every response (prod loads over file://,
 // dev over the Vite server — webRequest intercepts both). Prod is strict: only
@@ -471,12 +481,18 @@ function registerDbIpc() {
     existingManager(event)?.disconnect(stringValue(profileId, 'Profile id', 200)),
   )
   ipcMain.handle('db:disconnect-all', (event) => existingManager(event)?.disconnectAll())
-  ipcMain.handle('db:set-active-child', (event, profileId: string, database: string) =>
-    manager(event).setActiveChild(
-      stringValue(profileId, 'Profile id', 200),
-      stringValue(database, 'Database name', 2_000),
-    ),
-  )
+  // Returned (not thrown) failures keep the renderer's invoke from rejecting:
+  // the run path treats a rejected align as an app bug, not a query error.
+  ipcMain.handle('db:set-active-child', (event, profileId: string, database: string) => {
+    try {
+      return manager(event).setActiveChild(
+        stringValue(profileId, 'Profile id', 200),
+        stringValue(database, 'Database name', 2_000),
+      )
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message }
+    }
+  })
   ipcMain.handle('db:statuses', (event) => existingManager(event)?.statuses() ?? [])
   ipcMain.handle(
     'db:query',

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { SQL_NULL } from '../sql-write'
 import './results-panel'
 
 beforeAll(() => {
@@ -269,7 +270,7 @@ describe('results-panel draft rows', () => {
       phase: 'done',
       result: {
         columns: ['id', 'name', 'meta'],
-        rows: [[1, null, { role: 'admin' }]],
+        rows: [[1, null, 'admin']],
         rowCount: 1,
         durationMs: 1,
       },
@@ -284,8 +285,33 @@ describe('results-panel draft rows', () => {
 
     expect(duplicate).toHaveBeenCalledOnce()
     expect((duplicate.mock.calls[0]![0] as CustomEvent).detail).toEqual({
-      drafts: [{ after: 0, cells: ['2', '', '{"role":"admin"}'] }],
+      drafts: [{ after: 0, cells: ['2', SQL_NULL, 'admin'] }],
     })
+    el.remove()
+  })
+
+  it('refuses to duplicate rows with structured values and disables it for truncated results', async () => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.rowEditable = true
+    el.run = {
+      phase: 'done',
+      result: { columns: ['payload'], rows: [[{ nested: true }]], rowCount: 1, durationMs: 1 },
+    }
+    document.body.append(el)
+    await el.updateComplete
+    const duplicate = vi.fn()
+    const notice = vi.fn()
+    el.addEventListener('duplicate-rows', duplicate)
+    el.addEventListener('grid-notice', notice)
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Duplicate selected rows"]')!.click()
+    expect(duplicate).not.toHaveBeenCalled()
+    expect(notice).toHaveBeenCalledOnce()
+
+    el.run = { phase: 'done', result: { columns: ['value'], rows: [['partial']], rowCount: 1, durationMs: 1, truncated: true } }
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Duplicate selected rows"]')!.disabled).toBe(true)
     el.remove()
   })
 

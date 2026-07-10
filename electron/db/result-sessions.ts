@@ -39,7 +39,7 @@ const page = (rows: unknown[][], offset: number, limit: number, maxBytes = MAX_P
   for (let index = offset; index < rows.length && result.length < limit; index += 1) {
     const row = rows[index]!
     const size = rowBytes(row)
-    if (result.length && bytes + size > maxBytes) break
+    if (bytes + size > maxBytes) break
     result.push(row)
     bytes += size
   }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ColumnRef, InspectColumn, TableRef } from './electron'
 import { dialectFor } from './dialect'
 import {
+  SQL_NULL,
   buildBatchUpdate,
   buildBatchUpdates,
   buildColumnAdd,
@@ -49,9 +50,10 @@ describe('coerceValue', () => {
     expect(coerceValue('Ada', col({ dataType: 'text' }))).toBe('Ada')
   })
 
-  it('maps an empty string to NULL only when the column is nullable', () => {
-    expect(coerceValue('', col({ nullable: true }))).toBeNull()
+  it('keeps an empty string distinct from an explicit SQL NULL', () => {
+    expect(coerceValue('', col({ nullable: true }))).toBe('')
     expect(coerceValue('', col({ nullable: false }))).toBe('')
+    expect(coerceValue(SQL_NULL, col({ nullable: true }))).toBeNull()
   })
 
   it('falls back to text for unparseable numeric input', () => {
@@ -92,18 +94,18 @@ describe('buildBatchUpdate', () => {
     expect(sql).toContain('UPDATE "public"."users"')
     expect(sql).toContain('"name" = CASE')
     expect(sql).toContain('"qty" = CASE')
-    expect(sql).toContain('WHERE ("id" = $7) OR ("id" = $8)')
+    expect(sql).toContain('WHERE ("id" IS NOT DISTINCT FROM $7) OR ("id" IS NOT DISTINCT FROM $8)')
     expect(params).toEqual([1, 'Ada', 2, 'Ada', 1, 7, 1, 2])
   })
 
-  it('uses SQLite placeholders and coerces nullable empty values per column', () => {
+  it('uses SQLite placeholders and keeps an explicit NULL distinct from empty text', () => {
     const { sql, params } = buildBatchUpdate({
       table: { schema: null, name: 'notes', kind: 'table' },
       edits: [
         {
           column: 'body',
           columnMeta: col({ schema: null, table: 'notes', name: 'body', nullable: true }),
-          value: '',
+          value: SQL_NULL,
           pks: [{ name: 'id', value: 7 }],
         },
       ],
@@ -111,8 +113,8 @@ describe('buildBatchUpdate', () => {
     })
 
     expect(sql).toContain('UPDATE "notes"')
-    expect(sql).toContain('WHEN "id" = ? THEN ?')
-    expect(sql).toContain('WHERE ("id" = ?)')
+    expect(sql).toContain('WHEN "id" COLLATE BINARY IS ? THEN ?')
+    expect(sql).toContain('WHERE ("id" COLLATE BINARY IS ?)')
     expect(params).toEqual([7, null, 7])
   })
 
@@ -125,7 +127,7 @@ describe('buildBatchUpdate', () => {
       ],
       engine: 'postgresql',
     })
-    expect(built.sql).toContain('AND "name" = $2')
+    expect(built.sql).toContain('AND "name" IS NOT DISTINCT FROM $2')
     expect(built.sql).toContain('"name" IS NULL')
     expect(built.expectedRows).toBe(2)
   })
@@ -168,16 +170,26 @@ describe('buildInsert', () => {
     expect(params).toEqual([42, 'Ada'])
   })
 
-  it('uses ? placeholders and coerces empty nullable cells to NULL on SQLite', () => {
+  it('uses ? placeholders and binds an explicit NULL cell on SQLite', () => {
     const { sql, params } = buildInsert({
       table: users,
       columns: [{ name: 'name', columnMeta: col({ name: 'name', nullable: true }) }],
-      values: [''],
+      values: [SQL_NULL],
       engine: 'sqlite',
     })
 
     expect(sql).toBe('INSERT INTO "public"."users" ("name")\nVALUES (?)')
     expect(params).toEqual([null])
+  })
+
+  it('inserts an intentional empty string as an empty string', () => {
+    const { params } = buildInsert({
+      table: users,
+      columns: [{ name: 'name', columnMeta: col({ name: 'name', nullable: true }) }],
+      values: [''],
+      engine: 'sqlite',
+    })
+    expect(params).toEqual([''])
   })
 
   it('falls back to DEFAULT VALUES when no columns were filled', () => {
@@ -197,7 +209,7 @@ describe('buildDeleteRows', () => {
       engine: 'postgresql',
     })
 
-    expect(sql).toBe('DELETE FROM "public"."users"\n WHERE ("id" = $1) OR ("id" = $2)')
+    expect(sql).toBe('DELETE FROM "public"."users"\n WHERE ("id" IS NOT DISTINCT FROM $1) OR ("id" IS NOT DISTINCT FROM $2)')
     expect(params).toEqual([1, 2])
   })
 
@@ -208,7 +220,7 @@ describe('buildDeleteRows', () => {
       engine: 'sqlite',
     })
 
-    expect(sql).toBe('DELETE FROM "line_items"\n WHERE ("order_id" = ? AND "sku" = ?)')
+    expect(sql).toBe('DELETE FROM "line_items"\n WHERE ("order_id" COLLATE BINARY IS ? AND "sku" COLLATE BINARY IS ?)')
     expect(params).toEqual([10, 'A1'])
   })
 
@@ -225,7 +237,7 @@ describe('buildDeleteRows', () => {
   it('splits SQL Server writes below its parameter ceiling', () => {
     const edits = Array.from({ length: 700 }, (_, index) => ({
       column: 'name',
-      columnMeta: col({ name: 'name' }),
+      columnMeta: col({ name: 'name', dataType: 'varchar(255)' }),
       value: `new-${index}`,
       originalValue: `old-${index}`,
       pks: [{ name: 'id', value: index }],
@@ -424,5 +436,31 @@ describe('buildColumnDrop', () => {
     ])
     expect(buildColumnDrop(users, ['age'], 'sqlserver')).toEqual(['ALTER TABLE [public].[users] DROP COLUMN [age]'])
     expect(buildColumnDrop(users, [], 'mysql')).toEqual([])
+  })
+})
+
+describe('engine-aware optimistic predicates', () => {
+  it('compares text binarily on MySQL and SQL Server', () => {
+    const mysqlBuilt = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: 1 }, { name: 'name', value: 'Ada', columnMeta: col({ name: 'name', dataType: 'varchar(255)' }) }]],
+      engine: 'mysql',
+    })
+    expect(mysqlBuilt.sql).toContain('BINARY `name` <=> BINARY ?')
+
+    const mssqlBuilt = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: 1 }, { name: 'name', value: 'Ada', columnMeta: col({ name: 'name', dataType: 'nvarchar(50)' }) }]],
+      engine: 'sqlserver',
+    })
+    expect(mssqlBuilt.sql).toContain('[name] COLLATE Latin1_General_100_BIN2 = @p2 COLLATE Latin1_General_100_BIN2')
+  })
+
+  it('refuses guards on types without safe equality', () => {
+    expect(() => buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: 1 }, { name: 'payload', value: '{}', columnMeta: col({ name: 'payload', dataType: 'json' }) }]],
+      engine: 'postgresql',
+    })).toThrow(/cannot be compared safely/i)
   })
 })

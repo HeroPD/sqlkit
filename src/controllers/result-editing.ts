@@ -3,7 +3,7 @@ import type { QueryRun } from '../components/results-panel'
 import type { SqlTabState } from './contexts'
 import type { DialogsController } from './dialogs'
 import type { BatchResult, BatchStatement, ColumnRef, ConnectionProfile, TableRef } from '../electron'
-import { buildBatchUpdates, buildDeleteRowBatches, buildInsert } from '../sql-write'
+import { buildBatchUpdates, buildDeleteRowBatches, buildInsert, type CellInput } from '../sql-write'
 import { previewSql } from '../components/review-query-dialog'
 import {
   buildInsertRows,
@@ -28,7 +28,7 @@ type Deps = {
   // The active tab's staged new rows and cell edits, and how to clear them once saved.
   drafts: () => DraftRow[]
   dropDrafts: (tabId: string, indexes: number[]) => void
-  edits: () => Array<{ row: number; col: number; value: string }>
+  edits: () => Array<{ row: number; col: number; value: CellInput }>
   clearEdits: (tabId: string) => void
   // Drops the tab's staged undo/redo history — a saved batch is a commit point.
   clearStagedHistory?: (tabId: string) => void
@@ -163,6 +163,7 @@ export class ResultEditingController {
     return {
       tab: this.deps.activeTab(),
       profileId: this.deps.activeDbId(),
+      engine: this.deps.activeProfile()?.engine ?? null,
       run: this.deps.run(),
       tables: this.deps.tables(),
       columns: this.deps.columns(),

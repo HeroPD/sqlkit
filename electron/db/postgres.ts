@@ -8,7 +8,7 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
-import { assertSelfContainedTransaction, isCappableRead } from './sql-script'
+import { assertSelfContainedTransaction } from './sql-script'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
@@ -174,9 +174,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           released = true
           throw new Error('Query cancelled.')
         }
-        const result = await streamQuery(client, finalSql, params, started, isCappableRead(finalSql)
-          ? async () => { if (entry.pid !== null) await cancelBackends([entry.pid], childDb ?? active) }
-          : undefined)
+        const result = await streamQuery(client, finalSql, params, started)
         await resetUserSession(client)
         client.release()
         released = true
@@ -658,24 +656,24 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
 // Streams rows so a huge result can't OOM the main process: pg only buffers
 // when nothing listens for 'row'. rowMode array keeps duplicate column names.
+// Rows beyond the buffer caps are drained without being kept: cancelling the
+// statement instead could sever a SELECT with side effects (nextval(), volatile
+// functions) partway through, and the drain keeps the reported count exact.
 function streamQuery(
   client: pg.PoolClient,
   sql: string,
   params: unknown[],
   started: number,
-  stopAtLimit?: () => Promise<unknown>,
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     const buffers = new Map<object, { rows: unknown[][]; total: number; bytes: number; limited: boolean }>()
     let bufferedBytes = 0
-    let limitCancellation = false
     const config: pg.QueryArrayConfig = { text: sql, values: params, rowMode: 'array' }
     const query = new pg.Query(config)
     query.on('row', (row: unknown[], result?: object) => {
       const key = result ?? query
       const buffer = buffers.get(key) ?? { rows: [], total: 0, bytes: 0, limited: false }
       buffer.total += 1
-      let capacityExceeded = false
       if (buffer.rows.length < MAX_BUFFERED_ROWS) {
         const bounded = boundedRow(row, bufferedBytes)
         if (bounded) {
@@ -685,22 +683,11 @@ function streamQuery(
           buffer.limited ||= bounded.truncated
         } else {
           buffer.limited = true
-          capacityExceeded = true
         }
       } else {
         buffer.limited = true
-        capacityExceeded = true
       }
       buffers.set(key, buffer)
-      if (capacityExceeded && !limitCancellation && stopAtLimit) {
-        limitCancellation = true
-        // Pause this result socket before yielding to the out-of-band cancel;
-        // otherwise a fast server can synchronously emit the entire result
-        // before the cancel connection gets an event-loop turn.
-        const stream = (client as unknown as { connection?: { stream?: { pause(): void; resume(): void } } }).connection?.stream
-        stream?.pause()
-        void stopAtLimit().catch(() => {}).finally(() => stream?.resume())
-      }
     })
     const finish = (result?: pg.QueryArrayResult | pg.QueryArrayResult[]) => {
       const results = result
@@ -717,9 +704,9 @@ function streamQuery(
             columns: entry.fields.map((field) => field.name),
             columnSources: await columnSourcesForFields(client, entry.fields),
             rows: buffer.rows,
-            rowCount: limitCancellation ? buffer.total : (entry.rowCount ?? buffer.total),
+            rowCount: entry.rowCount ?? buffer.total,
             truncated: buffer.limited || buffer.total > buffer.rows.length,
-            rowCountExact: !limitCancellation,
+            rowCountExact: true,
           }
         }),
       )
@@ -733,7 +720,7 @@ function streamQuery(
         })
         .catch(reject)
     }
-    query.on('error', (error) => limitCancellation ? finish() : reject(error))
+    query.on('error', reject)
     query.on('end', finish)
     client.query(query)
   })

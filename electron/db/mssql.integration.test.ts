@@ -181,7 +181,7 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
-  it('stops a single read once the result buffer is full', async () => {
+  it('drains a capped read without cancelling statement semantics', async () => {
     const driver = await connectDriver()
     try {
       const count = MAX_BUFFERED_ROWS + 25
@@ -190,10 +190,9 @@ describeDb('mssql driver (integration)', () => {
          from sys.all_objects a cross join sys.all_objects b`,
       )
       expect(result.rows).toHaveLength(MAX_BUFFERED_ROWS)
-      expect(result.rowCount).toBeGreaterThanOrEqual(MAX_BUFFERED_ROWS)
-      expect(result.rowCount).toBeLessThan(count)
+      expect(result.rowCount).toBe(count)
       expect(result.truncated).toBe(true)
-      expect(result.rowCountExact).toBe(false)
+      expect(result.rowCountExact).toBe(true)
     } finally {
       await driver.disconnect()
     }
@@ -214,7 +213,18 @@ describeDb('mssql driver (integration)', () => {
     try {
       const result = await driver.query("select cast(12.34 as decimal(8,2)), cast('2026-07-10T03:04:05.1234567' as datetime2(7))")
       expect(result.rows).toEqual([['12.34', '2026-07-10 03:04:05.1234567']])
-      await expect(driver.query('select cast(9007199254740993 as decimal(19,0))')).rejects.toThrow(/CAST it to varchar/)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('returns high-precision decimal, money, and datetimeoffset values as exact text', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query(
+        "select cast(123456789012345678.90 as decimal(38,2)), cast(12.34 as money), cast('2026-07-10T12:34:56.1234567+08:00' as datetimeoffset(7))",
+      )
+      expect(result.rows).toEqual([['123456789012345678.90', '12.3400', '2026-07-10 12:34:56.1234567 +08:00']])
     } finally {
       await driver.disconnect()
     }

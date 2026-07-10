@@ -15,6 +15,7 @@ import { ConfigController } from '../controllers/config'
 import { FileOpsController } from '../controllers/file-ops'
 import { ContextsController, type EditorTabState } from '../controllers/contexts'
 import type { ConnectionProfile, FileInfo, MenuAction, TableRef } from '../electron'
+import type { CellInput } from '../sql-write'
 import './activity-button'
 import './command-palette'
 import './confirm-dialog'
@@ -427,7 +428,7 @@ export class WorkbenchScreen extends LitElement {
         if (event.shiftKey ? inspect?.redo() : inspect?.undo()) event.preventDefault()
         return
       }
-      if (this._ctx.activeSqlTab() && !this._layout.panelCollapsed) {
+      if (this._ctx.activeSqlTab() && !this._layout.panelCollapsed && !this._stagingFrozen()) {
         const tabId = this._ctx.activeTabId
         if (event.shiftKey ? this._queries.redoStaged(tabId) : this._queries.undoStaged(tabId)) event.preventDefault()
       }
@@ -545,17 +546,24 @@ export class WorkbenchScreen extends LitElement {
     const phase = this._live.phase(profile.id)
     this._queries.beginRun(tabId, executionId, profile.id, phase === 'connected' ? undefined : `Connecting to ${profile.name}…`)
 
-    if (phase !== 'connected') {
-      const connected = await this._live.connect(profile)
-      if (!connected.success) {
-        this._queries.setRun(tabId, { phase: 'error', error: connected.error })
+    // The tab is already in phase 'running'; a rejection escaping here would
+    // leave it spinning forever (the in-flight guard above blocks every rerun).
+    try {
+      if (phase !== 'connected') {
+        const connected = await this._live.connect(profile)
+        if (!connected.success) {
+          this._queries.setRun(tabId, { phase: 'error', error: connected.error })
+          return
+        }
+      }
+      // The driver may be targeting the discovery database; point it at the
+      // captured child before running.
+      if ((await this._alignActiveChild(profile.id, childDb)) === 'unavailable') {
+        this._queries.setRun(tabId, { phase: 'error', error: `Database "${childDb}" is not available on this connection` })
         return
       }
-    }
-    // The driver may be targeting the discovery database; point it at the
-    // captured child before running.
-    if ((await this._alignActiveChild(profile.id, childDb)) === 'unavailable') {
-      this._queries.setRun(tabId, { phase: 'error', error: `Database "${childDb}" is not available on this connection` })
+    } catch (error) {
+      this._queries.setRun(tabId, { phase: 'error', error: (error as Error).message })
       return
     }
 
@@ -957,6 +965,7 @@ export class WorkbenchScreen extends LitElement {
             @duplicate-rows=${this._onDuplicateRows}
             @delete-rows=${this._onDeleteRows}
             @draft-edit=${this._onDraftEdit}
+            @grid-notice=${this._onGridNotice}
             @draft-remove=${this._onDraftRemove}
             @save-rows=${() => this._resultEditing.saveChanges()}
             @discard-changes=${this._onDiscardChanges}
@@ -1203,33 +1212,49 @@ export class WorkbenchScreen extends LitElement {
     if (this._ctx.activeTabId) void this._queries.loadMore(this._ctx.activeTabId, index)
   }
 
+  // While the save-review dialog is up, the statements were built from a
+  // snapshot; staging anything more would be silently dropped or mis-indexed
+  // by the post-commit cleanup. Freeze staging until the dialog closes.
+  private _stagingFrozen() {
+    return this._dialogs.review !== null
+  }
+
   // A result-cell edit stages a pending change (committed later via ⌘S / Save),
   // mirroring how new rows are staged — no per-edit dialog.
   private _onCellEdit(event: Event) {
-    const { row, col, value } = (event as CustomEvent<{ row: number; col: number; value: string }>).detail
+    if (this._stagingFrozen()) return
+    const { row, col, value } = (event as CustomEvent<{ row: number; col: number; value: CellInput }>).detail
     if (this._ctx.activeTabId) this._queries.setEdit(this._ctx.activeTabId, row, col, value)
   }
 
   private _onCellEditClear(event: Event) {
+    if (this._stagingFrozen()) return
     const { row, col } = (event as CustomEvent<{ row: number; col: number }>).detail
     if (this._ctx.activeTabId) this._queries.clearEdit(this._ctx.activeTabId, row, col)
   }
 
   // A multi-cell fill from the grid: stage every changed cell in one undo step.
   private _onCellsFill(event: Event) {
+    if (this._stagingFrozen()) return
     const detail = (
       event as CustomEvent<{
-        edits: Array<{ row: number; col: number; value: string }>
+        edits: Array<{ row: number; col: number; value: CellInput }>
         clears: Array<{ row: number; col: number }>
-        draftCells: Array<{ index: number; col: number; value: string }>
+        draftCells: Array<{ index: number; col: number; value: CellInput }>
       }>
     ).detail
     if (this._ctx.activeTabId) this._queries.applyFill(this._ctx.activeTabId, detail)
   }
 
+  private _onGridNotice(event: Event) {
+    const { title, detail } = (event as CustomEvent<{ title: string; detail: string }>).detail
+    this._dialogs.notice(title, detail)
+  }
+
   // Stages an empty new row in the grid (committed later via ⌘S / Save rows),
   // inserting below the selected row and expanding the panel if it was collapsed.
   private _onAddRow(event: Event) {
+    if (this._stagingFrozen()) return
     const tabId = this._ctx.activeTabId
     const run = this._queries.runFor(tabId)
     if (!tabId || run.phase !== 'done') return
@@ -1239,22 +1264,26 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onDraftEdit(event: Event) {
-    const { index, col, value } = (event as CustomEvent<{ index: number; col: number; value: string }>).detail
+    if (this._stagingFrozen()) return
+    const { index, col, value } = (event as CustomEvent<{ index: number; col: number; value: CellInput }>).detail
     if (this._ctx.activeTabId) this._queries.setDraftCell(this._ctx.activeTabId, index, col, value)
   }
 
   private _onDraftRemove(event: Event) {
+    if (this._stagingFrozen()) return
     const { indexes } = (event as CustomEvent<{ indexes: number[] }>).detail
     if (this._ctx.activeTabId) this._queries.dropDrafts(this._ctx.activeTabId, indexes)
   }
 
   private _onDuplicateRows(event: Event) {
-    const { drafts } = (event as CustomEvent<{ drafts: Array<{ after: number; cells: Array<string | null> }> }>).detail
+    if (this._stagingFrozen()) return
+    const { drafts } = (event as CustomEvent<{ drafts: Array<{ after: number; cells: Array<CellInput | null> }> }>).detail
     if (this._ctx.activeTabId) this._queries.addDrafts(this._ctx.activeTabId, drafts)
     this._layout.expandPanel()
   }
 
   private _onDiscardChanges() {
+    if (this._stagingFrozen()) return
     if (this._ctx.activeTabId) this._queries.clearStaged(this._ctx.activeTabId)
   }
 

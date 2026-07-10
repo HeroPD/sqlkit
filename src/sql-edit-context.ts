@@ -1,63 +1,7 @@
-import type { TableRef } from './electron'
+import type { Engine, TableRef } from './electron'
+import { maskSql } from './sql-mask'
 
 const identEqual = (a: string | null, b: string | null) => a === b || (a !== null && b !== null && a.toLowerCase() === b.toLowerCase())
-
-function maskSql(sql: string) {
-  let out = ''
-  for (let i = 0; i < sql.length;) {
-    if (sql.startsWith('--', i)) {
-      const end = sql.indexOf('\n', i + 2)
-      const to = end < 0 ? sql.length : end
-      out += ' '.repeat(to - i)
-      i = to
-      continue
-    }
-    if (sql.startsWith('/*', i)) {
-      const end = sql.indexOf('*/', i + 2)
-      const to = end < 0 ? sql.length : end + 2
-      out += ' '.repeat(to - i)
-      i = to
-      continue
-    }
-    if (sql[i] === "'") {
-      const start = i
-      i += 1
-      while (i < sql.length) {
-        if (sql[i] === "'" && sql[i + 1] === "'") {
-          i += 2
-          continue
-        }
-        if (sql[i] === "'") {
-          i += 1
-          break
-        }
-        i += 1
-      }
-      out += ' '.repeat(i - start)
-      continue
-    }
-    if (sql[i] === '"') {
-      const start = i
-      i += 1
-      while (i < sql.length) {
-        if (sql[i] === '"' && sql[i + 1] === '"') {
-          i += 2
-          continue
-        }
-        if (sql[i] === '"') {
-          i += 1
-          break
-        }
-        i += 1
-      }
-      out += ' '.repeat(i - start)
-      continue
-    }
-    out += sql[i]
-    i += 1
-  }
-  return out
-}
 
 const isWord = (ch: string | undefined) => ch !== undefined && /[A-Za-z0-9_$]/.test(ch)
 
@@ -75,17 +19,22 @@ function topLevelWord(sql: string, word: string, start = 0) {
   return -1
 }
 
+// Quote pairs by opening char: ANSI double quotes, MySQL backticks, SQL Server
+// brackets. Each escapes its closer by doubling it.
+const QUOTE_CLOSERS: Record<string, string> = { '"': '"', '`': '`', '[': ']' }
+
 function parseIdentifier(sql: string, index: number): { name: string; end: number } | null {
-  if (sql[index] === '"') {
+  const closer = QUOTE_CLOSERS[sql[index] ?? '']
+  if (closer) {
     let name = ''
     let i = index + 1
     while (i < sql.length) {
-      if (sql[i] === '"' && sql[i + 1] === '"') {
-        name += '"'
+      if (sql[i] === closer && sql[i + 1] === closer) {
+        name += closer
         i += 2
         continue
       }
-      if (sql[i] === '"') return { name, end: i + 1 }
+      if (sql[i] === closer) return { name, end: i + 1 }
       name += sql[i]
       i += 1
     }
@@ -123,9 +72,9 @@ function hasForbiddenTopLevelSource(masked: string, start: number) {
   return false
 }
 
-export function inferEditableTable(sql: string, tables: TableRef[]): TableRef | null {
+export function inferEditableTable(sql: string, tables: TableRef[], engine?: Engine): TableRef | null {
   const source = sql.trim()
-  const masked = maskSql(source)
+  const masked = maskSql(source, engine)
   if (!/^\s*select\b/i.test(masked)) return null
   const from = topLevelWord(masked, 'from')
   if (from < 0) return null

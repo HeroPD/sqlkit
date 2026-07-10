@@ -7,7 +7,10 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
-import { assertSelfContainedTransaction, isCappableRead, splitSqlServerBatches } from './sql-script'
+import { assertSelfContainedTransaction, splitSqlServerBatches } from './sql-script'
+import { installLosslessTediousParsers } from './tedious-lossless'
+
+installLosslessTediousParsers()
 
 // Always-present databases; hidden from all-databases children except master,
 // which is a legitimate browsing target (it's the default sa database).
@@ -50,9 +53,9 @@ const temporalText = (value: PreciseDate, type: unknown, scale = 7): string => {
 }
 
 const exactFixed = (value: number, precision: number, scale: number, column: string): string => {
-  // tedious has already converted decimal to a binary float. Up to 15
-  // significant decimal digits can be round-tripped reliably; above that we
-  // must refuse the lossy value instead of displaying/editing corrupted data.
+  // Safety net: the lossless tedious adapter normally delivers these as exact
+  // strings before node-mssql sees them. A number here means the adapter did
+  // not cover this value; refuse lossy floats past 15 significant digits.
   if (precision > 15 || !Number.isFinite(value)) {
     throw new Error(`SQL Server column "${column}" has precision ${precision}, which its JavaScript driver cannot return losslessly. CAST it to varchar in the query.`)
   }
@@ -127,7 +130,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   const running = new Set<{ executionId?: string; request: sql.Request | null; cancelRequested: boolean }>()
   const tls = mssqlTls(profile)
 
-  const makePool = (database: string) => {
+  const makePool = (database: string, max = 4) => {
     const pool = new sql.ConnectionPool({
       server: endpoint.host,
       port: endpoint.port,
@@ -137,27 +140,13 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       connectionTimeout: 8000,
       // No statement timeout: user queries legitimately run long; Stop cancels.
       requestTimeout: 0,
-      pool: { max: 4 },
+      pool: { max },
       options: {
         encrypt: tls.encrypt,
         trustServerCertificate: tls.trustServerCertificate,
         ...(tls.ca ? { cryptoCredentialsDetails: { ca: tls.ca } } : {}),
       },
     })
-    // node-mssql does not reset tedious sessions when returning them to its
-    // pool. Delay every release until the TDS RESETCONNECTION request has
-    // rolled back implicit transactions and cleared SET/temp/session state.
-    type ResettableConnection = { reset(callback: (error?: Error) => void): void; close(): void }
-    type PoolWithRelease = { release(connection: ResettableConnection): sql.ConnectionPool }
-    const poolWithRelease = pool as unknown as PoolWithRelease
-    const originalRelease = poolWithRelease.release.bind(poolWithRelease)
-    poolWithRelease.release = (connection) => {
-      connection.reset((error) => {
-        if (error) connection.close()
-        originalRelease(connection)
-      })
-      return pool
-    }
     pool.on('error', (error: Error) => events.onError(error.message))
     return pool
   }
@@ -170,6 +159,19 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   }
 
   const poolForQuery = (childDb?: string | null) => connectedPool(childDb ?? active)
+
+  const databaseForQuery = (childDb?: string | null) => {
+    const database = childDb ?? active
+    if (!pools?.has(database)) throw new Error(database ? `Database "${database}" is not available on this connection` : 'Not connected')
+    return database
+  }
+
+  // node-mssql's pool has no supported reset-on-release hook, so pooled
+  // connections would leak transaction/SET/temp state between query tabs. User
+  // SQL therefore runs on a throwaway one-connection pool closed after the
+  // operation; its single session is also what every GO batch of one script
+  // shares. Metadata reads keep using the long-lived pools.
+  const openUserPool = async (childDb?: string | null) => makePool(databaseForQuery(childDb), 1).connect()
 
   const bind = (request: sql.Request, params: unknown[]) => {
     params.forEach((value, index) => request.input(`p${index + 1}`, value))
@@ -224,8 +226,10 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       assertSelfContainedTransaction(finalSql, 'sqlserver')
       const entry = { executionId, request: null as sql.Request | null, cancelRequested: false }
       running.add(entry)
+      let userPool: sql.ConnectionPool | null = null
       try {
-        const pool = await poolForQuery(childDb)
+        const pool = await openUserPool(childDb)
+        userPool = pool
         if (entry.cancelRequested) throw new Error('Query cancelled.')
         let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
         const resultSets: QueryResultSet[] = []
@@ -234,7 +238,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         for (const batch of batches) {
           entry.request = bind(pool.request(), params)
           if (entry.cancelRequested) throw new Error('Query cancelled.')
-          result = await streamQuery(entry.request, batch, started, budget, batches.length === 1 && isCappableRead(batch))
+          result = await streamQuery(entry.request, batch, started, budget)
           resultSets.push(...(result.resultSets ?? [{
             columns: result.columns,
             columnSources: result.columnSources,
@@ -254,17 +258,20 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         throw isCancelled(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
       } finally {
         running.delete(entry)
+        await userPool?.close().catch(() => {})
       }
     },
 
     async runBatch(statements, childDb = null) {
       if (!statements.length) return { success: true }
-      const pool = await poolForQuery(childDb)
-      const transaction = new sql.Transaction(pool)
       const entry = { request: null as sql.Request | null, cancelRequested: false }
       running.add(entry)
+      let userPool: sql.ConnectionPool | null = null
+      let transaction: sql.Transaction | null = null
       let index = -1
       try {
+        userPool = await openUserPool(childDb)
+        transaction = new sql.Transaction(userPool)
         await transaction.begin()
         if (entry.cancelRequested) throw new Error('Query cancelled.')
         for (index = 0; index < statements.length; index += 1) {
@@ -289,7 +296,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         await transaction.commit()
         return { success: true }
       } catch (error) {
-        await transaction.rollback().catch(() => {})
+        await transaction?.rollback().catch(() => {})
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
@@ -297,18 +304,21 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         }
       } finally {
         running.delete(entry)
+        await userPool?.close().catch(() => {})
       }
     },
 
     async runDdl(statements, childDb = null) {
       if (!statements.length) return { success: true }
       // SQL Server DDL is transactional, so all-or-nothing like Postgres.
-      const pool = await poolForQuery(childDb)
-      const transaction = new sql.Transaction(pool)
       const entry = { request: null as sql.Request | null, cancelRequested: false }
       running.add(entry)
+      let userPool: sql.ConnectionPool | null = null
+      let transaction: sql.Transaction | null = null
       let index = -1
       try {
+        userPool = await openUserPool(childDb)
+        transaction = new sql.Transaction(userPool)
         await transaction.begin()
         if (entry.cancelRequested) throw new Error('Query cancelled.')
         for (index = 0; index < statements.length; index += 1) {
@@ -321,7 +331,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         await transaction.commit()
         return { success: true }
       } catch (error) {
-        await transaction.rollback().catch(() => {})
+        await transaction?.rollback().catch(() => {})
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
@@ -329,6 +339,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         }
       } finally {
         running.delete(entry)
+        await userPool?.close().catch(() => {})
       }
     },
 
@@ -600,7 +611,6 @@ function streamQuery(
   sqlText: string,
   started: number,
   budget: { bytes: number } = { bytes: 0 },
-  stopAtLimit = false,
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     request.stream = true
@@ -614,11 +624,10 @@ function streamQuery(
     let active = false
     let fields: MssqlColumn[] = []
     let conversionError: Error | null = null
-    let limitCancellation = false
     const resultSets: QueryResultSet[] = []
     const pushCurrent = () => {
       if (!active) return
-      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length, rowCountExact: !limitCancellation })
+      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length, rowCountExact: true })
       active = false
     }
     request.on('recordset', (recordset: MssqlColumn[]) => {
@@ -642,7 +651,6 @@ function streamQuery(
         return
       }
       total += 1
-      let capacityExceeded = false
       if (rows.length < MAX_BUFFERED_ROWS) {
         const bounded = boundedRow(normalized, budget.bytes)
         if (bounded) {
@@ -651,15 +659,9 @@ function streamQuery(
           limited ||= bounded.truncated
         } else {
           limited = true
-          capacityExceeded = true
         }
       } else {
         limited = true
-        capacityExceeded = true
-      }
-      if (capacityExceeded && !limitCancellation && stopAtLimit) {
-        limitCancellation = true
-        request.cancel()
       }
     })
     request.on('rowsaffected', (count: number) => {
@@ -681,7 +683,6 @@ function streamQuery(
     }
     request.on('error', (error) => {
       if (conversionError) reject(conversionError)
-      else if (limitCancellation) finish()
       else reject(error instanceof Error ? error : new Error(String(error)))
     })
     request.on('done', finish)

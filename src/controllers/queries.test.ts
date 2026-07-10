@@ -243,6 +243,25 @@ describe('QueriesController drafts', () => {
   })
 })
 
+describe('QueriesController result retention', () => {
+  it('does not evict a result that owns staged changes', () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    const huge = 'x'.repeat(20 * 1024 * 1024)
+    const largeResult = { columns: ['payload'], rows: [[huge], [huge]], rowCount: 2, durationMs: 1 }
+
+    controller.setRun('t1', { phase: 'done', result: largeResult })
+    controller.setEdit('t1', 0, 0, 'pending')
+    controller.setRun('t2', { phase: 'done', result: largeResult })
+    controller.setRun('t3', { phase: 'done', result: largeResult })
+
+    // t1 is older than t2 but staged, so the eviction pass must skip it.
+    expect(controller.runFor('t1').phase).toBe('done')
+    expect(controller.editsFor('t1').size).toBe(1)
+    expect(controller.runFor('t2').phase).toBe('error')
+  })
+})
+
 describe('QueriesController column widths', () => {
   const cols = ['id', 'name']
 

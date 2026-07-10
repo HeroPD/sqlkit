@@ -25,6 +25,17 @@ describe('transaction safety', () => {
     expect(() => assertSelfContainedTransaction('DO $$ BEGIN PERFORM 1; END $$;', 'postgresql')).not.toThrow()
     expect(() => assertSelfContainedTransaction('create trigger x after insert on t begin update t set a=1; end', 'sqlite')).not.toThrow()
   })
+
+  it('recognizes transaction control around dialect-specific comments and escapes', () => {
+    expect(() => assertSelfContainedTransaction('# heading\nSTART TRANSACTION; update t set a=1', 'mysql')).toThrow(/same query run/i)
+    expect(() => assertSelfContainedTransaction('SELECT 3--2; START TRANSACTION; update t set a=1', 'mysql')).toThrow(/same query run/i)
+    expect(() => assertSelfContainedTransaction('/*!40101 START TRANSACTION */; update t set a=1', 'mysql')).toThrow(/same query run/i)
+    expect(() => assertSelfContainedTransaction("select E'quote\\'; BEGIN'; BEGIN", 'postgresql')).toThrow(/same query run/i)
+  })
+
+  it('supports PostgreSQL nested block comments', () => {
+    expect(() => assertSelfContainedTransaction('/* outer /* BEGIN */ still comment */ select 1', 'postgresql')).not.toThrow()
+  })
 })
 
 describe('dialect script handling', () => {
@@ -74,5 +85,6 @@ describe('dialect script handling', () => {
 
   it('splits only top-level semicolons', () => {
     expect(splitTopLevelStatements("select ';'; select (1 + 2);")).toEqual(["select ';'", 'select (1 + 2)'])
+    expect(splitTopLevelStatements("select 'can\\'t; stop'; select 2", 'mysql')).toEqual(["select 'can\\'t; stop'", 'select 2'])
   })
 })

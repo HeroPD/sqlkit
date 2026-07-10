@@ -37,6 +37,7 @@ function input(result: QueryResult, sql: string, tabTable?: TableRef): ResultEdi
       ...(tabTable ? { table: tabTable } : {}),
     },
     profileId: 'profile-1',
+    engine: 'postgresql',
     run: { phase: 'done', result, sql },
     tables: [accounts, companies],
     columns,
@@ -79,14 +80,15 @@ describe('result edit context', () => {
     }, 'select id, name, company_id from public.accounts')
     const ctx = singleTableEditContext(complete)
     expect(ctx).not.toBeNull()
-    expect(rowKeysForDelete(ctx!, [0])).toEqual({
-      ok: true,
-      value: [[
+    const keys = rowKeysForDelete(ctx!, [0])
+    expect(keys.ok).toBe(true)
+    if (keys.ok) {
+      expect(keys.value[0]?.map(({ name, value }) => ({ name, value }))).toEqual([
         { name: 'id', value: 1 },
         { name: 'name', value: 'Ada' },
         { name: 'company_id', value: null },
-      ]],
-    })
+      ])
+    }
 
     const partial = input({
       columns: ['id', 'name'],

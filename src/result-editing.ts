@@ -1,29 +1,31 @@
-import type { ColumnRef, QueryResult, TableRef } from './electron'
+import type { ColumnRef, Engine, QueryResult, TableRef } from './electron'
 import type { QueryRun, CellCoord } from './components/results-panel'
 import type { SqlTabState } from './controllers/contexts'
 import { inferEditableTable } from './sql-edit-context'
-import type { BatchUpdateEdit, RowKey } from './sql-write'
+import { supportsOptimisticComparison, type BatchUpdateEdit, type CellInput, type RowKey } from './sql-write'
 
 // An unsaved new row staged in the grid. `cells` align to the result's columns:
-// null = never touched (omit from INSERT so the DB default applies); a string =
-// a typed value ('' coerces to NULL for nullable columns). `after` is the result
+// null = never touched (omit from INSERT so the DB default applies); CellInput
+// keeps an empty string distinct from an explicit SQL NULL. `after` is the result
 // row index it renders below (-1 = above the first row), purely for display.
-export type DraftRow = { after: number; cells: Array<string | null> }
+export type DraftRow = { after: number; cells: Array<CellInput | null> }
 
 export type ResultEditInput = {
   tab: SqlTabState | null
   profileId: string | null
+  engine?: Engine | null
   run: QueryRun
   tables: TableRef[]
   columns: ColumnRef[]
 }
 
 export type SingleTableEditContext = {
+  engine: Engine | null
   table: TableRef
   columns: ColumnRef[]
   result: QueryResult
   sql: string
-  pkIndexes: Array<{ name: string; index: number }>
+  pkIndexes: Array<{ name: string; index: number; columnMeta: ColumnRef }>
 }
 
 export type CellEditContext = SingleTableEditContext & {
@@ -51,16 +53,37 @@ export function tableMatchesSource(table: TableRef, source: { schema: string | n
   return tableMatches && schemaMatches
 }
 
+// Exact match first, case-insensitive as a fallback: quoted identifiers can be
+// case-sensitive (Postgres "ID" vs "id"), so a folded-only lookup could bind
+// the wrong sibling column.
+function findColumnMeta(columns: ColumnRef[], name: string | null | undefined): ColumnRef | undefined {
+  if (!name) return undefined
+  return columns.find((column) => column.name === name)
+    ?? columns.find((column) => column.name.toLowerCase() === name.toLowerCase())
+}
+
+function columnSourceIndex(
+  result: QueryResult,
+  table: TableRef,
+  columnName: string,
+): number {
+  const sources = result.columnSources
+  if (!sources) return -1
+  const exact = sources.findIndex((source) => tableMatchesSource(table, source) && source.column === columnName)
+  if (exact >= 0) return exact
+  return sources.findIndex((source) => tableMatchesSource(table, source) && source.column?.toLowerCase() === columnName.toLowerCase())
+}
+
 export function singleTableEditContext(input: ResultEditInput): SingleTableEditContext | null {
   const { tab, profileId, run } = input
   if (!tab || !profileId || run.phase !== 'done') return null
-  const table = tab.table ?? inferEditableTable(run.sql ?? '', input.tables)
+  const table = tab.table ?? inferEditableTable(run.sql ?? '', input.tables, input.engine ?? undefined)
   if (!table) return null
   if (run.result.columnSources?.some((source) => source.table !== null && !tableMatchesSource(table, source))) return null
   const columns = columnsForTable(input.columns, table)
   const pkIndexes = primaryKeyIndexes(run.result, table, columns, true, run.sql ?? tab.content)
   const sql = run.sql ?? tab.content
-  return pkIndexes.length ? { table, columns, result: run.result, sql, pkIndexes } : null
+  return pkIndexes.length ? { engine: input.engine ?? null, table, columns, result: run.result, sql, pkIndexes } : null
 }
 
 export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEditContext | null {
@@ -73,7 +96,7 @@ export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEd
         ? source.column
         : null
       : single.result.columns[cell.col]
-    const columnMeta = single.columns.find((column) => column.name.toLowerCase() === columnName?.toLowerCase())
+    const columnMeta = findColumnMeta(single.columns, columnName)
     return columnName && columnMeta ? { ...single, columnName, columnMeta } : null
   }
 
@@ -82,14 +105,28 @@ export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEd
   const table = input.tables.find((candidate) => tableMatchesSource(candidate, source))
   if (!table) return null
   const columns = columnsForTable(input.columns, table)
-  const columnMeta = columns.find((column) => column.name.toLowerCase() === source.column!.toLowerCase())
+  const columnMeta = findColumnMeta(columns, source.column)
   const pkIndexes = primaryKeyIndexes(input.run.result, table, columns, false, input.run.sql ?? input.tab?.content ?? '')
   return columnMeta && pkIndexes.length
-    ? { table, columns, result: input.run.result, sql: input.run.sql ?? input.tab?.content ?? '', pkIndexes, columnName: columnMeta.name, columnMeta }
+    ? {
+        engine: input.engine ?? null,
+        table,
+        columns,
+        result: input.run.result,
+        sql: input.run.sql ?? input.tab?.content ?? '',
+        pkIndexes,
+        columnName: columnMeta.name,
+        columnMeta,
+      }
     : null
 }
 
-export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value: string): EditResult<{ table: TableRef; edits: BatchUpdateEdit[] }> {
+const cannotCompareColumn = (column: ColumnRef, action: string): EditIssue => ({
+  title: `Cannot safely ${action}`,
+  detail: `${column.name} (${column.dataType}) cannot be compared safely for concurrent changes. Use explicit SQL, or add a version column to guard on.`,
+})
+
+export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value: CellInput): EditResult<{ table: TableRef; edits: BatchUpdateEdit[] }> {
   const specs: BatchUpdateEdit[] = []
   let table: TableRef | null = null
   for (const cell of cells) {
@@ -101,7 +138,10 @@ export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value
     table = ctx.table
     const row = ctx.result.rows[cell.row]
     if (!row) return { ok: false, issue: { title: 'Cannot edit this row', detail: 'It is no longer loaded in the current result.' } }
-    const pks = rowKey(ctx.result, cell.row, ctx.pkIndexes)
+    if (input.engine && !supportsOptimisticComparison(input.engine, ctx.columnMeta)) {
+      return { ok: false, issue: cannotCompareColumn(ctx.columnMeta, 'edit this cell') }
+    }
+    const pks = rowKey(ctx, cell.row)
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
       return { ok: false, issue: { title: 'Cannot edit this row', detail: 'Its primary key value is missing from the result.' } }
     }
@@ -121,23 +161,23 @@ export function insertableColumn(ctx: SingleTableEditContext, colIndex: number):
       : null
     : ctx.result.columns[colIndex]
   if (!name) return null
-  const columnMeta = ctx.columns.find((column) => column.name.toLowerCase() === name.toLowerCase())
+  const columnMeta = findColumnMeta(ctx.columns, name)
   return { name, columnMeta }
 }
 
 export function buildInsertRows(
   input: ResultEditInput,
   drafts: DraftRow[],
-): EditResult<{ table: TableRef; rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: string[] }> }> {
+): EditResult<{ table: TableRef; rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: CellInput[] }> }> {
   if (!drafts.length) return { ok: false, issue: { title: 'No new rows', detail: 'Add a row before saving.' } }
   const ctx = singleTableEditContext(input)
   if (!ctx) {
     return { ok: false, issue: { title: 'Cannot add rows here', detail: 'New rows can only be saved to a result that maps to one editable table.' } }
   }
-  const rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: string[] }> = []
+  const rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: CellInput[] }> = []
   for (const draft of drafts) {
     const columns: { name: string; columnMeta: ColumnRef | undefined }[] = []
-    const values: string[] = []
+    const values: CellInput[] = []
     for (let col = 0; col < draft.cells.length; col += 1) {
       const cell = draft.cells[col]
       if (cell === null || cell === undefined) continue
@@ -156,7 +196,7 @@ export function buildInsertRows(
 // primary key is present in the result.
 export function buildPendingUpdate(
   input: ResultEditInput,
-  edits: Array<{ row: number; col: number; value: string }>,
+  edits: Array<{ row: number; col: number; value: CellInput }>,
 ): EditResult<{ table: TableRef; edits: BatchUpdateEdit[] }> {
   const specs: BatchUpdateEdit[] = []
   let table: TableRef | null = null
@@ -170,7 +210,10 @@ export function buildPendingUpdate(
     if (!ctx.result.rows[edit.row]) {
       return { ok: false, issue: { title: 'Cannot save an edit', detail: 'A row is no longer loaded in the current result.' } }
     }
-    const pks = rowKey(ctx.result, edit.row, ctx.pkIndexes)
+    if (input.engine && !supportsOptimisticComparison(input.engine, ctx.columnMeta)) {
+      return { ok: false, issue: cannotCompareColumn(ctx.columnMeta, 'save this edit') }
+    }
+    const pks = rowKey(ctx, edit.row)
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
       return { ok: false, issue: { title: 'Cannot save an edit', detail: 'A row\'s primary key value is missing from the result.' } }
     }
@@ -187,12 +230,16 @@ export function buildPendingUpdate(
 
 export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): EditResult<RowKey[]> {
   const hasSources = ctx.result.columnSources !== undefined
-  const guards = ctx.columns.map((column) => {
-    const sourceIndex = ctx.result.columnSources?.findIndex(
-      (source) => tableMatchesSource(ctx.table, source) && source.column?.toLowerCase() === column.name.toLowerCase(),
-    )
+  // A real version token (SQL Server rowversion) beats guarding on every
+  // column: it changes on any concurrent write and always compares cleanly.
+  const version = versionGuard(ctx)
+  const guardColumns = version ? [version.columnMeta] : ctx.columns
+  const unsupported = ctx.engine ? guardColumns.find((column) => !supportsOptimisticComparison(ctx.engine!, column)) : undefined
+  if (unsupported) return { ok: false, issue: cannotCompareColumn(unsupported, 'delete this row') }
+  const guards = guardColumns.map((column) => {
+    const sourceIndex = columnSourceIndex(ctx.result, ctx.table, column.name)
     const fallbackIndex = !hasSources ? simpleColumnProjectionIndex(ctx.result.columns, ctx.sql, column.name) : -1
-    return { name: column.name, index: sourceIndex !== undefined && sourceIndex >= 0 ? sourceIndex : fallbackIndex }
+    return { name: column.name, index: sourceIndex >= 0 ? sourceIndex : fallbackIndex, columnMeta: column }
   })
   if (guards.some((guard) => guard.index < 0)) {
     return {
@@ -208,13 +255,17 @@ export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): E
     if (!ctx.result.rows[rowIndex]) {
       return { ok: false, issue: { title: 'Cannot delete this row', detail: 'It is no longer loaded in the current result.' } }
     }
-    const pks = rowKey(ctx.result, rowIndex, ctx.pkIndexes)
+    const pks = rowKey(ctx, rowIndex, false)
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
       return { ok: false, issue: { title: 'Cannot delete this row', detail: 'Its primary key value is missing from the result.' } }
     }
     const byName = new Map(pks.map((key) => [key.name.toLowerCase(), key]))
     for (const guard of guards) {
-      if (!byName.has(guard.name.toLowerCase())) byName.set(guard.name.toLowerCase(), { name: guard.name, value: ctx.result.rows[rowIndex]?.[guard.index] })
+      if (!byName.has(guard.name.toLowerCase())) byName.set(guard.name.toLowerCase(), {
+        name: guard.name,
+        value: ctx.result.rows[rowIndex]?.[guard.index],
+        columnMeta: guard.columnMeta,
+      })
     }
     keys.push([...byName.values()])
   }
@@ -229,17 +280,21 @@ function sameTable(a: TableRef, b: TableRef) {
   return a.name === b.name && a.schema === b.schema
 }
 
-function primaryKeyIndexes(result: QueryResult, table: TableRef, columns: ColumnRef[], allowNameFallback: boolean, sql: string): Array<{ name: string; index: number }> {
+function primaryKeyIndexes(
+  result: QueryResult,
+  table: TableRef,
+  columns: ColumnRef[],
+  allowNameFallback: boolean,
+  sql: string,
+): Array<{ name: string; index: number; columnMeta: ColumnRef }> {
   const pk = columns.filter((column) => column.primaryKey)
   if (!pk.length) return []
   const hasSources = result.columnSources !== undefined
   const indexes = pk.map((column) => {
-    const sourceIndex = result.columnSources?.findIndex(
-      (source) => tableMatchesSource(table, source) && source.column?.toLowerCase() === column.name.toLowerCase(),
-    )
+    const sourceIndex = columnSourceIndex(result, table, column.name)
     const fallbackIndex = !hasSources && allowNameFallback ? simpleColumnProjectionIndex(result.columns, sql, column.name) : -1
-    const index = sourceIndex !== undefined && sourceIndex >= 0 ? sourceIndex : fallbackIndex
-    return { name: column.name, index }
+    const index = sourceIndex >= 0 ? sourceIndex : fallbackIndex
+    return { name: column.name, index, columnMeta: column }
   })
   return indexes.every((entry) => entry.index >= 0) ? indexes : []
 }
@@ -283,7 +338,24 @@ function projectionIsSimpleColumn(projection: string, columnName: string) {
   return last?.toLowerCase() === columnName.toLowerCase()
 }
 
-function rowKey(result: QueryResult, rowIndex: number, pkIndexes: Array<{ name: string; index: number }>): RowKey {
-  const row = result.rows[rowIndex]
-  return pkIndexes.map((pk) => ({ name: pk.name, value: row?.[pk.index] }))
+// SQL Server rowversion (legacy alias: timestamp): the engine bumps it on every
+// write, so it is the strongest optimistic token when the result includes it.
+// Only SQL Server — elsewhere `timestamp` is an ordinary datetime column.
+function versionGuard(ctx: SingleTableEditContext) {
+  if (ctx.engine !== 'sqlserver') return null
+  const columnMeta = ctx.columns.find((column) => /^(?:rowversion|timestamp)$/i.test(column.dataType.trim()))
+  if (!columnMeta) return null
+  const sourceIndex = columnSourceIndex(ctx.result, ctx.table, columnMeta.name)
+  const index = sourceIndex >= 0 ? sourceIndex : simpleColumnProjectionIndex(ctx.result.columns, ctx.sql, columnMeta.name)
+  return index >= 0 ? { name: columnMeta.name, index, columnMeta } : null
+}
+
+function rowKey(ctx: SingleTableEditContext, rowIndex: number, includeVersion = true): RowKey {
+  const row = ctx.result.rows[rowIndex]
+  const keys: RowKey = ctx.pkIndexes.map((pk) => ({ name: pk.name, value: row?.[pk.index], columnMeta: pk.columnMeta }))
+  const version = includeVersion ? versionGuard(ctx) : null
+  if (version && !keys.some((key) => key.name.toLowerCase() === version.name.toLowerCase())) {
+    keys.push({ name: version.name, value: row?.[version.index], columnMeta: version.columnMeta })
+  }
+  return keys
 }

@@ -5,6 +5,7 @@ import { isMac } from '../platform'
 import type { QueryResult, QuerySort } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { cellToTsv, cellsToTsv, rowToTsv, toDelimited, toJson } from '../result-export'
+import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './export-dialog'
@@ -52,6 +53,10 @@ const formatCell = (value: unknown): string => {
   }
   return String(value)
 }
+
+const inputText = (value: CellInput): string => isSqlNull(value) ? '' : value
+const sameInput = (left: CellInput, right: CellInput): boolean =>
+  isSqlNull(left) ? isSqlNull(right) : !isSqlNull(right) && left === right
 
 const numberColumnWidth = (result: QueryResult) => {
   const maxRow = Math.max(1, result.bufferedRowCount ?? result.rowCount ?? result.rows.length)
@@ -132,11 +137,11 @@ export class ResultsPanel extends LitElement {
   /** Unsaved new rows interleaved into the grid: `after` is the result row each
    * one renders below (-1 = above the first row); `cells` align to result columns. */
   @property({ attribute: false })
-  drafts: Array<{ after: number; cells: Array<string | null> }> = []
+  drafts: Array<{ after: number; cells: Array<CellInput | null> }> = []
 
   /** Staged result-cell edits, keyed "row:col" → new value, shown until saved. */
   @property({ attribute: false })
-  edits: ReadonlyMap<string, string> = new Map()
+  edits: ReadonlyMap<string, CellInput> = new Map()
 
   /** The grid-injected column sort, so the header shows the active direction. */
   @property({ attribute: false })
@@ -444,7 +449,7 @@ export class ResultsPanel extends LitElement {
   private _rowValuesAt(ref: RowRef): unknown[] {
     if (this.run.phase !== 'done') return []
     if (ref.kind === 'result') return this._shownResult()?.rows[ref.row] ?? []
-    return this.drafts[ref.index]?.cells ?? []
+    return (this.drafts[ref.index]?.cells ?? []).map((cell) => (isSqlNull(cell) ? null : cell))
   }
 
   private _addRow = () => {
@@ -468,6 +473,23 @@ export class ResultsPanel extends LitElement {
     if (this.run.phase !== 'done') return
     const { results } = this._selectedRefs()
     if (!results.length) return
+    // Duplication rebinds values through editor text. Binary/structured cells
+    // and truncated results would silently insert different data, so refuse
+    // (validated here, on click, so rendering never scans the selection).
+    const result = this._shownResult()
+    if (!result || result.truncated || !results.every((row) => result.rows[row]?.every((value) =>
+      value === null || value === undefined || ['string', 'number', 'bigint', 'boolean'].includes(typeof value),
+    ))) {
+      this.dispatchEvent(new CustomEvent('grid-notice', {
+        detail: {
+          title: 'Cannot duplicate these rows',
+          detail: 'A selected row contains binary, structured, or truncated values that would not round-trip through the editor. Insert it with explicit SQL instead.',
+        },
+        bubbles: true,
+        composed: true,
+      }))
+      return
+    }
     // Stack every duplicate below the last selected row, in selection order,
     // rather than interleaving each copy under its own source row.
     const after = Math.max(...results)
@@ -476,7 +498,7 @@ export class ResultsPanel extends LitElement {
     this._pendingSelectDraft = this.drafts.length
   }
 
-  private _duplicateCells(row: number): Array<string | null> {
+  private _duplicateCells(row: number): Array<CellInput | null> {
     if (this.run.phase !== 'done') return []
     const result = this._shownResult()
     if (!result) return []
@@ -484,8 +506,37 @@ export class ResultsPanel extends LitElement {
       const pending = this.edits.get(`${row}:${col}`)
       if (pending !== undefined) return pending
       const value = result.rows[row]?.[col]
-      return value === null || value === undefined ? '' : formatCell(value)
+      return value === null || value === undefined ? SQL_NULL : formatCell(value)
     })
+  }
+
+  private _setSelectionNull = () => {
+    const targets = this._selectedCellTargets()
+    if (targets.length) this._commitFill(targets, SQL_NULL)
+  }
+
+  private _setSelectionEmpty = () => {
+    const targets = this._selectedCellTargets()
+    if (targets.length) this._commitFill(targets, '')
+  }
+
+  // Cells of the live selection, for the NULL/'' toolbar actions. Called from
+  // click handlers only — never from render, where an O(selection) walk on a
+  // large grid would run on every pointer-move repaint.
+  private _selectedCellTargets(): Array<{ ref: RowRef; col: number }> {
+    if (!this._sel) return []
+    const { order } = this._display()
+    const targets: Array<{ ref: RowRef; col: number }> = []
+    const r0 = Math.max(0, Math.min(this._sel.r0, this._sel.r1))
+    const r1 = Math.min(order.length - 1, Math.max(this._sel.r0, this._sel.r1))
+    const c0 = Math.min(this._sel.c0, this._sel.c1)
+    const c1 = Math.max(this._sel.c0, this._sel.c1)
+    for (let row = r0; row <= r1; row += 1) {
+      const ref = order[row]
+      if (!ref) continue
+      for (let col = c0; col <= c1; col += 1) targets.push({ ref, col })
+    }
+    return targets
   }
 
   private _saveRows = () => {
@@ -571,13 +622,31 @@ export class ResultsPanel extends LitElement {
                         class="head-action"
                         title=${`Duplicate selected rows (${isMac ? '⌘D' : 'Ctrl+D'})`}
                         aria-label="Duplicate selected rows"
-                        ?disabled=${selected.results.length === 0}
+                        ?disabled=${selected.results.length === 0 || !!result?.truncated}
                         @click=${this._duplicateSelection}
                       >
                         <i class="codicon codicon-copy" aria-hidden="true"></i>
                       </button>
                     `
                   : ''}
+                <button
+                  class="head-action"
+                  title="Set selected cells to NULL"
+                  aria-label="Set selected cells to NULL"
+                  ?disabled=${!this._sel}
+                  @click=${this._setSelectionNull}
+                >
+                  <span aria-hidden="true">NULL</span>
+                </button>
+                <button
+                  class="head-action"
+                  title="Set selected cells to an empty string"
+                  aria-label="Set selected cells to an empty string"
+                  ?disabled=${!this._sel}
+                  @click=${this._setSelectionEmpty}
+                >
+                  <span aria-hidden="true">''</span>
+                </button>
                 <button
                   class="head-action"
                   title=${`Save ${pendingCount} pending change${pendingCount === 1 ? '' : 's'} (${isMac ? '⌘S' : 'Ctrl+S'})`}
@@ -786,7 +855,7 @@ export class ResultsPanel extends LitElement {
               <div class="record-field ${selected ? 'active' : ''} ${pending ? 'dirty-record' : ''}">
                 <div class="record-column" title=${column}>${column}</div>
                 <textarea
-                  class="record-value ${value === null || value === undefined ? 'null-value' : ''}"
+                  class="record-value ${value === null || value === undefined || isSqlNull(value) ? 'null-value' : ''}"
                   data-col=${col}
                   rows="1"
                   placeholder="NULL"
@@ -805,12 +874,12 @@ export class ResultsPanel extends LitElement {
 
   private _recordValue(ref: RowRef, col: number): unknown {
     if (ref.kind === 'draft') return this.drafts[ref.index]?.cells[col] ?? null
-    const pending = this.edits.get(`${ref.row}:${col}`)
-    return pending ?? this._shownResult()?.rows[ref.row]?.[col] ?? null
+    const key = `${ref.row}:${col}`
+    return this.edits.has(key) ? this.edits.get(key) : (this._shownResult()?.rows[ref.row]?.[col] ?? null)
   }
 
   private _recordEditText(value: unknown): string {
-    if (value === null || value === undefined) return ''
+    if (value === null || value === undefined || isSqlNull(value)) return ''
     return formatCell(value)
   }
 
@@ -832,20 +901,25 @@ export class ResultsPanel extends LitElement {
     if (!record || !Number.isFinite(col)) return
     const value = input.value
     if (record.ref.kind === 'draft') {
-      const current = this.drafts[record.ref.index]?.cells[col] ?? ''
-      if (value !== current) {
+      const current = this.drafts[record.ref.index]?.cells[col]
+      // A NULL cell renders as empty text; leaving it empty must not silently
+      // convert NULL to ''. The '' toolbar action sets an empty string explicitly.
+      if ((current === null || current === undefined || isSqlNull(current)) && value === '') return
+      if (current === null || current === undefined || !sameInput(value, current)) {
         this.dispatchEvent(new CustomEvent('draft-edit', { detail: { index: record.ref.index, col, value }, bubbles: true, composed: true }))
       }
       return
     }
     if (!this.editable || !this._canEditShownResult() || this.run.phase !== 'done') return
     const original = this._shownResult()?.rows[record.ref.row]?.[col]
-    const originalText = original === null || original === undefined ? '' : formatCell(original)
+    const originalInput: CellInput = original === null || original === undefined ? SQL_NULL : formatCell(original)
     const key = `${record.ref.row}:${col}`
     const pending = this.edits.get(key)
-    const current = pending ?? originalText
-    if (value === current) return
-    if (pending !== undefined && value === originalText) {
+    const current = pending ?? originalInput
+    if (sameInput(value, current)) return
+    // Same NULL-renders-empty rule for result cells: blur alone stages nothing.
+    if (value === '' && isSqlNull(current)) return
+    if (pending !== undefined && sameInput(value, originalInput)) {
       this.dispatchEvent(new CustomEvent('cell-edit-clear', { detail: { row: record.ref.row, col }, bubbles: true, composed: true }))
     } else {
       this.dispatchEvent(new CustomEvent('cell-edit', { detail: { row: record.ref.row, col, value }, bubbles: true, composed: true }))
@@ -1154,33 +1228,35 @@ export class ResultsPanel extends LitElement {
 
   // What a value does to one cell: stage a draft cell, stage/clear a result edit,
   // or nothing when it matches the current value.
-  private _classifyEdit(ref: RowRef, col: number, value: string): { event: string; detail: Record<string, unknown> } | null {
+  private _classifyEdit(ref: RowRef, col: number, value: CellInput): { event: string; detail: Record<string, unknown> } | null {
     if (ref.kind === 'draft') {
-      const current = this.drafts[ref.index]?.cells[col] ?? ''
-      return value === current ? null : { event: 'draft-edit', detail: { index: ref.index, col, value } }
+      const current = this.drafts[ref.index]?.cells[col]
+      return current !== null && current !== undefined && sameInput(value, current)
+        ? null
+        : { event: 'draft-edit', detail: { index: ref.index, col, value } }
     }
     if (this.run.phase !== 'done') return null
     const original = this._shownResult()?.rows[ref.row]?.[col]
-    const originalText = original === null || original === undefined ? '' : formatCell(original)
+    const originalInput: CellInput = original === null || original === undefined ? SQL_NULL : formatCell(original)
     const pending = this.edits.get(`${ref.row}:${col}`)
-    const current = pending ?? originalText
-    if (value === current) return null
-    if (pending !== undefined && value === originalText) return { event: 'cell-edit-clear', detail: { row: ref.row, col } }
+    const current = pending ?? originalInput
+    if (sameInput(value, current)) return null
+    if (pending !== undefined && sameInput(value, originalInput)) return { event: 'cell-edit-clear', detail: { row: ref.row, col } }
     return { event: 'cell-edit', detail: { row: ref.row, col, value } }
   }
 
   // Bundles every changed cell of a fill into one event so the owner stages them
   // in a single undoable step.
-  private _commitFill(targets: Array<{ ref: RowRef; col: number }>, value: string) {
-    const edits: Array<{ row: number; col: number; value: string }> = []
+  private _commitFill(targets: Array<{ ref: RowRef; col: number }>, value: CellInput) {
+    const edits: Array<{ row: number; col: number; value: CellInput }> = []
     const clears: Array<{ row: number; col: number }> = []
-    const draftCells: Array<{ index: number; col: number; value: string }> = []
+    const draftCells: Array<{ index: number; col: number; value: CellInput }> = []
     for (const { ref, col } of targets) {
       const change = this._classifyEdit(ref, col, value)
       if (!change) continue
-      if (change.event === 'draft-edit') draftCells.push(change.detail as { index: number; col: number; value: string })
+      if (change.event === 'draft-edit') draftCells.push(change.detail as { index: number; col: number; value: CellInput })
       else if (change.event === 'cell-edit-clear') clears.push(change.detail as { row: number; col: number })
-      else edits.push(change.detail as { row: number; col: number; value: string })
+      else edits.push(change.detail as { row: number; col: number; value: CellInput })
     }
     if (edits.length || clears.length || draftCells.length) {
       this.dispatchEvent(new CustomEvent('cells-fill', { detail: { edits, clears, draftCells }, bubbles: true, composed: true }))
@@ -1188,11 +1264,15 @@ export class ResultsPanel extends LitElement {
   }
 
   private _editCellText(ref: RowRef, col: number): string {
-    if (ref.kind === 'draft') return this.drafts[ref.index]?.cells[col] ?? ''
+    if (ref.kind === 'draft') {
+      const value = this.drafts[ref.index]?.cells[col]
+      return value === null || value === undefined || isSqlNull(value) ? '' : value
+    }
     if (this.run.phase !== 'done') return ''
     const original = this._shownResult()?.rows[ref.row]?.[col]
     const originalText = original === null || original === undefined ? '' : formatCell(original)
-    return this.edits.get(`${ref.row}:${col}`) ?? originalText
+    const pending = this.edits.get(`${ref.row}:${col}`)
+    return pending === undefined ? originalText : inputText(pending)
   }
 
   // The cells a commit writes to: the whole snapshotted selection (fill), or just
@@ -1302,7 +1382,7 @@ export class ResultsPanel extends LitElement {
     // -1 = above the first row). A stale anchor past the result clamps to the last
     // row. Only anchors inside the rendered window appear — the rest scroll in.
     const lastRow = result.rows.length - 1
-    const draftsByAnchor = new Map<number, Array<{ draft: { cells: Array<string | null> }; index: number }>>()
+    const draftsByAnchor = new Map<number, Array<{ draft: { cells: Array<CellInput | null> }; index: number }>>()
     this.drafts.forEach((draft, index) => {
       const anchor = draft.after < 0 ? -1 : Math.min(draft.after, lastRow)
       const list = draftsByAnchor.get(anchor) ?? []
@@ -1349,7 +1429,7 @@ export class ResultsPanel extends LitElement {
                   const pending = this.edits.get(`${absRow}:${col}`)
                   const cls = `${sel}${pending !== undefined ? ' dirty' : ''}`
                   if (editing && editing.col === col) {
-                    const value = editing.seed ?? pending ?? original
+                    const value = editing.seed ?? (pending === undefined ? original : inputText(pending))
                     return html`<td class=${cls}>
                       <input
                         class="cell-edit"
@@ -1360,9 +1440,8 @@ export class ResultsPanel extends LitElement {
                     </td>`
                   }
                   if (pending !== undefined) {
-                    return pending === ''
-                      ? html`<td class=${cls}></td>`
-                      : html`<td class=${cls} title=${pending}>${pending}</td>`
+                    if (isSqlNull(pending)) return html`<td class=${cls}><span class="null">NULL</span></td>`
+                    return pending === '' ? html`<td class=${cls}></td>` : html`<td class=${cls} title=${pending}>${pending}</td>`
                   }
                   if (cell === null || cell === undefined) return html`<td class=${sel}><span class="null">NULL</span></td>`
                   return html`<td class=${sel} title=${original}>${original}</td>`
@@ -1485,7 +1564,7 @@ export class ResultsPanel extends LitElement {
 
   // A staged new row interleaved at its anchor: highlighted, with a discard
   // button in the # column. Edited like a result cell, but commits to the draft.
-  private _renderDraft(cells: Array<string | null>, index: number, display: number, columnCount: number, numColWidth: number) {
+  private _renderDraft(cells: Array<CellInput | null>, index: number, display: number, columnCount: number, numColWidth: number) {
     const editing = this._editing?.ref.kind === 'draft' && this._editing.ref.index === index ? this._editing : null
     return html`
       <tr class="draft" data-draft=${index}>
@@ -1498,13 +1577,14 @@ export class ResultsPanel extends LitElement {
           const value = cells[col] ?? null
           const sel = this._isSelectedDisplay(display, col) ? 'draft-sel' : ''
           if (editing && editing.col === col) {
-            const initial = editing.seed ?? (value ?? '')
+            const initial = editing.seed ?? (value === null || isSqlNull(value) ? '' : value)
             return html`<td class=${sel}>
               <input class="cell-edit" .value=${initial} @keydown=${this._onEditKeydown} @blur=${this._onEditBlur} />
             </td>`
           }
           if (value === null) return html`<td class=${sel}></td>`
-          if (value === '') return html`<td class=${sel}><span class="null">NULL</span></td>`
+          if (isSqlNull(value)) return html`<td class=${sel}><span class="null">NULL</span></td>`
+          if (value === '') return html`<td class=${sel}></td>`
           return html`<td class=${sel} title=${value}>${value}</td>`
         })}
       </tr>

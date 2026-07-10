@@ -2,6 +2,7 @@ import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile, QueryResponse, QueryResult, QueryResultSet, QuerySort } from '../electron'
 import type { QueryRun } from '../components/results-panel'
 import type { DraftRow } from '../result-editing'
+import type { CellInput } from '../sql-write'
 import type { HistoryItem } from '../components/history-view'
 import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
 
@@ -45,7 +46,7 @@ const retainedResultBytes = (result: QueryResult): number => {
 
 // Shared empty edits map, so a tab with no pending edits returns a stable
 // reference (no spurious re-renders).
-const NO_EDITS: ReadonlyMap<string, string> = new Map()
+const NO_EDITS: ReadonlyMap<string, CellInput> = new Map()
 
 // Same stable-empty trick for column widths.
 const NO_WIDTHS: ReadonlyMap<number, number> = new Map()
@@ -57,7 +58,7 @@ const sameColumns = (a: string[], b: string[]) => a.length === b.length && a.eve
 const MAX_STAGED_HISTORY = 100
 
 // A point-in-time capture of everything staged on a tab, for undo/redo.
-type StagedSnapshot = { drafts: DraftRow[]; edits: Map<string, string> }
+type StagedSnapshot = { drafts: DraftRow[]; edits: Map<string, CellInput> }
 
 // Owns everything a query run produces: the per-tab results (switching tabs
 // brings a tab's result back), the cross-connection task list with its live
@@ -72,7 +73,7 @@ export class QueriesController implements ReactiveController {
   drafts = new Map<string, DraftRow[]>()
 
   /** Unsaved cell edits per tab: inner key "row:col" → new value string. */
-  edits = new Map<string, Map<string, string>>()
+  edits = new Map<string, Map<string, CellInput>>()
 
   /** The column sort the result grid injected, per tab; absent when unsorted. */
   sorts = new Map<string, QuerySort>()
@@ -153,7 +154,9 @@ export class QueriesController implements ReactiveController {
     const next = new Map(this.runs)
     for (const [tabId, entry] of next) {
       if (total <= MAX_RETAINED_RESULT_BYTES) break
-      if (tabId === protectedTabId || entry.phase !== 'done') continue
+      // Staged edits are row-index/version aligned to this exact snapshot. Keep
+      // their result available even when that temporarily exceeds the soft cap.
+      if (tabId === protectedTabId || entry.phase !== 'done' || this.hasStaged(tabId)) continue
       total -= retainedResultBytes(entry.result)
       this.closeResultSessions(entry.result)
       next.set(tabId, { phase: 'error', error: 'This result was released to keep SqlKit memory usage bounded. Run the query again to reload it.' })
@@ -173,7 +176,7 @@ export class QueriesController implements ReactiveController {
   addDraft(tabId: string, columnCount: number, after = -1, index?: number) {
     const rows = [...this.stagedDrafts(tabId)]
     const at = index === undefined ? rows.length : Math.max(0, Math.min(index, rows.length))
-    rows.splice(at, 0, { after, cells: Array<string | null>(columnCount).fill(null) })
+    rows.splice(at, 0, { after, cells: Array<CellInput | null>(columnCount).fill(null) })
     this.commitStaged(tabId, { drafts: rows, edits: this.stagedEdits(tabId) })
   }
 
@@ -182,7 +185,7 @@ export class QueriesController implements ReactiveController {
     this.commitStaged(tabId, { drafts: [...this.stagedDrafts(tabId), ...drafts], edits: this.stagedEdits(tabId) })
   }
 
-  setDraftCell(tabId: string, index: number, col: number, value: string) {
+  setDraftCell(tabId: string, index: number, col: number, value: CellInput) {
     const rows = this.drafts.get(tabId)
     if (!rows?.[index] || col < 0 || col >= rows[index].cells.length) return
     const nextCells = [...rows[index].cells]
@@ -207,12 +210,12 @@ export class QueriesController implements ReactiveController {
   // --- pending cell edits ---------------------------------------------------
 
   /** The tab's staged edits as a lookup map ("row:col" → value); empty when none. */
-  editsFor(tabId: string | null): ReadonlyMap<string, string> {
+  editsFor(tabId: string | null): ReadonlyMap<string, CellInput> {
     return (tabId ? this.edits.get(tabId) : undefined) ?? NO_EDITS
   }
 
   /** The tab's staged edits as a flat list, for building the UPDATE. */
-  editsList(tabId: string | null): Array<{ row: number; col: number; value: string }> {
+  editsList(tabId: string | null): Array<{ row: number; col: number; value: CellInput }> {
     const map = tabId ? this.edits.get(tabId) : undefined
     if (!map) return []
     return [...map.entries()].map(([key, value]) => {
@@ -221,7 +224,7 @@ export class QueriesController implements ReactiveController {
     })
   }
 
-  setEdit(tabId: string, row: number, col: number, value: string) {
+  setEdit(tabId: string, row: number, col: number, value: CellInput) {
     const inner = new Map(this.stagedEdits(tabId))
     inner.set(`${row}:${col}`, value)
     this.commitStaged(tabId, { drafts: this.stagedDrafts(tabId), edits: inner })
@@ -240,9 +243,9 @@ export class QueriesController implements ReactiveController {
   applyFill(
     tabId: string,
     changes: {
-      edits: Array<{ row: number; col: number; value: string }>
+      edits: Array<{ row: number; col: number; value: CellInput }>
       clears: Array<{ row: number; col: number }>
-      draftCells: Array<{ index: number; col: number; value: string }>
+      draftCells: Array<{ index: number; col: number; value: CellInput }>
     },
   ) {
     const inner = new Map(this.stagedEdits(tabId))
@@ -281,8 +284,8 @@ export class QueriesController implements ReactiveController {
     return this.drafts.get(tabId) ?? []
   }
 
-  private stagedEdits(tabId: string): Map<string, string> {
-    return this.edits.get(tabId) ?? new Map<string, string>()
+  private stagedEdits(tabId: string): Map<string, CellInput> {
+    return this.edits.get(tabId) ?? new Map<string, CellInput>()
   }
 
   // Writes a tab's staged state into the top-level maps, dropping empty entries

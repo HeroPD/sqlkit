@@ -1,12 +1,12 @@
 // Rows a query buffers in the main process; the renderer pages through these on
 // demand (see result-sessions.ts) instead of receiving them all at once.
-// `truncated` flags a result larger than this cap. Server drivers stop a safe
-// single SELECT and mark rowCountExact=false; scripts may still know the full
-// count. Kept in its own module so the SQLite
-// worker can import it without pulling in the rest of the driver graph.
+// `truncated` flags a result larger than these caps. Kept in its own module so
+// the SQLite worker can import it without pulling in the rest of the driver graph.
 export const MAX_BUFFERED_ROWS = 50_000
 export const MAX_BUFFERED_BYTES = 32 * 1024 * 1024
 export const MAX_CELL_BYTES = 1024 * 1024
+// A single structured-clone row must always fit inside the 2 MB IPC page cap.
+export const MAX_BUFFERED_ROW_BYTES = 1536 * 1024
 
 const utf8Bytes = (value: string) => Buffer.byteLength(value, 'utf8')
 const bigintReplacer = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value
@@ -14,6 +14,20 @@ const bigintReplacer = (_key: string, value: unknown): unknown => typeof value =
 export function boundedRow(row: unknown[], usedBytes: number): { row: unknown[]; bytes: number; truncated: boolean } | null {
   let bytes = 0
   let truncated = false
+  const overhead = 16 * (row.length + 1)
+  const valueBudget = Math.max(0, Math.min(MAX_CELL_BYTES, Math.floor((MAX_BUFFERED_ROW_BYTES - overhead) / Math.max(1, row.length))))
+  const truncateText = (value: string, label: string) => {
+    const suffix = `\n… [${label} truncated by SqlKit]`
+    if (valueBudget <= utf8Bytes(suffix)) return ''
+    let low = 0
+    let high = Math.min(value.length, valueBudget)
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2)
+      if (utf8Bytes(value.slice(0, middle)) + utf8Bytes(suffix) <= valueBudget) low = middle
+      else high = middle - 1
+    }
+    return value.slice(0, low) + suffix
+  }
   const bounded = row.map((value) => {
     if (typeof value === 'bigint') {
       bytes += 16
@@ -21,17 +35,25 @@ export function boundedRow(row: unknown[], usedBytes: number): { row: unknown[];
     }
     if (typeof value === 'string') {
       const size = utf8Bytes(value)
-      bytes += Math.min(size, MAX_CELL_BYTES)
-      if (size <= MAX_CELL_BYTES) return value
+      if (size <= valueBudget) {
+        bytes += size
+        return value
+      }
       truncated = true
-      return `${value.slice(0, Math.min(value.length, MAX_CELL_BYTES / 2))}\n… [cell truncated by SqlKit]`
+      const limited = truncateText(value, 'cell')
+      bytes += utf8Bytes(limited)
+      return limited
     }
     if (value instanceof Uint8Array) {
       const size = value.byteLength
-      bytes += Math.min(size, MAX_CELL_BYTES)
-      if (size <= MAX_CELL_BYTES) return value
+      if (size <= valueBudget) {
+        bytes += size
+        return value
+      }
       truncated = true
-      return value.slice(0, MAX_CELL_BYTES)
+      const limited = value.slice(0, valueBudget)
+      bytes += limited.byteLength
+      return limited
     }
     if (value && typeof value === 'object') {
       let encoded: string
@@ -41,14 +63,19 @@ export function boundedRow(row: unknown[], usedBytes: number): { row: unknown[];
         encoded = '[unserializable value]'
       }
       const size = utf8Bytes(encoded)
-      bytes += Math.min(size, MAX_CELL_BYTES)
-      if (size <= MAX_CELL_BYTES) return value
+      if (size <= valueBudget) {
+        bytes += size
+        return value
+      }
       truncated = true
-      return `${encoded.slice(0, MAX_CELL_BYTES / 2)}\n… [cell truncated by SqlKit]`
+      const limited = truncateText(encoded, 'value')
+      bytes += utf8Bytes(limited)
+      return limited
     }
     bytes += 16
     return value
   })
+  bytes += overhead
   if (usedBytes + bytes > MAX_BUFFERED_BYTES) return null
   return { row: bounded, bytes, truncated }
 }
