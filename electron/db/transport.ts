@@ -28,7 +28,9 @@ const remoteTarget = (profile: ConnectionProfile) => ({
 
 const usesTunnel = (profile: ConnectionProfile) => profile.engine !== 'sqlite' && profile.ssh?.enabled === true
 
-const approveFirstUse = (hostId: string, fingerprint: string) => dialog.showMessageBoxSync({
+// Async so the prompt never blocks the main process; openSshTunnel asks before
+// any handshake is in flight, so the user can take their time verifying.
+const approveFirstUse = async (hostId: string, fingerprint: string) => (await dialog.showMessageBox({
   type: 'warning',
   title: 'Verify SSH host key',
   message: `Trust this SSH host key for ${hostId}?`,
@@ -37,7 +39,7 @@ const approveFirstUse = (hostId: string, fingerprint: string) => dialog.showMess
   defaultId: 0,
   cancelId: 0,
   noLink: true,
-}) === 1
+})).response === 1
 
 // Resolve the transport for a connection: open an SSH tunnel if the profile
 // asks for one, then report the host/port a driver should actually dial. The

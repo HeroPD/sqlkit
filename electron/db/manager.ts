@@ -58,10 +58,17 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     if (!active) return
     remove(profileId)
     sessions.closeProfile(profileId)
-    await active.driver?.cancel?.().catch(() => {})
-    const closing = active.driver?.disconnect().catch(() => {})
-    if (closing) await Promise.race([closing, new Promise<void>((resolve) => setTimeout(resolve, 3000))])
-    await active.tunnel?.close().catch(() => {})
+    // One deadline over cancel + disconnect + tunnel close: cancel() dials an
+    // out-of-band connection (8s connect timeout), so on a dead network an
+    // uncapped sequence would hold the pools and tunnel long past the cap.
+    // Past the deadline the teardown keeps running detached; each step
+    // swallows its own error, so nothing rejects unhandled.
+    const teardown = (async () => {
+      await active.driver?.cancel?.().catch(() => {})
+      await active.driver?.disconnect().catch(() => {})
+      await active.tunnel?.close().catch(() => {})
+    })()
+    await Promise.race([teardown, new Promise<void>((resolve) => setTimeout(resolve, 3000))])
   }
 
   async function connect(profile: ConnectionProfile): Promise<ConnectResult> {

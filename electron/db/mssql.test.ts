@@ -4,7 +4,7 @@ import { writeFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { ConnectionProfile } from '../../src/electron'
-import { mssqlTls, mssqlVersion, normalizeMssqlRow } from './mssql'
+import { mssqlTls, mssqlVersion, normalizeMssqlRow, toBindable } from './mssql'
 
 describe('mssqlVersion', () => {
   it('shortens the @@version banner to product and year', () => {
@@ -66,5 +66,28 @@ describe('normalizeMssqlRow', () => {
       [new Date('2026-07-10T00:00:00Z')],
       [{ name: 'at', type: sql.DateTimeOffset, scale: 7 }],
     )).toThrow(/original offset is discarded/)
+  })
+})
+
+describe('toBindable', () => {
+  it('converts Uint8Array (post-IPC binary) to Buffer so node-mssql infers VarBinary', () => {
+    const bytes = new Uint8Array([1, 2, 255])
+    const bound = toBindable(bytes)
+    expect(Buffer.isBuffer(bound)).toBe(true)
+    expect([...(bound as Buffer)]).toEqual([1, 2, 255])
+  })
+
+  it('respects byte offsets into a shared ArrayBuffer', () => {
+    const backing = new Uint8Array([9, 9, 1, 2, 3, 9]).buffer
+    const view = new Uint8Array(backing, 2, 3)
+    expect([...(toBindable(view) as Buffer)]).toEqual([1, 2, 3])
+  })
+
+  it('passes Buffers and non-binary values through untouched', () => {
+    const buffer = Buffer.from([7])
+    expect(toBindable(buffer)).toBe(buffer)
+    expect(toBindable('x')).toBe('x')
+    expect(toBindable(42n)).toBe(42n)
+    expect(toBindable(null)).toBeNull()
   })
 })

@@ -79,6 +79,17 @@ export function supportsOptimisticComparison(engine: Engine, column: ColumnRef |
 const isTextType = (column: ColumnRef | undefined) =>
   /^(?:n?varchar|n?char|text|tinytext|mediumtext|longtext|citext)/.test(baseType(column))
 
+const isIntegerType = (column: ColumnRef | undefined) =>
+  /^(?:big|medium|small|tiny)?int(?:eger)?\b/.test(baseType(column))
+
+// mysql2 interpolates string params as quoted literals, and MySQL compares an
+// integer column against a string constant as doubles — so adjacent BIGINTs past
+// 2^53 collide. A bigint param renders unquoted, keeping the comparison exact.
+const exactGuardValue = (engine: Engine, key: { value: unknown; columnMeta?: ColumnRef }): unknown =>
+  engine === 'mysql' && typeof key.value === 'string' && isIntegerType(key.columnMeta) && /^-?\d+$/.test(key.value)
+    ? BigInt(key.value)
+    : key.value
+
 // A null-safe, case-exact equality predicate per engine. Plain `col = ?` misses
 // case-only concurrent changes under case-insensitive collations and never
 // matches NULL, so guards built from displayed values would silently pass or fail.
@@ -93,7 +104,7 @@ const comparisonPredicate = (
   if (!supportsOptimisticComparison(engine, key.columnMeta)) {
     throw new Error(`Column ${key.name} (${key.columnMeta?.dataType ?? 'unknown type'}) cannot be compared safely for an optimistic write.`)
   }
-  const parameter = bind(key.value)
+  const parameter = bind(exactGuardValue(engine, key))
   if (engine === 'postgresql') return `${identifier} IS NOT DISTINCT FROM ${parameter}`
   if (engine === 'mysql') return isTextType(key.columnMeta)
     ? `BINARY ${identifier} <=> BINARY ${parameter}`
@@ -207,7 +218,9 @@ export function buildBatchUpdates(spec: BatchUpdateSpec): Array<ReturnType<typeo
 }
 
 export function buildInsertDefault(table: TableRef, dialect: Dialect): { sql: string; params: unknown[]; expectedRows: number } {
-  return { sql: `INSERT INTO ${quoteQualified(table, dialect)} DEFAULT VALUES`, params: [], expectedRows: 1 }
+  // MySQL/MariaDB have no DEFAULT VALUES clause; the empty column/value lists are their spelling.
+  const allDefaults = dialect.engine === 'mysql' ? '() VALUES ()' : 'DEFAULT VALUES'
+  return { sql: `INSERT INTO ${quoteQualified(table, dialect)} ${allDefaults}`, params: [], expectedRows: 1 }
 }
 
 export type InsertSpec = {

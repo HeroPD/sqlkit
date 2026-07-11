@@ -392,6 +392,14 @@ describe('sqlite driver: multi-statement', () => {
     expect(result.resultSets?.at(-1)?.rows).toEqual([[5], [6]])
   })
 
+  it('refuses params on multi-statement scripts instead of binding NULLs silently', () => {
+    const db = openDatabase(':memory:')
+    db.exec('create table p(a)')
+    expect(() => queryDatabase(db, 'insert into p values (?); insert into p values (?)', [1, 2]))
+      .toThrow(/single-statement/i)
+    expect(queryDatabase(db, 'insert into p values (?)', [7]).rowCount).toBe(1)
+  })
+
   it('does not split on a semicolon inside a string literal', async () => {
     const driver = await memoryDriver()
     await driver.query('create table notes(body)')

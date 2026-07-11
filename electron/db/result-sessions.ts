@@ -5,6 +5,11 @@ import type { QueryResult, QueryResultSet } from '../../src/electron'
 // scrolls so a big result never crosses IPC all at once.
 export const PAGE_SIZE = 200
 
+// Ceiling for one fetch request. Export/copy-all drains the whole buffer, and
+// at PAGE_SIZE that is hundreds of serial IPC round trips; larger pages stay
+// safe because every page is still capped by MAX_PAGE_BYTES.
+export const MAX_FETCH_ROWS = 5000
+
 // Bytes held across all query tabs. A renderer that forgets to close sessions
 // cannot leak unboundedly; oldest buffers are evicted until under this ceiling.
 const MAX_SESSION_BYTES = 64 * 1024 * 1024
@@ -105,7 +110,7 @@ export class ResultSessionStore {
     const session = this.sessions.get(id)
     if (!session) return null
     const safeOffset = Math.max(0, Math.trunc(offset) || 0)
-    const safeLimit = Math.min(PAGE_SIZE, Math.max(0, Math.trunc(limit) || 0))
+    const safeLimit = Math.min(MAX_FETCH_ROWS, Math.max(0, Math.trunc(limit) || 0))
     // Touch for LRU: most-recently-fetched sessions evict last.
     this.sessions.delete(id)
     this.sessions.set(id, session)

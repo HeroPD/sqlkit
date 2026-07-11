@@ -151,6 +151,12 @@ describe('buildInsertDefault', () => {
       params: [],
       expectedRows: 1,
     })
+    expect(buildInsertDefault(users, dialectFor('sqlite')).sql).toBe('INSERT INTO "public"."users" DEFAULT VALUES')
+    expect(buildInsertDefault(users, dialectFor('sqlserver')).sql).toBe('INSERT INTO [public].[users] DEFAULT VALUES')
+  })
+
+  it('uses the empty-lists spelling on MySQL, which has no DEFAULT VALUES clause', () => {
+    expect(buildInsertDefault(users, dialectFor('mysql')).sql).toBe('INSERT INTO `public`.`users` () VALUES ()')
   })
 })
 
@@ -462,5 +468,37 @@ describe('engine-aware optimistic predicates', () => {
       rows: [[{ name: 'id', value: 1 }, { name: 'payload', value: '{}', columnMeta: col({ name: 'payload', dataType: 'json' }) }]],
       engine: 'postgresql',
     })).toThrow(/cannot be compared safely/i)
+  })
+
+  it('binds MySQL integer-column guard strings as bigint so they compare exactly, not as doubles', () => {
+    const meta = col({ name: 'id', dataType: 'bigint unsigned' })
+    const { params } = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: '9223372036854775807', columnMeta: meta }]],
+      engine: 'mysql',
+    })
+    expect(params).toEqual([9223372036854775807n])
+  })
+
+  it('leaves non-integer and non-MySQL guard strings untouched', () => {
+    const decimalGuard = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'price', value: '12.50', columnMeta: col({ name: 'price', dataType: 'decimal(10,2)' }) }]],
+      engine: 'mysql',
+    })
+    expect(decimalGuard.params).toEqual(['12.50'])
+    // 'point' contains "int" but is not an integer family type.
+    const pointGuard = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: '7', columnMeta: col({ name: 'loc', dataType: 'point' }) }]],
+      engine: 'mysql',
+    })
+    expect(pointGuard.params).toEqual(['7'])
+    const pgGuard = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: '9223372036854775807', columnMeta: col({ name: 'id', dataType: 'bigint' }) }]],
+      engine: 'postgresql',
+    })
+    expect(pgGuard.params).toEqual(['9223372036854775807'])
   })
 })

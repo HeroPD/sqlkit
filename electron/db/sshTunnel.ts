@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { SshConfig } from '../../src/electron'
 import type { Tunnel } from './transport'
-import { makeHostVerifier } from './knownHosts'
+import { hasPinnedHostKey, hostKeyFingerprint, knownHostsPath, makeHostVerifier, trustHostKey } from './knownHosts'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
@@ -41,19 +41,63 @@ function buildConnectConfig(ssh: SshConfig): ConnectConfig {
   return config
 }
 
+// Fetches the host key on a throwaway handshake: capture it in the verifier,
+// refuse the connection, surface the key. Runs before auth, so credentials are
+// never sent. Connect failures reject; the refusal error after capture doesn't.
+const probeHostKey = (config: ConnectConfig): Promise<Buffer> =>
+  new Promise((resolve, reject) => {
+    const client = new Client()
+    let captured = false
+    client.on('error', (error) => {
+      if (!captured) reject(error)
+    })
+    client.connect({
+      ...config,
+      hostVerifier: (key: Buffer) => {
+        captured = true
+        resolve(Buffer.from(key))
+        client.end()
+        return false
+      },
+    })
+  })
+
+// First-use approval, done before the real handshake: ssh2's hostVerifier runs
+// mid-handshake under readyTimeout, so prompting there both stalled the whole
+// main process (sync dialog) and timed the connection out while the user was
+// still reading the fingerprint. Probing first keeps the prompt unhurried.
+async function ensureHostKeyApproved(
+  config: ConnectConfig,
+  approveFirstUse?: (hostId: string, fingerprint: string) => Promise<boolean> | boolean,
+): Promise<void> {
+  const hostId = `${config.host as string}:${config.port as number}`
+  if (!approveFirstUse || hasPinnedHostKey(knownHostsPath(), hostId)) return
+  const key = await probeHostKey(config)
+  if (!(await approveFirstUse(hostId, hostKeyFingerprint(key)))) {
+    throw new Error(`Unknown SSH host key for ${hostId}: ${hostKeyFingerprint(key)}. Verify the fingerprint with the server administrator before trusting it.`)
+  }
+  try {
+    trustHostKey(knownHostsPath(), hostId, key)
+  } catch (error) {
+    throw new Error(`Could not save the trusted SSH host key for ${hostId}: ${(error as Error).message}`, { cause: error })
+  }
+}
+
 // Opens an SSH connection and forwards a random local port to
 // (remoteHost, remotePort). Resolves once the local TCP server is listening;
 // callers dial 127.0.0.1:localPort. close() destroys every forwarded socket
 // so teardown never waits on in-flight streams. `onError` fires if the SSH
 // session drops after it was established (it never double-reports a connect
 // failure, which surfaces through the returned promise).
-export function openSshTunnel(
+export async function openSshTunnel(
   ssh: SshConfig,
   remoteHost: string,
   remotePort: number,
   onError: (message: string) => void,
-  approveFirstUse?: (hostId: string, fingerprint: string) => boolean,
+  approveFirstUse?: (hostId: string, fingerprint: string) => Promise<boolean> | boolean,
 ): Promise<Tunnel> {
+  const approvedConfig = buildConnectConfig(ssh)
+  await ensureHostKeyApproved(approvedConfig, approveFirstUse)
   return new Promise((resolve, reject) => {
     const client = new Client()
     const sockets = new Set<net.Socket>()
@@ -123,14 +167,13 @@ export function openSshTunnel(
     })
 
     try {
-      const config = buildConnectConfig(ssh)
+      const config = { ...approvedConfig }
       // Pin the bastion's host key on first use and reject if it ever changes;
       // without this ssh2 accepts any key, leaving the tunnel open to MITM.
       config.hostVerifier = makeHostVerifier(
         config.host as string,
         config.port as number,
         (message) => { rejectionMessage = message },
-        approveFirstUse,
       )
       client.connect(config)
     } catch (error) {

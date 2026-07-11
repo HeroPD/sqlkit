@@ -37,6 +37,8 @@ export function sslOptions(profile: ConnectionProfile): boolean | ConnectionOpti
 // cost nothing. Queries and table listings always target the active child.
 // Dials the endpoint, not the profile — the transport layer may have
 // rewritten host/port to an SSH tunnel's local end.
+type RunningEntry = { executionId?: string; pid: number | null; cancelRequested: boolean }
+
 export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpoint, events: DriverEvents): Driver {
   let pools: Map<string, pg.Pool> | null = null
   let childNames: string[] = []
@@ -45,7 +47,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   // tabs can run on one connection at once, so this is a set rather than a
   // single slot — a single slot let a second run clobber the first's cancel
   // target, and the first's completion then cleared it.
-  const running = new Set<{ executionId?: string; pid: number | null; cancelRequested: boolean }>()
+  const running = new Set<RunningEntry>()
   const ssl = sslOptions(profile)
   const losslessTypes = new pg.TypeOverrides()
 
@@ -54,7 +56,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   // timestamp-without-zone in the workstation timezone). Keep temporal wire
   // values as text. Array forms remain PostgreSQL array literals for the same
   // reason; callers can inspect them without a lossy intermediate conversion.
-  for (const oid of [1082, 1083, 1114, 1184, 1186, 1266, 1115, 1182, 1183, 1185, 1187, 1270]) {
+  // numeric[] (1231) is included: pg-types runs its elements through parseFloat,
+  // silently rounding past 2^53, while scalar numeric already arrives as text.
+  for (const oid of [1082, 1083, 1114, 1184, 1186, 1266, 1115, 1182, 1183, 1185, 1187, 1270, 1231]) {
     losslessTypes.setTypeParser(oid, (value) => value)
   }
 
@@ -101,7 +105,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     await client.query('DISCARD ALL')
   }
 
-  const cancelBackends = async (pids: number[], database: string) => {
+  const cancelBackends = async (entries: RunningEntry[], database: string) => {
     const client = new pg.Client({
       host: endpoint.host,
       port: endpoint.port,
@@ -113,8 +117,12 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     })
     try {
       await client.connect()
-      return await Promise.all(pids.map((pid) => client
-        .query<{ ok: boolean }>('select pg_cancel_backend($1) as ok', [pid])
+      // The dial above takes real time; a targeted query may have finished and
+      // returned its client (same backend PID) to the pool for another query.
+      // Re-check membership so the late cancel can't hit that innocent successor.
+      const live = entries.filter((entry) => running.has(entry) && entry.pid !== null)
+      return await Promise.all(live.map((entry) => client
+        .query<{ ok: boolean }>('select pg_cancel_backend($1) as ok', [entry.pid])
         .then((result) => result.rows[0]?.ok === true)
         .catch(() => false)))
     } finally {
@@ -170,12 +178,16 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         client = await pool.connect()
         entry.pid = (client as unknown as { processID?: number }).processID ?? null
         if (entry.cancelRequested) {
+          running.delete(entry)
           client.release()
           released = true
           throw new Error('Query cancelled.')
         }
         const result = await streamQuery(client, finalSql, params, started)
         await resetUserSession(client)
+        // Leave `running` before the client re-enters the pool, so a late
+        // cancel can never target this backend once another query has it.
+        running.delete(entry)
         client.release()
         released = true
         return result
@@ -209,6 +221,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           const affected = result.rowCount ?? 0
           if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
             await client.query('ROLLBACK')
+            running.delete(entry)
             client.release()
             return {
               success: false,
@@ -220,6 +233,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           }
         }
         await client.query('COMMIT')
+        running.delete(entry)
         client.release()
         return { success: true }
       } catch (error) {
@@ -248,6 +262,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           await client.query(statements[index]!)
         }
         await client.query('COMMIT')
+        running.delete(entry)
         client.release()
         return { success: true }
       } catch (error) {
@@ -299,13 +314,13 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const entries = [...running].filter((entry) => executionId === undefined || entry.executionId === executionId)
       const queued = entries.filter((entry) => entry.pid === null)
       for (const entry of queued) entry.cancelRequested = true
-      const pids = entries.map((entry) => entry.pid).filter((pid): pid is number => pid !== null)
+      const targets = entries.filter((entry) => entry.pid !== null)
       // Nothing running, or running but no PID captured yet (queued checkout):
       // either way there's nothing to target, so report it honestly.
-      if (!pids.length) return { running: entries.length, cancelled: queued.length }
+      if (!targets.length) return { running: entries.length, cancelled: queued.length }
       // pg_cancel_backend returns false for a PID that's already gone or that
       // we lack permission to signal; count only the ones it actually hit.
-      const sent = await cancelBackends(pids, active)
+      const sent = await cancelBackends(targets, active)
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 

@@ -61,33 +61,27 @@ export function trustHostKey(file: string, hostId: string, key: Buffer): void {
   writeStore(file, store)
 }
 
-const storePath = () => path.join(app.getPath('userData'), 'known_hosts.json')
+export const hasPinnedHostKey = (file: string, hostId: string): boolean =>
+  readStore(file)[hostId] !== undefined
+
+export const knownHostsPath = () => path.join(app.getPath('userData'), 'known_hosts.json')
 
 // Builds an ssh2 hostVerifier keyed on host:port. Returns true to accept the
-// handshake; on a pinned-key mismatch it calls onReject with a message a human
-// can act on and returns false so ssh2 aborts the connection.
+// handshake; otherwise calls onReject with a message a human can act on and
+// returns false so ssh2 aborts. First-use approval happens before the real
+// connect (see openSshTunnel) — mid-handshake there is no one left to ask.
 export function makeHostVerifier(
   host: string,
   port: number,
   onReject: (message: string) => void,
-  approveFirstUse?: (hostId: string, fingerprint: string) => boolean,
 ) {
   const hostId = `${host}:${port}`
   return (key: Buffer): boolean => {
-    const outcome = verifyHostKey(storePath(), hostId, key)
+    const outcome = verifyHostKey(knownHostsPath(), hostId, key)
     if (outcome.trusted) return true
     if (outcome.firstUse) {
-      if (!approveFirstUse?.(hostId, outcome.presented)) {
-        onReject(`Unknown SSH host key for ${hostId}: ${outcome.presented}. Verify the fingerprint with the server administrator before trusting it.`)
-        return false
-      }
-      try {
-        trustHostKey(storePath(), hostId, key)
-        return true
-      } catch (error) {
-        onReject(`Could not save the trusted SSH host key for ${hostId}: ${(error as Error).message}`)
-        return false
-      }
+      onReject(`Unknown SSH host key for ${hostId}: ${outcome.presented}. Verify the fingerprint with the server administrator before trusting it.`)
+      return false
     }
     onReject(
       `Host key verification failed for ${hostId}: the server presented ${outcome.presented} but ` +

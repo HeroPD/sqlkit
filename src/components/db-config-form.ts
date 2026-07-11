@@ -186,7 +186,7 @@ export class DbConfigForm extends LitElement {
           html`
             <select @change=${(e: Event) => this._patchSsl(ssl, { mode: (e.target as HTMLSelectElement).value as SslMode })}>
               <option value="disable" ?selected=${ssl.mode === 'disable'}>Disable</option>
-              <option value="require" ?selected=${ssl.mode === 'require'}>Require encryption</option>
+              <option value="require" ?selected=${ssl.mode === 'require'}>Require encryption (no certificate check)</option>
               <option value="verify-ca" ?selected=${ssl.mode === 'verify-ca'} ?disabled=${draft.engine === 'sqlserver'}>Verify CA</option>
               <option value="verify-full" ?selected=${ssl.mode === 'verify-full'}>Verify full</option>
             </select>

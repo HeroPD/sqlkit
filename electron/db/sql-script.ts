@@ -28,24 +28,40 @@ export function splitTopLevelStatements(sql: string, engine?: Engine): string[] 
 export function assertSelfContainedTransaction(sql: string, engine: Engine) {
   let depth = 0
   let sawControl = false
-  for (const statement of splitTopLevelStatements(sql, engine)) {
-    const head = maskSql(statement, engine).trimStart().toLowerCase()
-    const begins = engine === 'sqlserver'
-      ? /^begin\s+tran(?:saction)?\b/.test(head)
-      : /^(?:begin(?:\s+(?:work|transaction))?|start\s+transaction)\b/.test(head)
-    const closes = /^commit(?:\s+(?:work|transaction|tran))?\b/.test(head)
-      || (engine === 'postgresql' && /^end(?:\s+(?:work|transaction))?\b/.test(head))
-      || (/^rollback(?:\s+(?:work|transaction|tran))?\b/.test(head) && !/^rollback\s+to\b/.test(head))
-    if (begins) {
-      sawControl = true
+  const apply = (control: 'begin' | 'close') => {
+    sawControl = true
+    if (control === 'begin') {
       depth += 1
-    } else if (closes) {
-      sawControl = true
-      if (depth === 0) {
-        throw new Error('No transaction is active in this query run. Run BEGIN and COMMIT/ROLLBACK together in one selection.')
-      }
+    } else if (depth === 0) {
+      throw new Error('No transaction is active in this query run. Run BEGIN and COMMIT/ROLLBACK together in one selection.')
+    } else {
       depth -= 1
     }
+  }
+  // SQLite spells COMMIT as END too, but trigger bodies (BEGIN stmt; … END)
+  // split at their inner semicolons here — their END is not a commit.
+  const endIsCommit = engine === 'postgresql'
+    || (engine === 'sqlite' && !/\bcreate\s+(?:temp(?:orary)?\s+)?trigger\b/i.test(maskSql(sql, engine)))
+  for (const statement of splitTopLevelStatements(sql, engine)) {
+    const masked = maskSql(statement, engine).toLowerCase()
+    if (engine === 'sqlserver') {
+      // T-SQL semicolons are optional, so one split statement can hold the whole
+      // BEGIN TRAN … COMMIT script — scan bodies for control tokens, in order.
+      const controls = masked.matchAll(/\b(?:(begin\s+tran(?:saction)?)|commit(?:\s+(?:tran(?:saction)?|work))?|rollback(?:\s+(?:tran(?:saction)?|work))?)\b/g)
+      for (const match of controls) apply(match[1] ? 'begin' : 'close')
+      continue
+    }
+    // BEGIN/COMMIT are standalone semicolon-separated statements on these
+    // engines, so heads suffice — bodies would false-positive on CASE … END.
+    const head = masked.trimStart()
+    const begins = /^(?:begin(?:\s+(?:work|transaction))?|start\s+transaction)\b/.test(head)
+      // MariaDB's anonymous compound block, not a transaction start.
+      && !/^begin\s+not\s+atomic\b/.test(head)
+    const closes = /^commit(?:\s+(?:work|transaction))?\b/.test(head)
+      || (endIsCommit && /^end(?:\s+(?:work|transaction))?\b/.test(head))
+      || (/^rollback(?:\s+(?:work|transaction))?\b/.test(head) && !/^rollback\s+to\b/.test(head))
+    if (begins) apply('begin')
+    else if (closes) apply('close')
   }
   if (sawControl && depth !== 0) {
     throw new Error('Transactions must begin and commit or roll back in the same query run; pooled connections cannot preserve them across runs.')

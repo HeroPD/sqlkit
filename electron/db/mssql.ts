@@ -18,6 +18,14 @@ const SYSTEM_DBS = ['tempdb', 'model', 'msdb']
 
 const isCancelled = (error: unknown) => (error as { code?: string }).code === 'ECANCEL'
 
+// Binary row values cross Electron IPC as Uint8Array, which node-mssql's type
+// inference doesn't recognize (only Buffer maps to VarBinary) — untyped it would
+// bind as NVarChar and break varbinary comparisons/writes.
+export const toBindable = (value: unknown): unknown =>
+  value instanceof Uint8Array && !Buffer.isBuffer(value)
+    ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+    : value
+
 const mssqlTypeExpression = `concat(
   case when ty.is_user_defined = 1
        then concat(quotename(schema_name(ty.schema_id)), '.', quotename(ty.name))
@@ -174,7 +182,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   const openUserPool = async (childDb?: string | null) => makePool(databaseForQuery(childDb), 1).connect()
 
   const bind = (request: sql.Request, params: unknown[]) => {
-    params.forEach((value, index) => request.input(`p${index + 1}`, value))
+    params.forEach((value, index) => request.input(`p${index + 1}`, toBindable(value)))
     return request
   }
 

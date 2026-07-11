@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { QueryResult } from '../../src/electron'
-import { PAGE_SIZE, ResultSessionStore } from './result-sessions'
+import { MAX_FETCH_ROWS, PAGE_SIZE, ResultSessionStore } from './result-sessions'
 
 const result = (rowCount: number): QueryResult => ({
   columns: ['id'],
@@ -93,13 +93,13 @@ describe('ResultSessionStore.fetch', () => {
     expect(store.fetch('nope', 0, 10)).toBeNull()
   })
 
-  it('clamps negative offsets and oversized limits to one page', () => {
+  it('clamps negative offsets and caps oversized limits at MAX_FETCH_ROWS', () => {
     const store = new ResultSessionStore(seqIds())
-    const out = store.open('p1', result(PAGE_SIZE * 3))
+    const out = store.open('p1', result(MAX_FETCH_ROWS + 100))
 
-    const rows = store.fetch(out.sessionId!, -10, PAGE_SIZE * 10)
+    const rows = store.fetch(out.sessionId!, -10, MAX_FETCH_ROWS * 10)
 
-    expect(rows).toHaveLength(PAGE_SIZE)
+    expect(rows).toHaveLength(MAX_FETCH_ROWS)
     expect(rows?.[0]).toEqual([0])
   })
 })

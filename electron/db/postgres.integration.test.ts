@@ -152,6 +152,8 @@ describeDb('postgres driver (integration)', () => {
         '2026-07-09 19:04:05.123456+00',
         '12345678901234567890.1234',
       ])
+      const arrays = await driver.query("select array[12345678901234567890.1234::numeric, 2]")
+      expect(arrays.rows[0]).toEqual(['{12345678901234567890.1234,2}'])
     } finally {
       await driver.disconnect()
     }

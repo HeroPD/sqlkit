@@ -32,6 +32,10 @@ export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam
   // Single statement (the run-at-caret case): prepare and run, binding params.
   if (statements.length === 1) return stamp(run(db.prepare(statements[0]!), params, budget))
 
+  // SQLite treats unbound ? placeholders as NULL — running a parameterized
+  // script statement-by-statement with no binds would silently write NULLs.
+  if (params.length > 0) throw new Error('Parameters can only be bound to a single-statement SQLite query.')
+
   // CREATE TRIGGER bodies carry their own semicolons that a top-level split
   // would break, so let exec run the whole script authoritatively. exec returns
   // no rows; if the script ends with a read (a verification SELECT), re-run just

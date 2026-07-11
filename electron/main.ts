@@ -43,6 +43,7 @@ import {
   stopWorkspaceWatcher,
 } from './files'
 import { createConnectionManager, testConnection, type ConnectionManager } from './db/manager'
+import { MAX_FETCH_ROWS } from './db/result-sessions'
 import { testSshTunnel } from './db/transport'
 import type { BatchStatement, ConnectionProfile, ConnectionStatus, DbObject, DbObjectKind, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
 import {
@@ -66,6 +67,10 @@ if (smokeTest) app.commandLine.appendSwitch('no-sandbox')
 const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
 const workspacePaths = new Map<number, string>()
 const dbManagers = new Map<number, ConnectionManager>()
+// Disconnects still settling after their manager left dbManagers (window
+// close); before-quit awaits these too, or quitting right after closing the
+// last window would exit mid-teardown.
+const pendingDisconnects = new Set<Promise<void>>()
 let quitting = false
 const IPC_PATH_LIMIT = 20_000
 const IPC_FILE_LIMIT = 64 * 1024 * 1024
@@ -181,7 +186,10 @@ function cleanupWindow(contentsId: number) {
   stopWorkspaceWatcher(contentsId)
   const manager = dbManagers.get(contentsId)
   dbManagers.delete(contentsId)
-  void manager?.disconnectAll()
+  if (!manager) return
+  const closing = manager.disconnectAll().catch(() => {})
+  pendingDisconnects.add(closing)
+  void closing.finally(() => pendingDisconnects.delete(closing))
 }
 
 function dbManagerFor(contents: WebContents) {
@@ -539,7 +547,7 @@ function registerDbIpc() {
     existingManager(event)?.fetchRows(
       stringValue(sessionId, 'Session id', 200),
       nonNegativeInteger(offset, 'Row offset', Number.MAX_SAFE_INTEGER),
-      nonNegativeInteger(limit, 'Row limit', 200),
+      nonNegativeInteger(limit, 'Row limit', MAX_FETCH_ROWS),
     ) ?? { success: false as const, error: 'No active session' },
   )
   ipcMain.handle('db:close-session', (event, sessionId: string) =>
@@ -628,7 +636,10 @@ function registerDbIpc() {
     quitting = true
     event.preventDefault()
     stopWorkspaceWatcher()
-    const closed = Promise.all([...dbManagers.values()].map((active) => active.disconnectAll().catch(() => {})))
+    const closed = Promise.all([
+      ...[...dbManagers.values()].map((active) => active.disconnectAll().catch(() => {})),
+      ...pendingDisconnects,
+    ])
     const deadline = new Promise<void>((resolve) => setTimeout(resolve, 3000))
     void Promise.race([closed, deadline]).finally(() => app.quit())
   })

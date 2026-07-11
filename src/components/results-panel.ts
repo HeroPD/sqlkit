@@ -203,6 +203,10 @@ export class ResultsPanel extends LitElement {
 
   @state() private _resizing: { col: number; startX: number; startWidth: number; moved: boolean } | null = null
 
+  // Non-null while export/copy-all pages the buffer out of the main process;
+  // rendered in the status span so a long drain doesn't look like a dead click.
+  @state() private _draining: { done: number; total: number } | null = null
+
   // Rendered column geometry (leading # column + each data column's width), so
   // keyboard nav can scroll a selected column into view without re-measuring.
   private _colLayout: { numColWidth: number; widths: number[] } | null = null
@@ -241,6 +245,10 @@ export class ResultsPanel extends LitElement {
     this._record = null
     this._displayCache = null
     this._widthsCache = null
+    // Dragged widths belong to the set they were dragged on; applied by index
+    // to another set they'd be wrong and would disable its auto-fill.
+    this._widthOverrides = new Map()
+    this._colLayout = null
     this._scrollTop = 0
     this._resetScroll = true
     this.requestUpdate()
@@ -733,13 +741,21 @@ export class ResultsPanel extends LitElement {
     const need = Math.min(limit ?? total, total)
     if (result.sessionId === undefined || result.rows.length >= need) return result.rows
     const rows: unknown[][] = []
-    while (rows.length < need) {
-      const response = await window.sqlkit.fetchRows(result.sessionId, rows.length, Math.min(200, need - rows.length))
-      if (!response.success) return result.rows.slice(0, need)
-      if (response.rows.length === 0) break
-      rows.push(...response.rows)
+    this._draining = { done: 0, total: need }
+    try {
+      while (rows.length < need) {
+        // 5000 mirrors MAX_FETCH_ROWS in the main process; pages stay byte-capped
+        // there, so a request can return fewer rows and the loop continues.
+        const response = await window.sqlkit.fetchRows(result.sessionId, rows.length, Math.min(5000, need - rows.length))
+        if (!response.success) return result.rows.slice(0, need)
+        if (response.rows.length === 0) break
+        rows.push(...response.rows)
+        this._draining = { done: rows.length, total: need }
+      }
+      return rows
+    } finally {
+      this._draining = null
     }
-    return rows
   }
 
   // One delegated listener instead of one per cell. The data row index is read
@@ -1290,6 +1306,9 @@ export class ResultsPanel extends LitElement {
   }
 
   private _status() {
+    if (this._draining) {
+      return html`Preparing ${this._draining.done.toLocaleString()} of ${this._draining.total.toLocaleString()} rows…`
+    }
     if (this.run.phase !== 'done') return ''
     const result = this._shownResult()
     if (!result) return ''

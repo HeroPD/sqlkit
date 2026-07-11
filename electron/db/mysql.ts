@@ -43,12 +43,14 @@ export function mysqlVersion(raw: string): string {
 // and metadata always target the active child via the pool's default schema.
 // Dials the endpoint — the transport layer may have rewritten host/port to an
 // SSH tunnel's local end.
+type RunningEntry = { executionId?: string; threadId: number | null; cancelRequested: boolean }
+
 export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint, events: DriverEvents): Driver {
   let pools: Map<string, mysql.Pool> | null = null
   let childNames: string[] = []
   let active = ''
   // Thread ids of in-flight user statements, so cancel() can KILL QUERY them.
-  const running = new Set<{ executionId?: string; threadId: number | null; cancelRequested: boolean }>()
+  const running = new Set<RunningEntry>()
   // The tls ConnectionOptions shape is what mysql2 forwards to tls.connect;
   // its own SslOptions type is just narrower.
   const tls = sslOptions(profile)
@@ -105,7 +107,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
   const dialect = dialectFor(profile.engine)
 
-  const killQueries = async (ids: number[], database: string) => {
+  const killQueries = async (entries: RunningEntry[], database: string) => {
     const conn = await mysql.createConnection({
       host: endpoint.host,
       port: endpoint.port,
@@ -116,7 +118,11 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       connectTimeout: 8000,
     })
     try {
-      return await Promise.all(ids.map((id) => conn.query(`kill query ${id}`).then(() => true).catch(() => false)))
+      // The dial above takes real time; a targeted query may have finished and
+      // returned its connection (same thread id) to the pool for another query.
+      // Re-check membership so the late KILL can't hit that innocent successor.
+      const live = entries.filter((entry) => running.has(entry) && entry.threadId !== null)
+      return await Promise.all(live.map((entry) => conn.query(`kill query ${entry.threadId}`).then(() => true).catch(() => false)))
     } finally {
       await conn.end().catch(() => {})
     }
@@ -172,11 +178,15 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         const raw = rawOf(conn)
         entry.threadId = raw.threadId ?? null
         if (entry.cancelRequested) {
+          running.delete(entry)
           conn.release()
           conn = null
           throw new Error('Query cancelled.')
         }
         const result = await streamQuery(raw, finalSql, params, started)
+        // Leave `running` before the connection re-enters the pool, so a late
+        // KILL QUERY can never target this thread once another query has it.
+        running.delete(entry)
         conn.release()
         conn = null
         return result
@@ -212,6 +222,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             (row) => row.engine !== null && !['InnoDB', 'NDBCLUSTER'].includes(row.engine),
           )
           if (unsafe.length) {
+            running.delete(entry)
             conn.release()
             return {
               success: false,
@@ -228,6 +239,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           const affected = (result as { affectedRows?: number }).affectedRows ?? 0
           if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
             await conn.rollback()
+            running.delete(entry)
             conn.release()
             return {
               success: false,
@@ -239,6 +251,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           }
         }
         await conn.commit()
+        running.delete(entry)
         conn.release()
         return { success: true }
       } catch (error) {
@@ -266,6 +279,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         for (index = 0; index < statements.length; index += 1) {
           await conn.query(statements[index]!)
         }
+        running.delete(entry)
         conn.release()
         return { success: true }
       } catch (error) {
@@ -317,9 +331,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const entries = [...running].filter((entry) => executionId === undefined || entry.executionId === executionId)
       const queued = entries.filter((entry) => entry.threadId === null)
       for (const entry of queued) entry.cancelRequested = true
-      const ids = entries.map((entry) => entry.threadId).filter((id): id is number => id !== null)
-      if (!ids.length) return { running: entries.length, cancelled: queued.length }
-      const sent = await killQueries(ids, active)
+      const targets = entries.filter((entry) => entry.threadId !== null)
+      if (!targets.length) return { running: entries.length, cancelled: queued.length }
+      const sent = await killQueries(targets, active)
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 

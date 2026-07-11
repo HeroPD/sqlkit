@@ -140,10 +140,12 @@ describe('results-panel multiple and paged results', () => {
     el.remove()
   })
 
-  it('fetches every page needed for export instead of silently stopping at 200 rows', async () => {
+  it('drains the full export in large pages, retrying when a page comes back short', async () => {
     const all = Array.from({ length: 450 }, (_, index) => [index])
+    // First page returns short of the requested limit (the main process caps
+    // pages by bytes); the loop must continue from where it left off.
     const fetchRows = vi.fn((_session: string, offset: number, limit: number) =>
-      Promise.resolve({ success: true as const, rows: all.slice(offset, offset + limit) }),
+      Promise.resolve({ success: true as const, rows: all.slice(offset, offset + Math.min(limit, 300)) }),
     )
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { fetchRows }
     const el = document.createElement('results-panel')
@@ -155,7 +157,9 @@ describe('results-panel multiple and paged results', () => {
       450,
     )
     expect(rows).toHaveLength(450)
-    expect(fetchRows).toHaveBeenCalledTimes(3)
+    expect(fetchRows).toHaveBeenCalledTimes(2)
+    expect(fetchRows).toHaveBeenNthCalledWith(1, 's1', 0, 450)
+    expect(fetchRows).toHaveBeenNthCalledWith(2, 's1', 300, 150)
   })
 })
 

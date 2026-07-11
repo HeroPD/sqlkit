@@ -36,6 +36,25 @@ describe('transaction safety', () => {
   it('supports PostgreSQL nested block comments', () => {
     expect(() => assertSelfContainedTransaction('/* outer /* BEGIN */ still comment */ select 1', 'postgresql')).not.toThrow()
   })
+
+  it('accepts T-SQL scripts written without semicolons', () => {
+    expect(() => assertSelfContainedTransaction('BEGIN TRAN\nupdate t set a=1\nCOMMIT', 'sqlserver')).not.toThrow()
+    expect(() => assertSelfContainedTransaction('BEGIN TRANSACTION\nupdate t set a=1\nROLLBACK TRAN', 'sqlserver')).not.toThrow()
+    expect(() => assertSelfContainedTransaction('BEGIN TRAN\nupdate t set a=1', 'sqlserver')).toThrow(/same query run/i)
+    // BEGIN TRY / CASE END are control flow, not transaction tokens.
+    expect(() => assertSelfContainedTransaction('BEGIN TRY\nselect case when 1=1 then 2 end\nEND TRY BEGIN CATCH END CATCH', 'sqlserver')).not.toThrow()
+    expect(() => assertSelfContainedTransaction("select 'COMMIT' -- COMMIT", 'sqlserver')).not.toThrow()
+  })
+
+  it('accepts SQLite END as an alias for COMMIT', () => {
+    expect(() => assertSelfContainedTransaction('BEGIN; update t set a=1; END', 'sqlite')).not.toThrow()
+    expect(() => assertSelfContainedTransaction('BEGIN; update t set a=1; END TRANSACTION', 'sqlite')).not.toThrow()
+    expect(() => assertSelfContainedTransaction('BEGIN; update t set a=1', 'sqlite')).toThrow(/same query run/i)
+  })
+
+  it('does not treat MariaDB BEGIN NOT ATOMIC blocks as transaction starts', () => {
+    expect(() => assertSelfContainedTransaction('BEGIN NOT ATOMIC\n  SELECT 1;\nEND', 'mysql')).not.toThrow()
+  })
 })
 
 describe('dialect script handling', () => {
@@ -44,6 +63,12 @@ describe('dialect script handling', () => {
       "select 'GO' as x",
       'create view v as select 1 as n',
       'select * from v',
+    ])
+  })
+
+  it('ignores GO inside T-SQL nested block comments', () => {
+    expect(splitSqlServerBatches('select 1\n/* outer /* inner */\nGO\nstill comment */\nselect 2')).toEqual([
+      'select 1\n/* outer /* inner */\nGO\nstill comment */\nselect 2',
     ])
   })
 

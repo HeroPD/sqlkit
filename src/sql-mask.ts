@@ -44,7 +44,8 @@ export function maskSql(sql: string, engine?: Engine): string {
       let p = i + 2
       let depth = 1
       while (p < sql.length && depth > 0) {
-        if (engine === 'postgresql' && sql[p] === '/' && sql[p + 1] === '*') {
+        // Postgres and T-SQL nest block comments; MySQL and SQLite do not.
+        if ((engine === 'postgresql' || engine === 'sqlserver') && sql[p] === '/' && sql[p + 1] === '*') {
           depth += 1
           p += 2
         } else if (sql[p] === '*' && sql[p + 1] === '/') {
@@ -68,7 +69,8 @@ export function maskSql(sql: string, engine?: Engine): string {
         continue
       }
     }
-    if (ch === "'" || ch === '"' || ((engine === undefined || engine === 'mysql') && ch === '`')) {
+    // SQLite accepts MySQL backticks and SQL Server brackets as identifier quotes too.
+    if (ch === "'" || ch === '"' || ((engine === undefined || engine === 'mysql' || engine === 'sqlite') && ch === '`')) {
       const postgresEscapeString = engine === 'postgresql'
         && ch === "'"
         && /[eE]/.test(sql[i - 1] ?? '')
@@ -94,7 +96,7 @@ export function maskSql(sql: string, engine?: Engine): string {
       i = p
       continue
     }
-    if ((engine === undefined || engine === 'sqlserver') && ch === '[') {
+    if ((engine === undefined || engine === 'sqlserver' || engine === 'sqlite') && ch === '[') {
       let p = i + 1
       while (p < sql.length) {
         if (sql[p] === ']' && sql[p + 1] === ']') {

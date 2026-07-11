@@ -103,6 +103,19 @@ describe('openSshTunnel: host-key pinning', () => {
     )
   }, 15000)
 
+  it('asks async approval once, pinning the key before the real connect', async () => {
+    let prompts = 0
+    const approve = async () => {
+      prompts += 1
+      return true
+    }
+    const first = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined, approve)
+    await first.close()
+    const second = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined, approve)
+    await second.close()
+    expect(prompts).toBe(1)
+  }, 15000)
+
   it('rejects with an actionable error when the pinned host key changed', async () => {
     const store = { [`127.0.0.1:${sshPort}`]: Buffer.from('a-different-host-key').toString('base64') }
     fs.writeFileSync(path.join(state.userData, 'known_hosts.json'), JSON.stringify(store))
