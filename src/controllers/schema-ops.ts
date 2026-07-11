@@ -106,7 +106,17 @@ export class SchemaOpsController {
     }
   }
 
-  private async _runAlter(spec: ColumnAlterSpec, statements: string[]) {
+  // Reviewed DDL statements from the inspect add dialogs (index/trigger/partition).
+  applyStatements(spec: { profileId: string; childDb: string | null; statements: string[]; onApplied: () => void }) {
+    if (!spec.statements.length) return
+    this.deps.dialogs.review = {
+      sql: spec.statements.map((statement) => `${statement};`).join('\n\n'),
+      params: [],
+      run: () => void this._runAlter(spec, spec.statements),
+    }
+  }
+
+  private async _runAlter(spec: { profileId: string; childDb: string | null; onApplied: () => void }, statements: string[]) {
     let result: DdlResult
     try {
       result = await window.sqlkit.runDdl(spec.profileId, spec.childDb, statements)

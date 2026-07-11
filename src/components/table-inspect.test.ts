@@ -1107,22 +1107,22 @@ describe('TableInspect cell selection', () => {
     await view.updateComplete
     const inner = internals(view)
 
-    const nameCell = view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"] tr[data-row="0"] td[data-field="name"]')!
+    const nameCell = view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"] tr[data-row="0"] td[data-field="name"]')!
     press(nameCell)
-    expect(inner._sel).toEqual({ grid: 0, r0: 0, c0: 0, r1: 0, c1: 0 })
+    expect(inner._sel).toEqual({ grid: 1, r0: 0, c0: 0, r1: 0, c1: 0 })
 
     // Extend into the second row's definition and copy: raw names, not display-trimmed.
-    press(view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"] tr[data-row="1"] td[data-field="definition"]')!, {
+    press(view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"] tr[data-row="1"] td[data-field="definition"]')!, {
       shiftKey: true,
     })
-    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"]')!.dispatchEvent(
+    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"]')!.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'c', metaKey: true }),
     )
     expect(writeText).toHaveBeenCalledWith('users_pkey\tPRIMARY KEY (id)\nusers_email_key\tUNIQUE (email)')
 
     // Sections are read-only: Enter and typing never open an editor.
-    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
-    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="0"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'x' }))
+    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'x' }))
     expect(inner._editing).toBeNull()
 
     // A click in the columns table moves the selection between grids.
@@ -1184,6 +1184,93 @@ describe('TableInspect save validation', () => {
     internals(view)._dropColumn(age)
     view.save()
     expect(onSave).toHaveBeenCalledTimes(1)
+    view.remove()
+  })
+})
+
+describe('TableInspect section add buttons', () => {
+  it('synthesizes empty Indexes/Triggers sections so a bare table can still add them', async () => {
+    const inspectTable = vi.fn(() =>
+      Promise.resolve<InspectResult>({ success: true, inspection: { columns: [inspectCol({ name: 'id' })], sections: [] } }),
+    )
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'sqlite'
+    view.table = { schema: null, name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    // The full sqlite scaffold shows at 0; Partitions/Storage stay presence-only.
+    const headers = [...view.shadowRoot!.querySelectorAll('h4')].map((h) => h.textContent?.trim() ?? '')
+    for (const title of ['Foreign Keys', 'Indexes', 'Triggers']) {
+      expect(headers.some((text) => text.startsWith(title))).toBe(true)
+    }
+    expect(headers.some((text) => text.startsWith('Partitions'))).toBe(false)
+    expect(view.shadowRoot!.querySelectorAll('.add-btn').length).toBeGreaterThanOrEqual(2)
+    // Empty synthesized sections render a section-specific hint, not a table.
+    expect(view.shadowRoot!.querySelectorAll('.section-table').length).toBe(0)
+    const empties = [...view.shadowRoot!.querySelectorAll('.section-empty')].map((p) => p.textContent?.trim() ?? '')
+    expect(empties.some((text) => text.startsWith('No indexes yet'))).toBe(true)
+    expect(empties.some((text) => text.startsWith('No triggers yet'))).toBe(true)
+    expect(empties.some((text) => text.startsWith('No foreign keys'))).toBe(true)
+    view.remove()
+  })
+
+  it('does not synthesize add sections for views', async () => {
+    const inspectTable = vi.fn(() =>
+      Promise.resolve<InspectResult>({ success: true, inspection: { columns: [inspectCol({ name: 'id' })], sections: [] } }),
+    )
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'v', kind: 'view' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    const headers = [...view.shadowRoot!.querySelectorAll('h4')].map((h) => h.textContent?.trim() ?? '')
+    expect(headers.some((text) => text.startsWith('Indexes'))).toBe(false)
+    expect(headers.some((text) => text.startsWith('Triggers'))).toBe(false)
+    view.remove()
+  })
+
+  it('opens the add dialog from a section button and forwards create-ddl', async () => {
+    const inspectTable = vi.fn(() =>
+      Promise.resolve<InspectResult>({ success: true, inspection: { columns: [inspectCol({ name: 'id' })], sections: [] } }),
+    )
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.childDb = null
+    view.engine = 'sqlite'
+    view.table = { schema: null, name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    const onCreate = vi.fn()
+    view.addEventListener('create-ddl', onCreate)
+    // The columns table also has an .add-btn; pick the Indexes section button.
+    const indexBtn = [...view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.add-btn')]
+      .find((btn) => btn.getAttribute('aria-label') === 'Add Indexes')!
+    indexBtn.click()
+    await view.updateComplete
+
+    const dialog = view.shadowRoot!.querySelector('inspect-add-dialog')!
+    expect(dialog).toBeTruthy()
+    dialog.dispatchEvent(new CustomEvent('add-ddl', { detail: { statements: ['CREATE INDEX "i" ON "users" ("id")'] }, bubbles: true, composed: true }))
+
+    expect(onCreate).toHaveBeenCalledOnce()
+    const detail = (onCreate.mock.calls[0]![0] as CustomEvent<{ statements: string[] }>).detail
+    expect(detail.statements).toEqual(['CREATE INDEX "i" ON "users" ("id")'])
+    await view.updateComplete
+    expect(view.shadowRoot!.querySelector('inspect-add-dialog')).toBeNull()
     view.remove()
   })
 })

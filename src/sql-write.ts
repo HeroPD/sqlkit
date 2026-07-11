@@ -311,6 +311,188 @@ export function buildColumnDrop(table: TableRef, columns: string[], engine: Engi
   return columns.map((name) => `ALTER TABLE ${qualified} DROP COLUMN ${dialect.quoteIdent(name)}`)
 }
 
+export type IndexSpec = {
+  name: string
+  columns: string[]
+  unique: boolean
+  /** PostgreSQL access method; empty or 'btree' emits no USING clause. */
+  method?: string
+}
+
+export const PG_INDEX_METHODS = ['btree', 'hash', 'gin', 'gist', 'spgist', 'brin'] as const
+
+// CREATE INDEX is the rare DDL all four engines spell alike apart from quoting.
+export function buildCreateIndex(table: TableRef, spec: IndexSpec, engine: Engine): string {
+  const dialect = dialectFor(engine)
+  const name = spec.name.trim()
+  if (!name) throw new Error('Index name is required')
+  if (!spec.columns.length) throw new Error('An index needs at least one column')
+  const method = spec.method?.trim() ?? ''
+  if (method && !(PG_INDEX_METHODS as readonly string[]).includes(method)) throw new Error(`Unknown index method: ${method}`)
+  const using = engine === 'postgresql' && method && method !== 'btree' ? ` USING ${method}` : ''
+  const columns = spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')
+  return `CREATE ${spec.unique ? 'UNIQUE ' : ''}INDEX ${dialect.quoteIdent(name)} ON ${quoteQualified(table, dialect)}${using} (${columns})`
+}
+
+export type TriggerTiming = 'BEFORE' | 'AFTER' | 'INSTEAD OF'
+export type TriggerEvent = 'INSERT' | 'UPDATE' | 'DELETE'
+
+export type TriggerSpec = {
+  name: string
+  timing: TriggerTiming
+  events: TriggerEvent[]
+  level: 'ROW' | 'STATEMENT'
+  /** PostgreSQL: existing trigger function to execute. */
+  functionName?: string
+  /** Other engines: inline trigger body statements. */
+  body?: string
+}
+
+export type TriggerCaps = {
+  timings: TriggerTiming[]
+  multiEvent: boolean
+  levels: TriggerSpec['level'][]
+  usesFunction: boolean
+}
+
+// What the add-trigger dialog may offer per engine; buildCreateTrigger enforces it.
+export function triggerCapabilities(engine: Engine): TriggerCaps {
+  // The inspect add flow targets real tables. PostgreSQL and SQLite only allow
+  // INSTEAD OF triggers on views, so offering it here produces invalid DDL.
+  if (engine === 'postgresql') return { timings: ['BEFORE', 'AFTER'], multiEvent: true, levels: ['ROW', 'STATEMENT'], usesFunction: true }
+  if (engine === 'mysql') return { timings: ['BEFORE', 'AFTER'], multiEvent: false, levels: ['ROW'], usesFunction: false }
+  if (engine === 'sqlserver') return { timings: ['AFTER', 'INSTEAD OF'], multiEvent: true, levels: ['STATEMENT'], usesFunction: false }
+  return { timings: ['BEFORE', 'AFTER'], multiEvent: false, levels: ['ROW'], usesFunction: false }
+}
+
+// Compound bodies need each inner statement terminated before END.
+const terminated = (body: string) => {
+  const trimmed = body.trim()
+  return trimmed.endsWith(';') ? trimmed : `${trimmed};`
+}
+
+export function buildCreateTrigger(table: TableRef, spec: TriggerSpec, engine: Engine): string {
+  const dialect = dialectFor(engine)
+  const caps = triggerCapabilities(engine)
+  const name = spec.name.trim()
+  if (!name) throw new Error('Trigger name is required')
+  if (!spec.events.length) throw new Error('A trigger needs at least one event')
+  if (!caps.timings.includes(spec.timing)) throw new Error(`${spec.timing} triggers are not supported on this engine`)
+  if (!caps.multiEvent && spec.events.length > 1) throw new Error('This engine allows one event per trigger')
+  if (!caps.levels.includes(spec.level)) throw new Error(`FOR EACH ${spec.level} is not supported on this engine`)
+  const qualified = quoteQualified(table, dialect)
+  const events = spec.events.join(engine === 'sqlserver' ? ', ' : ' OR ')
+  if (engine === 'postgresql') {
+    const fn = spec.functionName?.trim() ?? ''
+    if (!fn) throw new Error('A PostgreSQL trigger executes an existing function — name one')
+    const call = fn.includes('(') ? fn : `${fn}()`
+    return `CREATE TRIGGER ${dialect.quoteIdent(name)}\n${spec.timing} ${events} ON ${qualified}\nFOR EACH ${spec.level} EXECUTE FUNCTION ${call}`
+  }
+  const body = spec.body?.trim() ?? ''
+  if (!body) throw new Error('Trigger body is required')
+  if (engine === 'sqlserver') {
+    return `CREATE TRIGGER ${dialect.quoteIdent(name)} ON ${qualified}\n${spec.timing} ${events}\nAS\nBEGIN\n${terminated(body)}\nEND`
+  }
+  // MySQL and SQLite share the shape; both are row-level with a compound body.
+  return `CREATE TRIGGER ${dialect.quoteIdent(name)}\n${spec.timing} ${events} ON ${qualified}\nFOR EACH ROW\nBEGIN\n${terminated(body)}\nEND`
+}
+
+export type PartitionSpec = {
+  name: string
+  /** PG: `FOR VALUES …` tail or DEFAULT; MySQL: `VALUES LESS THAN (…)` / `VALUES IN (…)`. */
+  bounds: string
+}
+
+// Adds one partition to an already-partitioned table (PG/MySQL only — the
+// inspect UI offers this only when a Partitions section exists).
+export function buildAddPartition(table: TableRef, spec: PartitionSpec, engine: Engine): string {
+  const dialect = dialectFor(engine)
+  const name = spec.name.trim()
+  const bounds = spec.bounds.trim().replace(/^for\s+values\s+/i, '')
+  if (!name) throw new Error('Partition name is required')
+  if (engine === 'postgresql') {
+    const child = quoteQualified({ schema: table.schema, name, kind: 'table' }, dialect)
+    if (/^default$/i.test(bounds)) return `CREATE TABLE ${child} PARTITION OF ${quoteQualified(table, dialect)} DEFAULT`
+    if (!bounds) throw new Error('Partition bounds are required (e.g. FROM (…) TO (…), IN (…), or DEFAULT)')
+    return `CREATE TABLE ${child} PARTITION OF ${quoteQualified(table, dialect)} FOR VALUES ${bounds}`
+  }
+  if (engine === 'mysql') {
+    if (!bounds) throw new Error('Partition bounds are required (e.g. VALUES LESS THAN (…))')
+    return `ALTER TABLE ${quoteQualified(table, dialect)} ADD PARTITION (PARTITION ${dialect.quoteIdent(name)} ${bounds})`
+  }
+  throw new Error('Adding partitions is not supported on this engine')
+}
+
+// Adding FKs / CHECK / UNIQUE via ALTER works on the three server engines;
+// SQLite's ALTER can't, so the inspect UI leaves those sections read-only there.
+export const canAddConstraint = (engine: Engine): boolean => engine !== 'sqlite'
+
+// Quotes a user-typed table reference that may be schema-qualified ("s.t" → "s"."t").
+const quoteRef = (ref: string, dialect: Dialect): string =>
+  ref.trim().split('.').map((part) => dialect.quoteIdent(part.trim())).join('.')
+
+export type ForeignKeyAction = 'NO ACTION' | 'RESTRICT' | 'CASCADE' | 'SET NULL' | 'SET DEFAULT'
+
+// Referential actions each engine accepts (MySQL rejects SET DEFAULT; MSSQL has
+// no RESTRICT keyword). NO ACTION is the SQL default and always valid.
+export function foreignKeyActions(engine: Engine): ForeignKeyAction[] {
+  if (engine === 'mysql') return ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL']
+  if (engine === 'sqlserver') return ['NO ACTION', 'CASCADE', 'SET NULL', 'SET DEFAULT']
+  return ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT']
+}
+
+export type ForeignKeySpec = {
+  name: string
+  columns: string[]
+  refTable: string
+  refColumns: string[]
+  onDelete?: ForeignKeyAction
+  onUpdate?: ForeignKeyAction
+}
+
+export function buildAddForeignKey(table: TableRef, spec: ForeignKeySpec, engine: Engine): string {
+  if (!canAddConstraint(engine)) throw new Error('SQLite cannot add a foreign key to an existing table — recreate the table instead')
+  const dialect = dialectFor(engine)
+  const name = spec.name.trim()
+  const refTable = spec.refTable.trim()
+  if (!name) throw new Error('Constraint name is required')
+  if (!spec.columns.length) throw new Error('A foreign key needs at least one column')
+  if (!refTable) throw new Error('A referenced table is required')
+  if (!spec.refColumns.length) throw new Error('At least one referenced column is required')
+  if (spec.columns.length !== spec.refColumns.length) throw new Error('Local and referenced columns must match in count')
+  const cols = spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')
+  const refCols = spec.refColumns.map((column) => dialect.quoteIdent(column.trim())).join(', ')
+  const actions = foreignKeyActions(engine)
+  const clause = (keyword: string, action: ForeignKeyAction | undefined) =>
+    action && action !== 'NO ACTION' && actions.includes(action) ? ` ${keyword} ${action}` : ''
+  return `ALTER TABLE ${quoteQualified(table, dialect)} ADD CONSTRAINT ${dialect.quoteIdent(name)} ` +
+    `FOREIGN KEY (${cols}) REFERENCES ${quoteRef(refTable, dialect)} (${refCols})` +
+    clause('ON DELETE', spec.onDelete) + clause('ON UPDATE', spec.onUpdate)
+}
+
+export type ConstraintSpec = {
+  name: string
+  type: 'CHECK' | 'UNIQUE'
+  /** CHECK expression, or comma-column list for UNIQUE (via `columns`). */
+  expression?: string
+  columns?: string[]
+}
+
+export function buildAddConstraint(table: TableRef, spec: ConstraintSpec, engine: Engine): string {
+  if (!canAddConstraint(engine)) throw new Error('SQLite cannot add this constraint to an existing table — recreate the table, or use a unique index')
+  const dialect = dialectFor(engine)
+  const name = spec.name.trim()
+  if (!name) throw new Error('Constraint name is required')
+  const head = `ALTER TABLE ${quoteQualified(table, dialect)} ADD CONSTRAINT ${dialect.quoteIdent(name)}`
+  if (spec.type === 'CHECK') {
+    const expression = spec.expression?.trim() ?? ''
+    if (!expression) throw new Error('A CHECK constraint needs a boolean expression')
+    return `${head} CHECK (${expression})`
+  }
+  if (!spec.columns?.length) throw new Error('A UNIQUE constraint needs at least one column')
+  return `${head} UNIQUE (${spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')})`
+}
+
 // sp_rename takes the column path as one literal; parts are bracket-quoted so
 // dotted/odd names survive, while the new name must stay bare (unquoted).
 function spRename(table: TableRef, from: string, to: string): string {

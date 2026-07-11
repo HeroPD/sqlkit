@@ -578,7 +578,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       type Row = { name: string; definition: string }
       const rows = async (sql: string): Promise<Row[]> => (await pool.query<Row>(sql, args)).rows
 
-      const [columns, constraints, indexes, partitions, triggers, rules, policies] = await Promise.all([
+      const [columns, constraints, indexes, partitions, triggers, rules, policies, storage] = await Promise.all([
         pool.query(
           `select a.attname as name,
                   pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type,
@@ -628,6 +628,12 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
                                case when with_check is not null then 'WITH CHECK (' || with_check || ')' end
                      ) as definition
               from pg_catalog.pg_policies where schemaname = $1 and tablename = $2 order by policyname`),
+        // Only relkinds with storage; views/foreign tables have no tablespace.
+        rows(`select 'tablespace' as name, coalesce(t.spcname, '(database default)') as definition
+              from pg_catalog.pg_class c
+              join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+              left join pg_catalog.pg_tablespace t on t.oid = c.reltablespace
+              where n.nspname = $1 and c.relname = $2 and c.relkind in ('r', 'p', 'm')`),
       ])
 
       const constraintRows = constraints.rows as Array<Row & { type: string }>
@@ -641,6 +647,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         { title: 'Triggers', rows: triggers },
         { title: 'Rules', rows: rules },
         { title: 'Policies', rows: policies },
+        { title: 'Storage', rows: storage },
       ]
       return {
         columns: columns.rows.map(

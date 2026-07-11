@@ -241,3 +241,27 @@ describe('createDatabase / dropDatabase', () => {
     expect(h.onDatabaseDropped).not.toHaveBeenCalled()
   })
 })
+
+describe('applyStatements', () => {
+  it('reviews the statements and runs them on accept', async () => {
+    sqlkit.runDdl.mockResolvedValue({ success: true })
+    const h = harness()
+    const onApplied = vi.fn()
+    h.ops.applyStatements({ profileId: 'p1', childDb: null, statements: ['CREATE INDEX "i" ON "t" ("a")'], onApplied })
+
+    expect(h.dialogs.review?.sql).toBe('CREATE INDEX "i" ON "t" ("a");')
+    expect(sqlkit.runDdl).not.toHaveBeenCalled()
+
+    h.dialogs.acceptReview()
+    await flush()
+    expect(sqlkit.runDdl).toHaveBeenCalledWith('p1', null, ['CREATE INDEX "i" ON "t" ("a")'])
+    expect(onApplied).toHaveBeenCalledOnce()
+    expect(h.refresh).toHaveBeenCalledWith('p1')
+  })
+
+  it('is a no-op for an empty statement list', () => {
+    const h = harness()
+    h.ops.applyStatements({ profileId: 'p1', childDb: null, statements: [], onApplied: vi.fn() })
+    expect(h.dialogs.review).toBeNull()
+  })
+})

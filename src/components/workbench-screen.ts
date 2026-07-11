@@ -36,7 +36,7 @@ import './sql-editor'
 import './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
-import type { ColumnAlterEventDetail } from './table-inspect'
+import type { ColumnAlterEventDetail, CreateDdlEventDetail } from './table-inspect'
 import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
@@ -905,6 +905,7 @@ export class WorkbenchScreen extends LitElement {
             .table=${activeTab.table}
             .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
             @alter-columns=${this._onAlterColumns}
+            @create-ddl=${this._onCreateDdl}
             @inspect-dirty=${this._onInspectDirty}
           ></table-inspect>
         </div>
@@ -1117,6 +1118,10 @@ export class WorkbenchScreen extends LitElement {
 
   private _onAlterColumns(event: Event) {
     this._schemaOps.alterColumns((event as CustomEvent<ColumnAlterEventDetail>).detail)
+  }
+
+  private _onCreateDdl(event: Event) {
+    this._schemaOps.applyStatements((event as CustomEvent<CreateDdlEventDetail>).detail)
   }
 
   private _onInspectDirty(event: Event) {

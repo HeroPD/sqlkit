@@ -3,18 +3,26 @@ import type { ColumnRef, InspectColumn, TableRef } from './electron'
 import { dialectFor } from './dialect'
 import {
   SQL_NULL,
+  buildAddConstraint,
+  buildAddForeignKey,
+  buildAddPartition,
   buildBatchUpdate,
   buildBatchUpdates,
   buildColumnAdd,
   buildColumnAlter,
   buildColumnDrop,
+  buildCreateIndex,
+  buildCreateTrigger,
   buildDeleteRows,
   buildDeleteRowBatches,
   buildInsert,
   buildInsertDefault,
+  canAddConstraint,
   coerceValue,
+  foreignKeyActions,
   quoteLiteral,
   quoteQualified,
+  triggerCapabilities,
 } from './sql-write'
 
 const users: TableRef = { schema: 'public', name: 'users', kind: 'table' }
@@ -518,5 +526,143 @@ describe('engine-aware optimistic predicates', () => {
       engine: 'postgresql',
     })
     expect(pgGuard.params).toEqual(['9223372036854775807'])
+  })
+})
+
+describe('buildCreateIndex', () => {
+  it('builds engine-quoted CREATE INDEX statements', () => {
+    expect(buildCreateIndex(users, { name: 'idx_name', columns: ['name', 'age'], unique: false }, 'postgresql'))
+      .toBe('CREATE INDEX "idx_name" ON "public"."users" ("name", "age")')
+    expect(buildCreateIndex(users, { name: 'idx_name', columns: ['name'], unique: true }, 'sqlserver'))
+      .toBe('CREATE UNIQUE INDEX [idx_name] ON [public].[users] ([name])')
+    expect(buildCreateIndex({ schema: null, name: 'users', kind: 'table' }, { name: 'i', columns: ['a'], unique: false }, 'mysql'))
+      .toBe('CREATE INDEX `i` ON `users` (`a`)')
+  })
+
+  it('emits USING only for non-default PostgreSQL methods and rejects unknown ones', () => {
+    expect(buildCreateIndex(users, { name: 'i', columns: ['a'], unique: false, method: 'gin' }, 'postgresql'))
+      .toBe('CREATE INDEX "i" ON "public"."users" USING gin ("a")')
+    expect(buildCreateIndex(users, { name: 'i', columns: ['a'], unique: false, method: 'btree' }, 'postgresql'))
+      .toBe('CREATE INDEX "i" ON "public"."users" ("a")')
+    expect(() => buildCreateIndex(users, { name: 'i', columns: ['a'], unique: false, method: 'evil; drop' }, 'postgresql'))
+      .toThrow(/Unknown index method/)
+  })
+
+  it('requires a name and at least one column', () => {
+    expect(() => buildCreateIndex(users, { name: '  ', columns: ['a'], unique: false }, 'postgresql')).toThrow(/name/)
+    expect(() => buildCreateIndex(users, { name: 'i', columns: [], unique: false }, 'postgresql')).toThrow(/column/)
+  })
+})
+
+describe('buildCreateTrigger', () => {
+  it('builds a PostgreSQL trigger that executes a function, appending () when missing', () => {
+    expect(buildCreateTrigger(users, {
+      name: 'audit', timing: 'AFTER', events: ['INSERT', 'UPDATE'], level: 'ROW', functionName: 'log_change',
+    }, 'postgresql')).toBe('CREATE TRIGGER "audit"\nAFTER INSERT OR UPDATE ON "public"."users"\nFOR EACH ROW EXECUTE FUNCTION log_change()')
+    expect(buildCreateTrigger(users, {
+      name: 't', timing: 'BEFORE', events: ['DELETE'], level: 'STATEMENT', functionName: 'audit.log(1)',
+    }, 'postgresql')).toContain('FOR EACH STATEMENT EXECUTE FUNCTION audit.log(1)')
+    expect(() => buildCreateTrigger(users, { name: 't', timing: 'AFTER', events: ['INSERT'], level: 'ROW' }, 'postgresql'))
+      .toThrow(/function/)
+  })
+
+  it('wraps inline bodies in BEGIN…END with a terminated last statement', () => {
+    expect(buildCreateTrigger({ schema: null, name: 't', kind: 'table' }, {
+      name: 'trg', timing: 'BEFORE', events: ['INSERT'], level: 'ROW', body: 'SET NEW.created_at = NOW()',
+    }, 'mysql')).toBe('CREATE TRIGGER `trg`\nBEFORE INSERT ON `t`\nFOR EACH ROW\nBEGIN\nSET NEW.created_at = NOW();\nEND')
+    expect(buildCreateTrigger({ schema: null, name: 't', kind: 'table' }, {
+      name: 'trg', timing: 'AFTER', events: ['DELETE'], level: 'ROW', body: 'select 1;',
+    }, 'sqlite')).toContain('BEGIN\nselect 1;\nEND')
+  })
+
+  it('builds SQL Server triggers with comma events and no FOR EACH clause', () => {
+    expect(buildCreateTrigger(users, {
+      name: 'trg', timing: 'AFTER', events: ['INSERT', 'DELETE'], level: 'STATEMENT', body: 'select 1',
+    }, 'sqlserver')).toBe('CREATE TRIGGER [trg] ON [public].[users]\nAFTER INSERT, DELETE\nAS\nBEGIN\nselect 1;\nEND')
+  })
+
+  it('enforces the per-engine capability matrix', () => {
+    expect(() => buildCreateTrigger(users, { name: 't', timing: 'INSTEAD OF', events: ['INSERT'], level: 'ROW', body: 'x' }, 'mysql'))
+      .toThrow(/not supported/)
+    expect(() => buildCreateTrigger(users, { name: 't', timing: 'BEFORE', events: ['INSERT', 'UPDATE'], level: 'ROW', body: 'x' }, 'sqlite'))
+      .toThrow(/one event/)
+    expect(() => buildCreateTrigger(users, { name: 't', timing: 'AFTER', events: ['INSERT'], level: 'ROW', body: 'x' }, 'sqlserver'))
+      .toThrow(/FOR EACH ROW/)
+    expect(triggerCapabilities('mysql').multiEvent).toBe(false)
+    expect(triggerCapabilities('postgresql').usesFunction).toBe(true)
+    expect(triggerCapabilities('postgresql').timings).not.toContain('INSTEAD OF')
+    expect(triggerCapabilities('sqlite').timings).not.toContain('INSTEAD OF')
+    expect(triggerCapabilities('sqlserver').timings).toContain('INSTEAD OF')
+  })
+})
+
+describe('buildAddPartition', () => {
+  it('creates a PostgreSQL child partition in the parent schema', () => {
+    expect(buildAddPartition(users, { name: 'users_2026', bounds: "FROM ('2026-01-01') TO ('2027-01-01')" }, 'postgresql'))
+      .toBe(`CREATE TABLE "public"."users_2026" PARTITION OF "public"."users" FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`)
+    expect(buildAddPartition(users, { name: 'users_default', bounds: 'DEFAULT' }, 'postgresql'))
+      .toBe('CREATE TABLE "public"."users_default" PARTITION OF "public"."users" DEFAULT')
+    // A pasted FOR VALUES prefix is tolerated, not doubled.
+    expect(buildAddPartition(users, { name: 'p1', bounds: 'FOR VALUES IN (1, 2)' }, 'postgresql'))
+      .toBe('CREATE TABLE "public"."p1" PARTITION OF "public"."users" FOR VALUES IN (1, 2)')
+  })
+
+  it('emits ALTER TABLE … ADD PARTITION on MySQL and refuses other engines', () => {
+    expect(buildAddPartition({ schema: null, name: 'events', kind: 'table' }, { name: 'p2027', bounds: 'VALUES LESS THAN (2027)' }, 'mysql'))
+      .toBe('ALTER TABLE `events` ADD PARTITION (PARTITION `p2027` VALUES LESS THAN (2027))')
+    expect(() => buildAddPartition(users, { name: 'p', bounds: 'x' }, 'sqlserver')).toThrow(/not supported/)
+    expect(() => buildAddPartition(users, { name: 'p', bounds: '' }, 'mysql')).toThrow(/bounds/)
+  })
+})
+
+describe('buildAddForeignKey', () => {
+  it('builds a FK with matching column lists and referential actions', () => {
+    expect(buildAddForeignKey(users, {
+      name: 'fk_orders_user', columns: ['user_id'], refTable: 'public.orders', refColumns: ['id'],
+      onDelete: 'CASCADE', onUpdate: 'NO ACTION',
+    }, 'postgresql')).toBe(
+      'ALTER TABLE "public"."users" ADD CONSTRAINT "fk_orders_user" FOREIGN KEY ("user_id") REFERENCES "public"."orders" ("id") ON DELETE CASCADE',
+    )
+    // NO ACTION is the default and is omitted; MSSQL brackets the qualified ref.
+    expect(buildAddForeignKey(users, {
+      name: 'fk', columns: ['a', 'b'], refTable: 'dbo.other', refColumns: ['x', 'y'],
+    }, 'sqlserver')).toBe(
+      'ALTER TABLE [public].[users] ADD CONSTRAINT [fk] FOREIGN KEY ([a], [b]) REFERENCES [dbo].[other] ([x], [y])',
+    )
+  })
+
+  it('drops referential actions an engine rejects', () => {
+    // MySQL has no SET DEFAULT; it must not appear in the emitted SQL.
+    expect(buildAddForeignKey({ schema: null, name: 't', kind: 'table' }, {
+      name: 'fk', columns: ['a'], refTable: 'other', refColumns: ['id'], onDelete: 'SET DEFAULT',
+    }, 'mysql')).toBe('ALTER TABLE `t` ADD CONSTRAINT `fk` FOREIGN KEY (`a`) REFERENCES `other` (`id`)')
+    expect(foreignKeyActions('mysql')).not.toContain('SET DEFAULT')
+    expect(foreignKeyActions('sqlserver')).not.toContain('RESTRICT')
+  })
+
+  it('validates counts and refuses SQLite', () => {
+    expect(() => buildAddForeignKey(users, { name: 'fk', columns: ['a'], refTable: 't', refColumns: ['x', 'y'] }, 'postgresql'))
+      .toThrow(/match in count/)
+    expect(() => buildAddForeignKey(users, { name: '', columns: ['a'], refTable: 't', refColumns: ['x'] }, 'postgresql'))
+      .toThrow(/name/)
+    expect(() => buildAddForeignKey({ schema: null, name: 't', kind: 'table' }, { name: 'fk', columns: ['a'], refTable: 'o', refColumns: ['id'] }, 'sqlite'))
+      .toThrow(/SQLite/)
+    expect(canAddConstraint('sqlite')).toBe(false)
+    expect(canAddConstraint('mysql')).toBe(true)
+  })
+})
+
+describe('buildAddConstraint', () => {
+  it('builds CHECK and UNIQUE constraints', () => {
+    expect(buildAddConstraint(users, { name: 'age_positive', type: 'CHECK', expression: 'age > 0' }, 'postgresql'))
+      .toBe('ALTER TABLE "public"."users" ADD CONSTRAINT "age_positive" CHECK (age > 0)')
+    expect(buildAddConstraint({ schema: null, name: 't', kind: 'table' }, { name: 'uq_email', type: 'UNIQUE', columns: ['email', 'tenant'] }, 'mysql'))
+      .toBe('ALTER TABLE `t` ADD CONSTRAINT `uq_email` UNIQUE (`email`, `tenant`)')
+  })
+
+  it('validates by type and refuses SQLite', () => {
+    expect(() => buildAddConstraint(users, { name: 'c', type: 'CHECK', expression: '' }, 'postgresql')).toThrow(/expression/)
+    expect(() => buildAddConstraint(users, { name: 'c', type: 'UNIQUE', columns: [] }, 'postgresql')).toThrow(/column/)
+    expect(() => buildAddConstraint(users, { name: 'c', type: 'CHECK', expression: 'x > 0' }, 'sqlite')).toThrow(/SQLite/)
   })
 })

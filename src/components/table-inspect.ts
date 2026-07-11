@@ -4,8 +4,10 @@ import { codicons, scrollbars, typography } from '../shared-styles'
 import type { DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
 import { cellsToTsv } from '../result-export'
-import type { ColumnAdd, ColumnAlter } from '../sql-write'
+import { canAddConstraint, type ColumnAdd, type ColumnAlter } from '../sql-write'
 import './context-menu'
+import './inspect-add-dialog'
+import type { AddObjectDetail, AddObjectKind } from './inspect-add-dialog'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
 
@@ -20,6 +22,14 @@ type ColumnDiff = Partial<Omit<ColumnAlter, 'original'>> & { drop?: boolean }
 // Right-click menu state. `col`/`field` are set for the columns table (they
 // gate the reset items); the section tables leave them undefined.
 type RowMenu = { x: number; y: number; name: string; definition: string | null; col?: InspectColumn; field?: EditField | 'nullable' }
+
+// Emitted by the section add dialogs; same SchemaOps review → runDdl route.
+export type CreateDdlEventDetail = {
+  profileId: string
+  childDb: string | null
+  statements: string[]
+  onApplied: () => void
+}
 
 // Emitted on ⌘S / Save so the workbench routes the change through SchemaOps
 // (build DDL → review dialog → runDdl). `onApplied` reloads this tab on success.
@@ -41,6 +51,19 @@ export type ColumnAlterEventDetail = {
 // fresh row valid without forcing input.
 const ADD_KEY_PREFIX = `${String.fromCharCode(0)}add:`
 const NEW_COLUMN_NAME = 'new_column'
+
+// Canonical table-inspect sections per engine, in display order — what a table
+// *could* have, shown at 0 when empty so the section is still reachable.
+const ENGINE_SECTIONS: Record<Engine, string[]> = {
+  postgresql: ['Foreign Keys', 'Constraints', 'Indexes', 'Partitions', 'Triggers', 'Rules', 'Policies', 'Storage'],
+  mysql: ['Foreign Keys', 'Constraints', 'Indexes', 'Partitions', 'Triggers'],
+  sqlserver: ['Foreign Keys', 'Constraints', 'Indexes', 'Triggers'],
+  sqlite: ['Foreign Keys', 'Indexes', 'Triggers'],
+}
+
+// Never synthesized: their absence is a fact (not partitioned / no storage),
+// not an empty list — and Partitions' + would emit invalid DDL if offered.
+const PRESENT_ONLY_SECTIONS = new Set(['Partitions', 'Storage'])
 
 /** Grid id of the columns table in cell selection; sections use their index. */
 const COLUMNS_GRID = -1
@@ -99,6 +122,10 @@ export class TableInspect extends LitElement {
 
   @state()
   private _menu: RowMenu | null = null
+
+  /** Open section add dialog (index/trigger/partition), if any. */
+  @state()
+  private _addDialog: AddObjectKind | null = null
 
   /** Staged column edits, keyed by the column's original name. */
   @state()
@@ -278,8 +305,39 @@ export class TableInspect extends LitElement {
         ${this._renderBody()}
       </div>
       ${this._renderMenu()} ${this._renderCellMenu()} ${this._renderTypePicker()}
-      ${this._renderDefaultPicker()}
+      ${this._renderDefaultPicker()} ${this._renderAddDialog()}
     `
+  }
+
+  private _renderAddDialog() {
+    if (!this._addDialog || !this.table || !this.engine) return ''
+    return html`
+      <inspect-add-dialog
+        .kind=${this._addDialog}
+        .table=${this.table}
+        .engine=${this.engine}
+        .columns=${this._state.phase === 'done' ? this._state.inspection.columns.map((column) => column.name) : []}
+        @dialog-cancel=${() => (this._addDialog = null)}
+        @add-ddl=${this._onAddDdl}
+      ></inspect-add-dialog>
+    `
+  }
+
+  private _onAddDdl(event: CustomEvent<AddObjectDetail>) {
+    event.stopPropagation()
+    this._addDialog = null
+    this.dispatchEvent(
+      new CustomEvent<CreateDdlEventDetail>('create-ddl', {
+        bubbles: true,
+        composed: true,
+        detail: {
+          profileId: this.profileId,
+          childDb: this.childDb,
+          statements: event.detail.statements,
+          onApplied: () => void this._load(),
+        },
+      }),
+    )
   }
 
   private _renderMenu() {
@@ -369,9 +427,14 @@ export class TableInspect extends LitElement {
     return hasComments ? ['name', 'dataType', 'nullable', 'default', 'comment'] : ['name', 'dataType', 'nullable', 'default']
   }
 
+  // The sections as rendered (scaffold included): every grid index means this.
+  private _sections(): TableInspection['sections'] {
+    return this._state.phase === 'done' ? this._displaySections(this._state.inspection.sections) : []
+  }
+
   private _gridRowCount(grid: number): number {
     if (grid === COLUMNS_GRID) return this._gridRows().length
-    return this._state.phase === 'done' ? (this._state.inspection.sections[grid]?.rows.length ?? 0) : 0
+    return this._sections()[grid]?.rows.length ?? 0
   }
 
   // The grid coordinate of a DOM node's cell; null off any grid (icon cell, header).
@@ -511,8 +574,7 @@ export class TableInspect extends LitElement {
   // columns table, raw name/definition in the sections.
   private _cellValue(grid: number, row: number, field: string): string {
     if (grid !== COLUMNS_GRID) {
-      const section = this._state.phase === 'done' ? this._state.inspection.sections[grid] : undefined
-      const item = section?.rows[row]
+      const item = this._sections()[grid]?.rows[row]
       return (field === 'name' ? item?.name : item?.definition) ?? ''
     }
     const column = this._gridRows()[row]
@@ -956,6 +1018,64 @@ export class TableInspect extends LitElement {
     }
   }
 
+  // Which add dialog a section header offers; null hides the button. Partitions
+  // only where a quick add exists (PG PARTITION OF / MySQL ADD PARTITION).
+  private _sectionAddKind(title: string): AddObjectKind | null {
+    if (!this.table || !this.engine) return null
+    if (title === 'Indexes' && (this.table.kind === 'table' || this.table.kind === 'matview')) return 'index'
+    if (this.table.kind !== 'table') return null
+    if (title === 'Triggers') return 'trigger'
+    if (title === 'Partitions' && (this.engine === 'postgresql' || this.engine === 'mysql')) return 'partition'
+    // FK and CHECK/UNIQUE need ALTER TABLE ADD CONSTRAINT, which SQLite lacks.
+    if (title === 'Foreign Keys' && canAddConstraint(this.engine)) return 'foreignKey'
+    if (title === 'Constraints' && canAddConstraint(this.engine)) return 'constraint'
+    return null
+  }
+
+  // Drivers omit empty sections; a real table instead shows its engine's full
+  // canonical scaffold at 0, so every capability is visible and addable.
+  private _displaySections(sections: TableInspection['sections']): TableInspection['sections'] {
+    if (!this.table || !this.engine) return sections
+    if (this.table.kind !== 'table') {
+      // Views/matviews only gain what they can add (matview indexes).
+      const missing = ['Indexes']
+        .filter((title) => this._sectionAddKind(title) !== null && !sections.some((section) => section.title === title))
+        .map((title) => ({ title, rows: [] }))
+      return missing.length ? [...sections, ...missing] : sections
+    }
+    const canonical = ENGINE_SECTIONS[this.engine]
+    const scaffold = canonical
+      .map((title) =>
+        sections.find((section) => section.title === title)
+          ?? (PRESENT_ONLY_SECTIONS.has(title) ? null : { title, rows: [] }))
+      .filter((section): section is TableInspection['sections'][number] => section !== null)
+    return [...scaffold, ...sections.filter((section) => !canonical.includes(section.title))]
+  }
+
+  // Empty-state copy per section: what the section is for, plus a nudge to the
+  // + button when we can actually add one here.
+  private _emptySectionText(title: string): string {
+    const addable = this._sectionAddKind(title) !== null
+    const blurbs: Record<string, string> = {
+      Indexes: addable
+        ? 'No indexes yet — add one with + to speed up lookups and enforce uniqueness.'
+        : 'No indexes on this table.',
+      Triggers: addable
+        ? 'No triggers yet — add one with + to run logic automatically on insert, update, or delete.'
+        : 'No triggers on this table.',
+      Partitions: 'No partitions defined.',
+      'Foreign Keys': addable
+        ? 'No foreign keys yet — add one with + to link a column to another table.'
+        : 'No foreign keys — this table references no others.',
+      Constraints: addable
+        ? 'No constraints yet — add a + CHECK or UNIQUE rule the data must satisfy.'
+        : 'No check or unique constraints.',
+      Rules: 'No rewrite rules.',
+      Policies: 'No row-level security policies.',
+    }
+    return blurbs[title] ?? `No ${title.toLowerCase()} yet.`
+  }
+
   private _renderBody() {
     const state = this._state
     if (state.phase === 'loading') {
@@ -965,18 +1085,31 @@ export class TableInspect extends LitElement {
     }
     if (state.phase === 'error') return html`<pre class="error">${state.error}</pre>`
 
-    const { columns, sections } = state.inspection
+    const { columns } = state.inspection
+    const sections = this._sections()
     return html`
       ${columns.length ? this._renderColumnsTable(columns) : ''}
       ${sections.map(
         (section, grid) => html`
           <h4>
             ${section.title} <span class="count">${section.rows.length}</span>
-            <button class="add-btn" type="button" title="Add ${section.title}" aria-label="Add ${section.title}">
-              <i class="codicon codicon-add" aria-hidden="true"></i>
-            </button>
+            ${this._sectionAddKind(section.title)
+              ? html`
+                  <button
+                    class="add-btn"
+                    type="button"
+                    title="Add ${section.title}"
+                    aria-label="Add ${section.title}"
+                    @click=${() => (this._addDialog = this._sectionAddKind(section.title))}
+                  >
+                    <i class="codicon codicon-add" aria-hidden="true"></i>
+                  </button>
+                `
+              : ''}
           </h4>
-          <table
+          ${!section.rows.length
+            ? html`<p class="section-empty muted">${this._emptySectionText(section.title)}</p>`
+            : html`<table
             class="section-table"
             data-grid=${grid}
             tabindex="0"
@@ -1005,7 +1138,7 @@ export class TableInspect extends LitElement {
                 `,
               )}
             </tbody>
-          </table>
+          </table>`}
         `,
       )}
       ${sections.length
@@ -1566,6 +1699,11 @@ export class TableInspect extends LitElement {
         align-items: center;
         gap: 8px;
         padding: 10px 0;
+      }
+
+      .section-empty {
+        margin: 2px 0 4px;
+        line-height: 1.4;
       }
 
       .error {
