@@ -140,6 +140,40 @@ describe('results-panel multiple and paged results', () => {
     el.remove()
   })
 
+  it('drops dragged widths on other result sets but re-adopts saved widths on the last', async () => {
+    const el = document.createElement('results-panel')
+    el.columnWidths = new Map([[0, 321]])
+    el.run = {
+      phase: 'done',
+      result: {
+        columns: ['second'],
+        rows: [[2]],
+        rowCount: 1,
+        durationMs: 1,
+        resultSets: [
+          { columns: ['first'], rows: [[1]], rowCount: 1 },
+          { columns: ['second'], rows: [[2]], rowCount: 1 },
+        ],
+      },
+    }
+    document.body.append(el)
+    await el.updateComplete
+    const internal = el as unknown as { _widthOverrides: Map<number, number> }
+    expect(internal._widthOverrides.get(0)).toBe(321)
+
+    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.result-set-select')!
+    select.value = '0'
+    select.dispatchEvent(new Event('change'))
+    await el.updateComplete
+    expect(internal._widthOverrides.size).toBe(0)
+
+    select.value = '1'
+    select.dispatchEvent(new Event('change'))
+    await el.updateComplete
+    expect(internal._widthOverrides.get(0)).toBe(321)
+    el.remove()
+  })
+
   it('drains the full export in large pages, retrying when a page comes back short', async () => {
     const all = Array.from({ length: 450 }, (_, index) => [index])
     // First page returns short of the requested limit (the main process caps

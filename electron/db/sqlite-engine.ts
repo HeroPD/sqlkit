@@ -1,7 +1,7 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, QueryResultSet, TableInspection, TableRef } from '../../src/electron'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
-import { assertSelfContainedTransaction } from './sql-script'
+import { assertSelfContainedTransaction, containsSqliteTrigger } from './sql-script'
 
 // The synchronous SQLite core, factored out of any process/threading concern:
 // every function takes the DatabaseSync it operates on. The worker owns the
@@ -41,7 +41,7 @@ export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam
   // no rows; if the script ends with a read (a verification SELECT), re-run just
   // that statement to surface its result — safe because reads have no side
   // effects, so running it a second time can't change anything.
-  if (/\bcreate\s+(?:temp(?:orary)?\s+)?trigger\b/i.test(masked)) {
+  if (containsSqliteTrigger(masked)) {
     db.exec(sql)
     const tail = statements[statements.length - 1]
     if (tail && /^(?:select|values|explain)\b/i.test(tail)) {

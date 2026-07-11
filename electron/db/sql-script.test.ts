@@ -46,6 +46,16 @@ describe('transaction safety', () => {
     expect(() => assertSelfContainedTransaction("select 'COMMIT' -- COMMIT", 'sqlserver')).not.toThrow()
   })
 
+  it('accepts T-SQL closes in unexecuted branches (TRY/CATCH, @@TRANCOUNT guards)', () => {
+    expect(() => assertSelfContainedTransaction(
+      'BEGIN TRY\nBEGIN TRAN\nupdate t set a=1\nCOMMIT\nEND TRY\nBEGIN CATCH\nIF @@TRANCOUNT > 0 ROLLBACK\nEND CATCH',
+      'sqlserver',
+    )).not.toThrow()
+    expect(() => assertSelfContainedTransaction('IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION\nselect 1', 'sqlserver')).not.toThrow()
+    // A begin that no branch closes is still a leaked transaction.
+    expect(() => assertSelfContainedTransaction('BEGIN TRY\nBEGIN TRAN\nupdate t set a=1\nEND TRY\nBEGIN CATCH\nEND CATCH', 'sqlserver')).toThrow(/same query run/i)
+  })
+
   it('accepts SQLite END as an alias for COMMIT', () => {
     expect(() => assertSelfContainedTransaction('BEGIN; update t set a=1; END', 'sqlite')).not.toThrow()
     expect(() => assertSelfContainedTransaction('BEGIN; update t set a=1; END TRANSACTION', 'sqlite')).not.toThrow()

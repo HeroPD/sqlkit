@@ -67,9 +67,8 @@ if (smokeTest) app.commandLine.appendSwitch('no-sandbox')
 const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
 const workspacePaths = new Map<number, string>()
 const dbManagers = new Map<number, ConnectionManager>()
-// Disconnects still settling after their manager left dbManagers (window
-// close); before-quit awaits these too, or quitting right after closing the
-// last window would exit mid-teardown.
+// Disconnects still settling after their manager left dbManagers (window close);
+// before-quit awaits these too, or quit right after close exits mid-teardown.
 const pendingDisconnects = new Set<Promise<void>>()
 let quitting = false
 const IPC_PATH_LIMIT = 20_000
@@ -203,7 +202,12 @@ function dbManagerFor(contents: WebContents) {
   return manager
 }
 
+// Hard cap so a compromised renderer can't spawn windows unboundedly through
+// app:new-window; also the main-process seam for the paid multi-window gate.
+const MAX_WINDOWS = 8
+
 function createWindow() {
+  if (BrowserWindow.getAllWindows().length >= MAX_WINDOWS) return
   const window = new BrowserWindow({
     width: 1440,
     height: 900,

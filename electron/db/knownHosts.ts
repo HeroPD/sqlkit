@@ -66,10 +66,12 @@ export const hasPinnedHostKey = (file: string, hostId: string): boolean =>
 
 export const knownHostsPath = () => path.join(app.getPath('userData'), 'known_hosts.json')
 
-// Builds an ssh2 hostVerifier keyed on host:port. Returns true to accept the
-// handshake; otherwise calls onReject with a message a human can act on and
-// returns false so ssh2 aborts. First-use approval happens before the real
-// connect (see openSshTunnel) — mid-handshake there is no one left to ask.
+// One wording for the unknown-host condition, whichever path reaches it.
+export const unknownHostKeyMessage = (hostId: string, fingerprint: string) =>
+  `Unknown SSH host key for ${hostId}: ${fingerprint}. Verify the fingerprint with the server administrator before trusting it.`
+
+// Builds an ssh2 hostVerifier keyed on host:port; accepts only a pinned key.
+// First-use approval happens before the real connect (see openSshTunnel).
 export function makeHostVerifier(
   host: string,
   port: number,
@@ -80,7 +82,7 @@ export function makeHostVerifier(
     const outcome = verifyHostKey(knownHostsPath(), hostId, key)
     if (outcome.trusted) return true
     if (outcome.firstUse) {
-      onReject(`Unknown SSH host key for ${hostId}: ${outcome.presented}. Verify the fingerprint with the server administrator before trusting it.`)
+      onReject(unknownHostKeyMessage(hostId, outcome.presented))
       return false
     }
     onReject(

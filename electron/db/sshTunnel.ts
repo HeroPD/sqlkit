@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { SshConfig } from '../../src/electron'
 import type { Tunnel } from './transport'
-import { hasPinnedHostKey, hostKeyFingerprint, knownHostsPath, makeHostVerifier, trustHostKey } from './knownHosts'
+import { hasPinnedHostKey, hostKeyFingerprint, knownHostsPath, makeHostVerifier, trustHostKey, unknownHostKeyMessage } from './knownHosts'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
@@ -41,9 +41,8 @@ function buildConnectConfig(ssh: SshConfig): ConnectConfig {
   return config
 }
 
-// Fetches the host key on a throwaway handshake: capture it in the verifier,
-// refuse the connection, surface the key. Runs before auth, so credentials are
-// never sent. Connect failures reject; the refusal error after capture doesn't.
+// Fetches the host key on a throwaway pre-auth handshake: the verifier captures
+// the key and refuses; connect failures reject, the post-capture refusal doesn't.
 const probeHostKey = (config: ConnectConfig): Promise<Buffer> =>
   new Promise((resolve, reject) => {
     const client = new Client()
@@ -62,22 +61,21 @@ const probeHostKey = (config: ConnectConfig): Promise<Buffer> =>
     })
   })
 
-// First-use approval, done before the real handshake: ssh2's hostVerifier runs
-// mid-handshake under readyTimeout, so prompting there both stalled the whole
-// main process (sync dialog) and timed the connection out while the user was
-// still reading the fingerprint. Probing first keeps the prompt unhurried.
+// First-use approval before the real handshake — inside ssh2's verifier a slow
+// human answer trips readyTimeout. Returns whether a new key was just pinned.
 async function ensureHostKeyApproved(
   config: ConnectConfig,
   approveFirstUse?: (hostId: string, fingerprint: string) => Promise<boolean> | boolean,
-): Promise<void> {
+): Promise<boolean> {
   const hostId = `${config.host as string}:${config.port as number}`
-  if (!approveFirstUse || hasPinnedHostKey(knownHostsPath(), hostId)) return
+  if (!approveFirstUse || hasPinnedHostKey(knownHostsPath(), hostId)) return false
   const key = await probeHostKey(config)
   if (!(await approveFirstUse(hostId, hostKeyFingerprint(key)))) {
-    throw new Error(`Unknown SSH host key for ${hostId}: ${hostKeyFingerprint(key)}. Verify the fingerprint with the server administrator before trusting it.`)
+    throw new Error(unknownHostKeyMessage(hostId, hostKeyFingerprint(key)))
   }
   try {
     trustHostKey(knownHostsPath(), hostId, key)
+    return true
   } catch (error) {
     throw new Error(`Could not save the trusted SSH host key for ${hostId}: ${(error as Error).message}`, { cause: error })
   }
@@ -97,7 +95,7 @@ export async function openSshTunnel(
   approveFirstUse?: (hostId: string, fingerprint: string) => Promise<boolean> | boolean,
 ): Promise<Tunnel> {
   const approvedConfig = buildConnectConfig(ssh)
-  await ensureHostKeyApproved(approvedConfig, approveFirstUse)
+  const justPinned = await ensureHostKeyApproved(approvedConfig, approveFirstUse)
   return new Promise((resolve, reject) => {
     const client = new Client()
     const sockets = new Set<net.Socket>()
@@ -123,7 +121,12 @@ export async function openSshTunnel(
       })
 
     const fail = (error: Error) => {
-      const finalError = rejectionMessage ? new Error(rejectionMessage) : error
+      // A mismatch right after first-use pinning usually means a load-balanced
+      // host pool with per-node keys: the probe and the connect hit different nodes.
+      const mismatchHint = justPinned && rejectionMessage?.includes('Host key verification failed')
+        ? ' The server presented a different key than the one just approved — hosts behind a load balancer can carry distinct keys; retrying may reach the approved one.'
+        : ''
+      const finalError = rejectionMessage ? new Error(`${rejectionMessage}${mismatchHint}`) : error
       if (settled) {
         if (!closing) onError(`SSH tunnel: ${finalError.message}`)
         return

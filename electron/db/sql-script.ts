@@ -3,23 +3,35 @@ import { maskSql } from '../../src/sql-mask'
 
 export { maskSql }
 
-export function splitTopLevelStatements(sql: string, engine?: Engine): string[] {
+// SQLite trigger DDL, tested on masked SQL. Shared with sqlite-engine.ts: both
+// sides must classify a script identically or END counts wrong (see below).
+export const containsSqliteTrigger = (masked: string) => /\bcreate\s+(?:temp(?:orary)?\s+)?trigger\b/i.test(masked)
+
+type SplitScript = { statements: { raw: string; masked: string }[]; masked: string }
+
+// One mask pass shared by the splitter and every per-statement consumer.
+function splitScript(sql: string, engine?: Engine): SplitScript {
   const masked = maskSql(sql, engine)
-  const statements: string[] = []
+  const statements: SplitScript['statements'] = []
   let depth = 0
   let start = 0
+  const push = (from: number, to: number) => {
+    if (masked.slice(from, to).trim()) statements.push({ raw: sql.slice(from, to).trim(), masked: masked.slice(from, to).trim() })
+  }
   for (let i = 0; i < masked.length; i += 1) {
     if (masked[i] === '(') depth += 1
     else if (masked[i] === ')') depth = Math.max(0, depth - 1)
     else if (masked[i] === ';' && depth === 0) {
-      const statement = sql.slice(start, i).trim()
-      if (masked.slice(start, i).trim()) statements.push(statement)
+      push(start, i)
       start = i + 1
     }
   }
-  const tail = sql.slice(start).trim()
-  if (masked.slice(start).trim()) statements.push(tail)
-  return statements
+  push(start, sql.length)
+  return { statements, masked }
+}
+
+export function splitTopLevelStatements(sql: string, engine?: Engine): string[] {
+  return splitScript(sql, engine).statements.map((statement) => statement.raw)
 }
 
 // Pooled server queries cannot safely leave a transaction open for a later run:
@@ -28,27 +40,21 @@ export function splitTopLevelStatements(sql: string, engine?: Engine): string[] 
 export function assertSelfContainedTransaction(sql: string, engine: Engine) {
   let depth = 0
   let sawControl = false
-  const apply = (control: 'begin' | 'close') => {
-    sawControl = true
-    if (control === 'begin') {
-      depth += 1
-    } else if (depth === 0) {
-      throw new Error('No transaction is active in this query run. Run BEGIN and COMMIT/ROLLBACK together in one selection.')
-    } else {
-      depth -= 1
-    }
-  }
+  const script = splitScript(sql, engine)
   // SQLite spells COMMIT as END too, but trigger bodies (BEGIN stmt; … END)
   // split at their inner semicolons here — their END is not a commit.
-  const endIsCommit = engine === 'postgresql'
-    || (engine === 'sqlite' && !/\bcreate\s+(?:temp(?:orary)?\s+)?trigger\b/i.test(maskSql(sql, engine)))
-  for (const statement of splitTopLevelStatements(sql, engine)) {
-    const masked = maskSql(statement, engine).toLowerCase()
+  const endIsCommit = engine === 'postgresql' || (engine === 'sqlite' && !containsSqliteTrigger(script.masked))
+  for (const statement of script.statements) {
+    const masked = statement.masked.toLowerCase()
     if (engine === 'sqlserver') {
-      // T-SQL semicolons are optional, so one split statement can hold the whole
-      // BEGIN TRAN … COMMIT script — scan bodies for control tokens, in order.
+      // T-SQL semicolons are optional, so scan bodies for tokens; a close at depth
+      // 0 may sit in an unexecuted branch (TRY/CATCH), so leave it to the server.
       const controls = masked.matchAll(/\b(?:(begin\s+tran(?:saction)?)|commit(?:\s+(?:tran(?:saction)?|work))?|rollback(?:\s+(?:tran(?:saction)?|work))?)\b/g)
-      for (const match of controls) apply(match[1] ? 'begin' : 'close')
+      for (const match of controls) {
+        sawControl = true
+        if (match[1]) depth += 1
+        else if (depth > 0) depth -= 1
+      }
       continue
     }
     // BEGIN/COMMIT are standalone semicolon-separated statements on these
@@ -60,8 +66,16 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine) {
     const closes = /^commit(?:\s+(?:work|transaction))?\b/.test(head)
       || (endIsCommit && /^end(?:\s+(?:work|transaction))?\b/.test(head))
       || (/^rollback(?:\s+(?:work|transaction))?\b/.test(head) && !/^rollback\s+to\b/.test(head))
-    if (begins) apply('begin')
-    else if (closes) apply('close')
+    if (begins) {
+      sawControl = true
+      depth += 1
+    } else if (closes) {
+      sawControl = true
+      if (depth === 0) {
+        throw new Error('No transaction is active in this query run. Run BEGIN and COMMIT/ROLLBACK together in one selection.')
+      }
+      depth -= 1
+    }
   }
   if (sawControl && depth !== 0) {
     throw new Error('Transactions must begin and commit or roll back in the same query run; pooled connections cannot preserve them across runs.')

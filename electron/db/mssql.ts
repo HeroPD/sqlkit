@@ -18,9 +18,8 @@ const SYSTEM_DBS = ['tempdb', 'model', 'msdb']
 
 const isCancelled = (error: unknown) => (error as { code?: string }).code === 'ECANCEL'
 
-// Binary row values cross Electron IPC as Uint8Array, which node-mssql's type
-// inference doesn't recognize (only Buffer maps to VarBinary) — untyped it would
-// bind as NVarChar and break varbinary comparisons/writes.
+// Binary values cross Electron IPC as Uint8Array, which node-mssql binds as
+// NVarChar (only Buffer maps to VarBinary), breaking varbinary writes/guards.
 export const toBindable = (value: unknown): unknown =>
   value instanceof Uint8Array && !Buffer.isBuffer(value)
     ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)

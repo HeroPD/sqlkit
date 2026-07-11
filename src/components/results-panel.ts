@@ -4,6 +4,7 @@ import { codicons, scrollbars, typography } from '../shared-styles'
 import { isMac } from '../platform'
 import type { QueryResult, QuerySort } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
+import { MAX_FETCH_ROWS } from '../result-limits'
 import { cellToTsv, cellsToTsv, rowToTsv, toDelimited, toJson } from '../result-export'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
 import './context-menu'
@@ -245,9 +246,9 @@ export class ResultsPanel extends LitElement {
     this._record = null
     this._displayCache = null
     this._widthsCache = null
-    // Dragged widths belong to the set they were dragged on; applied by index
-    // to another set they'd be wrong and would disable its auto-fill.
-    this._widthOverrides = new Map()
+    // Dragged widths belong to the last set (the one persistence tracks); other
+    // sets auto-measure, and switching back re-adopts the tab's saved widths.
+    this._widthOverrides = this._canEditShownResult() ? new Map(this.columnWidths) : new Map<number, number>()
     this._colLayout = null
     this._scrollTop = 0
     this._resetScroll = true
@@ -744,9 +745,8 @@ export class ResultsPanel extends LitElement {
     this._draining = { done: 0, total: need }
     try {
       while (rows.length < need) {
-        // 5000 mirrors MAX_FETCH_ROWS in the main process; pages stay byte-capped
-        // there, so a request can return fewer rows and the loop continues.
-        const response = await window.sqlkit.fetchRows(result.sessionId, rows.length, Math.min(5000, need - rows.length))
+        // Pages stay byte-capped main-side, so a short return just loops again.
+        const response = await window.sqlkit.fetchRows(result.sessionId, rows.length, Math.min(MAX_FETCH_ROWS, need - rows.length))
         if (!response.success) return result.rows.slice(0, need)
         if (response.rows.length === 0) break
         rows.push(...response.rows)

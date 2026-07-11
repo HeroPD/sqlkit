@@ -1,14 +1,12 @@
 import type { QueryResult, QueryResultSet } from '../../src/electron'
+import { MAX_FETCH_ROWS } from '../../src/result-limits'
+
+export { MAX_FETCH_ROWS }
 
 // Rows delivered in the initial query response and per fetch-more page. The
 // driver buffers up to MAX_BUFFERED_ROWS; the renderer pulls these pages as it
 // scrolls so a big result never crosses IPC all at once.
 export const PAGE_SIZE = 200
-
-// Ceiling for one fetch request. Export/copy-all drains the whole buffer, and
-// at PAGE_SIZE that is hundreds of serial IPC round trips; larger pages stay
-// safe because every page is still capped by MAX_PAGE_BYTES.
-export const MAX_FETCH_ROWS = 5000
 
 // Bytes held across all query tabs. A renderer that forgets to close sessions
 // cannot leak unboundedly; oldest buffers are evicted until under this ceiling.

@@ -117,9 +117,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     })
     try {
       await client.connect()
-      // The dial above takes real time; a targeted query may have finished and
-      // returned its client (same backend PID) to the pool for another query.
-      // Re-check membership so the late cancel can't hit that innocent successor.
+      // The dial takes real time; a finished query's client (same PID) may now
+      // serve another query — re-check membership so a late cancel can't hit it.
       const live = entries.filter((entry) => running.has(entry) && entry.pid !== null)
       return await Promise.all(live.map((entry) => client
         .query<{ ok: boolean }>('select pg_cancel_backend($1) as ok', [entry.pid])
@@ -174,22 +173,23 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       running.add(entry)
       let client: pg.PoolClient | null = null
       let released = false
+      // Leaves `running` before the client re-enters the pool, so a late cancel
+      // can never target this backend once another query has it.
+      const releaseToPool = () => {
+        running.delete(entry)
+        client?.release()
+        released = true
+      }
       try {
         client = await pool.connect()
         entry.pid = (client as unknown as { processID?: number }).processID ?? null
         if (entry.cancelRequested) {
-          running.delete(entry)
-          client.release()
-          released = true
+          releaseToPool()
           throw new Error('Query cancelled.')
         }
         const result = await streamQuery(client, finalSql, params, started)
         await resetUserSession(client)
-        // Leave `running` before the client re-enters the pool, so a late
-        // cancel can never target this backend once another query has it.
-        running.delete(entry)
-        client.release()
-        released = true
+        releaseToPool()
         return result
       } catch (error) {
         // Mirror pool.query: an errored client is destroyed, not reused.
@@ -210,6 +210,11 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const client = await pool.connect()
       const entry = { pid: (client as unknown as { processID?: number }).processID ?? null, cancelRequested: false }
       running.add(entry)
+      // Leaves `running` before the client re-enters the pool (see query()).
+      const releaseToPool = () => {
+        running.delete(entry)
+        client.release()
+      }
       let index = -1
       try {
         await client.query('BEGIN')
@@ -221,8 +226,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           const affected = result.rowCount ?? 0
           if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
             await client.query('ROLLBACK')
-            running.delete(entry)
-            client.release()
+            releaseToPool()
             return {
               success: false,
               failedIndex: index,
@@ -233,8 +237,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           }
         }
         await client.query('COMMIT')
-        running.delete(entry)
-        client.release()
+        releaseToPool()
         return { success: true }
       } catch (error) {
         // A statement (or COMMIT) threw: drop the client so its uncertain
@@ -253,6 +256,11 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const client = await pool.connect()
       const entry = { pid: (client as unknown as { processID?: number }).processID ?? null, cancelRequested: false }
       running.add(entry)
+      // Leaves `running` before the client re-enters the pool (see query()).
+      const releaseToPool = () => {
+        running.delete(entry)
+        client.release()
+      }
       let index = -1
       try {
         await client.query('BEGIN')
@@ -262,8 +270,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           await client.query(statements[index]!)
         }
         await client.query('COMMIT')
-        running.delete(entry)
-        client.release()
+        releaseToPool()
         return { success: true }
       } catch (error) {
         client.release(error as Error)

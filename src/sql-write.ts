@@ -82,13 +82,23 @@ const isTextType = (column: ColumnRef | undefined) =>
 const isIntegerType = (column: ColumnRef | undefined) =>
   /^(?:big|medium|small|tiny)?int(?:eger)?\b/.test(baseType(column))
 
-// mysql2 interpolates string params as quoted literals, and MySQL compares an
-// integer column against a string constant as doubles — so adjacent BIGINTs past
-// 2^53 collide. A bigint param renders unquoted, keeping the comparison exact.
+// MySQL compares an int column to a quoted string literal as doubles, colliding
+// BIGINTs past 2^53; a bigint param renders unquoted so the guard stays exact.
 const exactGuardValue = (engine: Engine, key: { value: unknown; columnMeta?: ColumnRef }): unknown =>
   engine === 'mysql' && typeof key.value === 'string' && isIntegerType(key.columnMeta) && /^-?\d+$/.test(key.value)
     ? BigInt(key.value)
     : key.value
+
+const isDecimalType = (column: ColumnRef | undefined) =>
+  /^(?:decimal|numeric|dec|fixed)\b/.test(baseType(column))
+
+// DECIMAL columns hit the same MySQL double-comparison trap as BIGINT above; the
+// value's fraction length is the column scale (the server renders at scale).
+const mysqlDecimalScale = (key: { value: unknown; columnMeta?: ColumnRef }): number | null => {
+  if (!isDecimalType(key.columnMeta) || typeof key.value !== 'string') return null
+  const match = /^-?\d+(?:\.(\d+))?$/.exec(key.value)
+  return match ? Math.min(match[1]?.length ?? 0, 30) : null
+}
 
 // A null-safe, case-exact equality predicate per engine. Plain `col = ?` misses
 // case-only concurrent changes under case-insensitive collations and never
@@ -106,9 +116,13 @@ const comparisonPredicate = (
   }
   const parameter = bind(exactGuardValue(engine, key))
   if (engine === 'postgresql') return `${identifier} IS NOT DISTINCT FROM ${parameter}`
-  if (engine === 'mysql') return isTextType(key.columnMeta)
-    ? `BINARY ${identifier} <=> BINARY ${parameter}`
-    : `${identifier} <=> ${parameter}`
+  if (engine === 'mysql') {
+    if (isTextType(key.columnMeta)) return `BINARY ${identifier} <=> BINARY ${parameter}`
+    const scale = mysqlDecimalScale(key)
+    return scale === null
+      ? `${identifier} <=> ${parameter}`
+      : `${identifier} <=> CAST(${parameter} AS DECIMAL(65,${scale}))`
+  }
   if (engine === 'sqlite') return `${identifier} COLLATE BINARY IS ${parameter}`
   if (isTextType(key.columnMeta)) {
     return `${identifier} COLLATE Latin1_General_100_BIN2 = ${parameter} COLLATE Latin1_General_100_BIN2`

@@ -480,6 +480,23 @@ describe('engine-aware optimistic predicates', () => {
     expect(params).toEqual([9223372036854775807n])
   })
 
+  it('casts MySQL decimal-column guards back to DECIMAL so they compare exactly, not as doubles', () => {
+    const built = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'price', value: '12345678901234567890.1234567890', columnMeta: col({ name: 'price', dataType: 'decimal(30,10)' }) }]],
+      engine: 'mysql',
+    })
+    expect(built.sql).toContain('`price` <=> CAST(? AS DECIMAL(65,10))')
+    expect(built.params).toEqual(['12345678901234567890.1234567890'])
+    // Scale comes from the value's fraction length; an integer-rendered value casts at scale 0.
+    const whole = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'price', value: '42', columnMeta: col({ name: 'price', dataType: 'numeric(10,0)' }) }]],
+      engine: 'mysql',
+    })
+    expect(whole.sql).toContain('`price` <=> CAST(? AS DECIMAL(65,0))')
+  })
+
   it('leaves non-integer and non-MySQL guard strings untouched', () => {
     const decimalGuard = buildDeleteRows({
       table: users,
@@ -487,6 +504,7 @@ describe('engine-aware optimistic predicates', () => {
       engine: 'mysql',
     })
     expect(decimalGuard.params).toEqual(['12.50'])
+    expect(decimalGuard.sql).toContain('CAST(? AS DECIMAL(65,2))')
     // 'point' contains "int" but is not an integer family type.
     const pointGuard = buildDeleteRows({
       table: users,

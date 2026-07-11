@@ -162,6 +162,27 @@ describe('connection manager: disconnect', () => {
     expect(manager.statuses()).toEqual([])
   })
 
+  it('forces the tunnel closed when a hung disconnect outlives the deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const close = vi.fn(() => Promise.resolve())
+      hoisted.endpoint = tunnelEndpoint(close)
+      // A disconnect that never settles (dead network, pool.end waiting on a
+      // checked-out client) must not keep the SSH tunnel alive with it.
+      hoisted.driver = fakeDriver({ disconnect: vi.fn(() => new Promise<void>(() => {})) })
+      const manager = createConnectionManager(vi.fn())
+      await manager.connect(profile())
+
+      const disconnected = manager.disconnect('p1')
+      await vi.advanceTimersByTimeAsync(3000)
+      await disconnected
+
+      expect(close).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('disconnect is a no-op for an unknown profile', async () => {
     const manager = createConnectionManager(vi.fn())
     await expect(manager.disconnect('missing')).resolves.toBeUndefined()

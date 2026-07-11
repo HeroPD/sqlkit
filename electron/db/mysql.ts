@@ -118,9 +118,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       connectTimeout: 8000,
     })
     try {
-      // The dial above takes real time; a targeted query may have finished and
-      // returned its connection (same thread id) to the pool for another query.
-      // Re-check membership so the late KILL can't hit that innocent successor.
+      // The dial takes real time; a finished query's connection (same thread id)
+      // may now serve another query — re-check so a late KILL can't hit it.
       const live = entries.filter((entry) => running.has(entry) && entry.threadId !== null)
       return await Promise.all(live.map((entry) => conn.query(`kill query ${entry.threadId}`).then(() => true).catch(() => false)))
     } finally {
@@ -173,22 +172,23 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
       running.add(entry)
       let conn: mysql.PoolConnection | null = null
+      // Leaves `running` before the connection re-enters the pool, so a late
+      // KILL QUERY can never target this thread once another query has it.
+      const releaseToPool = () => {
+        running.delete(entry)
+        conn?.release()
+        conn = null
+      }
       try {
         conn = await poolForQuery(childDb).getConnection()
         const raw = rawOf(conn)
         entry.threadId = raw.threadId ?? null
         if (entry.cancelRequested) {
-          running.delete(entry)
-          conn.release()
-          conn = null
+          releaseToPool()
           throw new Error('Query cancelled.')
         }
         const result = await streamQuery(raw, finalSql, params, started)
-        // Leave `running` before the connection re-enters the pool, so a late
-        // KILL QUERY can never target this thread once another query has it.
-        running.delete(entry)
-        conn.release()
-        conn = null
+        releaseToPool()
         return result
       } catch (error) {
         // The connection may hold half-read results; drop it rather than reuse.
@@ -206,6 +206,11 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const conn = await poolForQuery(childDb).getConnection()
       const entry = { threadId: rawOf(conn).threadId ?? null, cancelRequested: false }
       running.add(entry)
+      // Leaves `running` before the connection re-enters the pool (see query()).
+      const releaseToPool = () => {
+        running.delete(entry)
+        conn.release()
+      }
       let index = -1
       try {
         const tableNames = statements.flatMap((statement) => {
@@ -222,8 +227,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             (row) => row.engine !== null && !['InnoDB', 'NDBCLUSTER'].includes(row.engine),
           )
           if (unsafe.length) {
-            running.delete(entry)
-            conn.release()
+            releaseToPool()
             return {
               success: false,
               error: `Atomic saves are unavailable for non-transactional table(s): ${unsafe.map((row) => row.table_name).join(', ')}`,
@@ -239,8 +243,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           const affected = (result as { affectedRows?: number }).affectedRows ?? 0
           if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
             await conn.rollback()
-            running.delete(entry)
-            conn.release()
+            releaseToPool()
             return {
               success: false,
               failedIndex: index,
@@ -251,8 +254,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           }
         }
         await conn.commit()
-        running.delete(entry)
-        conn.release()
+        releaseToPool()
         return { success: true }
       } catch (error) {
         // Uncertain transaction state: closing the connection aborts it.
@@ -274,13 +276,17 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const conn = await poolForQuery(childDb).getConnection()
       const entry = { threadId: rawOf(conn).threadId ?? null, cancelRequested: false }
       running.add(entry)
+      // Leaves `running` before the connection re-enters the pool (see query()).
+      const releaseToPool = () => {
+        running.delete(entry)
+        conn.release()
+      }
       let index = -1
       try {
         for (index = 0; index < statements.length; index += 1) {
           await conn.query(statements[index]!)
         }
-        running.delete(entry)
-        conn.release()
+        releaseToPool()
         return { success: true }
       } catch (error) {
         conn.destroy()
