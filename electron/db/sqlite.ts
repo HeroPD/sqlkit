@@ -1,11 +1,11 @@
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { BatchResult, ColumnRef, ConnectionProfile, DdlResult, QueryResult, TableInspection, TableRef } from '../../src/electron'
-import { dialectFor } from '../../src/dialect'
+import type { ConnectionProfile } from '../../src/electron'
 import type { Driver } from './driver'
 import type { SqliteParam } from './sqlite-engine'
-import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
+import type { SqliteRequest, SqliteRequestBody, SqliteResponse, SqliteResultByRequest } from './sqlite-protocol'
+import { prepareSqlRun } from './sql-script'
 
 // node:sqlite is synchronous and has no statement interrupt, so a long query
 // blocks whatever runs it. We run it in a separate Electron utilityProcess to
@@ -25,16 +25,11 @@ export type SqliteChannel = {
 
 export type SqliteSpawner = () => SqliteChannel
 
-// Distributes over the request union so each variant keeps its own fields
-// (a plain Omit<SqliteRequest, 'id'> would collapse to the shared `type` only).
-type SqliteRequestBody = SqliteRequest extends infer R ? (R extends { id: number } ? Omit<R, 'id'> : never) : never
-
 // A worker that never answers `open` (failed spawn that didn't even emit exit)
 // must not hang connect forever.
 const OPEN_TIMEOUT_MS = 15_000
 
 export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpawner = defaultSpawn): Driver {
-  const dialect = dialectFor(profile.engine)
   let channel: SqliteChannel | null = null
   let file = ''
   let nextId = 1
@@ -117,21 +112,21 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
     channel = opened
   }
 
-  const request = <T>(
-    message: SqliteRequestBody,
+  const request = <B extends SqliteRequestBody>(
+    message: B,
     timeoutMs?: number,
     executionId?: string,
     priority = false,
-  ): Promise<T> => {
+  ): Promise<SqliteResultByRequest[B['type']]> => {
     if (!channel) return Promise.reject(new Error('Not connected'))
     const id = nextId++
-    return new Promise<T>((resolve, reject) => {
+    return new Promise<SqliteResultByRequest[B['type']]>((resolve, reject) => {
       pending.set(id, {
         message,
         executionId,
         timeoutMs,
         timer: null,
-        resolve: (value) => resolve(value as T),
+        resolve: (value) => resolve(value as SqliteResultByRequest[B['type']]),
         reject,
       })
       // `open` must run before queued work replayed onto a fresh worker.
@@ -150,7 +145,7 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
 
   const open = (dbFile: string): Promise<string> => {
     spawnChannel()
-    return request<string>({ type: 'open', file: dbFile }, OPEN_TIMEOUT_MS, undefined, true)
+    return request({ type: 'open', file: dbFile }, OPEN_TIMEOUT_MS, undefined, true)
   }
 
   return {
@@ -168,31 +163,31 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
     },
 
     async query(sql, params = [], _childDb = null, sort = null, executionId) {
-      const finalSql = sort ? dialect.applyOrderBy(sql, sort) : sql
-      return request<QueryResult>({ type: 'query', sql: finalSql, params: params as SqliteParam[] }, undefined, executionId)
+      const plan = prepareSqlRun({ engine: 'sqlite', sql, params, sort })
+      return request({ type: 'query', sql: plan.batches[0]!, params: plan.params as SqliteParam[] }, undefined, executionId)
     },
 
     async runBatch(statements, _childDb = null) {
-      return request<BatchResult>({
+      return request({
         type: 'runBatch',
         statements: statements as { sql: string; params: SqliteParam[]; expectedRows?: number }[],
       })
     },
 
     async runDdl(statements, _childDb = null) {
-      return request<DdlResult>({ type: 'runDdl', statements })
+      return request({ type: 'runDdl', statements })
     },
 
     async listTables() {
-      return request<TableRef[]>({ type: 'listTables' })
+      return request({ type: 'listTables' })
     },
 
     async listColumns() {
-      return request<ColumnRef[]>({ type: 'listColumns' })
+      return request({ type: 'listColumns' })
     },
 
     async inspectTable(table) {
-      return request<TableInspection>({ type: 'inspectTable', table })
+      return request({ type: 'inspectTable', table })
     },
 
     async cancel(executionId) {

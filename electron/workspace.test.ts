@@ -275,6 +275,16 @@ describe('workspace config: missing vs corrupt', () => {
     openWorkspace(workspaceDir)
     expect(rawConfig()).toBe(before)
   })
+
+  it('rejects a structurally invalid config instead of trusting a JSON cast', () => {
+    writeRawConfig({ version: 1, connections: [{ ...profile(), engine: 'oracle' }] })
+    const before = rawConfig()
+    const result = readWorkspaceConfig(workspaceDir)
+    expect(result.error).toMatch(/invalid configuration.*engine/i)
+    expect(result.config.connections).toEqual([])
+    openWorkspace(workspaceDir)
+    expect(rawConfig()).toBe(before)
+  })
 })
 
 describe('workspace open: legacy migration', () => {

@@ -5,7 +5,7 @@ import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 import { sslOptions } from './postgres'
-import { assertSelfContainedTransaction, preprocessMysqlDelimiters } from './sql-script'
+import { prepareSqlRun } from './sql-script'
 
 // Schemas MySQL ships with; never listed as children or browsable databases.
 const SYSTEM_SCHEMAS = ['mysql', 'information_schema', 'performance_schema', 'sys']
@@ -164,9 +164,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
     async query(sql, params = [], childDb = null, sort = null, executionId) {
       const started = performance.now()
-      const script = preprocessMysqlDelimiters(sql)
-      assertSelfContainedTransaction(script, 'mysql')
-      const finalSql = sort ? dialect.applyOrderBy(script, sort) : script
+      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort })
       // Checked out manually so the thread id is known while the statement
       // runs and cancel() has a KILL QUERY target.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
@@ -187,7 +185,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           releaseToPool()
           throw new Error('Query cancelled.')
         }
-        const result = await streamQuery(raw, finalSql, params, started)
+        const result = await streamQuery(raw, plan.batches[0]!, plan.params, started)
         releaseToPool()
         return result
       } catch (error) {

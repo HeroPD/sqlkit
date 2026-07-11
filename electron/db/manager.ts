@@ -22,18 +22,16 @@ import { createDriver, type Driver } from './driver'
 import { ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
 
-type Active = {
-  /** Null until createDriver succeeds; phase 'connected' implies non-null. */
-  driver: Driver | null
-  /** SSH tunnel the session rides on; torn down with the session. */
-  tunnel: Tunnel | null
-  status: ConnectionStatus
-}
+type ConnectionResources = { driver: Driver | null; tunnel: Tunnel | null }
+type Active =
+  | ({ phase: 'connecting'; profileId: string } & ConnectionResources)
+  | { phase: 'connected'; profileId: string; driver: Driver; tunnel: Tunnel | null; serverVersion: string }
+  | ({ phase: 'error'; profileId: string; error: string } & ConnectionResources)
 
 export type ConnectionManager = ReturnType<typeof createConnectionManager>
 
 // Owns every live connection, keyed by profile id. All state transitions go
-// through setStatus so the renderer hears about each one via `broadcast`;
+// through replace so the renderer hears about each one via `broadcast`;
 // profiles absent from the map are simply disconnected. Failed connections
 // stay in the map in the 'error' phase so the UI can show what went wrong
 // until the user reconnects or disconnects.
@@ -42,10 +40,21 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   // Buffered result rows the renderer pages through; freed on disconnect.
   const sessions = new ResultSessionStore()
 
-  const statuses = () => [...connections.values()].map((active) => active.status)
+  const statusOf = (active: Active): ConnectionStatus => {
+    if (active.phase === 'connecting') return { profileId: active.profileId, phase: 'connecting' }
+    if (active.phase === 'error') return { profileId: active.profileId, phase: 'error', error: active.error }
+    return {
+      profileId: active.profileId,
+      phase: 'connected',
+      serverVersion: active.serverVersion,
+      tunneled: active.tunnel !== null,
+      children: active.driver.children?.(),
+    }
+  }
+  const statuses = () => [...connections.values()].map(statusOf)
 
-  const setStatus = (active: Active, status: ConnectionStatus) => {
-    active.status = status
+  const replace = (profileId: string, active: Active) => {
+    connections.set(profileId, active)
     broadcast(statuses())
   }
 
@@ -76,55 +85,66 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   async function connect(profile: ConnectionProfile): Promise<ConnectResult> {
     await disconnect(profile.id)
 
-    const active: Active = { driver: null, tunnel: null, status: { profileId: profile.id, phase: 'connecting' } }
-    connections.set(profile.id, active)
-    broadcast(statuses())
+    const resources: ConnectionResources = { driver: null, tunnel: null }
+    const attempt = Symbol(profile.id)
+    const attempts = new WeakMap<Active, symbol>()
+    const register = (state: Active) => {
+      attempts.set(state, attempt)
+      replace(profile.id, state)
+      return state
+    }
+    register({ phase: 'connecting', profileId: profile.id, ...resources })
 
     // True while `active` is still the entry registered for this profile. A
     // concurrent connect (or a disconnect) replaces or removes it mid-await;
     // when that happens this attempt must tear down whatever it built and
     // leave the newer entry's state alone.
-    const isCurrent = () => connections.get(profile.id) === active
+    const isCurrent = () => {
+      const current = connections.get(profile.id)
+      return !!current && attempts.get(current) === attempt
+    }
 
     // Closes only the resources this attempt opened — used on failure and when
     // the attempt is superseded, so a slow tunnel/pool can't outlive its entry.
     const teardown = async () => {
-      await active.driver?.disconnect().catch(() => {})
-      await active.tunnel?.close().catch(() => {})
+      await resources.driver?.disconnect().catch(() => {})
+      await resources.tunnel?.close().catch(() => {})
     }
 
     // Only flag the session that actually failed; a reconnect may have
     // already replaced this entry.
     const onError = (message: string) => {
-      if (isCurrent()) setStatus(active, { profileId: profile.id, phase: 'error', error: message })
+      if (isCurrent()) register({ phase: 'error', profileId: profile.id, error: message, ...resources })
     }
 
     try {
       const endpoint = await resolveEndpoint(profile, onError)
-      active.tunnel = endpoint.tunnel
+      resources.tunnel = endpoint.tunnel
+      if (isCurrent()) register({ phase: 'connecting', profileId: profile.id, ...resources })
       // Superseded while the tunnel was opening: own the tunnel we just got so
       // teardown can close it, then bail without overwriting the newer entry.
       if (!isCurrent()) {
         await teardown()
         return { success: false, error: 'Connection superseded' }
       }
-      active.driver = createDriver(profile, endpoint, { onError })
-      const serverVersion = await active.driver.connect()
+      resources.driver = createDriver(profile, endpoint, { onError })
+      if (isCurrent()) register({ phase: 'connecting', profileId: profile.id, ...resources })
+      const serverVersion = await resources.driver.connect()
       if (!isCurrent()) {
         await teardown()
         return { success: false, error: 'Connection superseded' }
       }
-      setStatus(active, {
+      register({
         profileId: profile.id,
         phase: 'connected',
         serverVersion,
-        tunneled: active.tunnel !== null,
-        children: active.driver.children?.(),
+        driver: resources.driver,
+        tunnel: resources.tunnel,
       })
       return { success: true, serverVersion }
     } catch (error) {
       const message = (error as Error).message
-      if (isCurrent()) setStatus(active, { profileId: profile.id, phase: 'error', error: message })
+      if (isCurrent()) register({ phase: 'error', profileId: profile.id, error: message, ...resources })
       // A failed connect must not leak the pool or the tunnel under it.
       await teardown()
       return { success: false, error: message }
@@ -137,7 +157,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   const connectedDriver = (profileId: string) => {
     const active = connections.get(profileId)
-    return active?.status.phase === 'connected' ? active.driver : null
+    return active?.phase === 'connected' ? active.driver : null
   }
 
   async function query(
@@ -219,13 +239,13 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   // so every window sees the new inUse flags.
   function setActiveChild(profileId: string, database: string): { success: boolean; error?: string } {
     const active = connections.get(profileId)
-    if (!active || active.status.phase !== 'connected' || !active.driver) {
+    if (!active || active.phase !== 'connected') {
       return { success: false, error: 'Not connected' }
     }
     if (!active.driver.useChild?.(database)) {
       return { success: false, error: `Database "${database}" is not available on this connection` }
     }
-    setStatus(active, { ...active.status, children: active.driver.children?.() })
+    broadcast(statuses())
     return { success: true }
   }
 
@@ -233,12 +253,12 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   // before a drop) and rebroadcast so every window sees the new child list.
   async function mutateDatabase(profileId: string, run: (driver: Driver) => Promise<void> | undefined) {
     const active = connections.get(profileId)
-    if (active?.status.phase !== 'connected' || !active.driver) return { success: false, error: 'Not connected' }
+    if (active?.phase !== 'connected') return { success: false, error: 'Not connected' }
     try {
       const pending = run(active.driver)
       if (!pending) return { success: false, error: 'Not supported for this engine' }
       await pending
-      setStatus(active, { ...active.status, children: active.driver.children?.() })
+      broadcast(statuses())
       return { success: true }
     } catch (error) {
       return { success: false, error: (error as Error).message }

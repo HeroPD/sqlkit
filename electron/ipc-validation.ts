@@ -115,11 +115,11 @@ export function workspaceConfig(value: unknown): WorkspaceConfig {
   const version = Number(config.version)
   if (!Number.isSafeInteger(version) || version < 1) throw new IpcValidationError('Workspace config version is invalid')
   const active = config.activeDbId
-  if (active !== undefined && active !== null && typeof active !== 'string') throw new IpcValidationError('Active database id is invalid')
+  const activeDbId = active === undefined || active === null ? active : stringValue(active, 'Active database id', MAX_ID)
   return {
     version,
     connections: config.connections.map(connectionProfile),
-    ...(active === undefined ? {} : { activeDbId: active }),
+    ...(activeDbId === undefined ? {} : { activeDbId }),
   }
 }
 

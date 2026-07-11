@@ -1,5 +1,7 @@
-import type { Engine } from '../../src/electron'
+import { dialectFor } from '../../src/dialect'
+import type { Engine, QuerySort } from '../../src/electron'
 import { maskSql } from '../../src/sql-mask'
+import { isReorderableQuery } from '../../src/sql-order'
 
 export { maskSql }
 
@@ -167,4 +169,36 @@ export function preprocessMysqlDelimiters(sql: string): string {
     output.push(transformed)
   }
   return output.join('\n')
+}
+
+export type SqlRunPlan = {
+  /** Native execution units. Only SQL Server's client-side GO creates several. */
+  batches: string[]
+  params: unknown[]
+}
+
+// The authoritative preparation step between renderer-selected text and a
+// driver's native execution API. Editor selection stays presentation-only;
+// dialect preprocessing, safe sorting, transaction validation and client-side
+// batch separators are enforced again in the privileged main process.
+export function prepareSqlRun(args: {
+  engine: Engine
+  sql: string
+  params?: unknown[]
+  sort?: QuerySort | null
+}): SqlRunPlan {
+  const params = args.params ?? []
+  let sql = args.engine === 'mysql' ? preprocessMysqlDelimiters(args.sql) : args.sql
+
+  if (args.sort) {
+    if (!isReorderableQuery(sql)) throw new Error('Sorting is only supported for a single SELECT statement.')
+    sql = dialectFor(args.engine).applyOrderBy(sql, args.sort)
+  }
+
+  assertSelfContainedTransaction(sql, args.engine)
+  const batches = args.engine === 'sqlserver' ? splitSqlServerBatches(sql) : [sql]
+  if (params.length && batches.length > 1) {
+    throw new Error('Parameters cannot be used with a multi-batch SQL Server script.')
+  }
+  return { batches, params }
 }

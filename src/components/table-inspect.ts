@@ -27,6 +27,7 @@ type RowMenu = { x: number; y: number; name: string; definition: string | null; 
 export type CreateDdlEventDetail = {
   profileId: string
   childDb: string | null
+  engine: Engine
   statements: string[]
   onApplied: () => void
 }
@@ -325,6 +326,8 @@ export class TableInspect extends LitElement {
 
   private _onAddDdl(event: CustomEvent<AddObjectDetail>) {
     event.stopPropagation()
+    const engine = this.engine
+    if (!engine) return
     this._addDialog = null
     this.dispatchEvent(
       new CustomEvent<CreateDdlEventDetail>('create-ddl', {
@@ -333,6 +336,7 @@ export class TableInspect extends LitElement {
         detail: {
           profileId: this.profileId,
           childDb: this.childDb,
+          engine,
           statements: event.detail.statements,
           onApplied: () => void this._load(),
         },

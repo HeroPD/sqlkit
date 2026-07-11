@@ -138,6 +138,7 @@ describe('alterColumns', () => {
     h.ops.alterColumns(s)
 
     expect(sqlkit.runDdl).not.toHaveBeenCalled()
+    expect(h.dialogs.review?.warning).toBeUndefined()
     expect(h.dialogs.review?.sql).toBe(
       'ALTER TABLE "public"."users" DROP COLUMN "legacy";\n\nALTER TABLE "public"."users" ADD COLUMN "age" integer;',
     )
@@ -176,6 +177,7 @@ describe('alterColumns', () => {
     sqlkit.runDdl.mockResolvedValue({ success: false, failedIndex: 1, partial: true, appliedCount: 1, error: 'boom' })
     const h = harness()
     h.ops.alterColumns(spec({ engine: 'mysql', drops: ['a', 'b'] }))
+    expect(h.dialogs.review?.warning).toMatch(/commits schema statements individually/i)
     h.dialogs.acceptReview()
     await flush()
 
@@ -247,7 +249,7 @@ describe('applyStatements', () => {
     sqlkit.runDdl.mockResolvedValue({ success: true })
     const h = harness()
     const onApplied = vi.fn()
-    h.ops.applyStatements({ profileId: 'p1', childDb: null, statements: ['CREATE INDEX "i" ON "t" ("a")'], onApplied })
+    h.ops.applyStatements({ profileId: 'p1', childDb: null, engine: 'postgresql', statements: ['CREATE INDEX "i" ON "t" ("a")'], onApplied })
 
     expect(h.dialogs.review?.sql).toBe('CREATE INDEX "i" ON "t" ("a");')
     expect(sqlkit.runDdl).not.toHaveBeenCalled()
@@ -261,7 +263,7 @@ describe('applyStatements', () => {
 
   it('is a no-op for an empty statement list', () => {
     const h = harness()
-    h.ops.applyStatements({ profileId: 'p1', childDb: null, statements: [], onApplied: vi.fn() })
+    h.ops.applyStatements({ profileId: 'p1', childDb: null, engine: 'postgresql', statements: [], onApplied: vi.fn() })
     expect(h.dialogs.review).toBeNull()
   })
 })

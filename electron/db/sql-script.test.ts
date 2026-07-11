@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assertSelfContainedTransaction,
+  prepareSqlRun,
   preprocessMysqlDelimiters,
   splitSqlServerBatches,
   splitTopLevelStatements,
@@ -121,5 +122,49 @@ describe('dialect script handling', () => {
   it('splits only top-level semicolons', () => {
     expect(splitTopLevelStatements("select ';'; select (1 + 2);")).toEqual(["select ';'", 'select (1 + 2)'])
     expect(splitTopLevelStatements("select 'can\\'t; stop'; select 2", 'mysql')).toEqual(["select 'can\\'t; stop'", 'select 2'])
+  })
+})
+
+describe('prepareSqlRun', () => {
+  it('applies an engine-quoted sort only to a single SELECT', () => {
+    expect(prepareSqlRun({
+      engine: 'postgresql',
+      sql: 'select id, name from users limit 10;',
+      sort: { column: 'display name', direction: 'desc' },
+    }).batches).toEqual(['select id, name from users\nORDER BY "display name" DESC\nlimit 10;'])
+
+    expect(() => prepareSqlRun({
+      engine: 'mysql',
+      sql: 'select 1; select 2',
+      sort: { column: 'value', direction: 'asc' },
+    })).toThrow(/single SELECT/i)
+    expect(() => prepareSqlRun({
+      engine: 'sqlserver',
+      sql: 'update users set active = 1',
+      sort: { column: 'id', direction: 'asc' },
+    })).toThrow(/single SELECT/i)
+  })
+
+  it('normalizes MySQL client delimiters before validation and execution', () => {
+    expect(prepareSqlRun({
+      engine: 'mysql',
+      sql: 'DELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n SELECT 1;\nEND$$\nDELIMITER ;',
+    }).batches).toEqual(['CREATE PROCEDURE p()\nBEGIN\n SELECT 1;\nEND;'])
+  })
+
+  it('expands SQL Server GO batches and rejects ambiguous parameter binding', () => {
+    expect(prepareSqlRun({ engine: 'sqlserver', sql: 'select 1\nGO 2\nselect 2' }).batches)
+      .toEqual(['select 1', 'select 1', 'select 2'])
+    expect(() => prepareSqlRun({
+      engine: 'sqlserver',
+      sql: 'select @p1\nGO\nselect @p1',
+      params: [1],
+    })).toThrow(/Parameters.*multi-batch/i)
+  })
+
+  it('enforces the stateless transaction contract for every caller', () => {
+    expect(() => prepareSqlRun({ engine: 'postgresql', sql: 'BEGIN; select 1' })).toThrow(/same query run/i)
+    expect(prepareSqlRun({ engine: 'postgresql', sql: 'BEGIN; select 1; COMMIT' }).batches)
+      .toEqual(['BEGIN; select 1; COMMIT'])
   })
 })

@@ -7,7 +7,7 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
-import { assertSelfContainedTransaction, splitSqlServerBatches } from './sql-script'
+import { prepareSqlRun } from './sql-script'
 import { installLosslessTediousParsers } from './tedious-lossless'
 
 installLosslessTediousParsers()
@@ -229,8 +229,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
     async query(sqlText, params = [], childDb = null, sort = null, executionId) {
       const started = performance.now()
-      const finalSql = sort ? dialect.applyOrderBy(sqlText, sort) : sqlText
-      assertSelfContainedTransaction(finalSql, 'sqlserver')
+      const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort })
       const entry = { executionId, request: null as sql.Request | null, cancelRequested: false }
       running.add(entry)
       let userPool: sql.ConnectionPool | null = null
@@ -241,9 +240,8 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
         const resultSets: QueryResultSet[] = []
         const budget = { bytes: 0 }
-        const batches = splitSqlServerBatches(finalSql)
-        for (const batch of batches) {
-          entry.request = bind(pool.request(), params)
+        for (const batch of plan.batches) {
+          entry.request = bind(pool.request(), plan.params)
           if (entry.cancelRequested) throw new Error('Query cancelled.')
           result = await streamQuery(entry.request, batch, started, budget)
           resultSets.push(...(result.resultSets ?? [{

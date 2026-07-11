@@ -12,7 +12,7 @@ type PromptConfig = {
   action: (value: string) => void
 }
 // A generated write statement awaiting the user's review before it runs.
-type ReviewConfig = { sql: string; params: unknown[]; run: () => void }
+type ReviewConfig = { sql: string; params: unknown[]; warning?: string; run: () => void }
 
 // Owns the modal confirm/prompt dialogs the workbench pops for destructive or
 // input actions. The dialog views are their own components; this holds which

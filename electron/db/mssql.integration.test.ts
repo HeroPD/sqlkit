@@ -1,6 +1,7 @@
 import sql from 'mssql'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ConnectionProfile } from '../../src/electron'
+import { buildAddConstraint, buildAddForeignKey, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { createMssqlDriver } from './mssql'
@@ -241,6 +242,7 @@ describeDb('mssql driver (integration)', () => {
       expect(outcome?.running).toBeGreaterThanOrEqual(1)
       expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
       await cancelled
+      expect((await driver.query('select 1')).rows).toEqual([[1]])
     } finally {
       await driver.disconnect()
     }
@@ -358,6 +360,33 @@ describeDb('mssql driver (integration)', () => {
       expect(gone.recordset).toHaveLength(0)
     } finally {
       await admin.request().batch(`drop database if exists ${name}`).catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('executes generated schema-object DDL and exposes it through inspection', async () => {
+    const driver = await connectDriver()
+    const source = { schema: 'dbo', name: 'ddl_source', kind: 'table' as const }
+    try {
+      await driver.query('create table ddl_target (id int primary key)')
+      await driver.query('create table ddl_source (id int, target_id int)')
+      const result = await driver.runDdl!([
+        buildCreateIndex(source, { name: 'ddl_source_idx', columns: ['target_id'], unique: false }, 'sqlserver'),
+        buildAddConstraint(source, { name: 'ddl_source_check', type: 'CHECK', expression: 'id >= 0' }, 'sqlserver'),
+        buildAddForeignKey(source, {
+          name: 'ddl_source_fk', columns: ['target_id'], refTable: 'dbo.ddl_target', refColumns: ['id'],
+        }, 'sqlserver'),
+        buildCreateTrigger(source, {
+          name: 'ddl_source_trigger', timing: 'AFTER', events: ['INSERT'], level: 'STATEMENT', body: 'SELECT 1',
+        }, 'sqlserver'),
+      ])
+      expect(result).toEqual({ success: true })
+      const inspection = await driver.inspectTable(source)
+      expect(inspection.sections.find((section) => section.title === 'Indexes')?.rows.some((row) => row.name === 'ddl_source_idx')).toBe(true)
+      expect(inspection.sections.find((section) => section.title === 'Foreign Keys')?.rows.some((row) => row.name === 'ddl_source_fk')).toBe(true)
+      expect(inspection.sections.find((section) => section.title === 'Triggers')?.rows.some((row) => row.name === 'ddl_source_trigger')).toBe(true)
+    } finally {
+      await driver.query('drop table if exists ddl_source, ddl_target').catch(() => {})
       await driver.disconnect()
     }
   })

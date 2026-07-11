@@ -3,6 +3,7 @@ import type { DialogsController } from './dialogs'
 import { dialectFor } from '../dialect'
 import { buildColumnAdd, buildColumnAlter, buildColumnDrop, quoteQualified, type ColumnAdd, type ColumnAlter } from '../sql-write'
 import { TABLE_KIND_LABELS } from '../table-kinds'
+import { capabilitiesFor } from '../engine-capabilities'
 
 // Staged column edits from the Inspect tab, plus how to reach the connection and
 // refresh the view once the change lands. `onApplied` reloads the inspect tab.
@@ -102,18 +103,25 @@ export class SchemaOpsController {
     this.deps.dialogs.review = {
       sql: statements.map((statement) => `${statement};`).join('\n\n'),
       params: [],
+      warning: this._ddlWarning(spec.engine, statements.length),
       run: () => void this._runAlter(spec, statements),
     }
   }
 
   // Reviewed DDL statements from the inspect add dialogs (index/trigger/partition).
-  applyStatements(spec: { profileId: string; childDb: string | null; statements: string[]; onApplied: () => void }) {
+  applyStatements(spec: { profileId: string; childDb: string | null; engine: Engine; statements: string[]; onApplied: () => void }) {
     if (!spec.statements.length) return
     this.deps.dialogs.review = {
       sql: spec.statements.map((statement) => `${statement};`).join('\n\n'),
       params: [],
+      warning: this._ddlWarning(spec.engine, spec.statements.length),
       run: () => void this._runAlter(spec, spec.statements),
     }
+  }
+
+  private _ddlWarning(engine: Engine, statementCount: number): string | undefined {
+    if (statementCount < 2 || capabilitiesFor(engine).ddlAtomicity === 'atomic') return undefined
+    return 'This engine commits schema statements individually. If a later statement fails, earlier changes cannot be rolled back automatically.'
   }
 
   private async _runAlter(spec: { profileId: string; childDb: string | null; onApplied: () => void }, statements: string[]) {

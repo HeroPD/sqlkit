@@ -27,9 +27,10 @@ export type Driver = {
   /** Opens the connection; resolves with the server version string. */
   connect(): Promise<string>
   disconnect(): Promise<void>
-  /** Runs in `childDb` when provided; otherwise uses the driver's active
-   * database. `sort` injects an ORDER BY the driver builds with its own
-   * identifier quoting. */
+  /** Executes one self-contained, stateless SQL run in `childDb` when provided,
+   * otherwise in the active database. Connection-scoped state is not preserved
+   * between calls; transactions must begin and finish in this call. `sort`
+   * injects an ORDER BY only for a single SELECT, with engine-correct quoting. */
   query(
     sql: string,
     params?: unknown[],

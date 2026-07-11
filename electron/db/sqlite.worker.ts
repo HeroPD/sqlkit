@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { inspectTable, listColumns, listTables, openDatabase, queryDatabase, runBatch, runDdl, serverVersion } from './sqlite-engine'
-import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
+import type { SqliteRequest, SqliteRequestType, SqliteResponse, SqliteResultByRequest } from './sqlite-protocol'
 
 // Electron utilityProcess entry: owns one synchronous SQLite handle and answers
 // requests over parentPort. Running here (not the main process) means a heavy
@@ -23,7 +23,7 @@ const requireDb = (): DatabaseSync => {
   return db
 }
 
-const handle = (request: SqliteRequest): unknown => {
+const handle = (request: SqliteRequest): SqliteResultByRequest[SqliteRequestType] => {
   switch (request.type) {
     case 'open':
       db?.close()

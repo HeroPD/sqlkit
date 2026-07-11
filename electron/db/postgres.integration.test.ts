@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ConnectionProfile } from '../../src/electron'
+import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { createPostgresDriver } from './postgres'
@@ -199,6 +200,7 @@ describeDb('postgres driver (integration)', () => {
       expect(outcome?.running).toBeGreaterThanOrEqual(1)
       expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
       await cancelled
+      expect((await driver.query('select 1')).rows).toEqual([[1]])
     } finally {
       await driver.disconnect()
     }
@@ -263,6 +265,42 @@ describeDb('postgres driver (integration)', () => {
       const indexes = inspection.sections.find((section) => section.title === 'Indexes')
       expect(indexes?.rows.some((row) => row.name === 'books_author_idx')).toBe(true)
     } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('executes generated schema-object DDL and exposes it through inspection', async () => {
+    const driver = await connectDriver()
+    const source = { schema: 'sqlkit_it', name: 'ddl_source', kind: 'table' as const }
+    try {
+      await driver.query('create table sqlkit_it.ddl_target (id integer primary key)')
+      await driver.query('create table sqlkit_it.ddl_source (id integer, target_id integer)')
+      await driver.query('create function sqlkit_it.ddl_touch() returns trigger language plpgsql as $$ begin return new; end $$')
+      const result = await driver.runDdl!([
+        buildCreateIndex(source, { name: 'ddl_source_idx', columns: ['target_id'], unique: false }, 'postgresql'),
+        buildAddConstraint(source, { name: 'ddl_source_check', type: 'CHECK', expression: 'id >= 0' }, 'postgresql'),
+        buildAddForeignKey(source, {
+          name: 'ddl_source_fk', columns: ['target_id'], refTable: 'sqlkit_it.ddl_target', refColumns: ['id'],
+        }, 'postgresql'),
+        buildCreateTrigger(source, {
+          name: 'ddl_source_trigger', timing: 'BEFORE', events: ['INSERT'], level: 'ROW', functionName: 'sqlkit_it.ddl_touch',
+        }, 'postgresql'),
+      ])
+      expect(result).toEqual({ success: true })
+      const inspection = await driver.inspectTable(source)
+      expect(inspection.sections.find((section) => section.title === 'Indexes')?.rows.some((row) => row.name === 'ddl_source_idx')).toBe(true)
+      expect(inspection.sections.find((section) => section.title === 'Foreign Keys')?.rows.some((row) => row.name === 'ddl_source_fk')).toBe(true)
+      expect(inspection.sections.find((section) => section.title === 'Triggers')?.rows.some((row) => row.name === 'ddl_source_trigger')).toBe(true)
+
+      await driver.query('create table sqlkit_it.ddl_partitioned (id integer) partition by range (id)')
+      expect(await driver.runDdl!([
+        buildAddPartition({ schema: 'sqlkit_it', name: 'ddl_partitioned', kind: 'table' }, { name: 'ddl_partition_10', bounds: 'FROM (0) TO (10)' }, 'postgresql'),
+      ])).toEqual({ success: true })
+    } finally {
+      await driver.query('drop table if exists sqlkit_it.ddl_partitioned cascade').catch(() => {})
+      await driver.query('drop table if exists sqlkit_it.ddl_source cascade').catch(() => {})
+      await driver.query('drop table if exists sqlkit_it.ddl_target cascade').catch(() => {})
+      await driver.query('drop function if exists sqlkit_it.ddl_touch() cascade').catch(() => {})
       await driver.disconnect()
     }
   })

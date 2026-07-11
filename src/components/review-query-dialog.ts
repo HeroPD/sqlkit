@@ -87,6 +87,9 @@ export class ReviewQueryDialog extends LitElement {
   @property()
   confirmLabel = 'Run'
 
+  @property()
+  warning = ''
+
   connectedCallback() {
     super.connectedCallback()
     window.addEventListener('keydown', this._onKeydown)
@@ -103,6 +106,7 @@ export class ReviewQueryDialog extends LitElement {
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <div class="panel" role="dialog" aria-label="Review query">
           <h4>Review query</h4>
+          ${this.warning ? html`<p class="warning" role="alert">${this.warning}</p>` : ''}
           <pre class="sql"><code>${sqlPreviewParts(preview).map((part) =>
             part.kind ? html`<span class=${part.kind}>${part.text}</span>` : part.text,
           )}</code></pre>
@@ -180,6 +184,16 @@ export class ReviewQueryDialog extends LitElement {
         background: var(--editor-bg);
         border: 1px solid var(--border-subtle);
         border-radius: 4px;
+      }
+
+      .warning {
+        margin: 0;
+        padding: 8px 10px;
+        color: var(--text);
+        background: color-mix(in srgb, var(--status-dot-warning) 14%, transparent);
+        border: 1px solid color-mix(in srgb, var(--status-dot-warning) 45%, transparent);
+        border-radius: 4px;
+        line-height: 1.4;
       }
 
       .sql code {

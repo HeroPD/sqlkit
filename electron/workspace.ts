@@ -9,6 +9,7 @@ import type {
   WorkspaceConfigResult,
   WorkspaceResult,
 } from '../src/electron'
+import { workspaceConfig as validateWorkspaceConfig } from './ipc-validation'
 
 // temp+rename so a crash mid-write can't leave a half-written (and for the
 // workspace config, connection-wiping) file behind.
@@ -197,8 +198,28 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'missing' }
     return { status: 'error', error: (error as Error).message }
   }
+  let decoded: unknown
   try {
-    const parsed = JSON.parse(raw) as Partial<WorkspaceConfig>
+    decoded = JSON.parse(raw)
+  } catch (error) {
+    return { status: 'error', error: `${workspaceConfigPathFor(workspacePath)} is not valid JSON: ${(error as Error).message}` }
+  }
+  try {
+    // Version-1 profiles predate `file` and `folder`; migrate only those known
+    // omissions before applying the same strict schema used at the IPC boundary.
+    const candidate: Record<string, unknown> | null = decoded && typeof decoded === 'object' && !Array.isArray(decoded)
+      ? decoded as Record<string, unknown>
+      : null
+    const migrated = candidate && Array.isArray(candidate.connections)
+      ? {
+          ...candidate,
+          connections: (candidate.connections as unknown[]).map((entry: unknown) =>
+            entry && typeof entry === 'object' && !Array.isArray(entry)
+              ? { file: '', folder: '', ...entry as Record<string, unknown> }
+              : entry),
+        }
+      : decoded
+    const parsed = validateWorkspaceConfig(migrated)
     let decryptFailed = false
     const decryptTracked = (value: string): string => {
       if (!value.startsWith(SECRET_PREFIX)) return value
@@ -209,18 +230,17 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
         return ''
       }
     }
-    const connections = normalizeConnections(parsed.connections ?? []).map((connection) => mapSecrets(connection, decryptTracked))
+    const connections = normalizeConnections(parsed.connections).map((connection) => mapSecrets(connection, decryptTracked))
     return {
       status: 'ok',
       decryptFailed,
       config: {
-        ...defaultWorkspaceConfig(),
         ...parsed,
         connections,
       },
     }
   } catch (error) {
-    return { status: 'error', error: `${workspaceConfigPathFor(workspacePath)} is not valid JSON: ${(error as Error).message}` }
+    return { status: 'error', error: `${workspaceConfigPathFor(workspacePath)} has an invalid configuration: ${(error as Error).message}` }
   }
 }
 

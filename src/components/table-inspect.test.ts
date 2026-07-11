@@ -1267,7 +1267,8 @@ describe('TableInspect section add buttons', () => {
     dialog.dispatchEvent(new CustomEvent('add-ddl', { detail: { statements: ['CREATE INDEX "i" ON "users" ("id")'] }, bubbles: true, composed: true }))
 
     expect(onCreate).toHaveBeenCalledOnce()
-    const detail = (onCreate.mock.calls[0]![0] as CustomEvent<{ statements: string[] }>).detail
+    const detail = (onCreate.mock.calls[0]![0] as CustomEvent<{ engine: string; statements: string[] }>).detail
+    expect(detail.engine).toBe('sqlite')
     expect(detail.statements).toEqual(['CREATE INDEX "i" ON "users" ("id")'])
     await view.updateComplete
     expect(view.shadowRoot!.querySelector('inspect-add-dialog')).toBeNull()

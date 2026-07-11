@@ -740,6 +740,7 @@ export class WorkbenchScreen extends LitElement {
             <review-query-dialog
               .sql=${this._dialogs.review.sql}
               .params=${this._dialogs.review.params}
+              .warning=${this._dialogs.review.warning ?? ''}
               @dialog-cancel=${() => (this._dialogs.review = null)}
               @dialog-confirm=${this._dialogs.acceptReview}
             ></review-query-dialog>

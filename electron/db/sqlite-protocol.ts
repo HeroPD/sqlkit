@@ -1,18 +1,27 @@
-import type { TableRef } from '../../src/electron'
+import type { BatchResult, ColumnRef, DdlResult, QueryResult, TableInspection, TableRef } from '../../src/electron'
 import type { SqliteParam } from './sqlite-engine'
 
-// Wire format between the SQLite driver (main process) and its worker. One
-// request gets exactly one response, correlated by id. Type-only, so importing
-// it couples neither side to the other's runtime.
-export type SqliteRequest =
-  | { id: number; type: 'open'; file: string }
-  | { id: number; type: 'query'; sql: string; params: SqliteParam[] }
-  | { id: number; type: 'runBatch'; statements: { sql: string; params: SqliteParam[]; expectedRows?: number }[] }
-  | { id: number; type: 'runDdl'; statements: string[] }
-  | { id: number; type: 'listTables' }
-  | { id: number; type: 'listColumns' }
-  | { id: number; type: 'inspectTable'; table: TableRef }
+export type SqliteRequestBodyByType = {
+  open: { type: 'open'; file: string }
+  query: { type: 'query'; sql: string; params: SqliteParam[] }
+  runBatch: { type: 'runBatch'; statements: { sql: string; params: SqliteParam[]; expectedRows?: number }[] }
+  runDdl: { type: 'runDdl'; statements: string[] }
+  listTables: { type: 'listTables' }
+  listColumns: { type: 'listColumns' }
+  inspectTable: { type: 'inspectTable'; table: TableRef }
+}
 
-export type SqliteResponse =
-  | { id: number; ok: true; value: unknown }
-  | { id: number; ok: false; error: string }
+export type SqliteResultByRequest = {
+  open: string
+  query: QueryResult
+  runBatch: BatchResult
+  runDdl: DdlResult
+  listTables: TableRef[]
+  listColumns: ColumnRef[]
+  inspectTable: TableInspection
+}
+
+export type SqliteRequestType = keyof SqliteRequestBodyByType
+export type SqliteRequestBody<K extends SqliteRequestType = SqliteRequestType> = SqliteRequestBodyByType[K]
+export type SqliteRequest<K extends SqliteRequestType = SqliteRequestType> = SqliteRequestBody<K> & { id: number }
+export type SqliteResponse = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: string }

@@ -8,7 +8,7 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
-import { assertSelfContainedTransaction } from './sql-script'
+import { prepareSqlRun } from './sql-script'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
@@ -38,6 +38,11 @@ export function sslOptions(profile: ConnectionProfile): boolean | ConnectionOpti
 // Dials the endpoint, not the profile — the transport layer may have
 // rewritten host/port to an SSH tunnel's local end.
 type RunningEntry = { executionId?: string; pid: number | null; cancelRequested: boolean }
+
+// node-postgres exposes the backend PID at runtime but omits it from the public
+// PoolClient type. Keep that upgrade-sensitive assertion at one boundary.
+const backendPid = (client: pg.PoolClient): number | null =>
+  (client as pg.PoolClient & { processID?: number }).processID ?? null
 
 export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpoint, events: DriverEvents): Driver {
   let pools: Map<string, pg.Pool> | null = null
@@ -163,9 +168,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     },
 
     async query(sql, params = [], childDb = null, sort = null, executionId) {
-      assertSelfContainedTransaction(sql, 'postgresql')
       const started = performance.now()
-      const finalSql = sort ? dialect.applyOrderBy(sql, sort) : sql
+      const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort })
       const pool = poolForQuery(childDb)
       // Checked out manually (not pool.query) so the backend PID is known
       // while the statement runs and cancel() has a target.
@@ -182,12 +186,12 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       }
       try {
         client = await pool.connect()
-        entry.pid = (client as unknown as { processID?: number }).processID ?? null
+        entry.pid = backendPid(client)
         if (entry.cancelRequested) {
           releaseToPool()
           throw new Error('Query cancelled.')
         }
-        const result = await streamQuery(client, finalSql, params, started)
+        const result = await streamQuery(client, plan.batches[0]!, plan.params, started)
         await resetUserSession(client)
         releaseToPool()
         return result
@@ -208,7 +212,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // One checked-out client for the whole batch: a pool-routed sequence would
       // spread the statements across backends, so BEGIN/COMMIT couldn't bind them.
       const client = await pool.connect()
-      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null, cancelRequested: false }
+      const entry = { pid: backendPid(client), cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the client re-enters the pool (see query()).
       const releaseToPool = () => {
@@ -254,7 +258,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       if (!statements.length) return { success: true }
       const pool = poolForQuery(childDb)
       const client = await pool.connect()
-      const entry = { pid: (client as unknown as { processID?: number }).processID ?? null, cancelRequested: false }
+      const entry = { pid: backendPid(client), cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the client re-enters the pool (see query()).
       const releaseToPool = () => {
