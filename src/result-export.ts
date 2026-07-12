@@ -61,18 +61,61 @@ export const cellToTsv = (value: unknown): string => {
 // cell on paste — and formula-leading cells are neutralized.
 export const cellsToTsv = (rows: unknown[][]): string => rows.map((row) => delimitedRow(row, '\t')).join('\n')
 
-/** Array of objects; duplicate column names (select a.id, b.id) get numbered
- * suffixes so no value is silently dropped. */
-export function toJson(columns: string[], rows: unknown[][]): string {
+// Numbered suffixes for duplicate column names (select a.id, b.id) so no value
+// is silently dropped when a row becomes an object.
+const jsonKeys = (columns: string[]): string[] => {
   const seen = new Map<string, number>()
-  const keys = columns.map((name) => {
+  return columns.map((name) => {
     const count = seen.get(name) ?? 0
     seen.set(name, count + 1)
     return count === 0 ? name : `${name}_${count + 1}`
   })
+}
+
+/** Array of objects; duplicate column names get numbered suffixes. */
+export function toJson(columns: string[], rows: unknown[][]): string {
+  const keys = jsonKeys(columns)
   return JSON.stringify(
     rows.map((row) => Object.fromEntries(keys.map((key, index) => [key, row[index] ?? null]))),
     bigintReplacer,
     2,
   )
+}
+
+export type ExportFormat = 'csv' | 'tsv' | 'json'
+
+// Emits an export one piece at a time (header, then a line per row, then a
+// footer) so a full result can be streamed straight to disk without ever
+// holding every row in memory. Reuses the exact escaping and formula-injection
+// neutralization of the buffered paths above, so a streamed file and a
+// clipboard copy of the same rows are byte-identical.
+export type ExportSerializer = {
+  header(): string
+  row(cells: unknown[]): string
+  footer(): string
+}
+
+export function createExportSerializer(columns: string[], format: ExportFormat): ExportSerializer {
+  if (format === 'json') {
+    const keys = jsonKeys(columns)
+    let first = true
+    return {
+      header: () => '[\n',
+      // One compact object per line, comma-separated — a valid JSON array that a
+      // reader can also consume line by line.
+      row: (cells) => {
+        const object = Object.fromEntries(keys.map((key, index) => [key, cells[index] ?? null]))
+        const text = `${first ? '' : ',\n'}${JSON.stringify(object, bigintReplacer)}`
+        first = false
+        return text
+      },
+      footer: () => '\n]\n',
+    }
+  }
+  const delimiter = format === 'tsv' ? '\t' : ','
+  return {
+    header: () => `${delimitedRow(columns, delimiter)}\n`,
+    row: (cells) => `${delimitedRow(cells, delimiter)}\n`,
+    footer: () => '',
+  }
 }

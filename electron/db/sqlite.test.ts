@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ConnectionProfile } from '../../src/electron'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { createSqliteDriver, type SqliteChannel, type SqliteSpawner } from './sqlite'
-import { inspectTable, listColumns, listTables, openDatabase, queryDatabase, runBatch, serverVersion } from './sqlite-engine'
+import { exportQuery, inspectTable, listColumns, listTables, openDatabase, queryDatabase, runBatch, serverVersion } from './sqlite-engine'
 import type { SqliteRequest, SqliteResponse } from './sqlite-protocol'
 
 // Fields the sqlite driver reads; the rest of the profile is filler so the type compiles.
@@ -624,5 +627,45 @@ describe('sqlite driver: inspectTable', () => {
     expect(inspection.sections).toEqual([
       { title: 'Indexes', rows: [{ name: 'sqlite_autoindex_uq_1', definition: '(auto: unique/primary key)' }] },
     ])
+  })
+})
+
+describe('sqlite exportQuery', () => {
+  const exportFile = (name: string) => join(mkdtempSync(join(tmpdir(), 'sqlkit-sqlite-export-')), name)
+
+  it('streams a full result to a CSV file', () => {
+    const db = openDatabase(':memory:')
+    db.exec('create table t (a integer, b text)')
+    db.exec("insert into t values (1, 'x'), (2, 'y'), (3, 'z')")
+    const file = exportFile('out.csv')
+    const { rowCount } = exportQuery(db, 'select a, b from t order by a', [], file, 'csv')
+    expect(rowCount).toBe(3)
+    expect(readFileSync(file, 'utf8')).toBe('a,b\n1,x\n2,y\n3,z\n')
+    db.close()
+  })
+
+  it('streams JSON and honors bound parameters', () => {
+    const db = openDatabase(':memory:')
+    db.exec('create table t (a integer, b text)')
+    db.exec("insert into t values (1, 'x'), (2, 'y'), (3, 'z')")
+    const file = exportFile('out.json')
+    const { rowCount } = exportQuery(db, 'select b from t where a > ? order by a', [1], file, 'json')
+    expect(rowCount).toBe(2)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual([{ b: 'y' }, { b: 'z' }])
+    db.close()
+  })
+
+  it('refuses a statement that returns no result set', () => {
+    const db = openDatabase(':memory:')
+    db.exec('create table t (a)')
+    expect(() => exportQuery(db, 'insert into t values (1)', [], exportFile('bad.csv'), 'csv')).toThrow(/result-returning/i)
+    db.close()
+  })
+
+  it('refuses a multi-statement script', () => {
+    const db = openDatabase(':memory:')
+    db.exec('create table t (a)')
+    expect(() => exportQuery(db, 'select 1; select 2', [], exportFile('multi.csv'), 'csv')).toThrow(/single statement/i)
+    db.close()
   })
 })

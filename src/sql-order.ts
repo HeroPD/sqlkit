@@ -3,6 +3,9 @@
 // while skipping strings, comments, dollar-quoted bodies and nested parens, so
 // it only ever touches the outer query's order/limit clauses.
 
+import type { Engine } from './electron'
+import { maskSql } from './sql-mask'
+
 export type SortDir = 'asc' | 'desc'
 export type OrderByTerm = { column: string; dir: SortDir }
 
@@ -146,6 +149,24 @@ export function isReorderableQuery(sql: string): boolean {
   if (scanned.multiStatement || scanned.unsafeClause) return false
   const head = leadingKeyword(sql)
   return head === 'select'
+}
+
+// Whether a query is safe to re-run for a full-result export: one statement, no
+// writes or side effects. Streaming export re-executes the SQL, so anything that
+// modifies data (or a SELECT … INTO / FOR, which unsafeClause already flags)
+// must fall back to exporting the buffered rows instead.
+export function isReadOnlyQuery(sql: string, engine?: Engine): boolean {
+  if (!sql.trim()) return false
+  const scanned = scan(sql)
+  if (scanned.multiStatement || scanned.unsafeClause) return false
+  const head = leadingKeyword(sql)
+  if (head === 'select' || head === 'values' || head === 'show' || head === 'pragma' || head === 'table') return true
+  // A CTE is read-only unless it drives a data-modifying statement
+  // (WITH x AS (DELETE … RETURNING …) …), which Postgres permits.
+  if (head === 'with') {
+    return !/\b(?:insert|update|delete|merge|call)\b/.test(maskSql(sql, engine).toLowerCase())
+  }
+  return false
 }
 
 // Strips a trailing direction (and NULLS FIRST/LAST) off one ORDER BY term.

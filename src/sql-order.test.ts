@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { activeSort, applyOrderBy, isReorderableQuery, type OrderByTerm } from './sql-order'
+import { activeSort, applyOrderBy, isReadOnlyQuery, isReorderableQuery, type OrderByTerm } from './sql-order'
 
 const asc = (column: string): OrderByTerm => ({ column, dir: 'asc' })
 const desc = (column: string): OrderByTerm => ({ column, dir: 'desc' })
@@ -83,5 +83,30 @@ describe('activeSort', () => {
     expect(activeSort('SELECT * FROM t', columns)).toBeNull()
     expect(activeSort('SELECT * FROM t ORDER BY lower(name)', columns)).toBeNull()
     expect(activeSort('SELECT * FROM t ORDER BY other', columns)).toBeNull()
+  })
+})
+
+describe('isReadOnlyQuery', () => {
+  it('accepts single read-only statements', () => {
+    expect(isReadOnlyQuery('SELECT * FROM users')).toBe(true)
+    expect(isReadOnlyQuery('  select 1;\n')).toBe(true)
+    expect(isReadOnlyQuery('VALUES (1),(2)')).toBe(true)
+    expect(isReadOnlyQuery('WITH x AS (SELECT 1 AS n) SELECT * FROM x')).toBe(true)
+  })
+
+  it('rejects writes and side-effecting statements', () => {
+    expect(isReadOnlyQuery('INSERT INTO t VALUES (1)')).toBe(false)
+    expect(isReadOnlyQuery('UPDATE t SET a = 1')).toBe(false)
+    expect(isReadOnlyQuery('DELETE FROM t')).toBe(false)
+    expect(isReadOnlyQuery('DROP TABLE t')).toBe(false)
+    // SELECT … INTO writes a new table; the scanner flags INTO as unsafe.
+    expect(isReadOnlyQuery('SELECT * INTO backup FROM t')).toBe(false)
+    // A data-modifying CTE must not be re-run for an export.
+    expect(isReadOnlyQuery('WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d')).toBe(false)
+  })
+
+  it('rejects multi-statement scripts', () => {
+    expect(isReadOnlyQuery('SELECT 1; DROP TABLE t')).toBe(false)
+    expect(isReadOnlyQuery('')).toBe(false)
   })
 })

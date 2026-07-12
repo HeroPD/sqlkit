@@ -1,5 +1,8 @@
 import mysql from 'mysql2/promise'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ConnectionProfile } from '../../src/electron'
 import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import type { Driver } from './driver'
@@ -51,6 +54,25 @@ describeDb('mysql driver (integration)', () => {
     await driver.connect()
     return driver
   }
+
+  it('streams a full result to a CSV file via exportQuery', async () => {
+    const driver = await connectDriver()
+    const file = join(mkdtempSync(join(tmpdir(), 'sqlkit-mysql-export-')), 'authors.csv')
+    try {
+      const result = await driver.exportQuery!({
+        sql: 'select name from authors order by id',
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'csv',
+      })
+      expect(result.rowCount).toBe(2)
+      expect(readFileSync(file, 'utf8')).toBe('name\nAda\nAlan\n')
+    } finally {
+      await driver.disconnect()
+    }
+  })
 
   it('connects and reports the server version', async () => {
     const profile = profileFromUrl(dbUrl, { engine: 'mysql' })

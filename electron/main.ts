@@ -52,9 +52,11 @@ import {
   databaseObject,
   databaseObjectKind,
   ddlStatements,
+  exportFormat,
   nullableStringValue,
   nonNegativeInteger,
   queryPayload,
+  querySort,
   stringValue,
   tableReference,
   workspaceConfig,
@@ -557,6 +559,35 @@ function registerDbIpc() {
   ipcMain.handle('db:close-session', (event, sessionId: string) =>
     existingManager(event)?.closeSession(stringValue(sessionId, 'Session id', 200)),
   )
+  // Streams a full read-only result to a user-chosen file, past the display
+  // buffer's row cap. The renderer only offers this for read-only SQL; the
+  // manager re-checks before re-running so a write can never re-execute.
+  ipcMain.handle('db:export-query', async (event, profileId: string, childDb: string | null, sql: string, sort: QuerySort | null, format: unknown, suggestedName: string) => {
+    let parsed
+    try {
+      parsed = {
+        profileId: stringValue(profileId, 'Profile id', 200),
+        childDb: childDb === null ? null : stringValue(childDb, 'Database name', 2_000),
+        sql: stringValue(sql, 'SQL'),
+        sort: querySort(sort),
+        format: exportFormat(format),
+        name: stringValue(suggestedName, 'Suggested file name', 1_000),
+      }
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message }
+    }
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window) return { success: false as const, error: 'No window' }
+    const activeManager = existingManager(event)
+    if (!activeManager) return { success: false as const, error: 'Not connected' }
+    const result = await dialog.showSaveDialog(window, {
+      title: 'Export Results',
+      defaultPath: join(app.getPath('downloads'), parsed.name || `results.${parsed.format}`),
+      filters: [{ name: parsed.format.toUpperCase(), extensions: [parsed.format] }],
+    })
+    if (result.canceled || !result.filePath) return { success: false as const, canceled: true }
+    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.sort, result.filePath, parsed.format)
+  })
   ipcMain.handle('db:cancel', (event, profileId: string, executionId?: string) =>
     manager(event).cancelQuery(
       stringValue(profileId, 'Profile id', 200),

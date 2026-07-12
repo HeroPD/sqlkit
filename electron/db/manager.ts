@@ -18,6 +18,9 @@ import type {
   TablesResult,
   TestConnectionResult,
 } from '../../src/electron'
+import { unlink } from 'node:fs/promises'
+import type { ExportFormat } from '../../src/result-export'
+import { isReadOnlyQuery } from '../../src/sql-order'
 import { createDriver, type Driver } from './driver'
 import { ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
@@ -111,14 +114,24 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       await resources.tunnel?.close().catch(() => {})
     }
 
-    // Only flag the session that actually failed; a reconnect may have
-    // already replaced this entry.
-    const onError = (message: string) => {
+    // A tunnel that drops after it was established won't recover on its own and
+    // takes the pools under it with it, so flag the connection as failed. Only
+    // flag the session that actually failed; a reconnect may have already
+    // replaced this entry.
+    const onTransportError = (message: string) => {
       if (isCurrent()) register({ phase: 'error', profileId: profile.id, error: message, ...resources })
     }
 
+    // Pool clients drop routinely while idle (managed-database idle timeouts,
+    // brief network blips); the pool discards the dead client and opens a fresh
+    // one on the next checkout. Demoting the whole connection to 'error' here
+    // would disable a pool that is about to heal — and blank the schema tree —
+    // so an async driver error is advisory only. A genuinely dead backend still
+    // surfaces as the next query's error.
+    const onDriverError = (_message: string) => {}
+
     try {
-      const endpoint = await resolveEndpoint(profile, onError)
+      const endpoint = await resolveEndpoint(profile, onTransportError)
       resources.tunnel = endpoint.tunnel
       if (isCurrent()) register({ phase: 'connecting', profileId: profile.id, ...resources })
       // Superseded while the tunnel was opening: own the tunnel we just got so
@@ -127,7 +140,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
         await teardown()
         return { success: false, error: 'Connection superseded' }
       }
-      resources.driver = createDriver(profile, endpoint, { onError })
+      resources.driver = createDriver(profile, endpoint, { onError: onDriverError })
       if (isCurrent()) register({ phase: 'connecting', profileId: profile.id, ...resources })
       const serverVersion = await resources.driver.connect()
       if (!isCurrent()) {
@@ -207,6 +220,30 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return await driver.runDdl(statements, childDb)
     } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
+  // Streams a full read-only result straight to a file, past the display buffer's
+  // row cap. Enforces read-only here too (IPC input is untrusted) so a re-run can
+  // never re-execute a write. A failed export leaves no half-written file.
+  async function exportQuery(
+    profileId: string,
+    childDb: string | null,
+    sql: string,
+    sort: QuerySort | null,
+    filePath: string,
+    format: ExportFormat,
+  ): Promise<{ success: boolean; rowCount?: number; error?: string }> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver.exportQuery) return { success: false, error: 'Export is not supported on this connection' }
+    if (!isReadOnlyQuery(sql)) return { success: false, error: 'Only read-only queries can be exported to a file.' }
+    try {
+      const { rowCount } = await driver.exportQuery({ sql, params: [], childDb, sort, filePath, format })
+      return { success: true, rowCount }
+    } catch (error) {
+      await unlink(filePath).catch(() => {})
       return { success: false, error: (error as Error).message }
     }
   }
@@ -347,6 +384,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     query,
     runBatch,
     runDdl,
+    exportQuery,
     fetchRows,
     closeSession,
     cancelQuery,

@@ -4,7 +4,7 @@ import { writeFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { ConnectionProfile } from '../../src/electron'
-import { mssqlTls, mssqlVersion, normalizeMssqlRow, toBindable } from './mssql'
+import { mssqlTls, mssqlVersion, normalizeMssqlRow, tediousToMssqlType, toBindable } from './mssql'
 
 describe('mssqlVersion', () => {
   it('shortens the @@version banner to product and year', () => {
@@ -89,5 +89,34 @@ describe('toBindable', () => {
     expect(toBindable('x')).toBe('x')
     expect(toBindable(42n)).toBe(42n)
     expect(toBindable(null)).toBeNull()
+  })
+})
+
+describe('tediousToMssqlType', () => {
+  const meta = (name: string, extra: Record<string, number> = {}) => ({ colName: 'c', type: { name }, ...extra })
+
+  it('maps temporal tokens (which arrive as JS Date) to the mssql type so normalizeMssqlRow formats them', () => {
+    expect(tediousToMssqlType(meta('DateTime2', { scale: 3 }))).toEqual({ type: sql.DateTime2, scale: 3 })
+    expect(tediousToMssqlType(meta('Date'))).toEqual({ type: sql.Date })
+    expect(tediousToMssqlType(meta('TimeN', { scale: 7 }))).toEqual({ type: sql.Time, scale: 7 })
+    expect(tediousToMssqlType(meta('DateTimeOffset', { scale: 7 }))).toEqual({ type: sql.DateTimeOffset, scale: 7 })
+  })
+
+  it('distinguishes datetime from smalldatetime by payload length', () => {
+    expect(tediousToMssqlType(meta('DateTimeN', { dataLength: 8 })).type).toBe(sql.DateTime)
+    expect(tediousToMssqlType(meta('DateTimeN', { dataLength: 4 })).type).toBe(sql.SmallDateTime)
+    expect(tediousToMssqlType(meta('MoneyN', { dataLength: 8 })).type).toBe(sql.Money)
+    expect(tediousToMssqlType(meta('MoneyN', { dataLength: 4 })).type).toBe(sql.SmallMoney)
+  })
+
+  it('carries precision and scale for decimal and numeric', () => {
+    expect(tediousToMssqlType(meta('DecimalN', { precision: 38, scale: 2 }))).toEqual({ type: sql.Decimal, precision: 38, scale: 2 })
+    expect(tediousToMssqlType(meta('NumericN', { precision: 10, scale: 4 }))).toEqual({ type: sql.Numeric, precision: 10, scale: 4 })
+  })
+
+  it('returns no type for tokens that need no normalization (already-correct values)', () => {
+    expect(tediousToMssqlType(meta('IntN'))).toEqual({})
+    expect(tediousToMssqlType(meta('NVarChar'))).toEqual({})
+    expect(tediousToMssqlType(meta('BitN'))).toEqual({})
   })
 })

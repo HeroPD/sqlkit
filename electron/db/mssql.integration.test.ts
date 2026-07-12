@@ -1,11 +1,29 @@
 import sql from 'mssql'
+import { Request as TediousRequest } from 'tedious'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ConnectionProfile } from '../../src/electron'
 import { buildAddConstraint, buildAddForeignKey, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
-import { createMssqlDriver } from './mssql'
+import { acquireConnection, createMssqlDriver, resetConnection, type AcquirablePool } from './mssql'
 import { endpointFor, profileFromUrl, testMssqlUrl } from './test-db'
+
+type PooledConn = Awaited<ReturnType<typeof acquireConnection>>
+const runBatch = (conn: PooledConn, text: string): Promise<void> =>
+  new Promise((resolve, reject) => conn.execSqlBatch(new TediousRequest(text, (err) => (err ? reject(err) : resolve()))))
+const scalar = (conn: PooledConn, text: string): Promise<unknown> =>
+  new Promise((resolve, reject) => {
+    let value: unknown = null
+    const request = new TediousRequest(text, (err) => (err ? reject(err) : resolve(value)))
+    ;(request as unknown as { on(event: 'row', listener: (cols: Array<{ value: unknown }>) => void): void }).on(
+      'row',
+      (cols) => { value = cols[0]?.value ?? null },
+    )
+    conn.execSqlBatch(request)
+  })
 
 const url = testMssqlUrl()
 const describeDb = url ? describe : describe.skip
@@ -68,6 +86,25 @@ describeDb('mssql driver (integration)', () => {
     await driver.connect()
     return driver
   }
+
+  it('streams a full result to a CSV file via exportQuery', async () => {
+    const driver = await connectDriver()
+    const file = join(mkdtempSync(join(tmpdir(), 'sqlkit-mssql-export-')), 'authors.csv')
+    try {
+      const result = await driver.exportQuery!({
+        sql: 'select name from authors order by id',
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'csv',
+      })
+      expect(result.rowCount).toBe(2)
+      expect(readFileSync(file, 'utf8')).toBe('name\nAda\nAlan\n')
+    } finally {
+      await driver.disconnect()
+    }
+  })
 
   it('connects and reports the server version', async () => {
     const driver = await connectDriver()
@@ -206,6 +243,24 @@ describeDb('mssql driver (integration)', () => {
       expect((await driver.query("select object_id('tempdb..#sqlkit_leaked_state')")).rows).toEqual([[null]])
     } finally {
       await driver.disconnect()
+    }
+  })
+
+  it('reset() scrubs session state on the very same reused connection', async () => {
+    // Deterministic proof (no same-vs-different-connection ambiguity): create a
+    // temp table on one connection, reset it, and see the table gone — that is
+    // the isolation the query() reset path relies on to reuse pooled connections.
+    const pool = await new sql.ConnectionPool(configFromUrl(dbUrl, TEST_DB)).connect()
+    try {
+      const acquirable = pool as unknown as AcquirablePool
+      const conn = await acquireConnection(acquirable)
+      await runBatch(conn, 'create table #reset_probe (x int)')
+      expect(await scalar(conn, "select object_id('tempdb..#reset_probe')")).not.toBeNull()
+      await resetConnection(conn)
+      expect(await scalar(conn, "select object_id('tempdb..#reset_probe')")).toBeNull()
+      acquirable.release(conn)
+    } finally {
+      await pool.close()
     }
   })
 

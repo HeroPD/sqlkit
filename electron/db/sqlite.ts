@@ -178,6 +178,11 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       return request({ type: 'runDdl', statements })
     },
 
+    async exportQuery({ sql, params, sort, filePath, format }) {
+      const plan = prepareSqlRun({ engine: 'sqlite', sql, params, sort })
+      return request({ type: 'exportQuery', sql: plan.batches[0]!, params: plan.params as SqliteParam[], filePath, format })
+    },
+
     async listTables() {
       return request({ type: 'listTables' })
     },

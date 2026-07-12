@@ -1,9 +1,12 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
+import type { ExportFormat } from '../result-export'
 
-export type ExportFormat = 'csv' | 'tsv' | 'json'
-export type ExportConfirmDetail = { format: ExportFormat; rows: number }
+export type { ExportFormat }
+// `stream` requests a full re-run streamed to disk (past the buffered rows);
+// otherwise `rows` of the already-received rows are exported.
+export type ExportConfirmDetail = { format: ExportFormat; rows: number; stream: boolean }
 
 const FORMATS: Array<{ id: ExportFormat; label: string }> = [
   { id: 'csv', label: 'CSV' },
@@ -24,8 +27,18 @@ export class ExportDialog extends LitElement {
   @property({ type: Boolean })
   truncated = false
 
+  /** The query is read-only, so the full result can be re-run and streamed to
+   * disk past the buffered rows. Offered only when the result was truncated. */
+  @property({ type: Boolean })
+  streamable = false
+
   @state()
   private _format: ExportFormat = 'csv'
+
+  // Default to the full streamed export when it's on offer (the buffered subset
+  // is rarely what the user wants once the result was capped).
+  @state()
+  private _streamFull = true
 
   connectedCallback() {
     super.connectedCallback()
@@ -38,6 +51,8 @@ export class ExportDialog extends LitElement {
   }
 
   render() {
+    const offerStream = this.streamable && this.truncated
+    const streaming = offerStream && this._streamFull
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <div class="panel" role="dialog" aria-label="Export results">
@@ -62,10 +77,18 @@ export class ExportDialog extends LitElement {
               )}
             </div>
           </div>
+          ${offerStream
+            ? html`
+                <label class="field stream-toggle">
+                  <input type="checkbox" .checked=${this._streamFull} @change=${this._onStreamToggle} />
+                  <span class="muted small">Export the full result — re-runs the query and streams every row to the file.</span>
+                </label>
+              `
+            : ''}
           <div class="field">
             <label class="label" for="rows">Rows</label>
-            <input id="rows" type="number" min="1" max=${this.total} .value=${String(this.total)} />
-            <span class="muted small">of ${this.total}</span>
+            <input id="rows" type="number" min="1" max=${this.total} .value=${String(this.total)} ?disabled=${streaming} />
+            <span class="muted small">${streaming ? 'all rows' : `of ${this.total}`}</span>
           </div>
           <div class="actions">
             <button class="secondary" @click=${this._cancel}>Cancel</button>
@@ -95,13 +118,22 @@ export class ExportDialog extends LitElement {
     this.dispatchEvent(new CustomEvent('dialog-cancel', { bubbles: true, composed: true }))
   }
 
+  private _onStreamToggle(event: Event) {
+    this._streamFull = (event.target as HTMLInputElement).checked
+  }
+
   private _confirm() {
+    const stream = this.streamable && this.truncated && this._streamFull
     const input = this.shadowRoot?.querySelector<HTMLInputElement>('#rows')
     const requested = Number(input?.value)
-    const rows = Number.isFinite(requested) ? Math.min(this.total, Math.max(1, Math.floor(requested))) : this.total
+    const rows = stream
+      ? this.total
+      : Number.isFinite(requested)
+        ? Math.min(this.total, Math.max(1, Math.floor(requested)))
+        : this.total
     this.dispatchEvent(
       new CustomEvent<ExportConfirmDetail>('export-confirm', {
-        detail: { format: this._format, rows },
+        detail: { format: this._format, rows, stream },
         bubbles: true,
         composed: true,
       }),
@@ -186,6 +218,16 @@ export class ExportDialog extends LitElement {
 
       input[type='number']:focus {
         border-color: var(--input-focus-border);
+      }
+
+      .stream-toggle {
+        align-items: flex-start;
+        cursor: pointer;
+      }
+
+      .stream-toggle input {
+        flex-shrink: 0;
+        margin-top: 2px;
       }
 
       .actions {

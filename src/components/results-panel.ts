@@ -5,7 +5,7 @@ import { isMac } from '../platform'
 import type { QueryResult, QuerySort } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { MAX_FETCH_ROWS } from '../result-limits'
-import { cellToTsv, cellsToTsv, rowToTsv, toDelimited, toJson } from '../result-export'
+import { cellToTsv, cellsToTsv, rowToTsv, toDelimited, toJson, type ExportFormat } from '../result-export'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -152,6 +152,11 @@ export class ResultsPanel extends LitElement {
    * loads; the grid emits `resize-columns` to write dragged widths back. */
   @property({ attribute: false })
   columnWidths: ReadonlyMap<number, number> = new Map()
+
+  /** The current run is a read-only query, so the export dialog can offer a full
+   * streamed export (re-runs past the buffered rows). The owner handles it. */
+  @property({ attribute: false })
+  streamExportAvailable = false
 
   /** The cell being edited inline, by row reference. `seed` is the character that
    * started a type-to-edit (replaces the value); null edits the existing value.
@@ -713,6 +718,7 @@ export class ResultsPanel extends LitElement {
             <export-dialog
               .total=${result?.bufferedRowCount ?? result?.rows.length ?? 0}
               .truncated=${result?.truncated ?? false}
+              .streamable=${this.streamExportAvailable}
               @dialog-cancel=${() => (this._exportOpen = false)}
               @export-confirm=${this._onExportConfirm}
             ></export-dialog>
@@ -724,7 +730,13 @@ export class ResultsPanel extends LitElement {
   private _onExportConfirm = async (event: CustomEvent<ExportConfirmDetail>) => {
     this._exportOpen = false
     if (this.run.phase !== 'done') return
-    const { format, rows } = event.detail
+    const { format, rows, stream } = event.detail
+    // A full streamed export re-runs the query in the main process; the owner
+    // has the query context (profile/child/sort) to drive it.
+    if (stream) {
+      this.dispatchEvent(new CustomEvent<{ format: ExportFormat }>('stream-export', { detail: { format }, bubbles: true, composed: true }))
+      return
+    }
     const result = this._shownResult()
     if (!result) return
     const slice = (await this._allRows(result, rows)).slice(0, rows)

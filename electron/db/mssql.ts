@@ -1,4 +1,5 @@
 import sql from 'mssql'
+import { Request as TediousRequest } from 'tedious'
 import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -7,6 +8,7 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
+import { openExportWriter, type ExportWriter } from './export'
 import { prepareSqlRun } from './sql-script'
 import { installLosslessTediousParsers } from './tedious-lossless'
 
@@ -134,7 +136,14 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   let childNames: string[] = []
   let active = ''
   // In-flight requests; tedious cancels in-band, so no out-of-band connection.
-  const running = new Set<{ executionId?: string; request: sql.Request | null; cancelRequested: boolean }>()
+  // `tediousCancel` is set by the reset-connection read path (which runs at the
+  // tedious level, below node-mssql's Request), so cancel() can interrupt it.
+  const running = new Set<{
+    executionId?: string
+    request: sql.Request | null
+    tediousCancel?: (() => void) | null
+    cancelRequested: boolean
+  }>()
   const tls = mssqlTls(profile)
 
   const makePool = (database: string, max = 4) => {
@@ -230,6 +239,52 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     async query(sqlText, params = [], childDb = null, sort = null, executionId) {
       const started = performance.now()
       const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort })
+      const collect = (result: QueryResult, resultSets: QueryResultSet[]) =>
+        resultSets.push(...(result.resultSets ?? [{
+          columns: result.columns,
+          columnSources: result.columnSources,
+          rows: result.rows,
+          rowCount: result.rowCount,
+          truncated: result.truncated,
+          rowCountExact: result.rowCountExact,
+        }]))
+
+      // Parameterized runs stay on a throwaway one-connection pool — parameter
+      // binding goes through node-mssql's Request, and a fresh connection gives
+      // session isolation. The common no-parameter path (every ad-hoc SELECT /
+      // browse / re-run) instead borrows a pooled connection and resets its
+      // session, so it pays no per-query login handshake.
+      if (plan.params.length === 0) {
+        const entry = { executionId, request: null as sql.Request | null, tediousCancel: null as (() => void) | null, cancelRequested: false }
+        running.add(entry)
+        const pool = (await poolForQuery(childDb)) as AcquirablePool
+        let conn: TediousConnection | null = null
+        try {
+          conn = await acquireConnection(pool)
+          const active = conn
+          entry.tediousCancel = () => active.cancel()
+          // Reset before use, not after release: a reused connection is scrubbed
+          // of any prior tab's transaction/SET/temp state right before it runs.
+          await resetConnection(conn)
+          if (entry.cancelRequested) throw new Error('Query cancelled.')
+          const resultSets: QueryResultSet[] = []
+          let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
+          const budget = { bytes: 0 }
+          for (const batch of plan.batches) {
+            if (entry.cancelRequested) throw new Error('Query cancelled.')
+            result = await streamTediousBatch(conn, batch, started, budget)
+            collect(result, resultSets)
+          }
+          const selected = resultSets[resultSets.length - 1] ?? result
+          return { ...selected, durationMs: result.durationMs, ...(resultSets.length > 1 ? { resultSets } : {}) }
+        } catch (error) {
+          throw isCancelled(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
+        } finally {
+          running.delete(entry)
+          if (conn) pool.release(conn)
+        }
+      }
+
       const entry = { executionId, request: null as sql.Request | null, cancelRequested: false }
       running.add(entry)
       let userPool: sql.ConnectionPool | null = null
@@ -244,14 +299,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           entry.request = bind(pool.request(), plan.params)
           if (entry.cancelRequested) throw new Error('Query cancelled.')
           result = await streamQuery(entry.request, batch, started, budget)
-          resultSets.push(...(result.resultSets ?? [{
-            columns: result.columns,
-            columnSources: result.columnSources,
-            rows: result.rows,
-            rowCount: result.rowCount,
-            truncated: result.truncated,
-            rowCountExact: result.rowCountExact,
-          }]))
+          collect(result, resultSets)
         }
         const selected = resultSets[resultSets.length - 1] ?? result
         return {
@@ -383,9 +431,30 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // tedious cancels in-band on the request itself; no KILL needed.
       const entries = [...running].filter((entry) => executionId === undefined || entry.executionId === executionId)
       for (const entry of entries) entry.cancelRequested = true
-      const cancellable = entries.filter((entry) => entry.request !== null)
-      for (const entry of cancellable) entry.request?.cancel()
+      for (const entry of entries) {
+        entry.request?.cancel()
+        entry.tediousCancel?.()
+      }
       return { running: entries.length, cancelled: entries.length }
+    },
+
+    async exportQuery({ sql: sqlText, params, childDb, sort, filePath, format }) {
+      const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort })
+      if (plan.batches.length !== 1) {
+        throw new Error('Streaming export supports a single SQL Server batch — remove GO separators.')
+      }
+      const userPool = await openUserPool(childDb)
+      const writer = openExportWriter(filePath, format)
+      try {
+        const request = bind(userPool.request(), plan.params)
+        await streamMssqlExport(request, plan.batches[0]!, writer)
+        return await writer.close()
+      } catch (error) {
+        await writer.close().catch(() => {})
+        throw error
+      } finally {
+        await userPool.close().catch(() => {})
+      }
     },
 
     async listTables(childDb = null) {
@@ -695,5 +764,220 @@ function streamQuery(
       // Errors surface via the 'error' event in stream mode; swallow the
       // duplicate rejection from the promise API.
     })
+  })
+}
+
+// Streams every row of a read-only query into `writer` with backpressure: while
+// a chunk is written to disk the request is paused so the server can't outrun
+// the file. Rows are normalized losslessly (like the buffered path); no row cap.
+function streamMssqlExport(
+  request: sql.Request,
+  sqlText: string,
+  writer: ExportWriter,
+  chunkSize = 1000,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    request.stream = true
+    request.arrayRowMode = true
+    let columnsSet = false
+    let fields: MssqlColumn[] = []
+    let chunk: unknown[][] = []
+    let draining = false
+    let ended = false
+    let failed = false
+    const fail = (error: unknown) => {
+      if (failed) return
+      failed = true
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    const flush = () => {
+      if (draining || failed) return
+      if (chunk.length === 0) {
+        if (ended) resolve()
+        return
+      }
+      const batch = chunk
+      chunk = []
+      draining = true
+      request.pause()
+      writer.rows(batch).then(() => {
+        draining = false
+        request.resume()
+        flush()
+      }, fail)
+    }
+    request.on('recordset', (recordset: MssqlColumn[]) => {
+      // Read-only single result set — the first recordset defines the columns.
+      if (columnsSet) return
+      fields = recordset
+      writer.columns(recordset.map((column) => column.name))
+      columnsSet = true
+    })
+    request.on('row', (row: unknown[]) => {
+      if (failed) return
+      let normalized: unknown[]
+      try {
+        normalized = normalizeMssqlRow(row, fields)
+      } catch (error) {
+        fail(error)
+        try { request.cancel() } catch { /* request may already be complete */ }
+        return
+      }
+      chunk.push(normalized)
+      if (chunk.length >= chunkSize) flush()
+    })
+    request.on('error', fail)
+    request.on('done', () => {
+      ended = true
+      flush()
+    })
+    void request.query(sqlText).catch(() => {
+      // Errors surface via the 'error' event in stream mode.
+    })
+  })
+}
+
+// --- reset-connection read path -------------------------------------------
+// node-mssql pools raw tedious Connections but never resets one on release, so
+// reusing a pooled connection would leak session state (open transaction, SET
+// options, #temp tables) between query tabs. tedious's Connection.reset() issues
+// sp_reset_connection — a one-round-trip session scrub, no re-login. To use it we
+// run the read at the tedious level on a connection we reset first; the result is
+// normalized through the same normalizeMssqlRow the node-mssql path uses.
+
+type TediousColumnMeta = { colName: string; type: { name: string }; precision?: number; scale?: number; dataLength?: number }
+type TediousRowColumn = { value: unknown; metadata: TediousColumnMeta }
+type TediousConnection = {
+  reset(callback: (err?: Error | null) => void): void
+  execSqlBatch(request: TediousRequest): void
+  cancel(): void
+}
+// node-mssql's ConnectionPool acquires/releases the underlying tedious Connection
+// through these methods; the public types omit them, so assert at this boundary.
+export type AcquirablePool = sql.ConnectionPool & {
+  acquire(requester: object, callback: (err: Error | null, connection: TediousConnection) => void): void
+  release(connection: TediousConnection): void
+}
+
+export const acquireConnection = (pool: AcquirablePool): Promise<TediousConnection> =>
+  new Promise((resolve, reject) => pool.acquire({}, (err, connection) => (err ? reject(err) : resolve(connection))))
+
+export const resetConnection = (connection: TediousConnection): Promise<void> =>
+  new Promise((resolve, reject) => connection.reset((err) => (err ? reject(err) : resolve())))
+
+// The lossless value-parser patch already decodes decimal/money/datetimeoffset to
+// strings, so those reach us as strings and normalizeMssqlRow leaves them. Only
+// the temporal types still arrive as JS Date and need mapping back to the mssql
+// type constant so normalizeMssqlRow renders them as lossless UTC text.
+export function tediousToMssqlType(meta: TediousColumnMeta): { type?: unknown; precision?: number; scale?: number } {
+  switch (meta.type.name) {
+    case 'DateTime2':
+    case 'DateTime2N':
+      return { type: sql.DateTime2, scale: meta.scale }
+    case 'DateTime':
+    case 'DateTimeN':
+      // datetime and smalldatetime share this token; 4-byte payload is smalldatetime.
+      return { type: meta.dataLength === 4 ? sql.SmallDateTime : sql.DateTime }
+    case 'SmallDateTime':
+    case 'SmallDateTimeN':
+      return { type: sql.SmallDateTime }
+    case 'Date':
+    case 'DateN':
+      return { type: sql.Date }
+    case 'Time':
+    case 'TimeN':
+      return { type: sql.Time, scale: meta.scale }
+    case 'DateTimeOffset':
+    case 'DateTimeOffsetN':
+      return { type: sql.DateTimeOffset, scale: meta.scale }
+    case 'Decimal':
+    case 'DecimalN':
+      return { type: sql.Decimal, precision: meta.precision, scale: meta.scale }
+    case 'Numeric':
+    case 'NumericN':
+      return { type: sql.Numeric, precision: meta.precision, scale: meta.scale }
+    case 'Money':
+      return { type: sql.Money }
+    case 'MoneyN':
+      return { type: meta.dataLength === 4 ? sql.SmallMoney : sql.Money }
+    case 'SmallMoney':
+      return { type: sql.SmallMoney }
+    default:
+      return {}
+  }
+}
+
+// Runs one no-parameter batch on a tedious connection and buffers it into the
+// shared QueryResult shape — the tedious-level twin of streamQuery, so both read
+// paths return identical results. rowsAffected is only surfaced for a batch with
+// no result set (a write), matching the node-mssql path.
+function streamTediousBatch(conn: TediousConnection, sqlText: string, started: number, budget: { bytes: number }): Promise<QueryResult> {
+  return new Promise((resolve, reject) => {
+    let columns: string[] = []
+    let fields: MssqlColumn[] = []
+    let rows: unknown[][] = []
+    let total = 0
+    let sawRecordset = false
+    let affected = 0
+    let limited = false
+    let activeSet = false
+    let conversionError: Error | null = null
+    const resultSets: QueryResultSet[] = []
+    const pushCurrent = () => {
+      if (!activeSet) return
+      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length, rowCountExact: true })
+      activeSet = false
+    }
+    const request = new TediousRequest(sqlText, (err) => {
+      if (conversionError) return reject(conversionError)
+      if (err) return reject(err)
+      pushCurrent()
+      if (!sawRecordset) resultSets.push({ columns: [], rows: [], rowCount: affected })
+      const selected = resultSets[resultSets.length - 1] ?? { columns: [], rows: [], rowCount: affected }
+      resolve({ ...selected, durationMs: performance.now() - started, ...(resultSets.length > 1 ? { resultSets } : {}) })
+    })
+    const withEvents = request as unknown as {
+      on(event: 'columnMetadata', listener: (columns: TediousColumnMeta[]) => void): void
+      on(event: 'row', listener: (columns: TediousRowColumn[]) => void): void
+      on(event: 'done' | 'doneInProc', listener: (rowCount: number | undefined) => void): void
+    }
+    withEvents.on('columnMetadata', (meta) => {
+      pushCurrent()
+      sawRecordset = true
+      fields = meta.map((column) => ({ name: column.colName, ...tediousToMssqlType(column) }))
+      columns = meta.map((column) => column.colName)
+      rows = []
+      total = 0
+      limited = false
+      activeSet = true
+    })
+    withEvents.on('row', (cols) => {
+      if (conversionError) return
+      let normalized: unknown[]
+      try {
+        normalized = normalizeMssqlRow(cols.map((column) => column.value), fields)
+      } catch (error) {
+        conversionError = error as Error
+        try { conn.cancel() } catch { /* request may already be complete */ }
+        return
+      }
+      total += 1
+      if (rows.length < MAX_BUFFERED_ROWS) {
+        const bounded = boundedRow(normalized, budget.bytes)
+        if (bounded) {
+          rows.push(bounded.row)
+          budget.bytes += bounded.bytes
+          limited ||= bounded.truncated
+        } else {
+          limited = true
+        }
+      } else {
+        limited = true
+      }
+    })
+    const onDone = (rowCount: number | undefined) => { if (typeof rowCount === 'number') affected += rowCount }
+    withEvents.on('done', onDone)
+    withEvents.on('doneInProc', onDone)
+    conn.execSqlBatch(request)
   })
 }

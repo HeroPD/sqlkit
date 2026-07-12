@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cellToTsv, cellsToTsv, formulaSafeText, rowToTsv, toDelimited, toJson } from './result-export'
+import { cellToTsv, cellsToTsv, createExportSerializer, formulaSafeText, rowToTsv, toDelimited, toJson } from './result-export'
 
 describe('cellToTsv', () => {
   it('returns plain values unchanged', () => {
@@ -135,5 +135,34 @@ describe('toJson', () => {
 
   it('maps missing and undefined cells to null', () => {
     expect(JSON.parse(toJson(['a', 'b'], [[1]]))).toEqual([{ a: 1, b: null }])
+  })
+})
+
+describe('createExportSerializer', () => {
+  it('streams CSV header and rows with no footer', () => {
+    const serializer = createExportSerializer(['a', 'b'], 'csv')
+    expect(serializer.header()).toBe('a,b\n')
+    expect(serializer.row(['x', 'y'])).toBe('x,y\n')
+    expect(serializer.footer()).toBe('')
+  })
+
+  it('applies the same quoting and formula-safety as buffered CSV', () => {
+    const serializer = createExportSerializer(['c'], 'csv')
+    serializer.header()
+    expect(serializer.row(['=CMD'])).toBe("'=CMD\n")
+    expect(serializer.row(['a,b'])).toBe('"a,b"\n')
+  })
+
+  it('streams a valid JSON array with deduped keys and no trailing comma', () => {
+    const serializer = createExportSerializer(['id', 'id'], 'json')
+    const doc = serializer.header() + serializer.row([1, 2]) + serializer.row([3, 4]) + serializer.footer()
+    expect(JSON.parse(doc)).toEqual([{ id: 1, id_2: 2 }, { id: 3, id_2: 4 }])
+  })
+
+  it('produces a valid document when there are no rows', () => {
+    const csv = createExportSerializer(['a'], 'csv')
+    expect(csv.header() + csv.footer()).toBe('a\n')
+    const json = createExportSerializer(['a'], 'json')
+    expect(JSON.parse(json.header() + json.footer())).toEqual([])
   })
 })

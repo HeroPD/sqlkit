@@ -14,6 +14,7 @@ import type {
   TableInspection,
   TableRef,
 } from '../../src/electron'
+import type { ExportFormat } from '../../src/result-export'
 import type { Endpoint } from './transport'
 import { createMssqlDriver } from './mssql'
 import { createMysqlDriver } from './mysql'
@@ -52,6 +53,18 @@ export type Driver = {
    * but un-cancellable" (running > 0, cancelled 0). Engines without server-side
    * cancellation (sqlite) leave it undefined. */
   cancel?(executionId?: string): Promise<{ running: number; cancelled: number }>
+  /** Streams a read-only query straight to `filePath` in `format`, bypassing the
+   * buffered/paged result path so a full large result exports without the row
+   * cap. Returns the number of data rows written. The manager guarantees the SQL
+   * is read-only before calling. Undefined where the engine can't stream a run. */
+  exportQuery?(args: {
+    sql: string
+    params: unknown[]
+    childDb: string | null
+    sort: QuerySort | null
+    filePath: string
+    format: ExportFormat
+  }): Promise<{ rowCount: number }>
   // Metadata methods target `childDb` when given, else the active child — same
   // contract as query(), so listings never silently follow a different child
   // than the one the caller asked for.

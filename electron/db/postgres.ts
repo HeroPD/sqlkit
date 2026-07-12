@@ -8,6 +8,7 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
+import { openExportWriter, type ExportWriter } from './export'
 import { prepareSqlRun } from './sql-script'
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
@@ -43,6 +44,11 @@ type RunningEntry = { executionId?: string; pid: number | null; cancelRequested:
 // PoolClient type. Keep that upgrade-sensitive assertion at one boundary.
 const backendPid = (client: pg.PoolClient): number | null =>
   (client as pg.PoolClient & { processID?: number }).processID ?? null
+
+// The client's underlying socket, for pausing reads to backpressure a streamed
+// export. node-postgres doesn't expose it publicly, so reach it at one boundary.
+const clientSocket = (client: pg.PoolClient): { pause(): void; resume(): void } | null =>
+  (client as pg.PoolClient & { connection?: { stream?: { pause(): void; resume(): void } } }).connection?.stream ?? null
 
 export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpoint, events: DriverEvents): Driver {
   let pools: Map<string, pg.Pool> | null = null
@@ -333,6 +339,26 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // we lack permission to signal; count only the ones it actually hit.
       const sent = await cancelBackends(targets, active)
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
+    },
+
+    async exportQuery({ sql, params, childDb, sort, filePath, format }) {
+      const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort })
+      const client = await poolForQuery(childDb).connect()
+      const writer = openExportWriter(filePath, format)
+      try {
+        await streamPgExport(client, plan.batches[0]!, plan.params, writer)
+        const result = await writer.close()
+        // A streamed SELECT leaves the session clean, but reset it like query()
+        // does before the connection re-enters the pool.
+        await resetUserSession(client)
+        client.release()
+        return result
+      } catch (error) {
+        await writer.close().catch(() => {})
+        // Uncertain session state — drop the client rather than reuse it.
+        client.release(error as Error)
+        throw error
+      }
     },
 
     async listTables(childDb = null) {
@@ -755,6 +781,67 @@ function streamQuery(
     }
     query.on('error', reject)
     query.on('end', finish)
+    client.query(query)
+  })
+}
+
+// Streams every row of a read-only query into `writer` with backpressure: rows
+// batch into chunks, and while a chunk is being written to disk the client
+// socket is paused so the server can't outrun the file. No MAX_BUFFERED_ROWS
+// cap — the whole result reaches the file.
+function streamPgExport(
+  client: pg.PoolClient,
+  sql: string,
+  params: unknown[],
+  writer: ExportWriter,
+  chunkSize = 1000,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = clientSocket(client)
+    let columnsSet = false
+    let chunk: unknown[][] = []
+    let draining = false
+    let ended = false
+    let failed = false
+    const setColumns = (fields?: pg.FieldDef[]) => {
+      if (columnsSet) return
+      writer.columns((fields ?? []).map((field) => field.name))
+      columnsSet = true
+    }
+    const fail = (error: unknown) => {
+      if (failed) return
+      failed = true
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    const flush = () => {
+      if (draining || failed) return
+      if (chunk.length === 0) {
+        if (ended) resolve()
+        return
+      }
+      const batch = chunk
+      chunk = []
+      draining = true
+      socket?.pause()
+      writer.rows(batch).then(() => {
+        draining = false
+        socket?.resume()
+        flush()
+      }, fail)
+    }
+    const query = new pg.Query({ text: sql, values: params, rowMode: 'array' } as pg.QueryArrayConfig)
+    query.on('row', (row: unknown[], result?: pg.QueryArrayResult) => {
+      setColumns(result?.fields)
+      chunk.push(row)
+      if (chunk.length >= chunkSize) flush()
+    })
+    query.on('error', fail)
+    // 'end' carries the result metadata, so a zero-row query still writes a header.
+    query.on('end', (result?: pg.QueryArrayResult) => {
+      setColumns(result?.fields)
+      ended = true
+      flush()
+    })
     client.query(query)
   })
 }

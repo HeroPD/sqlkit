@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ConnectionProfile } from '../../src/electron'
 import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import type { Driver } from './driver'
@@ -46,6 +49,48 @@ describeDb('postgres driver (integration)', () => {
     await driver.connect()
     return driver
   }
+
+  const exportFile = (name: string) => join(mkdtempSync(join(tmpdir(), 'sqlkit-pg-export-')), name)
+
+  it('streams a full result to a CSV file via exportQuery', async () => {
+    const driver = await connectDriver()
+    const file = exportFile('authors.csv')
+    try {
+      const result = await driver.exportQuery!({
+        sql: 'select name from sqlkit_it.authors order by id',
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'csv',
+      })
+      expect(result.rowCount).toBe(2)
+      expect(readFileSync(file, 'utf8')).toBe('name\nAda\nAlan\n')
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('exports past the in-memory row cap', async () => {
+    const driver = await connectDriver()
+    const file = exportFile('series.csv')
+    const rows = MAX_BUFFERED_ROWS + 10_000
+    try {
+      const result = await driver.exportQuery!({
+        sql: `select g from generate_series(1, ${rows}) g`,
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'csv',
+      })
+      expect(result.rowCount).toBe(rows)
+      // Header + every data row, proving the export bypassed the display cap.
+      expect(readFileSync(file, 'utf8').trimEnd().split('\n')).toHaveLength(rows + 1)
+    } finally {
+      await driver.disconnect()
+    }
+  })
 
   it('connects and reports the server version', async () => {
     const profile = profileFromUrl(dbUrl)

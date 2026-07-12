@@ -1,3 +1,5 @@
+import type { ExportFormat } from './result-export'
+
 export type RecentWorkspace = {
   name: string
   path: string
@@ -175,6 +177,10 @@ export type QuerySort = { column: string; direction: 'asc' | 'desc' }
 
 export type FetchRowsResult = { success: true; rows: unknown[][] } | { success: false; error: string }
 
+export type ExportQueryResult =
+  | { success: true; rowCount: number }
+  | { success: false; error?: string; canceled?: boolean }
+
 /** Partitioned tables count as plain tables — partitioning is hidden anyway. */
 export type TableKind = 'table' | 'view' | 'matview' | 'foreign'
 
@@ -296,6 +302,17 @@ export type SqlkitApi = {
   runDdl: (profileId: string, childDb: string | null, statements: string[]) => Promise<DdlResult>
   /** A page of a buffered result; rows beyond the first page are pulled on demand. */
   fetchRows: (sessionId: string, offset: number, limit: number) => Promise<FetchRowsResult>
+  /** Streams a full read-only result straight to a file the user picks, past the
+   * in-memory row cap. Re-runs the query (with any injected sort), so the main
+   * process enforces read-only. Returns the number of rows written. */
+  exportQuery: (
+    profileId: string,
+    childDb: string | null,
+    sql: string,
+    sort: QuerySort | null,
+    format: ExportFormat,
+    suggestedName: string,
+  ) => Promise<ExportQueryResult>
   /** Releases a result's main-process buffer (tab closed / superseded). */
   closeSession: (sessionId: string) => Promise<void>
   /** Cancels one in-flight execution; omit executionId only for connection teardown. */

@@ -39,7 +39,9 @@ export function splitTopLevelStatements(sql: string, engine?: Engine): string[] 
 // Pooled server queries cannot safely leave a transaction open for a later run:
 // that later run may get another connection. Self-contained transaction scripts
 // remain supported because one driver.query call keeps one checked-out connection.
-export function assertSelfContainedTransaction(sql: string, engine: Engine) {
+// Returns whether the script drives its own transaction control, so a caller can
+// avoid wrapping it in a redundant outer transaction.
+export function assertSelfContainedTransaction(sql: string, engine: Engine): boolean {
   let depth = 0
   let sawControl = false
   const script = splitScript(sql, engine)
@@ -82,6 +84,7 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine) {
   if (sawControl && depth !== 0) {
     throw new Error('Transactions must begin and commit or roll back in the same query run; pooled connections cannot preserve them across runs.')
   }
+  return sawControl
 }
 
 /** SQL Server's GO is a client batch separator, not T-SQL. */

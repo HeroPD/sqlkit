@@ -4,8 +4,10 @@ import {
   connectionProfile,
   databaseObject,
   databaseObjectKind,
+  exportFormat,
   nonNegativeInteger,
   queryPayload,
+  querySort,
   tableReference,
   workspaceConfig,
 } from './ipc-validation'
@@ -42,5 +44,37 @@ describe('IPC validation', () => {
     expect(() => tableReference({ schema: null, name: 'users', kind: 'procedure' })).toThrow(/kind/i)
     expect(() => databaseObject({ schema: [], name: 'x', detail: '' })).toThrow(/schema/i)
     expect(() => databaseObjectKind('procedure')).toThrow(/kind/i)
+  })
+})
+
+describe('exportFormat', () => {
+  it('accepts the supported formats', () => {
+    expect(exportFormat('csv')).toBe('csv')
+    expect(exportFormat('tsv')).toBe('tsv')
+    expect(exportFormat('json')).toBe('json')
+  })
+
+  it('rejects anything else', () => {
+    expect(() => exportFormat('xml')).toThrow()
+    expect(() => exportFormat('')).toThrow()
+    expect(() => exportFormat(undefined)).toThrow()
+  })
+})
+
+describe('querySort', () => {
+  it('treats null and undefined as no sort', () => {
+    expect(querySort(null)).toBeNull()
+    expect(querySort(undefined)).toBeNull()
+  })
+
+  it('parses a valid sort', () => {
+    expect(querySort({ column: 'name', direction: 'asc' })).toEqual({ column: 'name', direction: 'asc' })
+    expect(querySort({ column: 'id', direction: 'desc' })).toEqual({ column: 'id', direction: 'desc' })
+  })
+
+  it('rejects an invalid direction or column', () => {
+    expect(() => querySort({ column: 'a', direction: 'up' })).toThrow()
+    expect(() => querySort({ column: 5, direction: 'asc' })).toThrow()
+    expect(() => querySort('name')).toThrow()
   })
 })

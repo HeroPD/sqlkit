@@ -1,5 +1,7 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
+import { closeSync, openSync, writeSync } from 'node:fs'
 import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, QueryResultSet, TableInspection, TableRef } from '../../src/electron'
+import { createExportSerializer, type ExportFormat } from '../../src/result-export'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import { assertSelfContainedTransaction, containsSqliteTrigger } from './sql-script'
 
@@ -19,7 +21,7 @@ export const serverVersion = (db: DatabaseSync): string => {
 }
 
 export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam[] = []): QueryResult {
-  assertSelfContainedTransaction(sql, 'sqlite')
+  const managesOwnTransaction = assertSelfContainedTransaction(sql, 'sqlite')
   const started = performance.now()
   const stamp = (result: Omit<QueryResult, 'durationMs'>): QueryResult => ({ ...result, durationMs: performance.now() - started })
 
@@ -57,12 +59,67 @@ export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam
   // node:sqlite's prepare runs only the first statement, so run each in order
   // (preparing against the schema left by the previous one) and return the last
   // result — matching Postgres, where the final statement supplies the columns.
-  // Params aren't bound to multi-statement runs. A mid-script error throws and
-  // surfaces as the query error, leaving earlier statements applied once.
+  // Params aren't bound to multi-statement runs. Wrap the run in one transaction
+  // so a mid-script error rolls the whole thing back instead of half-applying —
+  // the same all-or-nothing a multi-statement Postgres run gets. Skip the
+  // wrapper when the script drives its own BEGIN/COMMIT (SQLite forbids a nested
+  // BEGIN); the tail statement's result is still what surfaces.
   const resultSets: QueryResultSet[] = []
-  for (const statement of statements) resultSets.push(run(db.prepare(statement), [], budget))
+  const wrap = !managesOwnTransaction
+  if (wrap) db.exec('BEGIN')
+  try {
+    for (const statement of statements) resultSets.push(run(db.prepare(statement), [], budget))
+    if (wrap) db.exec('COMMIT')
+  } catch (error) {
+    if (wrap) {
+      try {
+        db.exec('ROLLBACK')
+      } catch {
+        // The transaction may have auto-aborted already; nothing left to undo.
+      }
+    }
+    throw error
+  }
   const result = resultSets[resultSets.length - 1] ?? { columns: [], rows: [], rowCount: 0 }
   return stamp({ ...result, ...(resultSets.length > 1 ? { resultSets } : {}) })
+}
+
+// Streams a read-only query straight to `filePath` in the worker (off the main
+// process), so a full result exports without the row/byte caps that the paged
+// display path applies. The manager guarantees the SQL is read-only.
+export function exportQuery(
+  db: DatabaseSync,
+  sql: string,
+  params: SqliteParam[],
+  filePath: string,
+  format: ExportFormat,
+): { rowCount: number } {
+  const statements = splitStatements(sql, maskSqlite(sql))
+  if (statements.length !== 1) throw new Error('Export supports a single statement.')
+  const statement = db.prepare(statements[0]!)
+  const columns = statement.columns().map((column) => column.name)
+  if (!columns.length) throw new Error('Only a result-returning query can be exported.')
+  const serializer = createExportSerializer(columns, format)
+  statement.setReturnArrays(true)
+  const fd = openSync(filePath, 'w')
+  let rowCount = 0
+  try {
+    // Buffer to ~64 KB before each syncronous write to keep syscall count low.
+    let buffer = serializer.header()
+    for (const row of statement.iterate(...params) as unknown as Iterable<unknown[]>) {
+      buffer += serializer.row(row)
+      rowCount += 1
+      if (buffer.length >= 65_536) {
+        writeSync(fd, buffer)
+        buffer = ''
+      }
+    }
+    buffer += serializer.footer()
+    if (buffer) writeSync(fd, buffer)
+    return { rowCount }
+  } finally {
+    closeSync(fd)
+  }
 }
 
 export function listTables(db: DatabaseSync): TableRef[] {

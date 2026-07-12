@@ -1,4 +1,5 @@
 import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
+import type { ExportFormat } from '../src/result-export'
 
 const MAX_ID = 200
 const MAX_TEXT = 10 * 1024 * 1024
@@ -164,6 +165,19 @@ export function batchStatements(value: unknown): BatchStatement[] {
 export function ddlStatements(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > MAX_BATCH) throw new IpcValidationError(`DDL batch must contain at most ${MAX_BATCH} statements`)
   return value.map((statement, index) => stringValue(statement, `DDL statement ${index + 1}`))
+}
+
+export function exportFormat(value: unknown): ExportFormat {
+  if (value !== 'csv' && value !== 'tsv' && value !== 'json') throw new IpcValidationError('Export format is invalid')
+  return value
+}
+
+export function querySort(value: unknown): QuerySort | null {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Sort is invalid')
+  const candidate = value as Record<string, unknown>
+  if (candidate.direction !== 'asc' && candidate.direction !== 'desc') throw new IpcValidationError('Sort direction is invalid')
+  return { column: stringValue(candidate.column, 'Sort column', 2_000), direction: candidate.direction }
 }
 
 export function nonNegativeInteger(value: unknown, label: string, max: number): number {

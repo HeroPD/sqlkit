@@ -11,7 +11,7 @@ const hoisted = vi.hoisted(
     driver: Driver
     endpoint: Endpoint
     resolveImpl: null | (() => Promise<Endpoint>)
-    createImpl: null | (() => Driver)
+    createImpl: null | ((...args: unknown[]) => Driver)
   } => {
     const base: Driver = {
       connect: () => Promise.resolve('FakeDB 1.0'),
@@ -36,7 +36,7 @@ vi.mock('./transport', () => ({
 
 vi.mock('./driver', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./driver')>()
-  return { ...actual, createDriver: vi.fn(() => (hoisted.createImpl ? hoisted.createImpl() : hoisted.driver)) }
+  return { ...actual, createDriver: vi.fn((...args: unknown[]) => (hoisted.createImpl ? hoisted.createImpl(...args) : hoisted.driver)) }
 })
 
 import { createConnectionManager } from './manager'
@@ -109,6 +109,26 @@ describe('connection manager: connect lifecycle', () => {
     expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'error', error: 'auth failed' })])
     expect(disconnect).toHaveBeenCalled()
     expect(close).toHaveBeenCalled()
+  })
+
+  it('keeps a connected profile usable after a transient idle pool error', async () => {
+    // The driver's async onError fires when the pool discards an idle client
+    // (managed-database idle timeout / brief blip). That must not demote the
+    // whole connection — the pool heals on the next checkout.
+    let poolError: ((message: string) => void) | null = null
+    hoisted.createImpl = (...args: unknown[]) => {
+      poolError = (args[2] as { onError: (message: string) => void }).onError
+      return hoisted.driver
+    }
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    expect(poolError).not.toBeNull()
+
+    poolError!('Connection terminated unexpectedly')
+
+    expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'connected' })])
+    const res = await manager.query('p1', null, 'select 1')
+    expect(res.success).toBe(true)
   })
 
   it('supersedes an in-flight connect and tears down its resources', async () => {

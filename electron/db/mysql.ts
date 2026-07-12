@@ -4,6 +4,7 @@ import { dialectFor } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
+import { openExportWriter, type ExportWriter } from './export'
 import { sslOptions } from './postgres'
 import { prepareSqlRun } from './sql-script'
 
@@ -341,6 +342,23 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
+    async exportQuery({ sql, params, childDb, sort, filePath, format }) {
+      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort })
+      const conn = await poolForQuery(childDb).getConnection()
+      const writer = openExportWriter(filePath, format)
+      try {
+        await streamMysqlExport(rawOf(conn), plan.batches[0]!, plan.params, writer)
+        const result = await writer.close()
+        conn.release()
+        return result
+      } catch (error) {
+        await writer.close().catch(() => {})
+        // May hold half-read results; drop it rather than reuse.
+        conn.destroy()
+        throw error
+      }
+    },
+
     async listTables(childDb = null) {
       // schema stays null: a MySQL database (= the child) has no sub-schemas,
       // so the explorer shows a flat list like SQLite.
@@ -616,5 +634,64 @@ function streamQuery(
     }
     query.on('error', reject)
     query.on('end', finish)
+  })
+}
+
+// Streams every row of a read-only query into `writer` with backpressure: while
+// a chunk is written to disk the connection is paused so the server can't
+// outrun the file. No row cap — the whole result reaches the file.
+function streamMysqlExport(
+  raw: RawConnection,
+  sql: string,
+  params: unknown[],
+  writer: ExportWriter,
+  chunkSize = 1000,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let columnsSet = false
+    let chunk: unknown[][] = []
+    let draining = false
+    let ended = false
+    let failed = false
+    const fail = (error: unknown) => {
+      if (failed) return
+      failed = true
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    const flush = () => {
+      if (draining || failed) return
+      if (chunk.length === 0) {
+        if (ended) resolve()
+        return
+      }
+      const batch = chunk
+      chunk = []
+      draining = true
+      raw.pause()
+      writer.rows(batch).then(() => {
+        draining = false
+        raw.resume()
+        flush()
+      }, fail)
+    }
+    const query = raw.query({ sql, values: params, rowsAsArray: true })
+    query.on('fields', (fields) => {
+      if (columnsSet) return
+      const list = Array.isArray(fields) ? (fields as FieldMeta[]) : []
+      writer.columns(list.map((field) => field.name))
+      columnsSet = true
+    })
+    query.on('result', (row) => {
+      // Read-only single result set, so only data rows arrive (no OK packets).
+      if (Array.isArray(row)) {
+        chunk.push(row as unknown[])
+        if (chunk.length >= chunkSize) flush()
+      }
+    })
+    query.on('error', fail)
+    query.on('end', () => {
+      ended = true
+      flush()
+    })
   })
 }

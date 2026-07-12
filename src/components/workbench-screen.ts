@@ -45,7 +45,8 @@ import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
 import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
-import { isReorderableQuery } from '../sql-order'
+import { isReadOnlyQuery, isReorderableQuery } from '../sql-order'
+import type { ExportFormat } from '../result-export'
 import type { SortColumnDetail } from './results-panel'
 import type { QuerySort } from '../electron'
 import { stripExplain } from '../sql-types'
@@ -958,7 +959,9 @@ export class WorkbenchScreen extends LitElement {
             .edits=${this._queries.editsFor(this._ctx.activeTabId)}
             .sort=${this._queries.sortFor(this._ctx.activeTabId)}
             .columnWidths=${this._resultColumnWidths()}
+            .streamExportAvailable=${this._canStreamExport()}
             @cancel-query=${this._onCancelQuery}
+            @stream-export=${this._onStreamExport}
             @load-more=${this._onLoadMore}
             @cell-edit=${this._onCellEdit}
             @cell-edit-clear=${this._onCellEditClear}
@@ -1255,6 +1258,35 @@ export class WorkbenchScreen extends LitElement {
   private _onGridNotice(event: Event) {
     const { title, detail } = (event as CustomEvent<{ title: string; detail: string }>).detail
     this._dialogs.notice(title, detail)
+  }
+
+  // Whether the export dialog may offer a full streamed export: the current run
+  // is a finished, read-only query, so re-running it to stream every row is safe.
+  private _canStreamExport(): boolean {
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    const engine = this._config.activeProfile()?.engine
+    return run.phase === 'done' && !!run.sql && !!engine && isReadOnlyQuery(run.sql, engine)
+  }
+
+  // Streams the current query's full result to a file the user picks. Re-runs the
+  // SQL (with any injected sort) in the main process, which re-checks read-only.
+  private async _onStreamExport(event: Event) {
+    const { format } = (event as CustomEvent<{ format: ExportFormat }>).detail
+    const tabId = this._ctx.activeTabId
+    const profile = this._config.activeProfile()
+    const run = this._queries.runFor(tabId)
+    if (!tabId || !profile || run.phase !== 'done' || !run.sql) return
+    const tab = this._ctx.tabs.find((entry) => entry.id === tabId)
+    const base = tab && 'name' in tab && typeof tab.name === 'string' ? tab.name.replace(/\.sql$/i, '') : 'results'
+    const result = await window.sqlkit.exportQuery(
+      profile.id,
+      this._ctx.activeChildDb,
+      run.sql,
+      this._queries.sortFor(tabId),
+      format,
+      `${base || 'results'}.${format}`,
+    )
+    if (!result.success && result.error) this._dialogs.notice('Export failed', result.error)
   }
 
   // Stages an empty new row in the grid (committed later via ⌘S / Save rows),
