@@ -173,7 +173,10 @@ export type DdlResult =
 
 /** A column sort the UI injects into a query at run time; the driver builds the
  * engine-correct ORDER BY (its own identifier quoting). */
-export type QuerySort = { column: string; direction: 'asc' | 'desc' }
+// Sort targets a result column by its 0-based position, not its name: the sort
+// injects a positional `ORDER BY <n>`, which is unambiguous even when columns
+// share a name (select a.id, b.id) or are expressions with no real identifier.
+export type QuerySort = { columnIndex: number; direction: 'asc' | 'desc' }
 
 export type FetchRowsResult = { success: true; rows: unknown[][] } | { success: false; error: string }
 

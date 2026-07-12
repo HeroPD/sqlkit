@@ -87,19 +87,19 @@ describe('QueriesController.execute', () => {
     const { settle, runQuery } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)
 
-    const done = controller.execute({ ...runArgs, sort: { column: 'name', direction: 'desc' } })
+    const done = controller.execute({ ...runArgs, sort: { columnIndex: 0, direction: 'desc' } })
     settle({ success: true, result })
     await done
 
-    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', undefined, { column: 'name', direction: 'desc' }, 'exec1')
-    expect(controller.sortFor('t1')).toEqual({ column: 'name', direction: 'desc' })
+    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', undefined, { columnIndex: 0, direction: 'desc' }, 'exec1')
+    expect(controller.sortFor('t1')).toEqual({ columnIndex: 0, direction: 'desc' })
   })
 
   it('clears a previous sort when a run carries none', async () => {
     const { settle } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)
 
-    controller.sorts.set('t1', { column: 'name', direction: 'asc' })
+    controller.sorts.set('t1', { columnIndex: 0, direction: 'asc' })
     const done = controller.execute(runArgs)
     settle({ success: true, result })
     await done

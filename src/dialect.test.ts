@@ -21,21 +21,22 @@ describe('dialectFor: placeholder', () => {
 })
 
 describe('dialectFor: applyOrderBy', () => {
-  it('builds an engine-correct ORDER BY for a column sort', () => {
-    expect(dialectFor('postgresql').applyOrderBy('SELECT * FROM t LIMIT 5', { column: 'name', direction: 'desc' })).toBe(
-      'SELECT * FROM t\nORDER BY "name" DESC\nLIMIT 5',
+  it('builds a positional ORDER BY so duplicate/expression columns sort unambiguously', () => {
+    // columnIndex is 0-based; the emitted ordinal is 1-based (ORDER BY <n>).
+    expect(dialectFor('postgresql').applyOrderBy('SELECT * FROM t LIMIT 5', { columnIndex: 1, direction: 'desc' })).toBe(
+      'SELECT * FROM t\nORDER BY 2 DESC\nLIMIT 5',
     )
-    expect(dialectFor('mysql').applyOrderBy('SELECT * FROM t', { column: 'name', direction: 'asc' })).toBe(
-      'SELECT * FROM t\nORDER BY `name` ASC',
+    expect(dialectFor('mysql').applyOrderBy('SELECT * FROM t', { columnIndex: 0, direction: 'asc' })).toBe(
+      'SELECT * FROM t\nORDER BY 1 ASC',
     )
-    expect(dialectFor('sqlserver').applyOrderBy('SELECT * FROM t', { column: 'id', direction: 'asc' })).toBe(
-      'SELECT * FROM t\nORDER BY [id] ASC',
+    expect(dialectFor('sqlserver').applyOrderBy('SELECT * FROM t', { columnIndex: 0, direction: 'asc' })).toBe(
+      'SELECT * FROM t\nORDER BY 1 ASC',
     )
   })
 
   it('replaces an existing ORDER BY', () => {
-    expect(dialectFor('postgresql').applyOrderBy('SELECT * FROM t ORDER BY id', { column: 'name', direction: 'asc' })).toBe(
-      'SELECT * FROM t\nORDER BY "name" ASC',
+    expect(dialectFor('postgresql').applyOrderBy('SELECT * FROM t ORDER BY id', { columnIndex: 2, direction: 'asc' })).toBe(
+      'SELECT * FROM t\nORDER BY 3 ASC',
     )
   })
 })

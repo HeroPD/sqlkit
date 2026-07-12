@@ -283,7 +283,7 @@ describe('sqlite driver: query', () => {
     await driver.query('create table t(a, b)')
     await driver.query('insert into t values (1, 2), (3, 4), (2, 9)')
 
-    const result = await driver.query('select a, b from t', [], null, { column: 'a', direction: 'desc' })
+    const result = await driver.query('select a, b from t', [], null, { columnIndex: 0, direction: 'desc' })
     expect(result.rows).toEqual([
       [3, 4],
       [2, 9],
@@ -296,16 +296,16 @@ describe('sqlite driver: query', () => {
     await driver.query('create table t(a)')
     await driver.query('insert into t values (3), (1), (4), (1), (5)')
 
-    const result = await driver.query('select a from t order by a desc limit 2', [], null, { column: 'a', direction: 'asc' })
+    const result = await driver.query('select a from t order by a desc limit 2', [], null, { columnIndex: 0, direction: 'asc' })
     expect(result.rows).toEqual([[1], [1]])
   })
 
-  it('quotes the sort column so reserved/odd names are safe', async () => {
+  it('sorts a reserved/odd-named column safely (positional, no identifier needed)', async () => {
     const driver = await memoryDriver()
     await driver.query('create table t("order")')
     await driver.query('insert into t values (2), (1), (3)')
 
-    const result = await driver.query('select "order" from t', [], null, { column: 'order', direction: 'asc' })
+    const result = await driver.query('select "order" from t', [], null, { columnIndex: 0, direction: 'asc' })
     expect(result.rows).toEqual([[1], [2], [3]])
   })
 
@@ -401,6 +401,27 @@ describe('sqlite driver: multi-statement', () => {
     expect(() => queryDatabase(db, 'insert into p values (?); insert into p values (?)', [1, 2]))
       .toThrow(/single-statement/i)
     expect(queryDatabase(db, 'insert into p values (?)', [7]).rowCount).toBe(1)
+  })
+
+  it('rolls back the whole DML script when a later statement fails', () => {
+    const db = openDatabase(':memory:')
+    db.exec('create table u(x unique)')
+    db.exec('insert into u values (1)')
+    // The second insert violates the unique constraint; the transaction wrapper
+    // must undo the first insert of this run, leaving only the pre-existing row.
+    expect(() => queryDatabase(db, 'insert into u values (2); insert into u values (2)', [])).toThrow()
+    expect(Number((db.prepare('select count(*) as n from u').get() as { n: bigint }).n)).toBe(1)
+    db.close()
+  })
+
+  it('runs a multi-statement script containing VACUUM (which cannot run in a transaction)', () => {
+    const db = openDatabase(':memory:')
+    db.exec('create table t(x)')
+    db.exec('insert into t values (1), (2)')
+    // VACUUM can't run inside a transaction, so this run must not be wrapped.
+    expect(() => queryDatabase(db, 'delete from t where x = 1; vacuum', [])).not.toThrow()
+    expect(Number((db.prepare('select count(*) as n from t').get() as { n: bigint }).n)).toBe(1)
+    db.close()
   })
 
   it('does not split on a semicolon inside a string literal', async () => {
@@ -667,5 +688,21 @@ describe('sqlite exportQuery', () => {
     db.exec('create table t (a)')
     expect(() => exportQuery(db, 'select 1; select 2', [], exportFile('multi.csv'), 'csv')).toThrow(/single statement/i)
     db.close()
+  })
+})
+
+describe('sqlite driver: positional sort', () => {
+  it('sorts by column position so a duplicate column name is unambiguous', async () => {
+    const driver = await memoryDriver()
+    // Both output columns are named "id"; a named ORDER BY "id" would be ambiguous,
+    // but a positional ORDER BY 1 sorts by the first column cleanly.
+    const result = await driver.query(
+      'select id, id from (select 2 as id union all select 1 as id)',
+      [],
+      null,
+      { columnIndex: 0, direction: 'asc' },
+    )
+    expect(result.columns).toEqual(['id', 'id'])
+    expect(result.rows).toEqual([[1, 1], [2, 2]])
   })
 })

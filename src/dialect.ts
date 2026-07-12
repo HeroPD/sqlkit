@@ -169,7 +169,9 @@ const makeDialect = (engine: Engine): Dialect => {
     quoteIdent,
     // SQL Server's driver (tedious) has no positional '?', only named params.
     placeholder: (index) => (engine === 'postgresql' ? `$${index}` : engine === 'sqlserver' ? `@p${index}` : '?'),
-    applyOrderBy: (sql, sort) => placeOrderBy(sql, { column: quoteIdent(sort.column), dir: sort.direction }),
+    // Positional ORDER BY (`ORDER BY <n>`) targets the Nth output column
+    // unambiguously; a named ORDER BY breaks on duplicate or expression columns.
+    applyOrderBy: (sql, sort) => placeOrderBy(sql, { column: String(sort.columnIndex + 1), dir: sort.direction }),
     browseTable: (qualifiedTable, limit) =>
       engine === 'sqlserver'
         ? `SELECT TOP (${Math.max(1, Math.trunc(limit))}) * FROM ${qualifiedTable}`

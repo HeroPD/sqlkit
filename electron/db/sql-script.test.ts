@@ -126,22 +126,22 @@ describe('dialect script handling', () => {
 })
 
 describe('prepareSqlRun', () => {
-  it('applies an engine-quoted sort only to a single SELECT', () => {
+  it('applies a positional sort only to a single SELECT', () => {
     expect(prepareSqlRun({
       engine: 'postgresql',
       sql: 'select id, name from users limit 10;',
-      sort: { column: 'display name', direction: 'desc' },
-    }).batches).toEqual(['select id, name from users\nORDER BY "display name" DESC\nlimit 10;'])
+      sort: { columnIndex: 1, direction: 'desc' },
+    }).batches).toEqual(['select id, name from users\nORDER BY 2 DESC\nlimit 10;'])
 
     expect(() => prepareSqlRun({
       engine: 'mysql',
       sql: 'select 1; select 2',
-      sort: { column: 'value', direction: 'asc' },
+      sort: { columnIndex: 0, direction: 'asc' },
     })).toThrow(/single SELECT/i)
     expect(() => prepareSqlRun({
       engine: 'sqlserver',
       sql: 'update users set active = 1',
-      sort: { column: 'id', direction: 'asc' },
+      sort: { columnIndex: 0, direction: 'asc' },
     })).toThrow(/single SELECT/i)
   })
 

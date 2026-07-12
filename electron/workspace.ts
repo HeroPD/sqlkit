@@ -308,7 +308,16 @@ export function readGlobalConfig(): GlobalConfig {
   try {
     const file = globalConfigPath()
     if (fs.statSync(file).size > MAX_CONFIG_BYTES) return { recentWorkspaces: [], lastWorkspace: null }
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as GlobalConfig
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { recentWorkspaces?: unknown; lastWorkspace?: unknown }
+    // Valid JSON with a missing/wrong-typed shape (a hand-edit, an old version)
+    // must not crash callers that map over recentWorkspaces — normalize to the
+    // known shape, dropping entries without a usable path.
+    const entries: unknown[] = Array.isArray(parsed.recentWorkspaces) ? parsed.recentWorkspaces : []
+    return {
+      recentWorkspaces: entries.filter((entry): entry is RecentWorkspace =>
+        !!entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).path === 'string'),
+      lastWorkspace: typeof parsed.lastWorkspace === 'string' ? parsed.lastWorkspace : null,
+    }
   } catch {
     return { recentWorkspaces: [], lastWorkspace: null }
   }

@@ -20,6 +20,11 @@ export const serverVersion = (db: DatabaseSync): string => {
   return `SQLite ${row.version}`
 }
 
+// A statement that SQLite refuses to run inside a transaction, so the
+// multi-statement wrapper must not enclose a script containing one. Matches a
+// leading VACUUM or PRAGMA past any whitespace/comments.
+const TXN_INCOMPATIBLE = /^(?:\s|--[^\n]*|\/\*[\s\S]*?\*\/)*(?:vacuum|pragma)\b/i
+
 export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam[] = []): QueryResult {
   const managesOwnTransaction = assertSelfContainedTransaction(sql, 'sqlite')
   const started = performance.now()
@@ -63,9 +68,11 @@ export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam
   // so a mid-script error rolls the whole thing back instead of half-applying —
   // the same all-or-nothing a multi-statement Postgres run gets. Skip the
   // wrapper when the script drives its own BEGIN/COMMIT (SQLite forbids a nested
-  // BEGIN); the tail statement's result is still what surfaces.
+  // BEGIN), or contains a statement that can't run inside a transaction (VACUUM,
+  // and PRAGMAs like journal_mode) — those keep the old statement-by-statement
+  // behavior instead of erroring under the wrapper. The tail result still surfaces.
   const resultSets: QueryResultSet[] = []
-  const wrap = !managesOwnTransaction
+  const wrap = !managesOwnTransaction && !statements.some((statement) => TXN_INCOMPATIBLE.test(statement))
   if (wrap) db.exec('BEGIN')
   try {
     for (const statement of statements) resultSets.push(run(db.prepare(statement), [], budget))

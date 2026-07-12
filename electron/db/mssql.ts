@@ -12,8 +12,6 @@ import { openExportWriter, type ExportWriter } from './export'
 import { prepareSqlRun } from './sql-script'
 import { installLosslessTediousParsers } from './tedious-lossless'
 
-installLosslessTediousParsers()
-
 // Always-present databases; hidden from all-databases children except master,
 // which is a legitimate browsing target (it's the default sa database).
 const SYSTEM_DBS = ['tempdb', 'model', 'msdb']
@@ -132,6 +130,10 @@ export function mssqlTls(profile: ConnectionProfile): { encrypt: boolean; trustS
 // Dials the endpoint — the transport layer may have rewritten host/port to an
 // SSH tunnel's local end.
 export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint, events: DriverEvents): Driver {
+  // Patch tedious's value parser lazily (idempotent) rather than at module load,
+  // so an incompatible tedious version fails only this connection — surfaced
+  // through connect()'s error path — instead of crashing app startup.
+  installLosslessTediousParsers()
   let pools: Map<string, sql.ConnectionPool> | null = null
   let childNames: string[] = []
   let active = ''

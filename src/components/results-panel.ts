@@ -22,7 +22,7 @@ export type QueryRun =
 export type CellCoord = { row: number; col: number }
 
 // A header sort button click: re-sort by `column`, or clear the sort (null).
-export type SortColumnDetail = { column: string; direction: SortDir | null }
+export type SortColumnDetail = { columnIndex: number; direction: SortDir | null }
 
 // A row in the displayed grid: a result row (by data index) or a staged new row
 // (by draft array index). The grid lays these out in one interleaved sequence,
@@ -1371,7 +1371,7 @@ export class ResultsPanel extends LitElement {
     let current: QuerySort | null = sortable ? this.sort : null
     if (!current && sortable && run.sql) {
       const parsed = activeSort(run.sql, result.columns)
-      if (parsed) current = { column: result.columns[parsed.index]!, direction: parsed.dir }
+      if (parsed) current = { columnIndex: parsed.index, direction: parsed.dir }
     }
     // Measured widths, with any column the user dragged swapped in (reuse the
     // cached array unchanged in the common no-override case).
@@ -1429,7 +1429,7 @@ export class ResultsPanel extends LitElement {
         <thead>
           <tr>
             <th class="num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">#</th>
-            ${result.columns.map((column, col) => this._renderHeader(column, col, sortable, current?.column === column ? current.direction : null))}
+            ${result.columns.map((column, col) => this._renderHeader(column, col, sortable, current?.columnIndex === col ? current.direction : null))}
           </tr>
         </thead>
         <tbody>
@@ -1575,10 +1575,9 @@ export class ResultsPanel extends LitElement {
   // Cycles the column's sort and asks the owner to rewrite + re-run the query.
   private _sortBy(col: number, dir: SortDir | null) {
     if (this.run.phase !== 'done') return
-    const column = this._shownResult()?.columns[col]
-    if (column === undefined) return
+    if (this._shownResult()?.columns[col] === undefined) return
     const direction: SortDir | null = dir === 'asc' ? 'desc' : dir === 'desc' ? null : 'asc'
-    this.dispatchEvent(new CustomEvent<SortColumnDetail>('sort-column', { detail: { column, direction }, bubbles: true, composed: true }))
+    this.dispatchEvent(new CustomEvent<SortColumnDetail>('sort-column', { detail: { columnIndex: col, direction }, bubbles: true, composed: true }))
   }
 
   // A staged new row interleaved at its anchor: highlighted, with a discard

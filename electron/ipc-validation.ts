@@ -134,7 +134,7 @@ export function queryPayload(sql: unknown, params: unknown, sort: unknown, execu
   else if (typeof sort === 'object' && !Array.isArray(sort)) {
     const candidate = sort as Record<string, unknown>
     if (candidate.direction !== 'asc' && candidate.direction !== 'desc') throw new IpcValidationError('Sort direction is invalid')
-    parsedSort = { column: stringValue(candidate.column, 'Sort column', 2_000), direction: candidate.direction }
+    parsedSort = { columnIndex: nonNegativeInteger(candidate.columnIndex, 'Sort column index', 100_000), direction: candidate.direction }
   } else throw new IpcValidationError('Sort is invalid')
   return {
     sql: parsedSql,
@@ -177,7 +177,7 @@ export function querySort(value: unknown): QuerySort | null {
   if (typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Sort is invalid')
   const candidate = value as Record<string, unknown>
   if (candidate.direction !== 'asc' && candidate.direction !== 'desc') throw new IpcValidationError('Sort direction is invalid')
-  return { column: stringValue(candidate.column, 'Sort column', 2_000), direction: candidate.direction }
+  return { columnIndex: nonNegativeInteger(candidate.columnIndex, 'Sort column index', 100_000), direction: candidate.direction }
 }
 
 export function nonNegativeInteger(value: unknown, label: string, max: number): number {

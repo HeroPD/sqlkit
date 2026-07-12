@@ -27,6 +27,9 @@ const handle = (request: SqliteRequest): SqliteResultByRequest[SqliteRequestType
   switch (request.type) {
     case 'open':
       db?.close()
+      // Clear first: if openDatabase throws, a later request sees "Not connected"
+      // rather than reusing the just-closed handle.
+      db = null
       db = openDatabase(request.file)
       return serverVersion(db)
     case 'query':

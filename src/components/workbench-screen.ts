@@ -1344,7 +1344,7 @@ export class WorkbenchScreen extends LitElement {
   // driver turns into an engine-correct ORDER BY. A null direction clears it.
   // The editor text is left untouched.
   private _onSortColumn(event: Event) {
-    const { column, direction } = (event as CustomEvent<SortColumnDetail>).detail
+    const { columnIndex, direction } = (event as CustomEvent<SortColumnDetail>).detail
     const run = this._queries.runFor(this._ctx.activeTabId)
     if (run.phase !== 'done' || !run.sql || !isReorderableQuery(run.sql)) return
     const sql = run.sql
@@ -1352,7 +1352,7 @@ export class WorkbenchScreen extends LitElement {
       message: 'Re-run this query to sort the result?',
       detail: 'Database sorting executes the query again. Confirm only if repeating any functions in the SELECT is safe.',
       confirmLabel: 'Re-run and Sort',
-      action: () => void this._runSql(sql, direction ? { column, direction } : undefined),
+      action: () => void this._runSql(sql, direction ? { columnIndex, direction } : undefined),
     }
   }
 

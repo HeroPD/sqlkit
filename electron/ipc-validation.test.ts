@@ -67,14 +67,15 @@ describe('querySort', () => {
     expect(querySort(undefined)).toBeNull()
   })
 
-  it('parses a valid sort', () => {
-    expect(querySort({ column: 'name', direction: 'asc' })).toEqual({ column: 'name', direction: 'asc' })
-    expect(querySort({ column: 'id', direction: 'desc' })).toEqual({ column: 'id', direction: 'desc' })
+  it('parses a valid sort by column index', () => {
+    expect(querySort({ columnIndex: 0, direction: 'asc' })).toEqual({ columnIndex: 0, direction: 'asc' })
+    expect(querySort({ columnIndex: 3, direction: 'desc' })).toEqual({ columnIndex: 3, direction: 'desc' })
   })
 
-  it('rejects an invalid direction or column', () => {
-    expect(() => querySort({ column: 'a', direction: 'up' })).toThrow()
-    expect(() => querySort({ column: 5, direction: 'asc' })).toThrow()
+  it('rejects an invalid direction or column index', () => {
+    expect(() => querySort({ columnIndex: 0, direction: 'up' })).toThrow()
+    expect(() => querySort({ columnIndex: -1, direction: 'asc' })).toThrow()
+    expect(() => querySort({ columnIndex: 'x', direction: 'asc' })).toThrow()
     expect(() => querySort('name')).toThrow()
   })
 })
