@@ -820,15 +820,29 @@ describe('results-panel column resize', () => {
 
 describe('results-panel keyboard scroll-into-view', () => {
   // jsdom has no layout, so fake a narrow viewport with writable scroll offsets.
-  const fakeViewport = (el: HTMLElement) => {
+  const fakeViewport = (el: HTMLElement, height = 400, headerHeight = 0) => {
     const body = el.shadowRoot!.querySelector<HTMLElement>('.body')!
+    const header = el.shadowRoot!.querySelector<HTMLElement>('thead')!
     const state = { left: 0, top: 0 }
     Object.defineProperty(body, 'clientWidth', { configurable: true, value: 50 })
-    Object.defineProperty(body, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, value: height })
     Object.defineProperty(body, 'scrollLeft', { configurable: true, get: () => state.left, set: (v: number) => (state.left = v) })
     Object.defineProperty(body, 'scrollTop', { configurable: true, get: () => state.top, set: (v: number) => (state.top = v) })
+    Object.defineProperty(header, 'offsetHeight', { configurable: true, value: headerHeight })
     return state
   }
+
+  it('keeps vertical keyboard navigation clear of the sticky header', async () => {
+    const el = await mountGrid(3)
+    const view = fakeViewport(el, 50, 25)
+
+    key(el, { key: 'ArrowDown' })
+    expect(view.top).toBe(25)
+
+    key(el, { key: 'ArrowUp' })
+    expect(view.top).toBe(0)
+    el.remove()
+  })
 
   it('scrolls right to keep the selected column in view (ArrowRight)', async () => {
     const el = await mountGrid(1) // 2 columns, wider than the faked 50px viewport

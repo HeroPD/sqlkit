@@ -1087,15 +1087,18 @@ export class ResultsPanel extends LitElement {
   }
 
   // Keeps the focused cell in view as the selection moves; `col < 0` skips the
-  // x-axis. Vertical uses the row height, horizontal the rendered column widths.
+  // x-axis. Vertical uses the row/header heights, horizontal the rendered column widths.
   private _scrollCellIntoView(display: number, col: number) {
     const ref = this._refAt(display)
     const body = this._bodyEl()
     if (!ref || !body) return
     const rowH = this._rowHeight || ESTIMATED_ROW_HEIGHT
-    const top = this._anchorRowOf(ref) * rowH
+    const headerH = this.shadowRoot?.querySelector<HTMLElement>('thead')?.offsetHeight ?? 0
+    const top = headerH + this._anchorRowOf(ref) * rowH
     const bottom = top + rowH
-    if (top < body.scrollTop) body.scrollTop = top
+    // The sticky header covers the top of the scrollport. Keep the focused row
+    // below it instead of merely inside the body's raw scroll coordinates.
+    if (top < body.scrollTop + headerH) body.scrollTop = Math.max(0, top - headerH)
     else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight
 
     const layout = this._colLayout

@@ -259,9 +259,9 @@ function buildAppMenu() {
           label: 'Theme',
           submenu: [
             { label: 'Dark', type: 'radio', checked: selectedTheme === 'dark', click: () => selectTheme('dark') },
+            { label: 'Light', type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
             { label: 'Midnight Blue', type: 'radio', checked: selectedTheme === 'midnight-blue', click: () => selectTheme('midnight-blue') },
             { label: 'Warm Dark', type: 'radio', checked: selectedTheme === 'warm-dark', click: () => selectTheme('warm-dark') },
-            { label: 'Light', type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
           ],
         },
         { type: 'separator' },
