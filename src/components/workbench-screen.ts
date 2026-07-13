@@ -128,6 +128,39 @@ export class WorkbenchScreen extends LitElement {
 
   private _lastActiveTabId: string | null = null
 
+  private _restoreScrollTabId: string | null = null
+
+  private _tabScroll = new Map<string, { inspectTop?: number; resultsTop?: number; resultsLeft?: number }>()
+
+  private _captureTabScroll(tabId: string | null) {
+    if (!tabId) return
+    const current = this._tabScroll.get(tabId) ?? {}
+    const inspect = this.renderRoot.querySelector('table-inspect')?.shadowRoot?.querySelector<HTMLElement>('.scroll')
+    const results = this.renderRoot.querySelector('results-panel')?.shadowRoot?.querySelector<HTMLElement>('.body')
+    if (inspect) current.inspectTop = inspect.scrollTop
+    if (results) {
+      current.resultsTop = results.scrollTop
+      current.resultsLeft = results.scrollLeft
+    }
+    this._tabScroll.set(tabId, current)
+  }
+
+  private async _restoreTabScroll(tabId: string) {
+    const saved = this._tabScroll.get(tabId)
+    if (!saved) return
+    const inspectHost = this.renderRoot.querySelector('table-inspect')
+    const resultsHost = this.renderRoot.querySelector('results-panel')
+    await Promise.all([inspectHost?.updateComplete, resultsHost?.updateComplete])
+    if (this._ctx.activeTabId !== tabId) return
+    const inspect = inspectHost?.shadowRoot?.querySelector<HTMLElement>('.scroll')
+    const results = resultsHost?.shadowRoot?.querySelector<HTMLElement>('.body')
+    if (inspect && saved.inspectTop !== undefined) inspect.scrollTop = saved.inspectTop
+    if (results) {
+      if (saved.resultsTop !== undefined) results.scrollTop = saved.resultsTop
+      if (saved.resultsLeft !== undefined) results.scrollLeft = saved.resultsLeft
+    }
+  }
+
   // ⌘⇧P / ⌘P / ⌘K palette: open/close state, entry list, and pick dispatch.
   private _cmdPalette = new CommandPaletteController(this, {
     live: this._live,
@@ -286,6 +319,7 @@ export class WorkbenchScreen extends LitElement {
 
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('workspace')) {
+      this._tabScroll.clear()
       this._ctx.reset()
       this._config.reset()
       this._cmdPalette.close()
@@ -299,9 +333,17 @@ export class WorkbenchScreen extends LitElement {
     // Switching tabs unmounts the inspect component, dropping its staged edits;
     // clear the dirty marker so it can't linger on a tab that's no longer editing.
     if (this._ctx.activeTabId !== this._lastActiveTabId) {
+      this._captureTabScroll(this._lastActiveTabId)
       this._lastActiveTabId = this._ctx.activeTabId
+      this._restoreScrollTabId = this._ctx.activeTabId
       this._inspectDirtyTabId = null
     }
+  }
+
+  protected updated() {
+    const tabId = this._restoreScrollTabId
+    this._restoreScrollTabId = null
+    if (tabId) void this._restoreTabScroll(tabId)
   }
 
   // --- workspace config + context -----------------------------------------
@@ -1351,13 +1393,7 @@ export class WorkbenchScreen extends LitElement {
     const { columnIndex, direction } = (event as CustomEvent<SortColumnDetail>).detail
     const run = this._queries.runFor(this._ctx.activeTabId)
     if (run.phase !== 'done' || !run.sql || !isReorderableQuery(run.sql)) return
-    const sql = run.sql
-    this._dialogs.confirm = {
-      message: 'Re-run this query to sort the result?',
-      detail: 'Database sorting executes the query again. Confirm only if repeating any functions in the SELECT is safe.',
-      confirmLabel: 'Re-run and Sort',
-      action: () => void this._runSql(sql, direction ? { columnIndex, direction } : undefined),
-    }
+    void this._runSql(run.sql, direction ? { columnIndex, direction } : undefined)
   }
 
   private _onDeleteRows(event: Event) {

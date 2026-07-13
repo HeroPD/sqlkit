@@ -55,6 +55,61 @@ describe('WorkbenchScreen query orchestration', () => {
   })
 })
 
+describe('WorkbenchScreen tab scroll state', () => {
+  it('restores inspect and result scroll offsets for each tab', async () => {
+    const screen = new WorkbenchScreen()
+    const inspectScroll = { scrollTop: 140 }
+    const resultsScroll = { scrollTop: 260, scrollLeft: 90 }
+    const inspectHost = { updateComplete: Promise.resolve(true), shadowRoot: { querySelector: () => inspectScroll } }
+    const resultsHost = { updateComplete: Promise.resolve(true), shadowRoot: { querySelector: () => resultsScroll } }
+    const workbench = screen as never as {
+      _ctx: { activeTabId: string | null }
+      renderRoot: { querySelector(selector: string): unknown }
+      _captureTabScroll(tabId: string): void
+      _restoreTabScroll(tabId: string): Promise<void>
+    }
+    workbench._ctx.activeTabId = 'tab-a'
+    workbench.renderRoot = {
+      querySelector: (selector) => selector === 'table-inspect' ? inspectHost : selector === 'results-panel' ? resultsHost : null,
+    }
+
+    workbench._captureTabScroll('tab-a')
+    inspectScroll.scrollTop = 0
+    resultsScroll.scrollTop = 0
+    resultsScroll.scrollLeft = 0
+    await workbench._restoreTabScroll('tab-a')
+
+    expect(inspectScroll.scrollTop).toBe(140)
+    expect(resultsScroll).toEqual({ scrollTop: 260, scrollLeft: 90 })
+  })
+})
+
+describe('WorkbenchScreen result sorting', () => {
+  it('re-runs immediately without opening a confirmation dialog', () => {
+    const screen = new WorkbenchScreen()
+    const runSql = vi.fn()
+    const workbench = screen as never as {
+      _ctx: { activeTabId: string | null }
+      _queries: { runFor(tabId: string | null): unknown }
+      _dialogs: { confirm: unknown }
+      _runSql: typeof runSql
+      _onSortColumn(event: Event): void
+    }
+    workbench._ctx.activeTabId = 'tab-a'
+    workbench._queries.runFor = () => ({
+      phase: 'done',
+      sql: 'select id from accounts',
+      result: { columns: ['id'], rows: [[1]], rowCount: 1, durationMs: 1 },
+    })
+    workbench._runSql = runSql
+
+    workbench._onSortColumn(new CustomEvent('sort-column', { detail: { columnIndex: 0, direction: 'asc' } }))
+
+    expect(runSql).toHaveBeenCalledWith('select id from accounts', { columnIndex: 0, direction: 'asc' })
+    expect(workbench._dialogs.confirm).toBeNull()
+  })
+})
+
 describe('WorkbenchScreen child alignment', () => {
   type Child = { name: string; inUse: boolean }
   const alignInternals = (screen: WorkbenchScreen) =>
