@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // Channel names are string literals on both ends, so tsc can't catch a handler
-// added in main.ts without the matching invoke in preload.ts (or vice versa) —
+// added in a main-process IPC module without the matching invoke in preload.ts (or vice versa) —
 // the very drift CLAUDE.md warns about. This pins the two ends together.
 const dir = path.dirname(fileURLToPath(import.meta.url))
 const read = (file: string) => fs.readFileSync(path.join(dir, file), 'utf8')
@@ -15,7 +15,7 @@ const channels = (source: string, pattern: RegExp) => {
   return [...found].sort()
 }
 
-const main = read('main.ts')
+const main = [read('main.ts'), read('ipc-workspace.ts'), read('ipc-db.ts')].join('\n')
 const preload = read('preload.ts')
 
 describe('IPC contract: main ⇄ preload', () => {
