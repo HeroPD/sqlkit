@@ -368,7 +368,7 @@ export type SqlkitApi = {
 /** Action ids the app menu sends over `app:menu`. */
 export type MenuAction = 'new-query' | 'save' | 'save-as' | 'close-tab' | 'refresh-results' | `theme:${ThemeId}`
 
-export type ThemeId = 'dark' | 'light'
+export type ThemeId = 'dark' | 'light' | 'midnight-blue' | 'warm-dark'
 
 declare global {
   interface Window {

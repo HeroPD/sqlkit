@@ -28,7 +28,7 @@ type GlobalConfig = {
 
 const DEFAULT_THEME: ThemeId = 'dark'
 const themeValue = (value: unknown): ThemeId =>
-  value === 'light' ? value : DEFAULT_THEME
+  value === 'light' || value === 'midnight-blue' || value === 'warm-dark' ? value : DEFAULT_THEME
 
 const defaultWorkspaceConfig = (): WorkspaceConfig => ({ version: 1, connections: [] })
 

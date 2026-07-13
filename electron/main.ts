@@ -147,7 +147,13 @@ function createWindow() {
     height: 900,
     minWidth: 800,
     minHeight: 600,
-    backgroundColor: theme === 'light' ? '#f4f5f7' : '#13161d',
+    backgroundColor: theme === 'light'
+      ? '#f4f5f7'
+      : theme === 'midnight-blue'
+        ? '#0b1420'
+        : theme === 'warm-dark'
+          ? '#161311'
+          : '#13161d',
     show: false,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
@@ -253,6 +259,8 @@ function buildAppMenu() {
           label: 'Theme',
           submenu: [
             { label: 'Dark', type: 'radio', checked: selectedTheme === 'dark', click: () => selectTheme('dark') },
+            { label: 'Midnight Blue', type: 'radio', checked: selectedTheme === 'midnight-blue', click: () => selectTheme('midnight-blue') },
+            { label: 'Warm Dark', type: 'radio', checked: selectedTheme === 'warm-dark', click: () => selectTheme('warm-dark') },
             { label: 'Light', type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
           ],
         },
