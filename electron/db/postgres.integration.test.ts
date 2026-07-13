@@ -2,8 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ConnectionProfile } from '../../src/electron'
-import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+import type { ConnectionProfile, InspectColumn } from '../../src/electron'
+import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildColumnAlter, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+
+const inspectColumnFixture = (name: string): InspectColumn =>
+  ({ name, dataType: 'integer', nullable: true, default: null, primaryKey: false, comment: null })
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { createPostgresDriver } from './postgres'
@@ -49,6 +52,41 @@ describeDb('postgres driver (integration)', () => {
     await driver.connect()
     return driver
   }
+
+  it('swaps two column names in one runDdl without a transient collision', async () => {
+    const driver = await connectDriver()
+    try {
+      await admin.query('drop table if exists sqlkit_it.swap_probe')
+      await admin.query('create table sqlkit_it.swap_probe (a int, b int)')
+      await admin.query('insert into sqlkit_it.swap_probe values (1, 2)')
+      const statements = buildColumnAlter({ schema: 'sqlkit_it', name: 'swap_probe', kind: 'table' }, [
+        { original: inspectColumnFixture('a'), name: 'b' },
+        { original: inspectColumnFixture('b'), name: 'a' },
+      ], 'postgresql')
+      const outcome = await driver.runDdl!(statements)
+      expect(outcome.success).toBe(true)
+      // Names swapped: column "a" now holds b's old value (2), "b" holds a's (1).
+      expect((await driver.query('select a, b from sqlkit_it.swap_probe')).rows).toEqual([[2, 1]])
+    } finally {
+      await admin.query('drop table if exists sqlkit_it.swap_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('flags a generated column in inspectTable', async () => {
+    const driver = await connectDriver()
+    try {
+      await admin.query('drop table if exists sqlkit_it.gen_probe')
+      await admin.query('create table sqlkit_it.gen_probe (a int, total int generated always as (a + 1) stored)')
+      const inspection = await driver.inspectTable({ schema: 'sqlkit_it', name: 'gen_probe', kind: 'table' })
+      const byName = new Map(inspection.columns.map((column) => [column.name, column]))
+      expect(byName.get('total')?.generated).toBe(true)
+      expect(byName.get('a')?.generated).toBe(false)
+    } finally {
+      await admin.query('drop table if exists sqlkit_it.gen_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
 
   const exportFile = (name: string) => join(mkdtempSync(join(tmpdir(), 'sqlkit-pg-export-')), name)
 

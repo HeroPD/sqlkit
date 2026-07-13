@@ -531,6 +531,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           // auto_increment lives in `extra`, but it plays the role of a default.
           default: row.default_expr ?? (row.extra.includes('auto_increment') ? 'auto_increment' : null),
           primaryKey: !!row.pk,
+          // extra reads "STORED GENERATED" / "VIRTUAL GENERATED" for a generated column.
+          generated: /generated/i.test(row.extra),
           comment: row.comment,
         })),
         sections: sections.filter((section) => section.rows.length),

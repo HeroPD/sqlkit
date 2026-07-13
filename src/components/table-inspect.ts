@@ -410,8 +410,8 @@ export class TableInspect extends LitElement {
     if (hit && !this._isSelected(hit.grid, hit.row, hit.col)) {
       this._sel = { grid: hit.grid, r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col }
     }
-    // Additions key off a hidden sentinel, so the menu copies their visible name.
-    const name = this._isAddition(col.name) ? this._fieldText(col, 'name') : col.name
+    // Copy the visible name (a staged rename or addition), not the original.
+    const name = this._fieldText(col, 'name')
     this._menu = { x: event.clientX, y: event.clientY, name, definition: null, col, field }
   }
 
@@ -970,6 +970,9 @@ export class TableInspect extends LitElement {
       this._saveError = `Duplicate column name "${duplicate}" — rename one before saving.`
       return
     }
+    // The workbench reuses this element across tables; capture the target so a
+    // slow DDL that resolves after a retarget can't clear the new table's edits.
+    const target = { profileId: this.profileId, childDb: this.childDb, schema: this.table?.schema ?? null, name: this.table?.name ?? null }
     this.dispatchEvent(
       new CustomEvent<ColumnAlterEventDetail>('alter-columns', {
         bubbles: true,
@@ -983,6 +986,12 @@ export class TableInspect extends LitElement {
           additions,
           drops,
           onApplied: () => {
+            if (
+              this.profileId !== target.profileId
+              || this.childDb !== target.childDb
+              || (this.table?.schema ?? null) !== target.schema
+              || (this.table?.name ?? null) !== target.name
+            ) return
             this._edits = new Map()
             this._editing = null
             void this._load()

@@ -790,6 +790,30 @@ describe('TableInspect undo/redo and reset', () => {
     view.remove()
   })
 
+  it('copies the staged (renamed) name from the row menu, not the original', async () => {
+    const column = inspectCol({ name: 'age', dataType: 'integer' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    internals(view)._commitText(column, 'name', 'age_years')
+    await view.updateComplete
+
+    const nameCell = view.shadowRoot!.querySelector<HTMLElement>('td[data-field="name"]')!
+    nameCell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 5, clientY: 6 }))
+    await view.updateComplete
+
+    expect(internals(view)._menu?.name).toBe('age_years')
+    view.remove()
+  })
+
   it('clears the undo history when the tab reloads a new structure', async () => {
     const column = inspectCol({ name: 'age', dataType: 'integer' })
     const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))

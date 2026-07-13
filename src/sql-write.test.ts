@@ -344,6 +344,39 @@ describe('buildColumnAlter', () => {
     ])
   })
 
+  it('reorders a rename chain so each target name is free when its rename runs', () => {
+    // a→b, b→c: renaming a→b first would collide with the still-present b, so
+    // b→c must run first to free the name.
+    expect(
+      buildColumnAlter(users, [
+        { original: inspectCol({ name: 'a' }), name: 'b' },
+        { original: inspectCol({ name: 'b' }), name: 'c' },
+      ], 'postgresql'),
+    ).toEqual([
+      'ALTER TABLE "public"."users" RENAME COLUMN "b" TO "c"',
+      'ALTER TABLE "public"."users" RENAME COLUMN "a" TO "b"',
+    ])
+  })
+
+  it('breaks a rename cycle (swap) with a temporary name so it executes cleanly', () => {
+    expect(
+      buildColumnAlter(users, [
+        { original: inspectCol({ name: 'first' }), name: 'second' },
+        { original: inspectCol({ name: 'second' }), name: 'first' },
+      ], 'postgresql'),
+    ).toEqual([
+      'ALTER TABLE "public"."users" RENAME COLUMN "first" TO "first_sqlkit_tmp"',
+      'ALTER TABLE "public"."users" RENAME COLUMN "second" TO "first"',
+      'ALTER TABLE "public"."users" RENAME COLUMN "first_sqlkit_tmp" TO "second"',
+    ])
+  })
+
+  it('refuses to alter the type or nullability of a generated column', () => {
+    const original = inspectCol({ name: 'total', dataType: 'integer', generated: true })
+    expect(() => buildColumnAlter(users, [{ original, dataType: 'bigint' }], 'postgresql')).toThrow(/generated/i)
+    expect(() => buildColumnAlter(users, [{ original, nullable: false }], 'postgresql')).toThrow(/generated/i)
+  })
+
   it('escapes comment literals', () => {
     const original = inspectCol({ comment: null })
     expect(buildColumnAlter(users, [{ original, comment: "it's fine" }], 'postgresql')).toEqual([

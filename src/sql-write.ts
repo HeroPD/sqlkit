@@ -510,7 +510,7 @@ export function buildColumnAlter(table: TableRef, edits: ColumnAlter[], engine: 
   const caps = dialect.columnEdits
   const qualified = quoteQualified(table, dialect)
   const alters: string[] = []
-  const renames: string[] = []
+  const renamePairs: Array<{ from: string; to: string }> = []
   for (const edit of edits) {
     const col = dialect.quoteIdent(edit.original.name)
     const dataType = caps.dataType && edit.dataType !== undefined && edit.dataType !== edit.original.dataType ? edit.dataType : undefined
@@ -553,14 +553,49 @@ export function buildColumnAlter(table: TableRef, edits: ColumnAlter[], engine: 
       }
     }
     if (caps.rename && edit.name !== undefined && edit.name !== edit.original.name) {
-      renames.push(
-        engine === 'sqlserver'
-          ? spRename(table, edit.original.name, edit.name)
-          : `ALTER TABLE ${qualified} RENAME COLUMN ${col} TO ${dialect.quoteIdent(edit.name)}`,
-      )
+      renamePairs.push({ from: edit.original.name, to: edit.name })
     }
   }
+  // Renames run after the value alters (which reference the original names), and
+  // in a collision-safe order so a swap/cycle (a→b, b→a) doesn't fail because the
+  // target name is still occupied when its rename executes.
+  const renames = orderColumnRenames(renamePairs).map(({ from, to }) =>
+    engine === 'sqlserver'
+      ? spRename(table, from, to)
+      : `ALTER TABLE ${qualified} RENAME COLUMN ${dialect.quoteIdent(from)} TO ${dialect.quoteIdent(to)}`,
+  )
   return [...alters, ...renames]
+}
+
+// Orders column renames so none transiently collides: a rename runs only after
+// the column currently holding its target name has itself been renamed away. A
+// true cycle (a↔b) is broken by first moving one column to a temporary name, so
+// swapping two column names in one save works instead of erroring at the server.
+function orderColumnRenames(pairs: Array<{ from: string; to: string }>): Array<{ from: string; to: string }> {
+  const names = new Set(pairs.flatMap((pair) => [pair.from, pair.to]))
+  const tempFor = (seed: string) => {
+    let candidate = `${seed}_sqlkit_tmp`
+    for (let n = 2; names.has(candidate); n += 1) candidate = `${seed}_sqlkit_tmp_${n}`
+    names.add(candidate)
+    return candidate
+  }
+  const pending = pairs.map((pair) => ({ ...pair }))
+  const ordered: Array<{ from: string; to: string }> = []
+  while (pending.length) {
+    // Ready = no other pending rename still occupies this one's target name.
+    const ready = pending.findIndex((pair) => !pending.some((other) => other !== pair && other.from === pair.to))
+    if (ready >= 0) {
+      ordered.push(pending.splice(ready, 1)[0]!)
+      continue
+    }
+    // All remaining are blocked → a cycle: move one column to a temp name now and
+    // finish its rename (temp → target) once the cycle has cleared.
+    const blocked = pending[0]!
+    const temp = tempFor(blocked.from)
+    ordered.push({ from: blocked.from, to: temp })
+    blocked.from = temp
+  }
+  return ordered
 }
 
 export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: unknown[]; expectedRows: number } {

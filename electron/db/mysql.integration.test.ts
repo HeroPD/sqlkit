@@ -55,6 +55,21 @@ describeDb('mysql driver (integration)', () => {
     return driver
   }
 
+  it('flags a generated column in inspectTable', async () => {
+    const driver = await connectDriver()
+    try {
+      await admin.query('drop table if exists gen_probe')
+      await admin.query('create table gen_probe (a int, total int generated always as (a + 1) stored)')
+      const inspection = await driver.inspectTable({ schema: null, name: 'gen_probe', kind: 'table' })
+      const byName = new Map(inspection.columns.map((column) => [column.name, column]))
+      expect(byName.get('total')?.generated).toBe(true)
+      expect(byName.get('a')?.generated).toBe(false)
+    } finally {
+      await admin.query('drop table if exists gen_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('streams a full result to a CSV file via exportQuery', async () => {
     const driver = await connectDriver()
     const file = join(mkdtempSync(join(tmpdir(), 'sqlkit-mysql-export-')), 'authors.csv')

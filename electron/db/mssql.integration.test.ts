@@ -4,8 +4,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ConnectionProfile } from '../../src/electron'
-import { buildAddConstraint, buildAddForeignKey, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+import type { ConnectionProfile, InspectColumn } from '../../src/electron'
+import { buildAddConstraint, buildAddForeignKey, buildColumnAlter, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+
+const inspectColumnFixture = (name: string): InspectColumn =>
+  ({ name, dataType: 'int', nullable: true, default: null, primaryKey: false, comment: null })
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { acquireConnection, createMssqlDriver, resetConnection, type AcquirablePool } from './mssql'
@@ -86,6 +89,25 @@ describeDb('mssql driver (integration)', () => {
     await driver.connect()
     return driver
   }
+
+  it('swaps two column names in one alter batch (sp_rename, temp-name cycle break)', async () => {
+    const driver = await connectDriver()
+    try {
+      await fixtures.request().batch('drop table if exists swap_probe')
+      await fixtures.request().batch('create table swap_probe (a int, b int)')
+      await fixtures.request().batch('insert into swap_probe values (1, 2)')
+      const statements = buildColumnAlter({ schema: 'dbo', name: 'swap_probe', kind: 'table' }, [
+        { original: inspectColumnFixture('a'), name: 'b' },
+        { original: inspectColumnFixture('b'), name: 'a' },
+      ], 'sqlserver')
+      const outcome = await driver.runDdl!(statements)
+      expect(outcome.success).toBe(true)
+      expect((await driver.query('select a, b from swap_probe')).rows).toEqual([[2, 1]])
+    } finally {
+      await fixtures.request().batch('drop table if exists swap_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
 
   it('streams a full result to a CSV file via exportQuery', async () => {
     const driver = await connectDriver()
