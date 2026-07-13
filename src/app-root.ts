@@ -2,7 +2,7 @@ import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import './components/welcome-screen'
 import './components/workbench-screen'
-import type { RecentWorkspace, WorkspaceResult } from './electron'
+import type { MenuAction, RecentWorkspace, ThemeId, WorkspaceResult } from './electron'
 
 type Screen = 'welcome' | 'workbench'
 type Workspace = { name: string; path: string }
@@ -14,6 +14,7 @@ type Workspace = { name: string; path: string }
 // root decides what happens.
 @customElement('app-root')
 export class AppRoot extends LitElement {
+  private _unsubscribeMenu: (() => void) | null = null
   @state()
   private _screen: Screen = 'welcome'
 
@@ -25,7 +26,24 @@ export class AppRoot extends LitElement {
 
   connectedCallback() {
     super.connectedCallback()
+    this._unsubscribeMenu = window.sqlkit.onMenuAction((action) => this._onMenuAction(action))
+    void window.sqlkit.getTheme().then((theme) => this._applyTheme(theme))
     void this._loadRecents()
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback()
+    this._unsubscribeMenu?.()
+    this._unsubscribeMenu = null
+  }
+
+  private _onMenuAction(action: MenuAction) {
+    if (action.startsWith('theme:')) this._applyTheme(action.slice('theme:'.length) as ThemeId)
+  }
+
+  private _applyTheme(theme: ThemeId) {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem('sqlkit-theme', theme)
   }
 
   render() {

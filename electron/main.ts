@@ -10,12 +10,12 @@ import {
 import { realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import type { ConnectionStatus } from '../src/electron'
+import type { ConnectionStatus, ThemeId } from '../src/electron'
 import { createConnectionManager, type ConnectionManager } from './db/manager'
 import { stopWorkspaceWatcher } from './files'
 import { registerDbIpc } from './ipc-db'
 import { registerWorkspaceIpc } from './ipc-workspace'
-import { readGlobalConfig } from './workspace'
+import { readGlobalConfig, readTheme, writeTheme } from './workspace'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
@@ -141,12 +141,13 @@ const MAX_WINDOWS = 8
 
 function createWindow() {
   if (BrowserWindow.getAllWindows().length >= MAX_WINDOWS) return
+  const theme = readTheme()
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 800,
     minHeight: 600,
-    backgroundColor: '#0f1117',
+    backgroundColor: theme === 'light' ? '#f4f5f7' : '#13161d',
     show: false,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
@@ -217,8 +218,14 @@ function installQuitHandler() {
 
 function buildAppMenu() {
   const isMac = process.platform === 'darwin'
+  const selectedTheme = readTheme()
   const menuAction = (action: string) => (_item: unknown, window: unknown) => {
     if (window instanceof BrowserWindow) window.webContents.send('app:menu', action)
+  }
+  const selectTheme = (theme: ThemeId) => {
+    writeTheme(theme)
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('app:menu', `theme:${theme}`)
+    buildAppMenu()
   }
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' } as MenuItemConstructorOptions] : []),
@@ -242,6 +249,14 @@ function buildAppMenu() {
       label: 'View',
       submenu: [
         { label: 'Refresh Results', accelerator: 'CmdOrCtrl+R', click: menuAction('refresh-results') },
+        {
+          label: 'Theme',
+          submenu: [
+            { label: 'Dark', type: 'radio', checked: selectedTheme === 'dark', click: () => selectTheme('dark') },
+            { label: 'Light', type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
+          ],
+        },
+        { type: 'separator' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },

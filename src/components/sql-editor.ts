@@ -47,18 +47,18 @@ import { quoteStyleFor } from '../dialect'
 import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 
-// One Dark's highlight palette pre-blended 20% toward --editor-bg (#0f1117),
+// One Dark's highlight palette pre-blended toward the dark --editor-bg,
 // matching the softened contrast of the app theme tokens in index.css.
-const chalky = '#ba9d67',
-  coral = '#b65a62',
-  cyan = '#4895a0',
-  invalid = '#cfcfd1',
-  ivory = '#8c929d',
-  stone = '#676f7f',
-  malibu = '#518fc4',
-  sage = '#7d9f65',
-  whiskey = '#aa7f56',
-  violet = '#a163b5'
+const chalky = 'var(--syntax-literal)',
+  coral = 'var(--syntax-name)',
+  cyan = 'var(--syntax-variable)',
+  invalid = 'var(--syntax-invalid)',
+  ivory = 'var(--syntax-bracket)',
+  stone = 'var(--syntax-comment)',
+  malibu = 'var(--syntax-heading)',
+  sage = 'var(--syntax-string)',
+  whiskey = 'var(--syntax-type)',
+  violet = 'var(--syntax-keyword)'
 
 // Same tag mapping as oneDarkHighlightStyle, only the colors are softened.
 const softHighlightStyle = HighlightStyle.define([

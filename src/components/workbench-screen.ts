@@ -822,7 +822,10 @@ export class WorkbenchScreen extends LitElement {
       const context = this._config.activeProfile()
       const live = this._connectedProfile()
       const children = live ? (this._live.statuses[live.id]?.children ?? []) : []
-      const activeChild = children.length > 1 ? (children.find((child) => child.inUse)?.name ?? null) : null
+      const hasChildSelection = children.length > 1
+      const activeChild = hasChildSelection ? (children.find((child) => child.inUse)?.name ?? null) : null
+      const selectedChild = this._ctx.activeChildDb
+      const metadataMatchesContext = !!live && (!hasChildSelection || (selectedChild !== null && selectedChild === activeChild))
       return html`
         <explorer-view
           .files=${this._workspaceFiles.files}
@@ -830,10 +833,11 @@ export class WorkbenchScreen extends LitElement {
           .contextName=${context ? this._contextLabel() : null}
           .profileId=${context?.id ?? null}
           .engine=${context?.engine ?? null}
-          .tables=${live ? (this._live.tables[live.id] ?? []) : null}
-          .columns=${live ? (this._live.columns[live.id] ?? null) : null}
-          .objects=${live ? (this._live.objects[live.id] ?? null) : null}
-          .activeChildName=${activeChild}
+          .tables=${metadataMatchesContext ? (this._live.tables[live.id] ?? []) : null}
+          .columns=${metadataMatchesContext ? (this._live.columns[live.id] ?? null) : null}
+          .objects=${metadataMatchesContext ? (this._live.objects[live.id] ?? null) : null}
+          .activeChildName=${metadataMatchesContext ? activeChild : null}
+          .awaitingDatabaseSelection=${!!live && hasChildSelection && selectedChild === null}
           .selectedTable=${this._ctx.selectedTable}
           .profileIds=${this._config.connections.map((connection) => connection.id)}
         ></explorer-view>

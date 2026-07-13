@@ -9,6 +9,7 @@ import type {
   WorkspaceConfigResult,
   WorkspaceResult,
 } from '../src/electron'
+import type { ThemeId } from '../src/electron'
 import { workspaceConfig as validateWorkspaceConfig } from './ipc-validation'
 
 // temp+rename so a crash mid-write can't leave a half-written (and for the
@@ -22,7 +23,12 @@ const writeFileAtomic = (file: string, data: string) => {
 type GlobalConfig = {
   recentWorkspaces: RecentWorkspace[]
   lastWorkspace: string | null
+  theme: ThemeId
 }
+
+const DEFAULT_THEME: ThemeId = 'dark'
+const themeValue = (value: unknown): ThemeId =>
+  value === 'light' ? value : DEFAULT_THEME
 
 const defaultWorkspaceConfig = (): WorkspaceConfig => ({ version: 1, connections: [] })
 
@@ -307,8 +313,8 @@ const globalConfigPath = () => path.join(app.getPath('userData'), 'config.json')
 export function readGlobalConfig(): GlobalConfig {
   try {
     const file = globalConfigPath()
-    if (fs.statSync(file).size > MAX_CONFIG_BYTES) return { recentWorkspaces: [], lastWorkspace: null }
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { recentWorkspaces?: unknown; lastWorkspace?: unknown }
+    if (fs.statSync(file).size > MAX_CONFIG_BYTES) return { recentWorkspaces: [], lastWorkspace: null, theme: DEFAULT_THEME }
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { recentWorkspaces?: unknown; lastWorkspace?: unknown; theme?: unknown }
     // Valid JSON with a missing/wrong-typed shape (a hand-edit, an old version)
     // must not crash callers that map over recentWorkspaces — normalize to the
     // known shape, dropping entries without a usable path.
@@ -317,14 +323,21 @@ export function readGlobalConfig(): GlobalConfig {
       recentWorkspaces: entries.filter((entry): entry is RecentWorkspace =>
         !!entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).path === 'string'),
       lastWorkspace: typeof parsed.lastWorkspace === 'string' ? parsed.lastWorkspace : null,
+      theme: themeValue(parsed.theme),
     }
   } catch {
-    return { recentWorkspaces: [], lastWorkspace: null }
+    return { recentWorkspaces: [], lastWorkspace: null, theme: DEFAULT_THEME }
   }
 }
 
 function writeGlobalConfig(config: GlobalConfig) {
   writeFileAtomic(globalConfigPath(), JSON.stringify(config, null, 2))
+}
+
+export const readTheme = (): ThemeId => readGlobalConfig().theme
+
+export function writeTheme(theme: ThemeId) {
+  writeGlobalConfig({ ...readGlobalConfig(), theme })
 }
 
 export function isDirectory(checkPath: string) {

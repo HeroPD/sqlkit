@@ -8,8 +8,10 @@ import {
   openWorkspace,
   readWorkspaceConfig,
   readWorkspaceConfigForRenderer,
+  readTheme,
   isWeakStorageBackend,
   writeWorkspaceConfig,
+  writeTheme,
 } from './workspace'
 
 // A reversible stand-in for Electron's OS-keychain safeStorage: "SEALED:" marks
@@ -37,6 +39,16 @@ describe('credential storage strength', () => {
     expect(isWeakStorageBackend('linux', 'basic_text')).toBe(true)
     expect(isWeakStorageBackend('darwin', 'basic_text')).toBe(false)
     expect(isWeakStorageBackend('linux', 'gnome_libsecret')).toBe(false)
+  })
+})
+
+describe('global theme', () => {
+  it('defaults invalid or missing values to dark and persists a selection', () => {
+    expect(readTheme()).toBe('dark')
+    writeTheme('light')
+    expect(readTheme()).toBe('light')
+    fs.writeFileSync(path.join(state.userData, 'config.json'), JSON.stringify({ theme: 'unknown' }))
+    expect(readTheme()).toBe('dark')
   })
 })
 

@@ -86,6 +86,10 @@ export class ExplorerView extends LitElement {
   @property()
   activeChildName: string | null = null
 
+  /** Connected all-databases profile with no child selected in the UI yet. */
+  @property({ type: Boolean })
+  awaitingDatabaseSelection = false
+
   @property()
   selectedTable: string | null = null
 
@@ -264,6 +268,9 @@ export class ExplorerView extends LitElement {
   }
 
   private _renderTables() {
+    if (this.awaitingDatabaseSelection) {
+      return html`<p class="muted hint">Select a database to see its tables (${mod('K')}).</p>`
+    }
     if (this.tables === null || !this.profileId) {
       return html`<p class="muted hint">Connect a database to see tables (${mod('K')}).</p>`
     }

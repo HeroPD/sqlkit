@@ -275,6 +275,7 @@ export type SqlkitApi = {
   closeWorkspace: () => Promise<void>
   newWindow: () => Promise<void>
   getRecentWorkspaces: () => Promise<RecentWorkspace[]>
+  getTheme: () => Promise<ThemeId>
   getWorkspaceConfig: () => Promise<WorkspaceConfigResult>
   saveWorkspaceConfig: (config: WorkspaceConfig) => Promise<SaveResult>
   testConnection: (profile: ConnectionProfile) => Promise<TestConnectionResult>
@@ -365,7 +366,9 @@ export type SqlkitApi = {
 }
 
 /** Action ids the app menu sends over `app:menu`. */
-export type MenuAction = 'new-query' | 'save' | 'save-as' | 'close-tab' | 'refresh-results'
+export type MenuAction = 'new-query' | 'save' | 'save-as' | 'close-tab' | 'refresh-results' | `theme:${ThemeId}`
+
+export type ThemeId = 'dark' | 'light'
 
 declare global {
   interface Window {

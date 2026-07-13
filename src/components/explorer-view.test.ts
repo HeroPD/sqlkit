@@ -81,6 +81,22 @@ describe('ExplorerView outside selection reveal', () => {
   })
 })
 
+describe('ExplorerView database selection', () => {
+  it('hides loaded tables until an all-databases child is selected', async () => {
+    const view = new ExplorerView()
+    view.profileId = 'p1'
+    view.tables = [table('users')]
+    view.awaitingDatabaseSelection = true
+    document.body.append(view)
+
+    await view.updateComplete
+
+    expect(view.shadowRoot?.textContent).toContain('Select a database to see its tables')
+    expect(view.shadowRoot?.textContent).not.toContain('users')
+    view.remove()
+  })
+})
+
 describe('ExplorerView tree toggles', () => {
   it('expands and collapses a table without disturbing sibling state', () => {
     const view = new ExplorerView()

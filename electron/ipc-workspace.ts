@@ -21,6 +21,7 @@ import {
   isDirectory,
   openWorkspace,
   readGlobalConfig,
+  readTheme,
   readWorkspaceConfigForRenderer,
   writeWorkspaceConfig,
 } from './workspace'
@@ -201,6 +202,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
 
   ipcMain.handle('workspace:get-recent', () =>
     readGlobalConfig().recentWorkspaces.filter((workspace) => isDirectory(workspace.path)))
+  ipcMain.handle('app:get-theme', () => readTheme())
   ipcMain.handle('workspace:get-config', (event) => readWorkspaceConfigForRenderer(context.workspaceFor(event.sender)))
   ipcMain.handle('workspace:save-config', (event, config: WorkspaceConfig) => {
     try {

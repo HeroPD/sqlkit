@@ -567,6 +567,10 @@ export class InspectAddDialog extends LitElement {
         border-color: var(--input-focus-border);
       }
 
+      textarea::placeholder {
+        color: var(--input-placeholder);
+      }
+
       .error {
         color: var(--status-dot-error);
         font-size: var(--font-size-sm);

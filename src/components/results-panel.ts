@@ -1781,7 +1781,7 @@ export class ResultsPanel extends LitElement {
         z-index: 1;
         padding: 4px 10px;
         background: var(--header-bg);
-        color: var(--text-2);
+        color: var(--tab-inactive-fg);
         font-family: var(--ui-font);
         font-size: var(--font-size-sm);
         font-weight: 600;
@@ -1886,7 +1886,7 @@ export class ResultsPanel extends LitElement {
       }
 
       td {
-        color: var(--text);
+        color: var(--editor-fg);
         line-height: 18px;
       }
 
