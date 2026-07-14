@@ -60,6 +60,21 @@
   --row-hover: #163452;
   --row-num-bg: #151820;
   --header-bg: #171b23;
+  /* Shared grid staging states. Selection deepens the same semantic color
+     instead of switching staged cells to the grid's normal blue. */
+  --staged-edit-fg: #c19a62;
+  --staged-add-fg: #68b66f;
+  --staged-delete-fg: #d16f78;
+  --staged-edit-bg: color-mix(in srgb, var(--staged-edit-fg) 12%, var(--editor-bg));
+  --staged-edit-hover-bg: color-mix(in srgb, var(--staged-edit-fg) 17%, var(--editor-bg));
+  --staged-add-bg: color-mix(in srgb, var(--staged-add-fg) 13%, var(--editor-bg));
+  --staged-add-hover-bg: color-mix(in srgb, var(--staged-add-fg) 19%, var(--editor-bg));
+  --staged-delete-bg: color-mix(in srgb, var(--staged-delete-fg) 13%, var(--editor-bg));
+  --staged-delete-hover-bg: color-mix(in srgb, var(--staged-delete-fg) 19%, var(--editor-bg));
+  --grid-selection-bg: color-mix(in srgb, var(--accent) 34%, transparent);
+  --staged-edit-selection-bg: color-mix(in srgb, var(--staged-edit-fg) 25%, var(--editor-bg));
+  --staged-add-selection-bg: color-mix(in srgb, var(--staged-add-fg) 29%, var(--editor-bg));
+  --staged-delete-selection-bg: color-mix(in srgb, var(--staged-delete-fg) 29%, var(--editor-bg));
   --border: #303744;
   --border-subtle: #272e3a;
   /* Three clearly separated steps — adjacent tiers must be tellable apart
@@ -144,6 +159,9 @@
   --list-hover: #172a3d;
   --list-selection: #17466a;
   --list-selection-fg: #e5f1fa;
+  --staged-edit-fg: #c5a36c;
+  --staged-add-fg: #62b47e;
+  --staged-delete-fg: #d17682;
   --syntax-keyword: #b07ac4;
   --syntax-name: #cf7c83;
   --syntax-literal: #d0b16e;
@@ -200,6 +218,9 @@
   --list-hover: #302722;
   --list-selection: #53351f;
   --list-selection-fg: #f2e7dc;
+  --staged-edit-fg: #c39a68;
+  --staged-add-fg: #78ad6d;
+  --staged-delete-fg: #d17269;
   --status-dot-connected: #82b36b;
   --status-dot-warning: #d29242;
   --status-dot-error: #d95d58;
@@ -261,6 +282,9 @@
   --list-hover: #e2edf5;
   --list-selection: #c7e2f5;
   --list-selection-fg: #17212a;
+  --staged-edit-fg: #855f24;
+  --staged-add-fg: #337b3e;
+  --staged-delete-fg: #ad3745;
   --scrollbar-thumb: rgba(80, 88, 100, 0.35);
   --scrollbar-thumb-hover: rgba(70, 78, 90, 0.55);
   --syntax-keyword: #7a2f91;

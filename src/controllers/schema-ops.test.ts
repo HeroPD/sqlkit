@@ -176,6 +176,25 @@ describe('alterColumns', () => {
     ])
   })
 
+  it('drops dependent objects before columns and creates objects after column changes', () => {
+    const h = harness()
+    h.ops.alterColumns(spec({
+      drops: ['legacy'],
+      additions: [{ name: 'tenant_id', dataType: 'integer', nullable: true, default: null, comment: null }],
+      operations: [
+        { kind: 'index', spec: { name: 'users_tenant_idx', columns: ['tenant_id'], unique: false } },
+        { kind: 'drop', target: 'foreignKey', name: 'users_legacy_fk' },
+      ],
+    }))
+
+    expect(h.dialogs.review?.sql).toBe(
+      'ALTER TABLE "public"."users" DROP CONSTRAINT "users_legacy_fk";\n\n' +
+      'ALTER TABLE "public"."users" DROP COLUMN "legacy";\n\n' +
+      'ALTER TABLE "public"."users" ADD COLUMN "tenant_id" integer;\n\n' +
+      'CREATE INDEX "users_tenant_idx" ON "public"."users" ("tenant_id");',
+    )
+  })
+
   it('opens no review when the staged edits produce no statements', () => {
     const h = harness()
     h.ops.alterColumns(spec())

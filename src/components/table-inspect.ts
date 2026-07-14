@@ -10,7 +10,16 @@ import './inspect-add-dialog'
 import type { AddObjectDetail, AddObjectKind } from './inspect-add-dialog'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
-import { buildInspectOperation, operationName, operationSection, type InspectOperation } from '../inspect-operations'
+import {
+  buildInspectOperation,
+  canDropInspectObject,
+  canRenameInspectObject,
+  operationName,
+  operationSection,
+  operationSourceName,
+  type InspectDropTarget,
+  type InspectOperation,
+} from '../inspect-operations'
 
 // A column property the user can edit inline (click). Nullable is edited via a
 // yes/no menu; primary key stays read-only. Capabilities come from the dialect.
@@ -28,7 +37,16 @@ export const dropInspectDraft = (tabId: string) => draftCache.delete(tabId)
 
 // Right-click menu state. `col`/`field` are set for the columns table (they
 // gate the reset items); the section tables leave them undefined.
-type RowMenu = { x: number; y: number; name: string; definition: string | null; col?: InspectColumn; field?: EditField | 'nullable' }
+type RowMenu = {
+  x: number
+  y: number
+  name: string
+  definition: string | null
+  col?: InspectColumn
+  field?: EditField | 'nullable'
+  section?: string
+  operationIndex?: number
+}
 
 // Emitted on ⌘S / Save so the workbench routes the change through SchemaOps
 // (build DDL → review dialog → runDdl). `onApplied` reloads this tab on success.
@@ -158,6 +176,15 @@ export class TableInspect extends LitElement {
   @state()
   private _editing: { col: string; field: EditField; seed?: string } | null = null
 
+  @state()
+  private _sectionEditing: {
+    section: string
+    from: string
+    value: string
+    operationIndex?: number
+    seed?: string
+  } | null = null
+
   /** Save-time validation failure (duplicate names); cleared by the next edit. */
   @state()
   private _saveError: string | null = null
@@ -247,6 +274,14 @@ export class TableInspect extends LitElement {
         this._selectFirstDefaultOption = false
       }
     }
+    if (changed.has('_sectionEditing') && this._sectionEditing) {
+      const input = this.renderRoot.querySelector<HTMLInputElement>('.object-name-input')
+      if (input) {
+        input.focus()
+        if (this._sectionEditing.seed) input.setSelectionRange(input.value.length, input.value.length)
+        else input.select()
+      }
+    }
     // Surface the dirty state so the workbench can mark the tab (the • marker).
     if (changed.has('_edits') || changed.has('_operations')) {
       this.dispatchEvent(
@@ -268,6 +303,7 @@ export class TableInspect extends LitElement {
     if (!profileId || (!table && !object)) return
     this._restoreDraft()
     this._editing = null
+    this._sectionEditing = null
     this._cellMenu = null
     this._typePicker = null
     this._defaultPicker = null
@@ -392,7 +428,18 @@ export class TableInspect extends LitElement {
     if (!menu) return ''
     const items: MenuItem[] = [{ id: 'copy-name', label: 'Copy Name' }]
     if (menu.definition) items.push({ id: 'copy-definition', label: 'Copy Definition' })
-    if (menu.col && this._isAddition(menu.col.name)) {
+    const dropTarget = menu.section ? this._dropTarget(menu.section) : null
+    if (menu.operationIndex !== undefined) {
+      items.push({ id: 'remove-staged-operation', label: 'Remove Staged Change' })
+    } else if (dropTarget) {
+      const labels: Record<InspectDropTarget, string> = {
+        index: 'Drop Index',
+        trigger: 'Drop Trigger',
+        foreignKey: 'Drop Foreign Key',
+        constraint: 'Drop Constraint',
+      }
+      items.push({ id: 'drop-object', label: labels[dropTarget], danger: true })
+    } else if (menu.col && this._isAddition(menu.col.name)) {
       items.push({ id: 'remove-column', label: 'Remove Column' })
     } else if (menu.col && this._isDropped(menu.col.name)) {
       items.push({ id: 'restore-column', label: 'Restore Column' })
@@ -425,21 +472,53 @@ export class TableInspect extends LitElement {
   private _onMenuPick(id: string, menu: RowMenu) {
     if (id === 'copy-name') return void navigator.clipboard.writeText(menu.name)
     if (id === 'copy-definition') return void navigator.clipboard.writeText(menu.definition ?? '')
-    if (id === 'remove-column' && menu.col) this._removeAddition(menu.col.name)
+    if (id === 'remove-staged-operation' && menu.operationIndex !== undefined) {
+      this._commitDraft(this._edits, this._operations.filter((_, index) => index !== menu.operationIndex))
+    } else if (id === 'drop-object' && menu.section) {
+      const target = this._dropTarget(menu.section)
+      if (target) this._commitDraft(this._edits, [...this._operations, { kind: 'drop', target, name: menu.name }])
+    } else if (id === 'remove-column' && menu.col) this._removeAddition(menu.col.name)
     else if (id === 'drop-column' && menu.col) this._dropColumn(menu.col)
     else if (id === 'restore-column' && menu.col) this._resetRow(menu.col)
     else if (id === 'reset-field' && menu.col && menu.field) this._resetField(menu.col, menu.field)
     else if (id === 'reset-row' && menu.col) this._resetRow(menu.col)
   }
 
-  private _onRowMenu(event: MouseEvent, name: string, definition: string | null = null) {
+  private _onRowMenu(
+    event: MouseEvent,
+    name: string,
+    definition: string | null = null,
+    section?: string,
+    operationIndex?: number,
+  ) {
     event.preventDefault()
     // Same as the columns table: right-click lands the selection on the cell.
     const hit = this._cellAt(event.target as Element)
     if (hit && !this._isSelected(hit.grid, hit.row, hit.col)) {
       this._sel = { grid: hit.grid, r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col }
     }
-    this._menu = { x: event.clientX, y: event.clientY, name, definition }
+    this._menu = { x: event.clientX, y: event.clientY, name, definition, section, operationIndex }
+  }
+
+  private _dropTarget(section: string): InspectDropTarget | null {
+    const target = this._objectTarget(section)
+    return target && this.engine && canDropInspectObject(target, this.engine) ? target : null
+  }
+
+  private _objectTarget(section: string): InspectDropTarget | null {
+    const targets: Partial<Record<string, InspectDropTarget>> = {
+      Indexes: 'index',
+      Triggers: 'trigger',
+      'Foreign Keys': 'foreignKey',
+      Constraints: 'constraint',
+    }
+    return targets[section] ?? null
+  }
+
+  private _canRenameSectionObject(section: string, operationIndex = -1): boolean {
+    const target = this._objectTarget(section)
+    if (!target || !this.engine || !canRenameInspectObject(target, this.engine)) return false
+    return operationIndex < 0 || this._operations[operationIndex]?.kind === 'rename'
   }
 
   // The columns table's row menu is cell-aware: which <td> was right-clicked
@@ -516,10 +595,15 @@ export class TableInspect extends LitElement {
         section = { title, rows: [] }
         sections.push(section)
       }
-      section.rows.push({
-        name: `${operationName(operation)} •`,
+      const stagedRow = {
+        name: operationName(operation),
         definition: buildInspectOperation(this.table, operation, this.engine),
-      })
+      }
+      const changedRow = operation.kind === 'drop' || operation.kind === 'rename'
+        ? section.rows.findIndex((row) => row.name === operationSourceName(operation))
+        : -1
+      if (changedRow >= 0) section.rows[changedRow] = stagedRow
+      else section.rows.push(stagedRow)
     }
     return sections
   }
@@ -530,9 +614,7 @@ export class TableInspect extends LitElement {
   }
 
   private _stagedOperationIndex(section: string, rowName: string): number {
-    if (!rowName.endsWith(' •')) return -1
-    const name = rowName.slice(0, -2)
-    return this._operations.findIndex((operation) => operationSection(operation) === section && operationName(operation) === name)
+    return this._operations.findIndex((operation) => operationSection(operation) === section && operationName(operation) === rowName)
   }
 
   // The grid coordinate of a DOM node's cell; null off any grid (icon cell, header).
@@ -593,12 +675,14 @@ export class TableInspect extends LitElement {
 
   // A completed plain click opens the cell's editor (the classic gesture);
   // shift-clicks and drags that swept past the starting cell stay selection-only.
-  // Section grids are read-only, so their clicks end at selection.
+  // In section grids, only supported object-name cells open an editor;
+  // definitions and unsupported dialects remain selection-only.
   private _onGridClick = (event: MouseEvent) => {
     if (event.shiftKey || this._selDragMoved) return
     if ((event.target as HTMLElement).closest('.cell-input, button')) return
     const hit = this._cellAt(event.target as Element)
-    if (hit && hit.grid === COLUMNS_GRID) this._editCell(hit.row, hit.col, null)
+    if (hit?.grid === COLUMNS_GRID) this._editCell(hit.row, hit.col, null)
+    else if (hit?.col === 0) this._editSectionCell(hit.grid, hit.row, null)
   }
 
   // Opens the editor (or the nullable picker) on a grid cell; `seed` carries a
@@ -618,7 +702,7 @@ export class TableInspect extends LitElement {
 
   private _onGridKeydown = (event: KeyboardEvent) => {
     // The inline editor's input lives inside the table; its keys are its own.
-    if (this._editing || (event.target as HTMLElement).closest('.cell-input')) return
+    if (this._editing || this._sectionEditing || (event.target as HTMLElement).closest('.cell-input')) return
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
       event.preventDefault()
       this._copySelection()
@@ -630,7 +714,6 @@ export class TableInspect extends LitElement {
       return
     }
     if (event.metaKey || event.ctrlKey || event.altKey || !this._sel) return
-    const editable = this._sel.grid === COLUMNS_GRID // section grids are read-only
     const anchor = { row: Math.min(this._sel.r0, this._sel.r1), col: Math.min(this._sel.c0, this._sel.c1) }
     switch (event.key) {
       case 'ArrowDown': event.preventDefault(); return this._moveSel(1, 0, event.shiftKey)
@@ -640,14 +723,61 @@ export class TableInspect extends LitElement {
       case 'Enter':
       case 'F2':
         event.preventDefault()
-        if (editable) this._editCell(anchor.row, anchor.col, null)
+        if (this._sel.grid === COLUMNS_GRID) this._editCell(anchor.row, anchor.col, null)
+        else if (anchor.col === 0) this._editSectionCell(this._sel.grid, anchor.row, null)
         return
       default:
         // Type-to-edit: a printable key opens the editor seeded with that char.
         if (event.key.length === 1) {
           event.preventDefault()
-          if (editable) this._editCell(anchor.row, anchor.col, event.key)
+          if (this._sel.grid === COLUMNS_GRID) this._editCell(anchor.row, anchor.col, event.key)
+          else if (anchor.col === 0) this._editSectionCell(this._sel.grid, anchor.row, event.key)
         }
+    }
+  }
+
+  private _editSectionCell(grid: number, row: number, seed: string | null) {
+    const section = this._sections()[grid]
+    const item = section?.rows[row]
+    if (!section || !item) return
+    const operationIndex = this._stagedOperationIndex(section.title, item.name)
+    if (!this._canRenameSectionObject(section.title, operationIndex)) return
+    this._flushEdit()
+    const operation = operationIndex >= 0 ? this._operations[operationIndex] : undefined
+    const value = item.name
+    this._sectionEditing = {
+      section: section.title,
+      from: operation?.kind === 'rename' ? operation.from : value,
+      value,
+      operationIndex: operationIndex >= 0 ? operationIndex : undefined,
+      seed: seed ?? undefined,
+    }
+  }
+
+  private _commitSectionRename(raw: string) {
+    const editing = this._sectionEditing
+    if (!editing) return
+    this._sectionEditing = null
+    const to = raw.trim()
+    if (!to || to === editing.value) return
+    const target = this._objectTarget(editing.section)
+    if (!target || !this.engine || !canRenameInspectObject(target, this.engine)) return
+    const section = this._sections().find((candidate) => candidate.title === editing.section)
+    const duplicate = section?.rows.some((row) => {
+      const name = row.name
+      return name !== editing.value && name === to
+    })
+    if (duplicate) {
+      this._saveError = `Duplicate ${editing.section.toLowerCase()} name "${to}" — choose another name.`
+      return
+    }
+    const operation: InspectOperation = { kind: 'rename', target, from: editing.from, to }
+    if (editing.operationIndex === undefined) {
+      this._commitDraft(this._edits, [...this._operations, operation])
+    } else if (to === editing.from) {
+      this._commitDraft(this._edits, this._operations.filter((_, index) => index !== editing.operationIndex))
+    } else {
+      this._commitDraft(this._edits, this._operations.map((item, index) => index === editing.operationIndex ? operation : item))
     }
   }
 
@@ -889,7 +1019,7 @@ export class TableInspect extends LitElement {
   // the workbench leaves the browser's native input undo alone — while a cell
   // is mid-edit or there's nothing left to step to.
   undo(): boolean {
-    if (this._editing || this._historyIndex <= 0) return false
+    if (this._editing || this._sectionEditing || this._historyIndex <= 0) return false
     this._historyIndex--
     const snapshot = this._history[this._historyIndex]!
     this._edits = new Map(snapshot.edits)
@@ -899,7 +1029,7 @@ export class TableInspect extends LitElement {
   }
 
   redo(): boolean {
-    if (this._editing || this._historyIndex >= this._history.length - 1) return false
+    if (this._editing || this._sectionEditing || this._historyIndex >= this._history.length - 1) return false
     this._historyIndex++
     const snapshot = this._history[this._historyIndex]!
     this._edits = new Map(snapshot.edits)
@@ -1075,6 +1205,7 @@ export class TableInspect extends LitElement {
     this._historyIndex = 0
     this._addSeq = 0
     this._editing = null
+    this._sectionEditing = null
     this._saveError = null
     if (this.tabId) draftCache.delete(this.tabId)
   }
@@ -1110,7 +1241,9 @@ export class TableInspect extends LitElement {
     const effectiveColumns = new Set(this._effectiveColumnNames())
     try {
       for (const operation of this._operations) {
-        const localColumns = operation.kind === 'index' || operation.kind === 'foreignKey'
+        const localColumns = operation.kind === 'drop' || operation.kind === 'rename'
+          ? []
+          : operation.kind === 'index' || operation.kind === 'foreignKey'
           ? operation.spec.columns
           : operation.kind === 'constraint' && operation.spec.type === 'UNIQUE'
             ? operation.spec.columns ?? []
@@ -1153,6 +1286,7 @@ export class TableInspect extends LitElement {
             this._addSeq = 0
             if (this.tabId) draftCache.delete(this.tabId)
             this._editing = null
+            this._sectionEditing = null
             void this._load()
           },
         },
@@ -1286,6 +1420,7 @@ export class TableInspect extends LitElement {
             data-grid=${grid}
             tabindex="0"
             @pointerdown=${this._onGridPointerDown}
+            @click=${this._onGridClick}
             @keydown=${this._onGridKeydown}
           >
             <colgroup>
@@ -1296,18 +1431,48 @@ export class TableInspect extends LitElement {
               ${section.rows.map(
                 (row, index) => {
                   const stagedIndex = this._stagedOperationIndex(section.title, row.name)
+                  const objectEditing = this._sectionEditing
+                  const rowName = row.name
+                  const editingName = objectEditing?.section === section.title
+                    && objectEditing.operationIndex === (stagedIndex >= 0 ? stagedIndex : undefined)
+                    && objectEditing.value === rowName
+                  const stagedKind = stagedIndex >= 0
+                    ? this._operations[stagedIndex]?.kind === 'drop'
+                      ? 'staged-delete'
+                      : this._operations[stagedIndex]?.kind === 'rename'
+                        ? 'staged-edit'
+                        : 'staged-add'
+                    : ''
                   return html`
                   <tr
                     data-row=${index}
-                    class=${stagedIndex >= 0 ? 'staged-operation' : ''}
-                    @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}
+                    class=${stagedKind}
+                    @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition, section.title, stagedIndex >= 0 ? stagedIndex : undefined)}
                   >
                     <td
                       data-field="name"
-                      class="mono name-cell${this._isSelected(grid, index, 0) ? ' selected' : ''}"
+                      class="mono name-cell${!editingName && this._canRenameSectionObject(section.title, stagedIndex) ? ' editable' : ''}${!editingName && this._isSelected(grid, index, 0) ? ' selected' : ''}"
                       title=${row.name}
                     >
-                      ${this.engine ? dialectFor(this.engine).displayConstraintName(row.name) : row.name}
+                      ${editingName
+                        ? html`<input
+                            class="cell-input object-name-input"
+                            .value=${objectEditing.seed ?? objectEditing.value}
+                            @keydown=${(event: KeyboardEvent) => {
+                              if (event.key === 'Escape') {
+                                event.preventDefault()
+                                this._sectionEditing = null
+                              } else if (event.key === 'Enter') {
+                                event.preventDefault()
+                                ;(event.currentTarget as HTMLInputElement).blur()
+                              }
+                            }}
+                            @blur=${(event: FocusEvent) => {
+                              if (this._sectionEditing !== objectEditing) return
+                              this._commitSectionRename((event.currentTarget as HTMLInputElement).value)
+                            }}
+                          />`
+                        : row.name}
                       ${stagedIndex >= 0
                         ? html`<button
                             class="remove-staged"
@@ -1364,7 +1529,7 @@ export class TableInspect extends LitElement {
         @keydown=${this._onGridKeydown}
       >
         <colgroup>
-          <col class="icon-col" />
+          <col class="icon-col${columns.some((column) => column.primaryKey && column.foreignKey) ? ' dual' : ''}" />
           <col class="name-col" />
           <col class="type-col" />
           <col class="nullable-col" />
@@ -1704,6 +1869,7 @@ export class TableInspect extends LitElement {
         display: flex;
         align-items: center;
         gap: 8px;
+        min-height: 24px;
         margin-bottom: 4px;
       }
 
@@ -1741,6 +1907,7 @@ export class TableInspect extends LitElement {
       }
 
       .draft-action {
+        box-sizing: border-box;
         height: 24px;
         padding: 0 9px;
         color: var(--text-2);
@@ -1834,13 +2001,14 @@ export class TableInspect extends LitElement {
       }
 
       .icon-cell {
-        width: 30px;
+        padding-right: 4px;
+        vertical-align: middle;
       }
 
       .key-icons {
         display: flex;
         align-items: center;
-        gap: 2px;
+        gap: 0;
       }
 
       .icon-cell .pk {
@@ -1872,7 +2040,12 @@ export class TableInspect extends LitElement {
       }
 
       .icon-col {
-        width: 30px;
+        width: 18px;
+      }
+
+      /* Only reserve room for two keys when a column actually carries both. */
+      .icon-col.dual {
+        width: 28px;
       }
 
       .type-col {
@@ -1899,9 +2072,16 @@ export class TableInspect extends LitElement {
       }
 
       .name-cell {
+        position: relative;
         color: var(--text);
         overflow: hidden;
         white-space: nowrap;
+      }
+
+      .staged-add .name-cell,
+      .staged-edit .name-cell,
+      .staged-delete .name-cell {
+        padding-right: 24px;
       }
 
       /* No pre-wrap: a definition's own newlines (trigger bodies) collapse and
@@ -1918,18 +2098,43 @@ export class TableInspect extends LitElement {
         color: #a163b5;
       }
 
-      .staged-operation td {
-        background: color-mix(in srgb, var(--status-dot-connected) 8%, var(--editor-bg));
+      .staged-add td {
+        background: var(--staged-add-bg);
       }
 
-      .staged-operation .name-cell {
-        color: var(--status-dot-connected);
+      .staged-add .name-cell {
+        color: var(--staged-add-fg);
+      }
+
+      .staged-edit td {
+        background: var(--staged-edit-bg);
+      }
+
+      .staged-edit .name-cell {
+        color: var(--staged-edit-fg);
+      }
+
+      .staged-delete td {
+        background: var(--staged-delete-bg);
+      }
+
+      .staged-delete .name-cell {
+        color: var(--staged-delete-fg);
       }
 
       .remove-staged {
-        float: right;
+        position: absolute;
+        top: 50%;
+        right: 4px;
+        transform: translateY(-50%);
         display: inline-flex;
+        width: 16px;
+        height: 16px;
+        box-sizing: border-box;
+        align-items: center;
+        justify-content: center;
         padding: 1px;
+        line-height: 1;
         color: var(--text-3);
         background: transparent;
         border: 0;
@@ -1999,8 +2204,12 @@ export class TableInspect extends LitElement {
          like there, muted cells jump to full contrast). */
       td.edited,
       td.edited:hover {
-        color: var(--text);
-        background: color-mix(in srgb, var(--status-dot-warning) 14%, var(--editor-bg));
+        color: var(--staged-edit-fg);
+        background: var(--staged-edit-bg);
+      }
+
+      td.edited:hover {
+        background: var(--staged-edit-hover-bg);
       }
 
       /* Unsaved new columns: the same low-contrast green insert tint the results
@@ -2008,13 +2217,13 @@ export class TableInspect extends LitElement {
          amber edit tint) on a new row's changed cells at higher specificity. */
       tr.added td,
       tr.added td.edited {
-        color: var(--text);
-        background: color-mix(in srgb, var(--status-dot-connected) 8%, var(--editor-bg));
+        color: var(--staged-add-fg);
+        background: var(--staged-add-bg);
       }
 
       tr.added:hover td:not(.editable):not(.icon-cell),
       tr.added td.editable:hover {
-        background: color-mix(in srgb, var(--status-dot-connected) 12%, var(--editor-bg));
+        background: var(--staged-add-hover-bg);
       }
 
       .remove-btn,
@@ -2030,7 +2239,7 @@ export class TableInspect extends LitElement {
       }
 
       .remove-btn:hover {
-        color: var(--status-dot-error);
+        color: var(--staged-delete-fg);
         background: var(--list-hover);
       }
 
@@ -2043,8 +2252,8 @@ export class TableInspect extends LitElement {
          green insert tint; cells lock (no .editable) until the row is restored. */
       tr.dropped td,
       tr.dropped td.edited {
-        color: var(--text-2);
-        background: color-mix(in srgb, var(--status-dot-error) 8%, var(--editor-bg));
+        color: var(--staged-delete-fg);
+        background: var(--staged-delete-bg);
       }
 
       tr.dropped .cell-text {
@@ -2066,8 +2275,75 @@ export class TableInspect extends LitElement {
       tr.added td.editable.selected:hover,
       tr.added:hover td.selected:not(.editable):not(.icon-cell),
       tr.dropped td.selected {
-        background: color-mix(in srgb, var(--accent) 34%, transparent);
+        background: var(--grid-selection-bg);
         color: var(--text);
+      }
+
+      td.edited.selected,
+      td.edited.selected:hover,
+      .staged-edit td.selected {
+        background: var(--staged-edit-selection-bg);
+        color: var(--staged-edit-fg);
+      }
+
+      tr.added td.selected,
+      tr.added td.editable.selected:hover,
+      tr.added:hover td.selected:not(.editable):not(.icon-cell),
+      .staged-add td.selected {
+        background: var(--staged-add-selection-bg);
+        color: var(--staged-add-fg);
+      }
+
+      tr.dropped td.selected,
+      .staged-delete td.selected {
+        background: var(--staged-delete-selection-bg);
+        color: var(--staged-delete-fg);
+      }
+
+      .staged-edit td:hover:not(.selected) {
+        background: var(--staged-edit-hover-bg);
+      }
+
+      .staged-add td:hover:not(.selected) {
+        background: var(--staged-add-hover-bg);
+      }
+
+      .staged-delete td:hover:not(.selected),
+      tr.dropped td:hover:not(.selected) {
+        background: var(--staged-delete-hover-bg);
+      }
+
+      .staged-edit .name-cell:hover,
+      .staged-edit .name-cell.selected {
+        color: var(--staged-edit-fg);
+      }
+
+      .staged-add .name-cell:hover,
+      .staged-add .name-cell.selected {
+        color: var(--staged-add-fg);
+      }
+
+      .staged-delete .name-cell:hover,
+      .staged-delete .name-cell.selected {
+        color: var(--staged-delete-fg);
+      }
+
+      /* The input focus border replaces cell-selection blue while editing. */
+      td.selected:has(.cell-input) {
+        background: var(--editor-bg);
+        color: var(--text);
+      }
+
+      td.edited.selected:has(.cell-input),
+      .staged-edit td.selected:has(.cell-input) {
+        background: var(--staged-edit-bg);
+        color: var(--staged-edit-fg);
+      }
+
+      tr.added td.selected:has(.cell-input),
+      .staged-add td.selected:has(.cell-input) {
+        background: var(--staged-add-bg);
+        color: var(--staged-add-fg);
       }
 
       /* Overlays the cell padding (results-panel .cell-edit trick) so opening

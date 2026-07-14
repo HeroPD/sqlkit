@@ -1954,43 +1954,64 @@ export class ResultsPanel extends LitElement {
       /* Staged changes use dark theme-blended tints, not raw status colors, so
          they read as pending state without glowing against the grid. */
       tbody tr td.dirty {
-        background: color-mix(in srgb, var(--status-dot-warning) 9%, var(--editor-bg));
-        box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--status-dot-warning) 35%, var(--grid-border));
-        color: var(--text);
+        background: var(--staged-edit-bg);
+        color: var(--staged-edit-fg);
       }
 
-      tbody tr td.dirty:has(.cell-edit) {
-        box-shadow: none;
+      tbody tr td.dirty:hover:not(.selected) {
+        background: var(--staged-edit-hover-bg);
       }
 
       /* Cell selection — wins over zebra striping, cell hover, and dirty tint. */
       tbody tr td.selected,
       tbody tr:hover td.selected {
-        background: color-mix(in srgb, var(--accent) 34%, transparent);
+        background: var(--grid-selection-bg);
         color: var(--text);
+      }
+
+      tbody tr td.dirty.selected,
+      tbody tr:hover td.dirty.selected {
+        background: var(--staged-edit-selection-bg);
+        color: var(--staged-edit-fg);
+      }
+
+      /* Focus replaces selection while the inline editor is open. */
+      tbody tr td.selected:has(.cell-edit),
+      tbody tr:hover td.selected:has(.cell-edit) {
+        background: var(--editor-bg);
+      }
+
+      tbody tr td.dirty.selected:has(.cell-edit),
+      tbody tr:hover td.dirty.selected:has(.cell-edit) {
+        background: var(--staged-edit-bg);
       }
 
       /* Unsaved new rows: a low-contrast insert tint until saved. The hover rule
          below sits after the generic cell hover so it wins at equal specificity. */
       tbody tr.draft td {
-        background: color-mix(in srgb, var(--status-dot-connected) 7%, var(--editor-bg));
-        color: var(--text);
+        background: var(--staged-add-bg);
+        color: var(--staged-add-fg);
       }
 
       tbody tr.draft:hover td:not(.num) {
-        background: color-mix(in srgb, var(--status-dot-connected) 11%, var(--editor-bg));
+        background: var(--staged-add-hover-bg);
       }
 
       /* The anchored draft cell — after the draft rules so it wins at equal specificity. */
       tbody tr.draft td.draft-sel,
       tbody tr.draft:hover td.draft-sel {
-        background: color-mix(in srgb, var(--accent) 30%, transparent);
-        color: var(--text);
+        background: var(--staged-add-selection-bg);
+        color: var(--staged-add-fg);
+      }
+
+      tbody tr.draft td.draft-sel:has(.cell-edit),
+      tbody tr.draft:hover td.draft-sel:has(.cell-edit) {
+        background: var(--staged-add-bg);
       }
 
       td.draft-num {
         padding: 0;
-        box-shadow: inset 2px 0 0 color-mix(in srgb, var(--status-dot-connected) 45%, transparent);
+        box-shadow: inset 2px 0 0 color-mix(in srgb, var(--staged-add-fg) 45%, transparent);
       }
 
       /* The button fills the # cell and flex-centers the ✕, so it's centered both
@@ -2046,7 +2067,13 @@ export class ResultsPanel extends LitElement {
       }
 
       .record-field.dirty-record {
-        background: color-mix(in srgb, var(--status-dot-warning) 7%, var(--editor-bg));
+        background: var(--staged-edit-bg);
+        color: var(--staged-edit-fg);
+      }
+
+      .record-field.active.dirty-record {
+        background: var(--staged-edit-selection-bg);
+        color: var(--staged-edit-fg);
       }
 
       .record-column {

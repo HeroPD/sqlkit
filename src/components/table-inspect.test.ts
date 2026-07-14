@@ -36,8 +36,8 @@ const internals = (view: TableInspect) =>
     _defaultPicker: { x: number; y: number; width: number; kind?: string; filter: string; active: number } | null
     _resetField(col: InspectColumn, field: 'name' | 'dataType' | 'comment' | 'default' | 'nullable'): void
     _resetRow(col: InspectColumn): void
-    _onMenuPick(id: string, menu: { name: string; definition: string | null; col?: InspectColumn; field?: string }): void
-    _menu: { x: number; y: number; name: string; definition: string | null; col?: InspectColumn; field?: string } | null
+    _onMenuPick(id: string, menu: { name: string; definition: string | null; col?: InspectColumn; field?: string; section?: string; operationIndex?: number }): void
+    _menu: { x: number; y: number; name: string; definition: string | null; col?: InspectColumn; field?: string; section?: string; operationIndex?: number } | null
     _canAddColumn(): boolean
     _isAddition(name: string): boolean
     _addColumn(): void
@@ -47,6 +47,7 @@ const internals = (view: TableInspect) =>
     _isDropped(name: string): boolean
     _dropColumn(col: InspectColumn): void
     _saveError: string | null
+    _sectionEditing: { section: string; from: string; value: string; operationIndex?: number; seed?: string } | null
   }
 
 const inspectCol = (over: Partial<InspectColumn>): InspectColumn => ({
@@ -1236,6 +1237,9 @@ describe('TableInspect cell selection', () => {
     const inner = internals(view)
 
     const nameCell = view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"] tr[data-row="0"] td[data-field="name"]')!
+    expect(nameCell.textContent?.trim()).toBe('users_pkey')
+    expect(view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"] tr[data-row="1"] td[data-field="name"]')!.textContent?.trim())
+      .toBe('users_email_key')
     press(nameCell)
     expect(inner._sel).toEqual({ grid: 1, r0: 0, c0: 0, r1: 0, c1: 0 })
 
@@ -1248,10 +1252,12 @@ describe('TableInspect cell selection', () => {
     )
     expect(writeText).toHaveBeenCalledWith('users_pkey\tPRIMARY KEY (id)\nusers_email_key\tUNIQUE (email)')
 
-    // Sections are read-only: Enter and typing never open an editor.
+    // Section definitions stay read-only even though supported object names can be renamed.
+    press(view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"] tr[data-row="0"] td[data-field="definition"]')!)
     view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
     view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'x' }))
     expect(inner._editing).toBeNull()
+    expect(inner._sectionEditing).toBeNull()
 
     // A click in the columns table moves the selection between grids.
     press(cellOf(view, 0, 'name'))
@@ -1400,13 +1406,132 @@ describe('TableInspect section add buttons', () => {
     await view.updateComplete
     expect(view.shadowRoot!.querySelector('inspect-add-dialog')).toBeNull()
     expect(onSave).not.toHaveBeenCalled()
-    expect(view.shadowRoot!.textContent).toContain('i •')
+    expect(view.shadowRoot!.querySelector('.staged-add')?.textContent).toContain('i')
 
     view.save()
     expect(onSave).toHaveBeenCalledOnce()
     expect((onSave.mock.calls[0]![0] as CustomEvent<ColumnAlterEventDetail>).detail.operations).toEqual([
       { kind: 'index', spec: { name: 'i', columns: ['id'] } },
     ])
+    view.remove()
+  })
+})
+
+describe('TableInspect section drop menus', () => {
+  const withSection = async (engine: 'postgresql' | 'sqlite', title: string, name: string) => {
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: { columns: [inspectCol({ name: 'id' })], sections: [{ title, rows: [{ name, definition: 'existing definition' }] }] },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = engine
+    view.table = { schema: engine === 'sqlite' ? null : 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+    return view
+  }
+
+  it('offers a destructive Drop action and stages it until Save', async () => {
+    const view = await withSection('postgresql', 'Indexes', 'users_email_idx')
+    const row = view.shadowRoot!.querySelector<HTMLElement>('.section-table tr')!
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 5, clientY: 6 }))
+    await view.updateComplete
+
+    const menu = view.shadowRoot!.querySelector('context-menu')!
+    expect(menu.items).toContainEqual({ id: 'drop-object', label: 'Drop Index', danger: true })
+    menu.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'drop-object' }, bubbles: true, composed: true }))
+    await view.updateComplete
+
+    expect(view.hasPendingChanges()).toBe(true)
+    expect(view.shadowRoot!.querySelector('.staged-delete')?.textContent).toContain('users_email_idx')
+    expect(view.shadowRoot!.textContent).toContain('DROP INDEX')
+
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
+    view.save()
+    expect((onSave.mock.calls[0]![0] as CustomEvent<ColumnAlterEventDetail>).detail.operations).toEqual([
+      { kind: 'drop', target: 'index', name: 'users_email_idx' },
+    ])
+    view.remove()
+  })
+
+  it('does not offer unsupported SQLite foreign-key drops', async () => {
+    const view = await withSection('sqlite', 'Foreign Keys', 'users_team_fk')
+    view.shadowRoot!.querySelector<HTMLElement>('.section-table tr')!
+      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+    await view.updateComplete
+
+    expect(view.shadowRoot!.querySelector('context-menu')!.items.some((item) => item.id === 'drop-object')).toBe(false)
+    view.remove()
+  })
+
+  it('edits supported object names inline and stages the rename until Save', async () => {
+    const view = await withSection('postgresql', 'Indexes', 'users_email_idx')
+    const nameCell = view.shadowRoot!.querySelector<HTMLElement>('.section-table td[data-field="name"]')!
+    nameCell.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await view.updateComplete
+
+    const input = view.shadowRoot!.querySelector<HTMLInputElement>('.object-name-input')!
+    expect(input.value).toBe('users_email_idx')
+    expect(input.closest('td')?.classList.contains('selected')).toBe(false)
+    expect(input.closest('td')?.classList.contains('editable')).toBe(false)
+    input.value = 'users_contact_idx'
+    input.dispatchEvent(new FocusEvent('blur'))
+    await view.updateComplete
+
+    expect(view.shadowRoot!.querySelector('.staged-edit')?.textContent).toContain('users_contact_idx')
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
+    view.save()
+    expect((onSave.mock.calls[0]![0] as CustomEvent<ColumnAlterEventDetail>).detail.operations).toEqual([
+      { kind: 'rename', target: 'index', from: 'users_email_idx', to: 'users_contact_idx' },
+    ])
+    view.remove()
+  })
+
+  it('opens an inline editor only in the clicked object row', async () => {
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: {
+        columns: [inspectCol({ name: 'id' })],
+        sections: [{
+          title: 'Indexes',
+          rows: [
+            { name: 'users_email_idx', definition: 'CREATE INDEX users_email_idx' },
+            { name: 'users_team_idx', definition: 'CREATE INDEX users_team_idx' },
+          ],
+        }],
+      },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    view.shadowRoot!.querySelector<HTMLElement>('.section-table tr:first-child td[data-field="name"]')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await view.updateComplete
+
+    expect(view.shadowRoot!.querySelectorAll('.object-name-input')).toHaveLength(1)
+    expect(view.shadowRoot!.querySelector<HTMLInputElement>('.object-name-input')!.value).toBe('users_email_idx')
+    expect(view.shadowRoot!.querySelectorAll('.section-table tr')[1]!.textContent).toContain('users_team_idx')
+    view.remove()
+  })
+
+  it('keeps SQLite object names read-only', async () => {
+    const view = await withSection('sqlite', 'Indexes', 'users_email_idx')
+    view.shadowRoot!.querySelector<HTMLElement>('.section-table td[data-field="name"]')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await view.updateComplete
+    expect(view.shadowRoot!.querySelector('.object-name-input')).toBeNull()
+    expect(internals(view)._sectionEditing).toBeNull()
     view.remove()
   })
 })

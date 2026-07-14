@@ -19,9 +19,6 @@ export type Dialect = {
   applyOrderBy(sql: string, sort: QuerySort): string
   /** A small browse query for a table, using this engine's row-limit syntax. */
   browseTable(qualifiedTable: string, limit: number): string
-  /** Strips this engine's auto-generated constraint/index name suffix for display
-   *  (e.g. Postgres `_fkey`); returns the name unchanged when there's nothing to strip. */
-  displayConstraintName(name: string): string
   /** Whether this engine has native column comments — drives whether the inspector
    *  shows a Comment column at all (shown even when every value is empty). */
   supportsColumnComments: boolean
@@ -69,17 +66,6 @@ export const quoteStyleFor: Record<string, (name: string) => string> = {
   '"': ansiQuote,
   '`': backtickQuote,
   '[': bracketQuote,
-}
-
-// Auto-generated constraint/index name suffix per engine, stripped for display.
-// Postgres uses <table>_<cols>_<suffix>; SQLite section names are real column or
-// index identifiers (never strip). MySQL's _ibfk_N/_chk_N strip down to just the
-// table name — not useful — so it opts out until its driver proves otherwise.
-const constraintSuffixFor: Record<Engine, RegExp | null> = {
-  postgresql: /_(?:pkey|key|fkey|check|excl)$/,
-  sqlite: null,
-  mysql: null,
-  sqlserver: null,
 }
 
 // Native column comments: Postgres (COMMENT ON), MySQL (COLUMN COMMENT). SQLite
@@ -163,7 +149,6 @@ const defaultValuesFor: Record<Engine, string[]> = {
 
 const makeDialect = (engine: Engine): Dialect => {
   const quoteIdent = quoteFor[engine]
-  const suffix = constraintSuffixFor[engine]
   return {
     engine,
     quoteIdent,
@@ -176,7 +161,6 @@ const makeDialect = (engine: Engine): Dialect => {
       engine === 'sqlserver'
         ? `SELECT TOP (${Math.max(1, Math.trunc(limit))}) * FROM ${qualifiedTable}`
         : `SELECT * FROM ${qualifiedTable} LIMIT ${Math.max(1, Math.trunc(limit))}`,
-    displayConstraintName: (name) => (suffix ? name.replace(suffix, '') : name),
     supportsColumnComments: columnCommentsFor[engine],
     bindBoolean: (value) => (engine === 'sqlite' ? (value ? 1 : 0) : value),
     columnEdits: columnEditsFor[engine],

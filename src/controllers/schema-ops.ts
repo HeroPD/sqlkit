@@ -95,12 +95,15 @@ export class SchemaOpsController {
   // run it atomically. On success the inspect tab reloads and metadata refreshes
   // so autocomplete/column lists pick up renames.
   alterColumns(spec: ColumnAlterSpec) {
-    // Drops run first so a rename or addition can reuse a freed name.
+    const operations = spec.operations ?? []
+    // Dependent objects are removed before columns; new objects are created
+    // after the columns they may reference exist.
     const statements = [
+      ...operations.filter((operation) => operation.kind === 'drop').map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
       ...buildColumnDrop(spec.table, spec.drops, spec.engine),
       ...buildColumnAlter(spec.table, spec.edits, spec.engine),
       ...buildColumnAdd(spec.table, spec.additions, spec.engine),
-      ...(spec.operations ?? []).map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
+      ...operations.filter((operation) => operation.kind !== 'drop').map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
     ]
     if (!statements.length) return
     this.deps.dialogs.review = {
