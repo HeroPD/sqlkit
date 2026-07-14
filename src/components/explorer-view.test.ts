@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ColumnRef, TableRef } from '../electron'
 import { ExplorerView, tableKey } from './explorer-view'
 
@@ -17,6 +17,7 @@ const internals = (view: ExplorerView) =>
     _toggleObjectGroup(key: string): void
     _tableColumns(table: TableRef): ColumnRef[] | null
     _onTableMenu(event: MouseEvent, table: TableRef): void
+    _onTableMenuPick(id: string, table: TableRef): void
   }
 
 const table = (name: string, schema: string | null = 'public'): TableRef => ({ schema, name, kind: 'table' })
@@ -159,5 +160,15 @@ describe('ExplorerView context menu', () => {
     inner._onTableMenu(new MouseEvent('contextmenu', { clientX: 10, clientY: 20 }), table('users'))
 
     expect(inner._menu).toMatchObject({ kind: 'table', x: 10, y: 20 })
+  })
+
+  it('creates in the right-clicked table schema', () => {
+    const view = new ExplorerView()
+    const onCreate = vi.fn()
+    view.addEventListener('table-create', onCreate)
+
+    internals(view)._onTableMenuPick('create', table('users', 'billing'))
+
+    expect((onCreate.mock.calls[0]![0] as CustomEvent).detail).toEqual({ schema: 'billing' })
   })
 })

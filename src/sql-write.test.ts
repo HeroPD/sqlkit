@@ -12,6 +12,7 @@ import {
   buildColumnAlter,
   buildColumnDrop,
   buildCreateIndex,
+  buildCreateTable,
   buildCreateTrigger,
   buildDeleteRows,
   buildDeleteRowBatches,
@@ -693,9 +694,73 @@ describe('buildAddConstraint', () => {
       .toBe('ALTER TABLE `t` ADD CONSTRAINT `uq_email` UNIQUE (`email`, `tenant`)')
   })
 
+  it('builds a composite primary key', () => {
+    expect(buildAddConstraint(users, { name: 'users_pkey', type: 'PRIMARY KEY', columns: ['tenant', 'id'] }, 'postgresql'))
+      .toBe('ALTER TABLE "public"."users" ADD CONSTRAINT "users_pkey" PRIMARY KEY ("tenant", "id")')
+  })
+
   it('validates by type and refuses SQLite', () => {
     expect(() => buildAddConstraint(users, { name: 'c', type: 'CHECK', expression: '' }, 'postgresql')).toThrow(/expression/)
     expect(() => buildAddConstraint(users, { name: 'c', type: 'UNIQUE', columns: [] }, 'postgresql')).toThrow(/column/)
     expect(() => buildAddConstraint(users, { name: 'c', type: 'CHECK', expression: 'x > 0' }, 'sqlite')).toThrow(/SQLite/)
+  })
+})
+
+describe('buildCreateTable', () => {
+  const columns = [
+    { name: 'id', dataType: 'integer', nullable: false, default: null, comment: 'Identifier' },
+    { name: 'team_id', dataType: 'integer', nullable: true, default: null, comment: null },
+  ]
+
+  it('builds PostgreSQL CREATE TABLE with inline constraints and a separate comment', () => {
+    expect(buildCreateTable(users, columns, [
+      { name: 'users_pkey', type: 'PRIMARY KEY', columns: ['id'] },
+      { name: 'positive_team', type: 'CHECK', expression: 'team_id > 0' },
+    ], [{ name: 'users_team_fk', columns: ['team_id'], refTable: 'public.teams', refColumns: ['id'], onDelete: 'CASCADE' }], 'postgresql')).toEqual([
+      'CREATE TABLE "public"."users" (\n' +
+        '  "id" integer NOT NULL,\n' +
+        '  "team_id" integer,\n' +
+        '  CONSTRAINT "users_pkey" PRIMARY KEY ("id"),\n' +
+        '  CONSTRAINT "positive_team" CHECK (team_id > 0),\n' +
+        '  CONSTRAINT "users_team_fk" FOREIGN KEY ("team_id") REFERENCES "public"."teams" ("id") ON DELETE CASCADE\n' +
+        ')',
+      'COMMENT ON COLUMN "public"."users"."id" IS \'Identifier\'',
+    ])
+  })
+
+  it('supports inline SQLite constraints even though SQLite cannot add them later', () => {
+    const table: TableRef = { schema: null, name: 'users', kind: 'table' }
+    expect(buildCreateTable(table, columns, [{ name: 'users_pkey', type: 'PRIMARY KEY', columns: ['id'] }], [], 'sqlite')[0])
+      .toContain('CONSTRAINT "users_pkey" PRIMARY KEY ("id")')
+  })
+
+  it('uses MySQL and SQL Server identifier/comment syntax', () => {
+    expect(buildCreateTable(
+      { schema: 'app', name: 'accounts', kind: 'table' },
+      [{ name: 'id', dataType: 'bigint', nullable: false, default: null, comment: 'Identifier' }],
+      [{ name: 'accounts_pkey', type: 'PRIMARY KEY', columns: ['id'] }],
+      [],
+      'mysql',
+    )).toEqual([
+      'CREATE TABLE `app`.`accounts` (\n' +
+      "  `id` bigint NOT NULL COMMENT 'Identifier',\n" +
+      '  CONSTRAINT `accounts_pkey` PRIMARY KEY (`id`)\n' +
+      ')',
+    ])
+    expect(buildCreateTable(
+      { schema: 'dbo', name: 'accounts', kind: 'table' },
+      [{ name: 'id', dataType: 'bigint', nullable: false, default: null, comment: null }],
+      [{ name: 'accounts_pkey', type: 'PRIMARY KEY', columns: ['id'] }],
+      [],
+      'sqlserver',
+    )[0]).toContain('CREATE TABLE [dbo].[accounts]')
+  })
+
+  it('validates columns and permits only one primary key', () => {
+    expect(() => buildCreateTable(users, [], [], [], 'postgresql')).toThrow(/at least one column/i)
+    expect(() => buildCreateTable(users, columns, [
+      { name: 'pk1', type: 'PRIMARY KEY', columns: ['id'] },
+      { name: 'pk2', type: 'PRIMARY KEY', columns: ['team_id'] },
+    ], [], 'postgresql')).toThrow(/only one primary key/i)
   })
 })

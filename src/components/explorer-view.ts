@@ -19,6 +19,7 @@ const objectIcon = (label: 'Functions' | 'Types', object: DbObject) =>
 export type TableSelectDetail = { key: string }
 export type ObjectInspectDetail = { object: DbObject; objectKind: DbObjectKind }
 export type TableBrowseDetail = { table: TableRef }
+export type TableCreateDetail = { schema: string | null }
 
 // Expand/collapse of tree rows; every key is prefixed with its profile id so
 // state for removed profiles can be pruned.
@@ -40,6 +41,7 @@ type SectionLayout = {
 // The open context menu; table and object menus are mutually exclusive.
 type ExplorerMenu = { x: number; y: number } & (
   | { kind: 'table'; table: TableRef }
+  | { kind: 'tables'; schema: string | null }
   | { kind: 'object'; object: DbObject; objectKind: DbObjectKind }
 )
 
@@ -208,18 +210,38 @@ export class ExplorerView extends LitElement {
               `
             : ''}
         </div>
-        ${tablesCollapsed ? '' : html`<div class="section-body">${this._renderTables()}</div>`}
+        ${tablesCollapsed
+          ? ''
+          : html`<div class="section-body" @contextmenu=${(event: MouseEvent) => this._onTablesMenu(event, this._defaultCreateSchema())}>${this._renderTables()}</div>`}
       </div>
       ${this._renderTableMenu()} ${this._renderObjectMenu()}
     `
   }
 
   private _renderTableMenu() {
-    const menu = this._menu?.kind === 'table' ? this._menu : null
+    const menu = this._menu?.kind === 'table' || this._menu?.kind === 'tables' ? this._menu : null
     if (!menu) return ''
+    if (menu.kind === 'tables') {
+      return html`
+        <context-menu
+          .x=${menu.x}
+          .y=${menu.y}
+          .items=${[
+            { id: 'create', label: 'Create Table…' },
+            ...(this.tables !== null ? [{ id: 'refresh', label: 'Refresh Tables' }] : []),
+          ]}
+          @menu-pick=${(e: CustomEvent<MenuPickDetail>) => {
+            if (e.detail.id === 'create') this._createTable(menu.schema)
+            if (e.detail.id === 'refresh') this._refresh()
+          }}
+          @menu-close=${() => (this._menu = null)}
+        ></context-menu>
+      `
+    }
     const kind = menu.table.kind
     const dropLabel = TABLE_KIND_LABELS[kind].replace(/\b\w/g, (c) => c.toUpperCase())
     const items: MenuItem[] = [
+      { id: 'create', label: 'Create Table…' },
       { id: 'browse', label: 'Browse Data' },
       { id: 'inspect', label: 'Inspect Table' },
       ...(kind === 'matview' ? [{ id: 'refresh-matview', label: 'Refresh Materialized View' }] : []),
@@ -241,6 +263,7 @@ export class ExplorerView extends LitElement {
   }
 
   private _onTableMenuPick(id: string, table: TableRef) {
+    if (id === 'create') this._createTable(table.schema)
     if (id === 'browse') this._browse(table)
     if (id === 'inspect') {
       this.dispatchEvent(
@@ -265,6 +288,17 @@ export class ExplorerView extends LitElement {
     if (id === 'copy-name') void navigator.clipboard.writeText(tableLabel(table))
     if (id === 'copy-select') void navigator.clipboard.writeText(`select * from ${tableLabel(table)} limit 100;`)
     if (id === 'refresh') this._refresh()
+  }
+
+  private _createTable(schema: string | null) {
+    this.dispatchEvent(
+      new CustomEvent<TableCreateDetail>('table-create', { detail: { schema }, bubbles: true, composed: true }),
+    )
+  }
+
+  private _defaultCreateSchema(): string | null {
+    const schemas = new Set((this.tables ?? []).map((table) => table.schema))
+    return schemas.size === 1 ? [...schemas][0] ?? null : null
   }
 
   private _renderTables() {
@@ -301,7 +335,11 @@ export class ExplorerView extends LitElement {
           const groupKey = `${profileId}:${schema}`
           const collapsed = this._tree.collapsedSchemas.has(groupKey)
           return html`
-            <button class="schema-row" @click=${() => this._toggleSchema(groupKey)}>
+            <button
+              class="schema-row"
+              @click=${() => this._toggleSchema(groupKey)}
+              @contextmenu=${(event: MouseEvent) => this._onTablesMenu(event, schema)}
+            >
               <i class="codicon codicon-chevron-right chevron ${collapsed ? '' : 'expanded'}" aria-hidden="true"></i>
               <span>${schema}</span>
               <span class="schema-count">${tables.length}</span>
@@ -500,6 +538,13 @@ export class ExplorerView extends LitElement {
     event.preventDefault()
     event.stopPropagation()
     this._menu = { kind: 'table', x: event.clientX, y: event.clientY, table }
+  }
+
+  private _onTablesMenu(event: MouseEvent, schema: string | null) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (!this.profileId || this.tables === null || this.awaitingDatabaseSelection) return
+    this._menu = { kind: 'tables', x: event.clientX, y: event.clientY, schema }
   }
 
   private _onResizeStart(event: PointerEvent) {

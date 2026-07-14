@@ -194,6 +194,10 @@ export function inspectTable(db: DatabaseSync, table: TableRef): TableInspection
     .prepare(`select name, type, sql from sqlite_master where tbl_name = ? and type in ('index', 'trigger') order by type, name`)
     .all(table.name) as Array<{ name: string; type: string; sql: string | null }>
 
+  // The primary key columns, ordered by their position in the key (pk is 0 when
+  // the column isn't part of it). Shown read-only in the UI, like FKs.
+  const pkColumns = columns.filter((row) => row.pk > 0).sort((a, b) => a.pk - b.pk).map((row) => row.name)
+
   const sections: InspectSection[] = [
     {
       title: 'Foreign Keys',
@@ -201,6 +205,10 @@ export function inspectTable(db: DatabaseSync, table: TableRef): TableInspection
         name: fk.from_col,
         definition: `REFERENCES ${fk.ref_table}(${fk.to_col ?? 'rowid'}) ON UPDATE ${fk.on_update} ON DELETE ${fk.on_delete}`,
       })),
+    },
+    {
+      title: 'Constraints',
+      rows: pkColumns.length ? [{ name: 'PRIMARY KEY', definition: `PRIMARY KEY (${pkColumns.join(', ')})` }] : [],
     },
     {
       title: 'Indexes',

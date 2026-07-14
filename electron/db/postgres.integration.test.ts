@@ -348,6 +348,8 @@ describeDb('postgres driver (integration)', () => {
       expect(foreignKeys?.rows[0]?.definition).toMatch(/REFERENCES sqlkit_it\.authors/i)
       const indexes = inspection.sections.find((section) => section.title === 'Indexes')
       expect(indexes?.rows.some((row) => row.name === 'books_author_idx')).toBe(true)
+      const constraints = inspection.sections.find((section) => section.title === 'Constraints')
+      expect(constraints?.rows.some((row) => /^PRIMARY KEY \(id\)/i.test(row.definition))).toBe(true)
     } finally {
       await driver.disconnect()
     }

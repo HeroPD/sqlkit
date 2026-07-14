@@ -450,8 +450,8 @@ export type ForeignKeySpec = {
   onUpdate?: ForeignKeyAction
 }
 
-export function buildAddForeignKey(table: TableRef, spec: ForeignKeySpec, engine: Engine): string {
-  if (!canAddConstraint(engine)) throw new Error('SQLite cannot add a foreign key to an existing table — recreate the table instead')
+// The FK definition body, shared by ALTER TABLE ADD and inline CREATE TABLE.
+export const buildCreateForeignKeyDefinition = (spec: ForeignKeySpec, engine: Engine): string => {
   const dialect = dialectFor(engine)
   const name = spec.name.trim()
   const refTable = spec.refTable.trim()
@@ -460,37 +460,93 @@ export function buildAddForeignKey(table: TableRef, spec: ForeignKeySpec, engine
   if (!refTable) throw new Error('A referenced table is required')
   if (!spec.refColumns.length) throw new Error('At least one referenced column is required')
   if (spec.columns.length !== spec.refColumns.length) throw new Error('Local and referenced columns must match in count')
-  const cols = spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')
-  const refCols = spec.refColumns.map((column) => dialect.quoteIdent(column.trim())).join(', ')
+  const columns = spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')
+  const refColumns = spec.refColumns.map((column) => dialect.quoteIdent(column.trim())).join(', ')
   const actions = foreignKeyActions(engine)
-  const clause = (keyword: string, action: ForeignKeyAction | undefined) =>
-    action && action !== 'NO ACTION' && actions.includes(action) ? ` ${keyword} ${action}` : ''
-  return `ALTER TABLE ${quoteQualified(table, dialect)} ADD CONSTRAINT ${dialect.quoteIdent(name)} ` +
-    `FOREIGN KEY (${cols}) REFERENCES ${quoteRef(refTable, dialect)} (${refCols})` +
-    clause('ON DELETE', spec.onDelete) + clause('ON UPDATE', spec.onUpdate)
+  const action = (keyword: string, value: ForeignKeyAction | undefined) =>
+    value && value !== 'NO ACTION' && actions.includes(value) ? ` ${keyword} ${value}` : ''
+  return `CONSTRAINT ${dialect.quoteIdent(name)} FOREIGN KEY (${columns}) ` +
+    `REFERENCES ${quoteRef(refTable, dialect)} (${refColumns})` +
+    action('ON DELETE', spec.onDelete) + action('ON UPDATE', spec.onUpdate)
+}
+
+export function buildAddForeignKey(table: TableRef, spec: ForeignKeySpec, engine: Engine): string {
+  if (!canAddConstraint(engine)) throw new Error('SQLite cannot add a foreign key to an existing table — recreate the table instead')
+  return `ALTER TABLE ${quoteQualified(table, dialectFor(engine))} ADD ${buildCreateForeignKeyDefinition(spec, engine)}`
 }
 
 export type ConstraintSpec = {
   name: string
-  type: 'CHECK' | 'UNIQUE'
-  /** CHECK expression, or comma-column list for UNIQUE (via `columns`). */
+  type: 'CHECK' | 'UNIQUE' | 'PRIMARY KEY'
+  /** CHECK expression, or ordered columns for UNIQUE / PRIMARY KEY. */
   expression?: string
   columns?: string[]
 }
 
-export function buildAddConstraint(table: TableRef, spec: ConstraintSpec, engine: Engine): string {
-  if (!canAddConstraint(engine)) throw new Error('SQLite cannot add this constraint to an existing table — recreate the table, or use a unique index')
+// The constraint definition body, shared by ALTER TABLE ADD and inline CREATE TABLE.
+export const buildCreateConstraintDefinition = (spec: ConstraintSpec, engine: Engine): string => {
   const dialect = dialectFor(engine)
   const name = spec.name.trim()
   if (!name) throw new Error('Constraint name is required')
-  const head = `ALTER TABLE ${quoteQualified(table, dialect)} ADD CONSTRAINT ${dialect.quoteIdent(name)}`
+  const head = `CONSTRAINT ${dialect.quoteIdent(name)}`
   if (spec.type === 'CHECK') {
     const expression = spec.expression?.trim() ?? ''
     if (!expression) throw new Error('A CHECK constraint needs a boolean expression')
     return `${head} CHECK (${expression})`
   }
-  if (!spec.columns?.length) throw new Error('A UNIQUE constraint needs at least one column')
-  return `${head} UNIQUE (${spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')})`
+  if (!spec.columns?.length) throw new Error(`A ${spec.type} constraint needs at least one column`)
+  return `${head} ${spec.type} (${spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')})`
+}
+
+export function buildAddConstraint(table: TableRef, spec: ConstraintSpec, engine: Engine): string {
+  if (!canAddConstraint(engine)) throw new Error('SQLite cannot add this constraint to an existing table — recreate the table, or use a unique index')
+  return `ALTER TABLE ${quoteQualified(table, dialectFor(engine))} ADD ${buildCreateConstraintDefinition(spec, engine)}`
+}
+
+const createColumnDefinition = (column: ColumnAdd, engine: Engine): string => {
+  const dialect = dialectFor(engine)
+  const name = column.name.trim()
+  const dataType = column.dataType.trim()
+  if (!name) throw new Error('Column name is required')
+  if (!dataType) throw new Error(`Column "${name}" needs a data type`)
+  let sql = `${dialect.quoteIdent(name)} ${dataType}`
+  if (column.default !== null && column.default !== '') sql += ` DEFAULT ${column.default}`
+  if (!column.nullable) sql += ' NOT NULL'
+  if (engine === 'mysql' && column.comment) sql += ` COMMENT ${quoteLiteral(column.comment)}`
+  return sql
+}
+
+// New tables need constraints inline (SQLite cannot add them afterward). Indexes
+// and triggers are intentionally left to the caller as post-create statements.
+export function buildCreateTable(
+  table: TableRef,
+  columns: ColumnAdd[],
+  constraints: ConstraintSpec[],
+  foreignKeys: ForeignKeySpec[],
+  engine: Engine,
+): string[] {
+  const name = table.name.trim()
+  if (!name) throw new Error('Table name is required')
+  if (!columns.length) throw new Error('A table needs at least one column')
+  if (constraints.filter((constraint) => constraint.type === 'PRIMARY KEY').length > 1) {
+    throw new Error('A table can have only one primary key')
+  }
+  const dialect = dialectFor(engine)
+  const definitions = [
+    ...columns.map((column) => createColumnDefinition(column, engine)),
+    ...constraints.map((constraint) => buildCreateConstraintDefinition(constraint, engine)),
+    ...foreignKeys.map((foreignKey) => buildCreateForeignKeyDefinition(foreignKey, engine)),
+  ]
+  const statements = [`CREATE TABLE ${quoteQualified({ ...table, name }, dialect)} (\n  ${definitions.join(',\n  ')}\n)`]
+  if (engine === 'postgresql') {
+    for (const column of columns) {
+      if (!column.comment) continue
+      statements.push(
+        `COMMENT ON COLUMN ${quoteQualified({ ...table, name }, dialect)}.${dialect.quoteIdent(column.name.trim())} IS ${quoteLiteral(column.comment)}`,
+      )
+    }
+  }
+  return statements
 }
 
 // sp_rename takes the column path as one literal; parts are bracket-quoted so

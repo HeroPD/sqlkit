@@ -339,6 +339,8 @@ DELIMITER ;`)
       const indexes = inspection.sections.find((section) => section.title === 'Indexes')
       expect(indexes?.rows.some((row) => row.name === 'books_author_idx')).toBe(true)
       expect(indexes?.rows.some((row) => row.name === 'PRIMARY')).toBe(false)
+      const constraints = inspection.sections.find((section) => section.title === 'Constraints')
+      expect(constraints?.rows.some((row) => /^PRIMARY KEY \(id\)/i.test(row.definition))).toBe(true)
     } finally {
       await driver.disconnect()
     }

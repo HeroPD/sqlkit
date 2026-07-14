@@ -71,6 +71,34 @@ describe('inspect-add-dialog: index', () => {
   })
 })
 
+describe('inspect-add-dialog: editing a staged operation', () => {
+  it('pre-fills the form from the operation and saves the edited version', async () => {
+    const el = await mount((dialog) => {
+      dialog.kind = 'index'
+      dialog.engine = 'postgresql'
+      dialog.columns = ['id', 'name', 'age']
+      dialog.operation = { kind: 'index', spec: { name: 'idx_users_name', columns: ['name'], unique: false } }
+    })
+
+    // Pre-filled: the name carries over, 'name' is checked, and the button says Save.
+    expect(el.shadowRoot!.querySelector<HTMLInputElement>('input[type="text"]')!.value).toBe('idx_users_name')
+    const checks = [...el.shadowRoot!.querySelectorAll<HTMLInputElement>('.checks input[type="checkbox"]')]
+    expect([checks[0]!.checked, checks[1]!.checked, checks[2]!.checked]).toEqual([false, true, false])
+    expect(el.shadowRoot!.querySelector('button.primary')!.textContent?.trim()).toBe('Save')
+
+    // Add 'age' to the index and save.
+    const onDdl = vi.fn()
+    el.addEventListener('add-ddl', onDdl)
+    checks[2]!.click()
+    await el.updateComplete
+    create(el)
+
+    const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
+    expect(detail.operation.kind).toBe('index')
+    expect(detail.operation).toMatchObject({ spec: { name: 'idx_users_name', columns: ['name', 'age'], unique: false } })
+  })
+})
+
 describe('inspect-add-dialog: trigger', () => {
   it('offers a single-event select and body on MySQL and emits the wrapped trigger', async () => {
     const el = await mount((dialog) => {
@@ -215,6 +243,30 @@ describe('inspect-add-dialog: constraint', () => {
 
     const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
     expect(buildInspectOperation(users, detail.operation, 'mysql')).toBe('ALTER TABLE `public`.`users` ADD CONSTRAINT `uq_email` UNIQUE (`email`, `tenant`)')
+  })
+
+  it('offers a composite PRIMARY KEY in create-table mode, including on SQLite', async () => {
+    const el = await mount((dialog) => {
+      dialog.kind = 'constraint'
+      dialog.engine = 'sqlite'
+      dialog.createTable = true
+      dialog.columns = ['tenant', 'id']
+    })
+    const onDdl = vi.fn()
+    el.addEventListener('add-ddl', onDdl)
+
+    await setInput(el, 'input[type="text"]', 'users_pkey')
+    const typeSelect = el.shadowRoot!.querySelector<HTMLSelectElement>('select')!
+    typeSelect.value = 'PRIMARY KEY'
+    typeSelect.dispatchEvent(new Event('change'))
+    await el.updateComplete
+    el.shadowRoot!.querySelectorAll<HTMLInputElement>('.checks input[type="checkbox"]').forEach((box) => box.click())
+    create(el)
+
+    expect((onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail.operation).toEqual({
+      kind: 'constraint',
+      spec: { name: 'users_pkey', type: 'PRIMARY KEY', expression: '', columns: ['tenant', 'id'] },
+    })
   })
 })
 

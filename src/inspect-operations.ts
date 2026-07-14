@@ -5,6 +5,8 @@ import {
   buildAddForeignKey,
   buildAddPartition,
   buildCreateIndex,
+  buildCreateConstraintDefinition,
+  buildCreateForeignKeyDefinition,
   buildCreateTrigger,
   quoteLiteral,
   quoteQualified,
@@ -109,14 +111,18 @@ function buildRenameInspectObject(
   return `EXEC sp_rename N${quoteLiteral(oldName)}, N${quoteLiteral(to)}, N${quoteLiteral(objectType)}`
 }
 
-export function buildInspectOperation(table: TableRef, operation: InspectOperation, engine: Engine): string {
+export function buildInspectOperation(table: TableRef, operation: InspectOperation, engine: Engine, creating = false): string {
   switch (operation.kind) {
     case 'drop': return buildDropInspectObject(table, operation.target, operation.name.trim(), engine)
     case 'rename': return buildRenameInspectObject(table, operation.target, operation.from.trim(), operation.to.trim(), engine)
     case 'index': return buildCreateIndex(table, operation.spec, engine)
     case 'trigger': return buildCreateTrigger(table, operation.spec, engine)
     case 'partition': return buildAddPartition(table, operation.spec, engine)
-    case 'foreignKey': return buildAddForeignKey(table, operation.spec, engine)
-    case 'constraint': return buildAddConstraint(table, operation.spec, engine)
+    case 'foreignKey': return creating
+      ? buildCreateForeignKeyDefinition(operation.spec, engine)
+      : buildAddForeignKey(table, operation.spec, engine)
+    case 'constraint': return creating
+      ? buildCreateConstraintDefinition(operation.spec, engine)
+      : buildAddConstraint(table, operation.spec, engine)
   }
 }

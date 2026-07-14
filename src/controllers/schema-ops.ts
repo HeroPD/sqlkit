@@ -1,7 +1,15 @@
 import type { ConnectionProfile, DdlResult, Engine, TableRef } from '../electron'
 import type { DialogsController } from './dialogs'
 import { dialectFor } from '../dialect'
-import { buildColumnAdd, buildColumnAlter, buildColumnDrop, quoteQualified, type ColumnAdd, type ColumnAlter } from '../sql-write'
+import {
+  buildColumnAdd,
+  buildColumnAlter,
+  buildColumnDrop,
+  buildCreateTable,
+  quoteQualified,
+  type ColumnAdd,
+  type ColumnAlter,
+} from '../sql-write'
 import { TABLE_KIND_LABELS } from '../table-kinds'
 import { capabilitiesFor } from '../engine-capabilities'
 import { buildInspectOperation, type InspectOperation } from '../inspect-operations'
@@ -17,6 +25,7 @@ export type ColumnAlterSpec = {
   additions: ColumnAdd[]
   drops: string[]
   operations?: InspectOperation[]
+  createTable?: boolean
   onApplied: () => void
 }
 
@@ -96,6 +105,17 @@ export class SchemaOpsController {
   // so autocomplete/column lists pick up renames.
   alterColumns(spec: ColumnAlterSpec) {
     const operations = spec.operations ?? []
+    if (spec.createTable) {
+      const constraints = operations.filter((operation) => operation.kind === 'constraint').map((operation) => operation.spec)
+      const foreignKeys = operations.filter((operation) => operation.kind === 'foreignKey').map((operation) => operation.spec)
+      const postCreate = operations.filter((operation) => operation.kind === 'index' || operation.kind === 'trigger')
+      const statements = [
+        ...buildCreateTable(spec.table, spec.additions, constraints, foreignKeys, spec.engine),
+        ...postCreate.map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
+      ]
+      this._reviewAlter(spec, statements)
+      return
+    }
     // Dependent objects are removed before columns; new objects are created
     // after the columns they may reference exist.
     const statements = [
@@ -105,12 +125,16 @@ export class SchemaOpsController {
       ...buildColumnAdd(spec.table, spec.additions, spec.engine),
       ...operations.filter((operation) => operation.kind !== 'drop').map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
     ]
+    this._reviewAlter(spec, statements)
+  }
+
+  private _reviewAlter(spec: ColumnAlterSpec, statements: string[]) {
     if (!statements.length) return
     this.deps.dialogs.review = {
       sql: statements.map((statement) => `${statement};`).join('\n\n'),
       params: [],
       warning: this._ddlWarning(spec.engine, statements.length),
-      run: () => void this._runAlter(spec, statements),
+      run: () => this._runAlter(spec, statements),
     }
   }
 
@@ -119,7 +143,9 @@ export class SchemaOpsController {
     return 'This engine commits schema statements individually. If a later statement fails, earlier changes cannot be rolled back automatically.'
   }
 
-  private async _runAlter(spec: { profileId: string; childDb: string | null; onApplied: () => void }, statements: string[]) {
+  // Resolves to an error message (shown inline in the review dialog) or null on
+  // success, at which point the tab reloads and metadata refreshes.
+  private async _runAlter(spec: { profileId: string; childDb: string | null; onApplied: () => void }, statements: string[]): Promise<string | null> {
     let result: DdlResult
     try {
       result = await window.sqlkit.runDdl(spec.profileId, spec.childDb, statements)
@@ -134,11 +160,11 @@ export class SchemaOpsController {
       const outcome = result.partial
         ? `${result.appliedCount ?? result.failedIndex ?? 0} earlier statement(s) were already committed by MySQL. Reload the schema before continuing.`
         : 'No changes were made.'
-      this.deps.dialogs.notice('Schema change failed', `${reason} ${outcome}`)
-      return
+      return `${reason} ${outcome}`
     }
     spec.onApplied()
     this.deps.refresh(spec.profileId)
+    return null
   }
 
   createDatabase(profileId: string) {

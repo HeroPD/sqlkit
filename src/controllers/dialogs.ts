@@ -11,8 +11,9 @@ type PromptConfig = {
   trim?: boolean
   action: (value: string) => void
 }
-// A generated write statement awaiting the user's review before it runs.
-type ReviewConfig = { sql: string; params: unknown[]; warning?: string; run: () => void }
+// A generated write statement awaiting the user's review before it runs. `run`
+// resolves to an error message to show inline in the dialog, or null on success.
+type ReviewConfig = { sql: string; params: unknown[]; warning?: string; run: () => Promise<string | null> }
 
 // Owns the modal confirm/prompt dialogs the workbench pops for destructive or
 // input actions. The dialog views are their own components; this holds which
@@ -83,11 +84,5 @@ export class DialogsController implements ReactiveController {
     const current = this._promptQueue.shift()
     this.host.requestUpdate()
     current?.action(value)
-  }
-
-  acceptReview = () => {
-    const current = this._reviewQueue.shift()
-    this.host.requestUpdate()
-    current?.run()
   }
 }

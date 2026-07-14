@@ -1,4 +1,4 @@
-import { LitElement, css, html, type TemplateResult } from 'lit'
+import { LitElement, type PropertyValues, css, html, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
 import type { ColumnRef, DbObject, Engine, TableRef } from '../electron'
@@ -41,6 +41,13 @@ export class InspectAddDialog extends LitElement {
   @property()
   engine: Engine = 'postgresql'
 
+  @property({ type: Boolean })
+  createTable = false
+
+  /** A staged operation to edit; when set the form is pre-filled and saves back. */
+  @property({ attribute: false })
+  operation: InspectOperation | null = null
+
   /** Table column names, for the index/FK/unique column pickers. */
   @property({ attribute: false })
   columns: string[] = []
@@ -69,7 +76,7 @@ export class InspectAddDialog extends LitElement {
   @state() private _refColumns = ''
   @state() private _onDelete: ForeignKeyAction = 'NO ACTION'
   @state() private _onUpdate: ForeignKeyAction = 'NO ACTION'
-  @state() private _constraintType: 'CHECK' | 'UNIQUE' = 'CHECK'
+  @state() private _constraintType: 'CHECK' | 'UNIQUE' | 'PRIMARY KEY' = 'CHECK'
   @state() private _checkExpression = ''
   @state() private _uniqueColumns: string[] = []
   @state() private _error = ''
@@ -88,8 +95,42 @@ export class InspectAddDialog extends LitElement {
     this.shadowRoot?.querySelector('input')?.focus()
   }
 
+  // Pre-fill the form from a staged operation so editing reopens it as-built.
+  protected willUpdate(changed: PropertyValues) {
+    if (!changed.has('operation') || !this.operation) return
+    const op = this.operation
+    if (op.kind === 'index') {
+      this._name = op.spec.name
+      this._indexColumns = [...op.spec.columns]
+      this._unique = op.spec.unique
+      this._method = op.spec.method || 'btree'
+    } else if (op.kind === 'trigger') {
+      this._name = op.spec.name
+      this._timing = op.spec.timing
+      this._events = [...op.spec.events]
+      this._level = op.spec.level
+      this._functionName = op.spec.functionName ?? ''
+      this._body = op.spec.body ?? ''
+    } else if (op.kind === 'partition') {
+      this._name = op.spec.name
+      this._bounds = op.spec.bounds
+    } else if (op.kind === 'foreignKey') {
+      this._name = op.spec.name
+      this._fkColumns = [...op.spec.columns]
+      this._refTable = op.spec.refTable
+      this._refColumns = op.spec.refColumns.join(', ')
+      this._onDelete = op.spec.onDelete ?? 'NO ACTION'
+      this._onUpdate = op.spec.onUpdate ?? 'NO ACTION'
+    } else if (op.kind === 'constraint') {
+      this._name = op.spec.name
+      this._constraintType = op.spec.type
+      this._checkExpression = op.spec.expression ?? ''
+      this._uniqueColumns = [...(op.spec.columns ?? [])]
+    }
+  }
+
   render() {
-    const title = `Add ${KIND_TITLES[this.kind]} · ${this.table?.name ?? ''}`
+    const title = `${this.operation ? 'Edit' : 'Add'} ${KIND_TITLES[this.kind]} · ${this.table?.name ?? ''}`
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <div class="panel" role="dialog" aria-label=${title}>
@@ -98,7 +139,7 @@ export class InspectAddDialog extends LitElement {
           ${this._error ? html`<p class="error" role="alert">${this._error}</p>` : ''}
           <div class="actions">
             <button class="secondary" @click=${this._cancel}>Cancel</button>
-            <button class="primary" @click=${this._create}>Create</button>
+            <button class="primary" @click=${this._create}>${this.operation ? 'Save' : 'Create'}</button>
           </div>
         </div>
       </div>
@@ -179,14 +220,20 @@ export class InspectAddDialog extends LitElement {
   }
 
   private _constraintFields() {
+    const defaultName = this._constraintType === 'PRIMARY KEY'
+      ? `${this.table?.name ?? ''}_pkey`
+      : this._constraintType === 'UNIQUE'
+        ? `uq_${this.table?.name ?? ''}`
+        : `chk_${this.table?.name ?? ''}`
     return html`
-      ${this._field('Name', this._nameInput(`chk_${this.table?.name ?? ''}`))}
+      ${this._field('Name', this._nameInput(defaultName))}
       ${this._field(
         'Type',
         html`
-          <select @change=${(e: Event) => (this._constraintType = (e.target as HTMLSelectElement).value as 'CHECK' | 'UNIQUE')}>
+          <select @change=${(e: Event) => (this._constraintType = (e.target as HTMLSelectElement).value as typeof this._constraintType)}>
             <option value="CHECK" ?selected=${this._constraintType === 'CHECK'}>CHECK</option>
             <option value="UNIQUE" ?selected=${this._constraintType === 'UNIQUE'}>UNIQUE</option>
+            <option value="PRIMARY KEY" ?selected=${this._constraintType === 'PRIMARY KEY'}>PRIMARY KEY</option>
           </select>
         `,
       )}
@@ -201,7 +248,11 @@ export class InspectAddDialog extends LitElement {
             ></sql-expression-editor>`,
             'A boolean expression each row must satisfy.',
           )
-        : this._field('Columns', this._columnChecks(this._uniqueColumns, (column) => this._toggleUniqueColumn(column)), 'Rows must be unique across these columns.')}
+        : this._field(
+            'Columns',
+            this._columnChecks(this._uniqueColumns, (column) => this._toggleUniqueColumn(column)),
+            this._constraintType === 'PRIMARY KEY' ? 'Columns that uniquely identify each row.' : 'Rows must be unique across these columns.',
+          )}
     `
   }
 
@@ -443,7 +494,7 @@ export class InspectAddDialog extends LitElement {
     if (!this.table) return
     try {
       const operation = this._operation()
-      buildInspectOperation(this.table, operation, this.engine)
+      buildInspectOperation(this.table, operation, this.engine, this.createTable)
       this.dispatchEvent(
         new CustomEvent<AddObjectDetail>('add-ddl', { detail: { operation }, bubbles: true, composed: true }),
       )

@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { InspectColumn, InspectResult, TableInspection, TableRef } from '../electron'
 import { clearInspectDraftCache, dropInspectDraft, TableInspect, type ColumnAlterEventDetail } from './table-inspect'
+import type { AddObjectDetail } from './inspect-add-dialog'
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
 const defer = <T>(): Deferred<T> => {
@@ -48,6 +49,7 @@ const internals = (view: TableInspect) =>
     _dropColumn(col: InspectColumn): void
     _saveError: string | null
     _sectionEditing: { section: string; from: string; value: string; operationIndex?: number; seed?: string } | null
+    _onAddDdl(event: CustomEvent<AddObjectDetail>): void
   }
 
 const inspectCol = (over: Partial<InspectColumn>): InspectColumn => ({
@@ -1532,6 +1534,195 @@ describe('TableInspect section drop menus', () => {
     await view.updateComplete
     expect(view.shadowRoot!.querySelector('.object-name-input')).toBeNull()
     expect(internals(view)._sectionEditing).toBeNull()
+    view.remove()
+  })
+
+  it('shows an existing primary key read-only in Constraints (no inline edit, no drop/rename menu)', async () => {
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: {
+        columns: [inspectCol({ name: 'id', primaryKey: true })],
+        sections: [{
+          title: 'Constraints',
+          rows: [
+            { name: 'users_pkey', definition: 'PRIMARY KEY (id)' },
+            { name: 'uq_email', definition: 'UNIQUE (email)' },
+          ],
+        }],
+      },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    const rows = view.shadowRoot!.querySelectorAll('.section-table tr')
+    const pkCell = rows[0]!.querySelector<HTMLElement>('td[data-field="name"]')!
+    expect(pkCell.classList.contains('editable')).toBe(false)
+    pkCell.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await view.updateComplete
+    expect(internals(view)._sectionEditing).toBeNull()
+
+    const menuLabels = () =>
+      [...view.shadowRoot!.querySelector('context-menu')!.shadowRoot!.querySelectorAll('[role="menuitem"]')]
+        .map((item) => item.textContent?.trim())
+    pkCell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 5, clientY: 5 }))
+    await view.updateComplete
+    expect(menuLabels()).not.toContain('Drop Constraint')
+    expect(menuLabels()).not.toContain('Rename')
+
+    // A regular UNIQUE constraint in the same section stays fully manageable.
+    rows[1]!.querySelector<HTMLElement>('td[data-field="name"]')!
+      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 5, clientY: 5 }))
+    await view.updateComplete
+    expect(menuLabels()).toContain('Drop Constraint')
+    view.remove()
+  })
+})
+
+describe('TableInspect create-table mode', () => {
+  it('starts a local draft, stages a primary key, and emits the created table after apply', async () => {
+    clearInspectDraftCache()
+    const inspectTable = vi.fn()
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.tabId = 'create-1'
+    view.profileId = 'p1'
+    view.engine = 'sqlite'
+    view.table = { schema: null, name: 'new_table', kind: 'table' }
+    view.createTable = true
+    document.body.append(view)
+    await view.updateComplete
+
+    expect(inspectTable).not.toHaveBeenCalled()
+    expect(internals(view)._additionColumns()).toHaveLength(1)
+    // The Columns section is always shown in create mode, seeded with the id row.
+    const columnsHeading = [...view.shadowRoot!.querySelectorAll('h4')].find((heading) => heading.textContent?.includes('Columns'))
+    expect(columnsHeading?.querySelector('.count')?.textContent).toBe('1')
+    expect(view.shadowRoot!.querySelector('.columns-table')?.textContent).toContain('id')
+    expect([...view.shadowRoot!.querySelectorAll('h4')].some((heading) => heading.textContent?.includes('Constraints'))).toBe(true)
+
+    view.shadowRoot!.querySelector<HTMLElement>('.create-table-name')!.click()
+    await view.updateComplete
+    const name = view.shadowRoot!.querySelector<HTMLInputElement>('.table-name-input')!
+    name.value = 'projects'
+    name.dispatchEvent(new FocusEvent('blur'))
+    internals(view)._onAddDdl(new CustomEvent<AddObjectDetail>('add-ddl', {
+      detail: { operation: { kind: 'constraint', spec: { name: 'projects_pkey', type: 'PRIMARY KEY', columns: ['id'] } } },
+    }))
+    await view.updateComplete
+
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
+    view.save()
+
+    const detail = (onSave.mock.calls[0]![0] as CustomEvent<ColumnAlterEventDetail>).detail
+    expect(detail.createTable).toBe(true)
+    expect(detail.tabId).toBe('create-1')
+    expect(detail.table).toEqual({ schema: null, name: 'projects', kind: 'table' })
+    expect(detail.additions).toEqual([{ name: 'id', dataType: 'integer', nullable: false, default: null, comment: null }])
+    expect(detail.operations).toEqual([
+      { kind: 'constraint', spec: { name: 'projects_pkey', type: 'PRIMARY KEY', columns: ['id'] } },
+    ])
+
+    detail.onApplied()
+    expect(view.hasPendingChanges()).toBe(true) // create tabs stay drafts until the workbench swaps the tab
+    view.remove()
+  })
+
+  it('seeds the id column as bigint on server engines and integer on sqlite', async () => {
+    clearInspectDraftCache()
+    ;(window as never as { sqlkit: { inspectTable: () => void } }).sqlkit = { inspectTable: vi.fn() }
+    const seedType = async (engine: 'postgresql' | 'sqlite') => {
+      const view = new TableInspect()
+      view.tabId = `create-${engine}`
+      view.profileId = 'p1'
+      view.engine = engine
+      view.table = { schema: engine === 'sqlite' ? null : 'public', name: 'new_table', kind: 'table' }
+      view.createTable = true
+      document.body.append(view)
+      await view.updateComplete
+      const type = view.shadowRoot!.querySelector('.columns-table .type')?.textContent?.trim()
+      view.remove()
+      return type
+    }
+    expect(await seedType('postgresql')).toBe('bigint')
+    expect(await seedType('sqlite')).toBe('integer')
+  })
+
+  const stagedConstraintView = async () => {
+    clearInspectDraftCache()
+    ;(window as never as { sqlkit: { inspectTable: () => void } }).sqlkit = { inspectTable: vi.fn() }
+    const view = new TableInspect()
+    view.tabId = 'create-edit'
+    view.profileId = 'p1'
+    view.engine = 'sqlite'
+    view.table = { schema: null, name: 'projects', kind: 'table' }
+    view.createTable = true
+    document.body.append(view)
+    await view.updateComplete
+    internals(view)._onAddDdl(new CustomEvent<AddObjectDetail>('add-ddl', {
+      detail: { operation: { kind: 'constraint', spec: { name: 'projects_pkey', type: 'PRIMARY KEY', columns: ['id'] } } },
+    }))
+    await view.updateComplete
+    return view
+  }
+
+  it('inline-renames a staged constraint by clicking its name', async () => {
+    const view = await stagedConstraintView()
+    view.shadowRoot!.querySelector<HTMLElement>('.section-table td[data-field="name"]')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await view.updateComplete
+    const input = view.shadowRoot!.querySelector<HTMLInputElement>('.object-name-input')!
+    expect(input).toBeTruthy()
+    input.value = 'pk_projects'
+    input.dispatchEvent(new FocusEvent('blur'))
+    await view.updateComplete
+
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
+    view.save()
+    expect((onSave.mock.calls[0]![0] as CustomEvent<ColumnAlterEventDetail>).detail.operations).toEqual([
+      { kind: 'constraint', spec: { name: 'pk_projects', type: 'PRIMARY KEY', columns: ['id'] } },
+    ])
+    view.remove()
+  })
+
+  it('edits a staged operation in place via the row context menu (replaces, not appends)', async () => {
+    const view = await stagedConstraintView()
+
+    // The staged constraint's menu offers Edit (full dialog), not Rename.
+    view.shadowRoot!.querySelector<HTMLElement>('.section-table td[data-field="name"]')!
+      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 5, clientY: 5 }))
+    await view.updateComplete
+    const labels = [...view.shadowRoot!.querySelector('context-menu')!.shadowRoot!.querySelectorAll('[role="menuitem"]')]
+      .map((item) => item.textContent?.trim())
+    expect(labels).toContain('Edit')
+    expect(labels).not.toContain('Rename')
+
+    // Edit opens the add dialog pre-filled with the staged operation.
+    internals(view)._onMenuPick('edit-object', { name: 'projects_pkey', definition: null, section: 'Constraints', operationIndex: 0 })
+    await view.updateComplete
+    const dialog = view.shadowRoot!.querySelector('inspect-add-dialog')!
+    expect((dialog as unknown as { operation: unknown }).operation).toMatchObject({ kind: 'constraint', spec: { name: 'projects_pkey' } })
+
+    // Saving the edited op replaces the staged one rather than adding a second.
+    internals(view)._onAddDdl(new CustomEvent<AddObjectDetail>('add-ddl', {
+      detail: { operation: { kind: 'constraint', spec: { name: 'pk_projects', type: 'PRIMARY KEY', columns: ['id'] } } },
+    }))
+    await view.updateComplete
+
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
+    view.save()
+    const detail = (onSave.mock.calls[0]![0] as CustomEvent<ColumnAlterEventDetail>).detail
+    expect(detail.operations).toEqual([
+      { kind: 'constraint', spec: { name: 'pk_projects', type: 'PRIMARY KEY', columns: ['id'] } },
+    ])
     view.remove()
   })
 })

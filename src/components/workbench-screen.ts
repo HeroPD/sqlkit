@@ -39,7 +39,7 @@ import type { EmptyAction } from './editor-empty'
 import { clearInspectDraftCache, dropInspectDraft, type ColumnAlterEventDetail } from './table-inspect'
 import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
-import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
+import type { ObjectInspectDetail, TableBrowseDetail, TableCreateDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
@@ -67,7 +67,7 @@ type ViewId = (typeof VIEWS)[number]['id']
 
 const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'config') return tab.profile.name.trim() || 'New Database'
-  if (tab.kind === 'inspect') return `${tab.table.name} · info`
+  if (tab.kind === 'inspect') return tab.createTable ? 'New Table · create' : `${tab.table.name} · info`
   if (tab.kind === 'inspect-object') return `${tab.object.name} · info`
   return tab.content === tab.savedContent ? tab.name : `${tab.name} •`
 }
@@ -667,6 +667,7 @@ export class WorkbenchScreen extends LitElement {
         @table-select=${this._onTableSelect}
         @table-browse=${this._onTableBrowse}
         @table-inspect=${this._onTableInspect}
+        @table-create=${this._onTableCreate}
         @object-inspect=${this._onObjectInspect}
         @matview-refresh=${this._onMatviewRefresh}
         @table-truncate=${this._onTableTruncate}
@@ -786,8 +787,9 @@ export class WorkbenchScreen extends LitElement {
               .sql=${this._dialogs.review.sql}
               .params=${this._dialogs.review.params}
               .warning=${this._dialogs.review.warning ?? ''}
+              .run=${this._dialogs.review.run}
               @dialog-cancel=${() => (this._dialogs.review = null)}
-              @dialog-confirm=${this._dialogs.acceptReview}
+              @dialog-done=${() => (this._dialogs.review = null)}
             ></review-query-dialog>
           `
         : ''}
@@ -954,6 +956,7 @@ export class WorkbenchScreen extends LitElement {
             .profileId=${activeTab.profileId}
             .childDb=${this._ctx.activeChildDb}
             .table=${activeTab.table}
+            .createTable=${activeTab.createTable ?? false}
             .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
             .tables=${this._live.tables[activeTab.profileId] ?? []}
             .referenceColumns=${this._live.columns[activeTab.profileId] ?? []}
@@ -1172,7 +1175,26 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onAlterColumns(event: Event) {
-    this._schemaOps.alterColumns((event as CustomEvent<ColumnAlterEventDetail>).detail)
+    const detail = (event as CustomEvent<ColumnAlterEventDetail>).detail
+    if (!detail.createTable) {
+      this._schemaOps.alterColumns(detail)
+      return
+    }
+    this._schemaOps.alterColumns({
+      ...detail,
+      onApplied: () => {
+        detail.onApplied()
+        const id = `inspect:${tableContextKey(detail.profileId, detail.childDb, detail.table)}`
+        this._ctx.replaceTabInContext(detail.profileId, detail.childDb, detail.tabId, {
+          id,
+          kind: 'inspect',
+          profileId: detail.profileId,
+          table: detail.table,
+        })
+        this._inspectDirtyTabIds = new Set([...this._inspectDirtyTabIds].filter((dirtyId) => dirtyId !== detail.tabId))
+        dropInspectDraft(detail.tabId)
+      },
+    })
   }
 
   private _onInspectDirty(event: Event) {
@@ -1192,6 +1214,20 @@ export class WorkbenchScreen extends LitElement {
     if (!profile) return
     const id = `inspect:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
     this._ctx.addTab({ id, kind: 'inspect', profileId: profile.id, table })
+  }
+
+  private _onTableCreate(event: Event) {
+    const profile = this._config.activeProfile()
+    if (!profile) return
+    const { schema } = (event as CustomEvent<TableCreateDetail>).detail
+    const id = `create-table:${profile.id}:${this._ctx.activeChildDb ?? ''}:${crypto.randomUUID()}`
+    this._ctx.addTab({
+      id,
+      kind: 'inspect',
+      profileId: profile.id,
+      table: { schema, name: 'new_table', kind: 'table' },
+      createTable: true,
+    })
   }
 
   // Same for functions/types; detail (identity args) keeps overloads apart.

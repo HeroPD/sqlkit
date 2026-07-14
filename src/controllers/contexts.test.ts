@@ -78,6 +78,35 @@ describe('ContextsController.newQuery', () => {
   })
 })
 
+describe('ContextsController.replaceTabInContext', () => {
+  const draft = { id: 'create-1', kind: 'inspect' as const, profileId: 'p1', table: { schema: 'public', name: 'new_table', kind: 'table' as const }, createTable: true }
+  const created = { id: 'inspect-projects', kind: 'inspect' as const, profileId: 'p1', table: { schema: 'public', name: 'projects', kind: 'table' as const } }
+
+  it('replaces and activates a create draft in the live context', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', 'app')
+    ctrl.addTab(draft)
+
+    ctrl.replaceTabInContext('p1', 'app', draft.id, created)
+
+    expect(ctrl.tabs).toEqual([created])
+    expect(ctrl.activeTabId).toBe(created.id)
+  })
+
+  it('replaces a draft after its database context was switched away', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', 'app')
+    ctrl.addTab(draft)
+    ctrl.switchInstance('p1', 'other')
+
+    ctrl.replaceTabInContext('p1', 'app', draft.id, created)
+    ctrl.switchInstance('p1', 'app')
+
+    expect(ctrl.tabs).toEqual([created])
+    expect(ctrl.activeTabId).toBe(created.id)
+  })
+})
+
 describe('ContextsController preview tabs', () => {
   it('recycles the open preview tab, then pins it once edited', () => {
     const { ctrl } = make()

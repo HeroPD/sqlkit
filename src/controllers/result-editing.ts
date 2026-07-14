@@ -90,7 +90,7 @@ export class ResultEditingController {
     this.deps.dialogs.review = {
       sql: display,
       params: [],
-      run: () => void this.runChanges(profile, childDb, statements, applied),
+      run: () => this.runChanges(profile, childDb, statements, applied),
     }
   }
 
@@ -102,7 +102,7 @@ export class ResultEditingController {
     childDb: string | null,
     statements: BatchStatement[],
     applied: { hadEdits: boolean; draftCount: number; tabId: string | null; refreshSql: string | null },
-  ) {
+  ): Promise<string | null> {
     let outcome: BatchResult
     try {
       outcome = await window.sqlkit.runBatch(profile.id, childDb, statements)
@@ -114,8 +114,7 @@ export class ResultEditingController {
         outcome.failedIndex !== undefined
           ? `Change ${outcome.failedIndex + 1} of ${statements.length} could not be applied: ${outcome.error}`
           : outcome.error
-      this.deps.dialogs.notice('Save failed', `${reason} The save was rolled back; no changes were made.`)
-      return
+      return `${reason} The save was rolled back; no changes were made.`
     }
     const { hadEdits, draftCount, tabId, refreshSql } = applied
     if (tabId && hadEdits) this.deps.clearEdits(tabId)
@@ -124,6 +123,7 @@ export class ResultEditingController {
     // saved rows/edits, so drop it (the dropDrafts above may have recorded a step).
     if (tabId) this.deps.clearStagedHistory?.(tabId)
     if (refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)
+    return null
   }
 
   deleteRows(rows: number[]) {
@@ -141,22 +141,19 @@ export class ResultEditingController {
     const tab = this.deps.activeTab()
     const refreshSql = tab ? firstStatement(tab.content) || tab.content : null
     const sql = statements.map((statement) => previewSql(statement.sql, statement.params)).join(';\n\n')
-    this.deps.dialogs.review = { sql, params: [], run: () => void this.runWrite(profile, childDb, statements, tab?.id ?? null, refreshSql) }
+    this.deps.dialogs.review = { sql, params: [], run: () => this.runWrite(profile, childDb, statements, tab?.id ?? null, refreshSql) }
   }
 
-  private async runWrite(profile: ConnectionProfile, childDb: string | null, statements: BatchStatement[], tabId: string | null, refreshSql: string | null) {
+  private async runWrite(profile: ConnectionProfile, childDb: string | null, statements: BatchStatement[], tabId: string | null, refreshSql: string | null): Promise<string | null> {
     let outcome: BatchResult
     try {
       outcome = await window.sqlkit.runBatch(profile.id, childDb, statements)
     } catch (error) {
-      this.deps.dialogs.notice('Write failed', (error as Error).message)
-      return
+      return (error as Error).message
     }
-    if (!outcome.success) {
-      this.deps.dialogs.notice('Write failed', outcome.error)
-      return
-    }
+    if (!outcome.success) return outcome.error
     if (refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)
+    return null
   }
 
   private input() {

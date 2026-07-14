@@ -587,7 +587,7 @@ describe('sqlite driver: listColumns', () => {
 })
 
 describe('sqlite driver: inspectTable', () => {
-  it('returns columns with type, nullability, default and primary key; no sections when there are none', async () => {
+  it('returns columns with type, nullability, default and primary key; only the PK constraint when there are no other objects', async () => {
     const driver = await memoryDriver()
     await driver.query('create table t(id integer primary key, a integer default 5, b text not null)')
 
@@ -597,7 +597,9 @@ describe('sqlite driver: inspectTable', () => {
       { name: 'a', dataType: 'INTEGER', nullable: true, default: '5', primaryKey: false, foreignKey: false, comment: null },
       { name: 'b', dataType: 'TEXT', nullable: false, default: null, primaryKey: false, foreignKey: false, comment: null },
     ])
-    expect(inspection.sections).toEqual([])
+    expect(inspection.sections).toEqual([
+      { title: 'Constraints', rows: [{ name: 'PRIMARY KEY', definition: 'PRIMARY KEY (id)' }] },
+    ])
   })
 
   it('groups foreign keys, indexes and triggers into non-empty sections', async () => {
@@ -618,6 +620,7 @@ describe('sqlite driver: inspectTable', () => {
         title: 'Foreign Keys',
         rows: [{ name: 'parent_id', definition: 'REFERENCES parent(id) ON UPDATE NO ACTION ON DELETE NO ACTION' }],
       },
+      { title: 'Constraints', rows: [{ name: 'PRIMARY KEY', definition: 'PRIMARY KEY (id)' }] },
       { title: 'Indexes', rows: [{ name: 'idx_note', definition: 'CREATE INDEX idx_note on child(note)' }] },
       {
         title: 'Triggers',

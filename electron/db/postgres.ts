@@ -674,8 +674,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const sections: InspectSection[] = [
         // FKs are constraints too, but they're what people look for most.
         { title: 'Foreign Keys', rows: constraintRows.filter((row) => row.type === 'f') },
-        // Skip NOT NULL (contype 'n', PG 17+) and PRIMARY KEY ('p') — already shown in the columns table.
-        { title: 'Constraints', rows: constraintRows.filter((row) => row.type !== 'f' && row.type !== 'n' && row.type !== 'p') },
+        // Skip NOT NULL (contype 'n', PG 17+); the PRIMARY KEY ('p') stays, shown
+        // read-only in the UI (it's also the columns table's key marker), like FKs.
+        { title: 'Constraints', rows: constraintRows.filter((row) => row.type !== 'f' && row.type !== 'n') },
         { title: 'Indexes', rows: indexes },
         { title: 'Partitions', rows: partitions },
         { title: 'Triggers', rows: triggers },

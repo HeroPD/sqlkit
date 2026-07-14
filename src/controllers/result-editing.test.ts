@@ -105,9 +105,8 @@ describe('ResultEditingController', () => {
     ctrl.saveChanges()
     setActiveChild('db_b')
     setActiveTab(tab('tab-b', 'select * from other_table'))
-    dialogs.acceptReview()
+    await dialogs.review!.run()
 
-    await vi.waitFor(() => expect(runBatch).toHaveBeenCalled())
     expect(runBatch).toHaveBeenCalledWith('p1', 'db_a', [expect.objectContaining({ sql: expect.stringContaining('UPDATE') })])
     expect(clearEdits).toHaveBeenCalledWith('tab-a')
     // The active tab moved away before accepting, so no refresh runs there.
@@ -123,13 +122,12 @@ describe('ResultEditingController', () => {
 
     setEdits([{ row: 0, col: 1, value: 'Grace' }])
     ctrl.saveChanges()
-    dialogs.acceptReview()
+    const error = await dialogs.review!.run()
 
-    await vi.waitFor(() => expect(runBatch).toHaveBeenCalledOnce())
+    expect(runBatch).toHaveBeenCalledOnce()
     expect(clearEdits).not.toHaveBeenCalled()
     expect(runSql).not.toHaveBeenCalled()
-    expect(dialogs.confirm?.message).toBe('Save failed')
-    expect(dialogs.confirm?.detail).toContain('affected no rows')
+    expect(error).toContain('affected no rows')
   })
 
   it('saves edits and new rows together as one batch: UPDATE then an INSERT per row', async () => {
@@ -148,9 +146,9 @@ describe('ResultEditingController', () => {
     expect(dialogs.review?.sql).toContain('UPDATE "public"."accounts"')
     expect(dialogs.review?.sql).toContain('INSERT INTO "public"."accounts" ("name")')
     expect(dialogs.review?.sql).toContain('INSERT INTO "public"."accounts" ("id", "name")')
-    dialogs.acceptReview()
+    await dialogs.review!.run()
 
-    await vi.waitFor(() => expect(runBatch).toHaveBeenCalledOnce())
+    expect(runBatch).toHaveBeenCalledOnce()
     // One transaction carrying all three statements, in order.
     expect(runBatch).toHaveBeenCalledWith('p1', 'db_a', [
       expect.objectContaining({ sql: expect.stringContaining('UPDATE') }),
@@ -173,14 +171,13 @@ describe('ResultEditingController', () => {
 
     setDrafts([{ after: -1, cells: ['1', 'A'] }, { after: -1, cells: ['2', 'B'] }])
     ctrl.saveChanges()
-    dialogs.acceptReview()
+    const error = await dialogs.review!.run()
 
-    await vi.waitFor(() => expect(runBatch).toHaveBeenCalledOnce())
+    expect(runBatch).toHaveBeenCalledOnce()
     // Atomic: nothing committed, so nothing is cleared, dropped, or refreshed.
     expect(dropDrafts).not.toHaveBeenCalled()
     expect(clearEdits).not.toHaveBeenCalled()
     expect(runSql).not.toHaveBeenCalled()
-    expect(dialogs.confirm?.message).toBe('Save failed')
-    expect(dialogs.confirm?.detail).toContain('rolled back')
+    expect(error).toContain('rolled back')
   })
 })

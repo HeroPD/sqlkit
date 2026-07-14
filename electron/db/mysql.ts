@@ -451,7 +451,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       type Row = { name: string; definition: string }
       const args = [table.name]
 
-      const [columns, foreignKeys, checks, indexes, partitions, triggers] = await Promise.all([
+      const [columns, primaryKey, foreignKeys, checks, indexes, partitions, triggers] = await Promise.all([
         metaRows<{ name: string; data_type: string; nullable: number; default_expr: string | null; pk: number; fk: number; comment: string | null; extra: string }>(
           `select c.column_name as name, c.column_type as data_type, c.is_nullable = 'YES' as nullable,
                   c.column_default as default_expr, c.column_key = 'PRI' as pk,
@@ -461,6 +461,16 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
                   nullif(c.column_comment, '') as comment, c.extra as extra
            from information_schema.columns c
            where c.table_schema = database() and c.table_name = ? order by c.ordinal_position`,
+          args,
+          childDb,
+        ),
+        // The primary key (constraint name is always PRIMARY); one row or none.
+        metaRows<Row>(
+          `select 'PRIMARY' as name,
+                  concat('PRIMARY KEY (', group_concat(column_name order by seq_in_index separator ', '), ')') as definition
+           from information_schema.statistics
+           where table_schema = database() and table_name = ? and index_name = 'PRIMARY'
+           group by index_name`,
           args,
           childDb,
         ),
@@ -520,8 +530,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
       const sections: InspectSection[] = [
         { title: 'Foreign Keys', rows: foreignKeys },
-        { title: 'Constraints', rows: checks },
-        // PRIMARY is already the columns table's key marker.
+        // PK is shown read-only in the UI (also the columns table's key marker), like FKs.
+        { title: 'Constraints', rows: [...primaryKey, ...checks] },
         { title: 'Indexes', rows: indexes.filter((row) => row.name !== 'PRIMARY') },
         { title: 'Partitions', rows: partitions },
         { title: 'Triggers', rows: triggers },

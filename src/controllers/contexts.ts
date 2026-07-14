@@ -21,7 +21,7 @@ export type SqlTabState = {
 
 export type EditorTabState =
   | { id: string; kind: 'config'; profile: ConnectionProfile }
-  | { id: string; kind: 'inspect'; profileId: string; table: TableRef }
+  | { id: string; kind: 'inspect'; profileId: string; table: TableRef; createTable?: boolean }
   | { id: string; kind: 'inspect-object'; profileId: string; object: DbObject; objectKind: DbObjectKind }
   | SqlTabState
 
@@ -181,6 +181,34 @@ export class ContextsController {
     const instance = this._instances.get(key) ?? { tabs: [], activeTabId: null, selectedTable: null }
     const tabs = instance.tabs.some((entry) => entry.id === tab.id) ? instance.tabs : [...instance.tabs, tab]
     this._instances.set(key, { ...instance, tabs, activeTabId: tab.id })
+  }
+
+  replaceTabInContext(
+    profileId: string | null,
+    childDb: string | null,
+    oldId: string,
+    replacement: EditorTabState,
+  ) {
+    const replace = (instance: ContextInstance): ContextInstance => {
+      if (!instance.tabs.some((tab) => tab.id === oldId)) return instance
+      const tabs = instance.tabs
+        .filter((tab) => tab.id === oldId || tab.id !== replacement.id)
+        .map((tab) => tab.id === oldId ? replacement : tab)
+      return {
+        ...instance,
+        tabs,
+        activeTabId: instance.activeTabId === oldId ? replacement.id : instance.activeTabId,
+      }
+    }
+    const key = this.deps.contextKey(profileId, childDb)
+    if (key === this.deps.contextKey(this._activeDbId, this._activeChildDb)) {
+      const next = replace({ tabs: this._tabs, activeTabId: this._activeTabId, selectedTable: this._selectedTable })
+      this.tabs = next.tabs
+      this.activeTabId = next.activeTabId
+      return
+    }
+    const instance = this._instances.get(key)
+    if (instance) this._instances.set(key, replace(instance))
   }
 
   openConfigTab(profile: ConnectionProfile) {

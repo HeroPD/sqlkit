@@ -405,6 +405,8 @@ describeDb('mssql driver (integration)', () => {
       const indexes = inspection.sections.find((section) => section.title === 'Indexes')
       expect(indexes?.rows.some((row) => row.name === 'books_author_idx')).toBe(true)
       expect(indexes?.rows.every((row) => !/^PK_/.test(row.name))).toBe(true)
+      const constraints = inspection.sections.find((section) => section.title === 'Constraints')
+      expect(constraints?.rows.some((row) => /^PRIMARY KEY \(id\)/i.test(row.definition))).toBe(true)
     } finally {
       await driver.disconnect()
     }

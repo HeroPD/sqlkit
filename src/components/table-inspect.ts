@@ -4,7 +4,7 @@ import { codicons, scrollbars, typography } from '../shared-styles'
 import type { ColumnRef, DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
 import { cellsToTsv } from '../result-export'
-import { canAddConstraint, type ColumnAdd, type ColumnAlter } from '../sql-write'
+import { buildCreateTable, canAddConstraint, type ColumnAdd, type ColumnAlter } from '../sql-write'
 import './context-menu'
 import './inspect-add-dialog'
 import type { AddObjectDetail, AddObjectKind } from './inspect-add-dialog'
@@ -28,7 +28,7 @@ type EditField = 'name' | 'dataType' | 'comment' | 'default'
 // One column's staged edits — the fields that differ from what was loaded.
 // `drop: true` stages removing the column and replaces any field edits.
 type ColumnDiff = Partial<Omit<ColumnAlter, 'original'>> & { drop?: boolean }
-type DraftSnapshot = { edits: Map<string, ColumnDiff>; operations: InspectOperation[] }
+type DraftSnapshot = { edits: Map<string, ColumnDiff>; operations: InspectOperation[]; tableName: string | null }
 
 const draftCache = new Map<string, { snapshot: DraftSnapshot; history: DraftSnapshot[]; historyIndex: number; addSeq: number }>()
 
@@ -46,11 +46,13 @@ type RowMenu = {
   field?: EditField | 'nullable'
   section?: string
   operationIndex?: number
+  readonly?: boolean
 }
 
 // Emitted on ⌘S / Save so the workbench routes the change through SchemaOps
 // (build DDL → review dialog → runDdl). `onApplied` reloads this tab on success.
 export type ColumnAlterEventDetail = {
+  tabId: string
   profileId: string
   childDb: string | null
   table: TableRef
@@ -58,6 +60,7 @@ export type ColumnAlterEventDetail = {
   edits: ColumnAlter[]
   additions: ColumnAdd[]
   operations: InspectOperation[]
+  createTable?: boolean
   /** Original names of columns staged for DROP COLUMN. */
   drops: string[]
   onApplied: () => void
@@ -76,7 +79,7 @@ const ENGINE_SECTIONS: Record<Engine, string[]> = {
   postgresql: ['Foreign Keys', 'Constraints', 'Indexes', 'Partitions', 'Triggers', 'Rules', 'Policies', 'Storage'],
   mysql: ['Foreign Keys', 'Constraints', 'Indexes', 'Partitions', 'Triggers'],
   sqlserver: ['Foreign Keys', 'Constraints', 'Indexes', 'Triggers'],
-  sqlite: ['Foreign Keys', 'Indexes', 'Triggers'],
+  sqlite: ['Foreign Keys', 'Constraints', 'Indexes', 'Triggers'],
 }
 
 // Never synthesized: their absence is a fact (not partitioned / no storage),
@@ -126,6 +129,9 @@ export class TableInspect extends LitElement {
   @property({ attribute: false })
   table: TableRef | null = null
 
+  @property({ type: Boolean })
+  createTable = false
+
   /** Alternative target: a schema object (function/type) instead of a table. */
   @property({ attribute: false })
   object: DbObject | null = null
@@ -157,6 +163,10 @@ export class TableInspect extends LitElement {
   @state()
   private _addDialog: AddObjectKind | null = null
 
+  /** When the add dialog is editing a staged op, its index; null when adding. */
+  @state()
+  private _editOperationIndex: number | null = null
+
   @state()
   private _operations: InspectOperation[] = []
 
@@ -165,7 +175,7 @@ export class TableInspect extends LitElement {
   private _edits = new Map<string, ColumnDiff>()
 
   /** Undo/redo stack for the complete Inspect draft. */
-  private _history: DraftSnapshot[] = [{ edits: new Map(), operations: [] }]
+  private _history: DraftSnapshot[] = [{ edits: new Map(), operations: [], tableName: null }]
 
   private _historyIndex = 0
 
@@ -184,6 +194,12 @@ export class TableInspect extends LitElement {
     operationIndex?: number
     seed?: string
   } | null = null
+
+  @state()
+  private _createName = ''
+
+  @state()
+  private _tableNameEditing = false
 
   /** Save-time validation failure (duplicate names); cleared by the next edit. */
   @state()
@@ -246,6 +262,7 @@ export class TableInspect extends LitElement {
       changed.has('table') ||
       changed.has('object') ||
       changed.has('objectKind')
+      || changed.has('createTable')
     ) {
       void this._load()
     }
@@ -282,6 +299,11 @@ export class TableInspect extends LitElement {
         else input.select()
       }
     }
+    if (changed.has('_tableNameEditing') && this._tableNameEditing) {
+      const input = this.renderRoot.querySelector<HTMLInputElement>('.table-name-input')
+      input?.focus()
+      input?.select()
+    }
     // Surface the dirty state so the workbench can mark the tab (the • marker).
     if (changed.has('_edits') || changed.has('_operations')) {
       this.dispatchEvent(
@@ -309,6 +331,12 @@ export class TableInspect extends LitElement {
     this._defaultPicker = null
     this._saveError = null
     this._sel = null
+    this._tableNameEditing = false
+    this._closeAddDialog()
+    if (this.createTable && table) {
+      this._state = { phase: 'done', inspection: { columns: [], sections: [] } }
+      return
+    }
     this._state = { phase: 'loading' }
     const result =
       object && objectKind
@@ -333,16 +361,29 @@ export class TableInspect extends LitElement {
     if (cached) {
       this._edits = new Map(cached.snapshot.edits)
       this._operations = [...cached.snapshot.operations]
-      this._history = cached.history.map((snapshot) => ({ edits: new Map(snapshot.edits), operations: [...snapshot.operations] }))
+      this._createName = cached.snapshot.tableName ?? this.table?.name ?? ''
+      this._history = cached.history.map((snapshot) => ({
+        edits: new Map(snapshot.edits),
+        operations: [...snapshot.operations],
+        tableName: snapshot.tableName,
+      }))
       this._historyIndex = cached.historyIndex
       this._addSeq = cached.addSeq
       return
     }
-    this._edits = new Map()
+    this._createName = this.table?.name ?? ''
+    this._edits = this.createTable ? this._seedCreateEdits() : new Map<string, ColumnDiff>()
     this._operations = []
-    this._history = [{ edits: new Map(), operations: [] }]
+    this._history = [{ edits: new Map(this._edits), operations: [], tableName: this.createTable ? this._createName : null }]
     this._historyIndex = 0
-    this._addSeq = 0
+    this._addSeq = this.createTable ? 1 : 0
+  }
+
+  // A fresh create-table draft starts with one id column. SQLite needs a plain
+  // INTEGER so a later PRIMARY KEY becomes a rowid alias; other engines use bigint.
+  private _seedCreateEdits(): Map<string, ColumnDiff> {
+    const dataType = this.engine === 'sqlite' ? 'integer' : 'bigint'
+    return new Map<string, ColumnDiff>([[`${ADD_KEY_PREFIX}0`, { name: 'id', dataType, nullable: false }]])
   }
 
   private _stashDraft() {
@@ -352,8 +393,12 @@ export class TableInspect extends LitElement {
       return
     }
     draftCache.set(this.tabId, {
-      snapshot: { edits: new Map(this._edits), operations: [...this._operations] },
-      history: this._history.map((snapshot) => ({ edits: new Map(snapshot.edits), operations: [...snapshot.operations] })),
+      snapshot: { edits: new Map(this._edits), operations: [...this._operations], tableName: this.createTable ? this._createName : null },
+      history: this._history.map((snapshot) => ({
+        edits: new Map(snapshot.edits),
+        operations: [...snapshot.operations],
+        tableName: snapshot.tableName,
+      })),
       historyIndex: this._historyIndex,
       addSeq: this._addSeq,
     })
@@ -381,11 +426,34 @@ export class TableInspect extends LitElement {
       <div class="scroll">
         <div class="head">
           <i class="codicon ${icon}" aria-hidden="true"></i>
-          <h3>${label}</h3>
+          <h3 class=${this.createTable ? 'create-table-name' : ''} @click=${() => {
+            if (this.createTable) this._tableNameEditing = true
+          }}>
+            ${this.createTable && this._tableNameEditing
+              ? html`<input
+                  class="table-name-input"
+                  .value=${this._createName}
+                  @keydown=${(event: KeyboardEvent) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault()
+                      this._tableNameEditing = false
+                    } else if (event.key === 'Enter') {
+                      event.preventDefault()
+                      ;(event.currentTarget as HTMLInputElement).blur()
+                    }
+                  }}
+                  @blur=${(event: FocusEvent) => this._commitCreateName((event.currentTarget as HTMLInputElement).value)}
+                />`
+              : this.createTable
+                ? `${target.schema ? `${target.schema}.` : ''}${this._createName}`
+                : label}
+          </h3>
           ${badge ? html`<span class="kind">${badge}</span>` : ''}
-          <button class="refresh" title="Reload structure" aria-label="Reload structure" @click=${() => void this._load()}>
-            <i class="codicon codicon-refresh" aria-hidden="true"></i>
-          </button>
+          ${this.createTable
+            ? html`<span class="head-spacer"></span>`
+            : html`<button class="refresh" title="Reload structure" aria-label="Reload structure" @click=${() => void this._load()}>
+                <i class="codicon codicon-refresh" aria-hidden="true"></i>
+              </button>`}
           ${this.hasPendingChanges()
             ? html`
                 <button class="draft-action" @click=${this.discard}>Discard</button>
@@ -402,25 +470,47 @@ export class TableInspect extends LitElement {
 
   private _renderAddDialog() {
     if (!this._addDialog || !this.table || !this.engine) return ''
+    const table = this._effectiveTable()
+    if (!table) return ''
+    const editing = this._editOperationIndex != null ? this._operations[this._editOperationIndex] ?? null : null
     return html`
       <inspect-add-dialog
         .kind=${this._addDialog}
-        .table=${this.table}
+        .table=${table}
         .engine=${this.engine}
+        .createTable=${this.createTable}
+        .operation=${editing}
         .columns=${this._effectiveColumnNames()}
         .tables=${this.tables}
         .referenceColumns=${this._effectiveReferenceColumns()}
         .functions=${this.functions}
-        @dialog-cancel=${() => (this._addDialog = null)}
+        @dialog-cancel=${this._closeAddDialog}
         @add-ddl=${this._onAddDdl}
       ></inspect-add-dialog>
     `
   }
 
+  // Opens the add dialog pre-filled with a staged op so it can be edited in full.
+  private _editOperation(index: number) {
+    const operation = this._operations[index]
+    if (!operation || operation.kind === 'drop' || operation.kind === 'rename') return
+    this._editOperationIndex = index
+    this._addDialog = operation.kind
+  }
+
+  private _closeAddDialog = () => {
+    this._addDialog = null
+    this._editOperationIndex = null
+  }
+
   private _onAddDdl(event: CustomEvent<AddObjectDetail>) {
     event.stopPropagation()
-    this._commitDraft(this._edits, [...this._operations, event.detail.operation])
-    this._addDialog = null
+    const index = this._editOperationIndex
+    const operations = index != null
+      ? this._operations.map((operation, position) => position === index ? event.detail.operation : operation)
+      : [...this._operations, event.detail.operation]
+    this._commitDraft(this._edits, operations)
+    this._closeAddDialog()
   }
 
   private _renderMenu() {
@@ -430,8 +520,19 @@ export class TableInspect extends LitElement {
     if (menu.definition) items.push({ id: 'copy-definition', label: 'Copy Definition' })
     const dropTarget = menu.section ? this._dropTarget(menu.section) : null
     if (menu.operationIndex !== undefined) {
+      const staged = this._operations[menu.operationIndex]
+      // Add-family staged ops (index/trigger/FK/constraint/partition) reopen their
+      // full dialog to edit; a staged rename only re-edits its target name.
+      if (staged && staged.kind !== 'drop' && staged.kind !== 'rename') {
+        items.push({ id: 'edit-object', label: 'Edit' })
+      } else if (menu.section && this._canRenameSectionObject(menu.section, menu.operationIndex)) {
+        items.push({ id: 'rename-object', label: 'Rename' })
+      }
       items.push({ id: 'remove-staged-operation', label: 'Remove Staged Change' })
-    } else if (dropTarget) {
+    } else if (dropTarget && !menu.readonly) {
+      if (menu.section && this._canRenameSectionObject(menu.section)) {
+        items.push({ id: 'rename-object', label: 'Rename' })
+      }
       const labels: Record<InspectDropTarget, string> = {
         index: 'Drop Index',
         trigger: 'Drop Trigger',
@@ -472,6 +573,8 @@ export class TableInspect extends LitElement {
   private _onMenuPick(id: string, menu: RowMenu) {
     if (id === 'copy-name') return void navigator.clipboard.writeText(menu.name)
     if (id === 'copy-definition') return void navigator.clipboard.writeText(menu.definition ?? '')
+    if (id === 'edit-object' && menu.operationIndex !== undefined) return this._editOperation(menu.operationIndex)
+    if (id === 'rename-object' && menu.section) return this._beginSectionRename(menu.section, menu.name)
     if (id === 'remove-staged-operation' && menu.operationIndex !== undefined) {
       this._commitDraft(this._edits, this._operations.filter((_, index) => index !== menu.operationIndex))
     } else if (id === 'drop-object' && menu.section) {
@@ -490,6 +593,7 @@ export class TableInspect extends LitElement {
     definition: string | null = null,
     section?: string,
     operationIndex?: number,
+    readonly = false,
   ) {
     event.preventDefault()
     // Same as the columns table: right-click lands the selection on the cell.
@@ -497,7 +601,7 @@ export class TableInspect extends LitElement {
     if (hit && !this._isSelected(hit.grid, hit.row, hit.col)) {
       this._sel = { grid: hit.grid, r0: hit.row, c0: hit.col, r1: hit.row, c1: hit.col }
     }
-    this._menu = { x: event.clientX, y: event.clientY, name, definition, section, operationIndex }
+    this._menu = { x: event.clientX, y: event.clientY, name, definition, section, operationIndex, readonly }
   }
 
   private _dropTarget(section: string): InspectDropTarget | null {
@@ -515,10 +619,21 @@ export class TableInspect extends LitElement {
     return targets[section] ?? null
   }
 
+  // An existing primary key is listed in Constraints for reference (like an FK),
+  // but is managed through the columns, so its row is read-only — no drop/rename.
+  // Staged PKs (operationIndex >= 0) stay editable while the draft is built.
+  private _isReadonlyRow(section: string, definition: string | null, staged: boolean): boolean {
+    return !staged && section === 'Constraints' && /^PRIMARY KEY\b/i.test(definition ?? '')
+  }
+
   private _canRenameSectionObject(section: string, operationIndex = -1): boolean {
+    const operation = operationIndex >= 0 ? this._operations[operationIndex] : undefined
+    // A staged add carries its name on the pending spec — edit it in place, no
+    // DDL rename, so the engine's rename capability doesn't gate it.
+    if (operation && operation.kind !== 'rename' && operation.kind !== 'drop') return true
     const target = this._objectTarget(section)
     if (!target || !this.engine || !canRenameInspectObject(target, this.engine)) return false
-    return operationIndex < 0 || this._operations[operationIndex]?.kind === 'rename'
+    return operationIndex < 0 || operation?.kind === 'rename'
   }
 
   // The columns table's row menu is cell-aware: which <td> was right-clicked
@@ -555,15 +670,21 @@ export class TableInspect extends LitElement {
     return [...loaded, ...additions].filter(Boolean)
   }
 
+  private _effectiveTable(): TableRef | null {
+    if (!this.table) return null
+    return this.createTable ? { ...this.table, name: this._createName.trim() } : this.table
+  }
+
   private _effectiveReferenceColumns(): ColumnRef[] {
     if (!this.table || this._state.phase !== 'done') return this.referenceColumns
-    const sameTable = (column: ColumnRef) => column.table === this.table!.name && column.schema === this.table!.schema
+    const table = this._effectiveTable()!
+    const sameTable = (column: ColumnRef) => column.table === table.name && column.schema === table.schema
     const others = this.referenceColumns.filter((column) => !sameTable(column))
     const current = this._gridRows()
       .filter((column) => !this._isDropped(column.name))
       .map((column) => ({
-        schema: this.table!.schema,
-        table: this.table!.name,
+        schema: table.schema,
+        table: table.name,
         name: String(this._fieldText(column, 'name')),
         dataType: String(this._fieldText(column, 'dataType')),
         nullable: this._fieldNullable(column),
@@ -588,6 +709,7 @@ export class TableInspect extends LitElement {
       rows: [...section.rows],
     }))
     if (!this.table || !this.engine) return sections
+    const table = this._effectiveTable()!
     for (const operation of this._operations) {
       const title = operationSection(operation)
       let section = sections.find((candidate) => candidate.title === title)
@@ -597,7 +719,7 @@ export class TableInspect extends LitElement {
       }
       const stagedRow = {
         name: operationName(operation),
-        definition: buildInspectOperation(this.table, operation, this.engine),
+        definition: buildInspectOperation(table, operation, this.engine, this.createTable),
       }
       const changedRow = operation.kind === 'drop' || operation.kind === 'rename'
         ? section.rows.findIndex((row) => row.name === operationSourceName(operation))
@@ -736,11 +858,21 @@ export class TableInspect extends LitElement {
     }
   }
 
+  // Enters name-edit on a section row addressed by section + current name;
+  // used by the row context menu's Rename item (clicking the cell is the other).
+  private _beginSectionRename(section: string, name: string) {
+    const sections = this._sections()
+    const grid = sections.findIndex((candidate) => candidate.title === section)
+    const row = grid >= 0 ? sections[grid]!.rows.findIndex((item) => item.name === name) : -1
+    if (grid >= 0 && row >= 0) this._editSectionCell(grid, row, null)
+  }
+
   private _editSectionCell(grid: number, row: number, seed: string | null) {
     const section = this._sections()[grid]
     const item = section?.rows[row]
     if (!section || !item) return
     const operationIndex = this._stagedOperationIndex(section.title, item.name)
+    if (this._isReadonlyRow(section.title, item.definition, operationIndex >= 0)) return
     if (!this._canRenameSectionObject(section.title, operationIndex)) return
     this._flushEdit()
     const operation = operationIndex >= 0 ? this._operations[operationIndex] : undefined
@@ -760,8 +892,6 @@ export class TableInspect extends LitElement {
     this._sectionEditing = null
     const to = raw.trim()
     if (!to || to === editing.value) return
-    const target = this._objectTarget(editing.section)
-    if (!target || !this.engine || !canRenameInspectObject(target, this.engine)) return
     const section = this._sections().find((candidate) => candidate.title === editing.section)
     const duplicate = section?.rows.some((row) => {
       const name = row.name
@@ -771,6 +901,18 @@ export class TableInspect extends LitElement {
       this._saveError = `Duplicate ${editing.section.toLowerCase()} name "${to}" — choose another name.`
       return
     }
+    // Renaming a staged add: rewrite the pending spec's name in place rather
+    // than staging a DDL rename against an object that doesn't exist yet.
+    if (editing.operationIndex !== undefined) {
+      const staged = this._operations[editing.operationIndex]
+      if (staged && staged.kind !== 'rename' && staged.kind !== 'drop') {
+        const renamed = { ...staged, spec: { ...staged.spec, name: to } } as InspectOperation
+        this._commitDraft(this._edits, this._operations.map((item, index) => index === editing.operationIndex ? renamed : item))
+        return
+      }
+    }
+    const target = this._objectTarget(editing.section)
+    if (!target || !this.engine || !canRenameInspectObject(target, this.engine)) return
     const operation: InspectOperation = { kind: 'rename', target, from: editing.from, to }
     if (editing.operationIndex === undefined) {
       this._commitDraft(this._edits, [...this._operations, operation])
@@ -979,16 +1121,28 @@ export class TableInspect extends LitElement {
     this._commitDraft(next, this._operations)
   }
 
-  private _commitDraft(edits: Map<string, ColumnDiff>, operations: InspectOperation[]) {
-    if (this._editsEqual(edits, this._edits) && JSON.stringify(operations) === JSON.stringify(this._operations)) return
+  private _commitDraft(edits: Map<string, ColumnDiff>, operations: InspectOperation[], tableName = this._createName) {
+    if (
+      this._editsEqual(edits, this._edits)
+      && JSON.stringify(operations) === JSON.stringify(this._operations)
+      && (!this.createTable || tableName === this._createName)
+    ) return
     this._saveError = null
     this._edits = new Map(edits)
     this._operations = [...operations]
-    const snapshot = { edits: new Map(edits), operations: [...operations] }
+    this._createName = tableName
+    const snapshot = { edits: new Map(edits), operations: [...operations], tableName: this.createTable ? tableName : null }
     this._history = [...this._history.slice(0, this._historyIndex + 1), snapshot]
     if (this._history.length > MAX_EDIT_HISTORY) this._history = this._history.slice(this._history.length - MAX_EDIT_HISTORY)
     this._historyIndex = this._history.length - 1
     this._stashDraft()
+  }
+
+  private _commitCreateName(raw: string) {
+    this._tableNameEditing = false
+    const name = raw.trim()
+    if (!name || name === this._createName) return
+    this._commitDraft(this._edits, this._operations, name)
   }
 
   private _editsEqual(a: Map<string, ColumnDiff>, b: Map<string, ColumnDiff>): boolean {
@@ -1019,21 +1173,23 @@ export class TableInspect extends LitElement {
   // the workbench leaves the browser's native input undo alone — while a cell
   // is mid-edit or there's nothing left to step to.
   undo(): boolean {
-    if (this._editing || this._sectionEditing || this._historyIndex <= 0) return false
+    if (this._editing || this._sectionEditing || this._tableNameEditing || this._addDialog || this._historyIndex <= 0) return false
     this._historyIndex--
     const snapshot = this._history[this._historyIndex]!
     this._edits = new Map(snapshot.edits)
     this._operations = [...snapshot.operations]
+    this._createName = snapshot.tableName ?? this._createName
     this._stashDraft()
     return true
   }
 
   redo(): boolean {
-    if (this._editing || this._sectionEditing || this._historyIndex >= this._history.length - 1) return false
+    if (this._editing || this._sectionEditing || this._tableNameEditing || this._addDialog || this._historyIndex >= this._history.length - 1) return false
     this._historyIndex++
     const snapshot = this._history[this._historyIndex]!
     this._edits = new Map(snapshot.edits)
     this._operations = [...snapshot.operations]
+    this._createName = snapshot.tableName ?? this._createName
     this._stashDraft()
     return true
   }
@@ -1061,7 +1217,7 @@ export class TableInspect extends LitElement {
     return this._operations.map((operation) => {
       if (operation.kind === 'index') return { ...operation, spec: { ...operation.spec, columns: rename(operation.spec.columns) ?? [] } }
       if (operation.kind === 'foreignKey') return { ...operation, spec: { ...operation.spec, columns: rename(operation.spec.columns) ?? [] } }
-      if (operation.kind === 'constraint' && operation.spec.type === 'UNIQUE') {
+      if (operation.kind === 'constraint' && (operation.spec.type === 'UNIQUE' || operation.spec.type === 'PRIMARY KEY')) {
         return { ...operation, spec: { ...operation.spec, columns: rename(operation.spec.columns) } }
       }
       return operation
@@ -1195,15 +1351,16 @@ export class TableInspect extends LitElement {
 
   /** Whether there are staged column edits. Read by the workbench close-confirm. */
   hasPendingChanges() {
-    return this._edits.size > 0 || this._operations.length > 0
+    return this.createTable || this._edits.size > 0 || this._operations.length > 0
   }
 
   discard = () => {
-    this._edits = new Map()
+    this._createName = this.table?.name ?? ''
+    this._edits = this.createTable ? this._seedCreateEdits() : new Map<string, ColumnDiff>()
     this._operations = []
-    this._history = [{ edits: new Map(), operations: [] }]
+    this._history = [{ edits: new Map(this._edits), operations: [], tableName: this.createTable ? this._createName : null }]
     this._historyIndex = 0
-    this._addSeq = 0
+    this._addSeq = this.createTable ? 1 : 0
     this._editing = null
     this._sectionEditing = null
     this._saveError = null
@@ -1214,7 +1371,7 @@ export class TableInspect extends LitElement {
   // review and apply. Called on ⌘S and the Save button; a no-op when nothing is
   // staged.
   save() {
-    this.renderRoot.querySelector<HTMLElement>('.cell-input')?.blur()
+    this.renderRoot.querySelectorAll<HTMLElement>('.cell-input, .table-name-input').forEach((input) => input.blur())
     if (this._state.phase !== 'done' || !this.hasPendingChanges() || !this.table || !this.engine) return
     const byName = new Map(this._state.inspection.columns.map((column) => [column.name, column]))
     const edits: ColumnAlter[] = []
@@ -1232,25 +1389,40 @@ export class TableInspect extends LitElement {
       const original = byName.get(name)
       if (original) edits.push({ original, ...diff })
     }
-    if (!edits.length && !additions.length && !drops.length && !this._operations.length) return
+    if (!this.createTable && !edits.length && !additions.length && !drops.length && !this._operations.length) return
     const duplicate = this._duplicateName(edits, additions, drops)
     if (duplicate !== null) {
       this._saveError = `Duplicate column name "${duplicate}" — rename one before saving.`
       return
     }
     const effectiveColumns = new Set(this._effectiveColumnNames())
+    const table = this._effectiveTable()!
     try {
       for (const operation of this._operations) {
         const localColumns = operation.kind === 'drop' || operation.kind === 'rename'
           ? []
           : operation.kind === 'index' || operation.kind === 'foreignKey'
           ? operation.spec.columns
-          : operation.kind === 'constraint' && operation.spec.type === 'UNIQUE'
+          : operation.kind === 'constraint' && (operation.spec.type === 'UNIQUE' || operation.spec.type === 'PRIMARY KEY')
             ? operation.spec.columns ?? []
             : []
         const missing = localColumns.find((column) => !effectiveColumns.has(column))
         if (missing) throw new Error(`Staged ${operation.kind} references removed column "${missing}"`)
-        buildInspectOperation(this.table, operation, this.engine)
+        if (!this.createTable || (operation.kind !== 'constraint' && operation.kind !== 'foreignKey')) {
+          buildInspectOperation(table, operation, this.engine)
+        }
+      }
+      if (this.createTable) {
+        const unsupported = this._operations.find((operation) =>
+          operation.kind !== 'constraint' && operation.kind !== 'foreignKey' && operation.kind !== 'index' && operation.kind !== 'trigger')
+        if (unsupported) throw new Error(`Cannot ${unsupported.kind} while creating a table`)
+        buildCreateTable(
+          table,
+          additions,
+          this._operations.filter((operation) => operation.kind === 'constraint').map((operation) => operation.spec),
+          this._operations.filter((operation) => operation.kind === 'foreignKey').map((operation) => operation.spec),
+          this.engine,
+        )
       }
     } catch (error) {
       this._saveError = (error as Error).message
@@ -1264,15 +1436,21 @@ export class TableInspect extends LitElement {
         bubbles: true,
         composed: true,
         detail: {
+          tabId: this.tabId,
           profileId: this.profileId,
           childDb: this.childDb,
-          table: this.table,
+          table,
           engine: this.engine,
           edits,
           additions,
           drops,
           operations: [...this._operations],
+          createTable: this.createTable,
           onApplied: () => {
+            if (this.createTable) {
+              if (this.tabId) draftCache.delete(this.tabId)
+              return
+            }
             if (
               this.profileId !== target.profileId
               || this.childDb !== target.childDb
@@ -1281,7 +1459,7 @@ export class TableInspect extends LitElement {
             ) return
             this._edits = new Map()
             this._operations = []
-            this._history = [{ edits: new Map(), operations: [] }]
+            this._history = [{ edits: new Map(), operations: [], tableName: null }]
             this._historyIndex = 0
             this._addSeq = 0
             if (this.tabId) draftCache.delete(this.tabId)
@@ -1331,10 +1509,11 @@ export class TableInspect extends LitElement {
     if (title === 'Indexes' && (this.table.kind === 'table' || this.table.kind === 'matview')) return 'index'
     if (this.table.kind !== 'table') return null
     if (title === 'Triggers') return 'trigger'
-    if (title === 'Partitions' && (this.engine === 'postgresql' || this.engine === 'mysql')) return 'partition'
-    // FK and CHECK/UNIQUE need ALTER TABLE ADD CONSTRAINT, which SQLite lacks.
-    if (title === 'Foreign Keys' && canAddConstraint(this.engine)) return 'foreignKey'
-    if (title === 'Constraints' && canAddConstraint(this.engine)) return 'constraint'
+    if (!this.createTable && title === 'Partitions' && (this.engine === 'postgresql' || this.engine === 'mysql')) return 'partition'
+    // Existing SQLite tables cannot add constraints, but create mode can place
+    // foreign keys and CHECK/UNIQUE/PRIMARY KEY clauses inside CREATE TABLE.
+    if (title === 'Foreign Keys' && (this.createTable || canAddConstraint(this.engine))) return 'foreignKey'
+    if (title === 'Constraints' && (this.createTable || canAddConstraint(this.engine))) return 'constraint'
     return null
   }
 
@@ -1349,7 +1528,9 @@ export class TableInspect extends LitElement {
         .map((title) => ({ title, rows: [] }))
       return missing.length ? [...sections, ...missing] : sections
     }
-    const canonical = ENGINE_SECTIONS[this.engine]
+    const canonical = this.createTable
+      ? ['Foreign Keys', 'Constraints', 'Indexes', 'Triggers']
+      : ENGINE_SECTIONS[this.engine]
     const scaffold = canonical
       .map((title) =>
         sections.find((section) => section.title === title)
@@ -1394,7 +1575,7 @@ export class TableInspect extends LitElement {
     const { columns } = state.inspection
     const sections = this._sections()
     return html`
-      ${columns.length ? this._renderColumnsTable(columns) : ''}
+      ${columns.length || this._additionColumns().length || this.createTable ? this._renderColumnsTable(columns) : ''}
       ${sections.map(
         (section, grid) => html`
           <h4>
@@ -1406,7 +1587,7 @@ export class TableInspect extends LitElement {
                     type="button"
                     title="Add ${section.title}"
                     aria-label="Add ${section.title}"
-                    @click=${() => (this._addDialog = this._sectionAddKind(section.title))}
+                    @click=${() => { this._editOperationIndex = null; this._addDialog = this._sectionAddKind(section.title) }}
                   >
                     <i class="codicon codicon-add" aria-hidden="true"></i>
                   </button>
@@ -1433,6 +1614,7 @@ export class TableInspect extends LitElement {
                   const stagedIndex = this._stagedOperationIndex(section.title, row.name)
                   const objectEditing = this._sectionEditing
                   const rowName = row.name
+                  const readonly = this._isReadonlyRow(section.title, row.definition, stagedIndex >= 0)
                   const editingName = objectEditing?.section === section.title
                     && objectEditing.operationIndex === (stagedIndex >= 0 ? stagedIndex : undefined)
                     && objectEditing.value === rowName
@@ -1447,11 +1629,11 @@ export class TableInspect extends LitElement {
                   <tr
                     data-row=${index}
                     class=${stagedKind}
-                    @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition, section.title, stagedIndex >= 0 ? stagedIndex : undefined)}
+                    @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition, section.title, stagedIndex >= 0 ? stagedIndex : undefined, readonly)}
                   >
                     <td
                       data-field="name"
-                      class="mono name-cell${!editingName && this._canRenameSectionObject(section.title, stagedIndex) ? ' editable' : ''}${!editingName && this._isSelected(grid, index, 0) ? ' selected' : ''}"
+                      class="mono name-cell${!editingName && !readonly && this._canRenameSectionObject(section.title, stagedIndex) ? ' editable' : ''}${!editingName && this._isSelected(grid, index, 0) ? ' selected' : ''}"
                       title=${row.name}
                     >
                       ${editingName
@@ -1511,7 +1693,7 @@ export class TableInspect extends LitElement {
     const additions = this._additionColumns()
     return html`
       <h4>
-        ${this.object ? 'Attributes' : 'Columns'} <span class="count">${columns.length}</span>
+        ${this.object ? 'Attributes' : 'Columns'} <span class="count">${columns.length + additions.length}</span>
         ${this._canAddColumn()
           ? html`
               <button class="add-btn" type="button" title="Add column" aria-label="Add column" @click=${this._addColumn}>
@@ -1560,6 +1742,15 @@ export class TableInspect extends LitElement {
   // a staged drop swaps in a restore (↩) button and tints it red.
   private _renderColumnRow(column: InspectColumn, hasComments: boolean, addition: boolean, row: number) {
     const dropped = !addition && this._isDropped(column.name)
+    const effectiveName = String(this._fieldText(column, 'name'))
+    const stagedPrimaryKey = this._operations.some((operation) =>
+      operation.kind === 'constraint'
+      && operation.spec.type === 'PRIMARY KEY'
+      && operation.spec.columns?.includes(effectiveName))
+    const stagedForeignKey = this._operations.some((operation) =>
+      operation.kind === 'foreignKey' && operation.spec.columns.includes(effectiveName))
+    const primaryKey = column.primaryKey || stagedPrimaryKey
+    const foreignKey = column.foreignKey || stagedForeignKey
     return html`
       <tr
         data-row=${row}
@@ -1591,12 +1782,12 @@ export class TableInspect extends LitElement {
                     <i class="codicon codicon-discard" aria-hidden="true"></i>
                   </button>
                 `
-              : column.primaryKey || column.foreignKey
+              : primaryKey || foreignKey
                 ? html`<span class="key-icons">
-                    ${column.primaryKey
+                    ${primaryKey
                       ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>`
                       : ''}
-                    ${column.foreignKey
+                    ${foreignKey
                       ? html`<i class="codicon codicon-key fk" aria-hidden="true" title="Foreign key"></i>`
                       : ''}
                   </span>`
@@ -1880,6 +2071,27 @@ export class TableInspect extends LitElement {
         color: var(--text);
       }
 
+      .create-table-name {
+        min-width: 120px;
+        cursor: text;
+      }
+
+      .table-name-input {
+        width: min(320px, 40vw);
+        box-sizing: border-box;
+        padding: 2px 5px;
+        font: inherit;
+        color: var(--input-fg);
+        background: var(--input-bg);
+        border: 1px solid var(--focus-border);
+        border-radius: 3px;
+        outline: none;
+      }
+
+      .head-spacer {
+        margin-left: auto;
+      }
+
       .kind {
         padding: 1px 6px;
         border: 1px solid var(--border);
@@ -2026,6 +2238,13 @@ export class TableInspect extends LitElement {
       .section-table,
       .columns-table {
         table-layout: fixed;
+      }
+
+      /* Columns-table rows are single-line, so center every cell — the
+         remove (✕) and key icons then line up with the row's text. Section
+         defs keep the global top-align since they can wrap. */
+      .columns-table td {
+        vertical-align: middle;
       }
 
       /* Focusable for keyboard nav/copy; drag-selection replaces text selection. */
@@ -2228,8 +2447,11 @@ export class TableInspect extends LitElement {
 
       .remove-btn,
       .restore-btn {
-        display: inline-flex;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         padding: 1px;
+        line-height: 1;
         color: var(--text-3);
         background: transparent;
         border: none;

@@ -144,8 +144,7 @@ describe('alterColumns', () => {
       'ALTER TABLE "public"."users" DROP COLUMN "legacy";\n\nALTER TABLE "public"."users" ADD COLUMN "age" integer;',
     )
 
-    h.dialogs.acceptReview()
-    await flush()
+    await h.dialogs.review!.run()
     expect(sqlkit.runDdl).toHaveBeenCalledWith('p1', null, [
       'ALTER TABLE "public"."users" DROP COLUMN "legacy"',
       'ALTER TABLE "public"."users" ADD COLUMN "age" integer',
@@ -168,12 +167,32 @@ describe('alterColumns', () => {
       'ALTER TABLE "public"."users" ADD COLUMN "tenant_id" integer NOT NULL;\n\n' +
       'CREATE INDEX "users_tenant_idx" ON "public"."users" ("tenant_id");',
     )
-    h.dialogs.acceptReview()
-    await flush()
+    await h.dialogs.review!.run()
     expect(sqlkit.runDdl).toHaveBeenCalledWith('p1', null, [
       'ALTER TABLE "public"."users" ADD COLUMN "tenant_id" integer NOT NULL',
       'CREATE INDEX "users_tenant_idx" ON "public"."users" ("tenant_id")',
     ])
+  })
+
+  it('creates a table before its staged indexes in one reviewed batch', () => {
+    const h = harness()
+    h.ops.alterColumns(spec({
+      table: { schema: 'public', name: 'projects', kind: 'table' },
+      createTable: true,
+      additions: [{ name: 'id', dataType: 'integer', nullable: false, default: null, comment: null }],
+      operations: [
+        { kind: 'constraint', spec: { name: 'projects_pkey', type: 'PRIMARY KEY', columns: ['id'] } },
+        { kind: 'index', spec: { name: 'projects_id_idx', columns: ['id'], unique: false } },
+      ],
+    }))
+
+    expect(h.dialogs.review?.sql).toBe(
+      'CREATE TABLE "public"."projects" (\n' +
+      '  "id" integer NOT NULL,\n' +
+      '  CONSTRAINT "projects_pkey" PRIMARY KEY ("id")\n' +
+      ');\n\n' +
+      'CREATE INDEX "projects_id_idx" ON "public"."projects" ("id");',
+    )
   })
 
   it('drops dependent objects before columns and creates objects after column changes', () => {
@@ -206,11 +225,9 @@ describe('alterColumns', () => {
     const h = harness()
     const s = spec({ drops: ['a', 'b'] })
     h.ops.alterColumns(s)
-    h.dialogs.acceptReview()
-    await flush()
+    const error = await h.dialogs.review!.run()
 
-    expect(h.dialogs.confirm?.message).toBe('Schema change failed')
-    expect(h.dialogs.confirm?.detail).toBe('Statement 2 of 2 failed: boom No changes were made.')
+    expect(error).toBe('Statement 2 of 2 failed: boom No changes were made.')
     expect(s.onApplied).not.toHaveBeenCalled()
     expect(h.refresh).not.toHaveBeenCalled()
   })
@@ -220,22 +237,19 @@ describe('alterColumns', () => {
     const h = harness()
     h.ops.alterColumns(spec({ engine: 'mysql', drops: ['a', 'b'] }))
     expect(h.dialogs.review?.warning).toMatch(/commits schema statements individually/i)
-    h.dialogs.acceptReview()
-    await flush()
+    const error = await h.dialogs.review!.run()
 
-    expect(h.dialogs.confirm?.detail).toContain('1 earlier statement(s) were already committed by MySQL.')
+    expect(error).toContain('1 earlier statement(s) were already committed by MySQL.')
   })
 
-  it('surfaces a rejected runDdl IPC call as a failure notice', async () => {
+  it('surfaces a rejected runDdl IPC call as an inline failure message', async () => {
     sqlkit.runDdl.mockRejectedValue(new Error('ipc down'))
     const h = harness()
     const s = spec({ drops: ['a'] })
     h.ops.alterColumns(s)
-    h.dialogs.acceptReview()
-    await flush()
+    const error = await h.dialogs.review!.run()
 
-    expect(h.dialogs.confirm?.message).toBe('Schema change failed')
-    expect(h.dialogs.confirm?.detail).toBe('ipc down No changes were made.')
+    expect(error).toBe('ipc down No changes were made.')
     expect(s.onApplied).not.toHaveBeenCalled()
   })
 })

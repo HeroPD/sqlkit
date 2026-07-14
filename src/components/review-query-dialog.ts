@@ -1,6 +1,6 @@
-import { LitElement, css, html } from 'lit'
-import { customElement, property } from 'lit/decorators.js'
-import { controls, scrollbars, typography } from '../shared-styles'
+import { LitElement, type PropertyValues, css, html } from 'lit'
+import { customElement, property, state } from 'lit/decorators.js'
+import { codicons, controls, scrollbars, typography } from '../shared-styles'
 
 // Renders a bound parameter in SQL-ish form for review only; execution still
 // uses the original parameterized query.
@@ -90,6 +90,15 @@ export class ReviewQueryDialog extends LitElement {
   @property()
   warning = ''
 
+  // Runs the reviewed statement, resolving to an error message (shown inline) or
+  // null on success. The dialog owns the applying/error UI so failures stay in
+  // context instead of popping a separate notice.
+  @property({ attribute: false })
+  run: (() => Promise<string | null>) | null = null
+
+  @state() private _applying = false
+  @state() private _error = ''
+
   connectedCallback() {
     super.connectedCallback()
     window.addEventListener('keydown', this._onKeydown)
@@ -98,6 +107,14 @@ export class ReviewQueryDialog extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback()
     window.removeEventListener('keydown', this._onKeydown)
+  }
+
+  // A new statement (queued review) resets the transient applying/error state.
+  protected willUpdate(changed: PropertyValues) {
+    if (changed.has('sql')) {
+      this._applying = false
+      this._error = ''
+    }
   }
 
   render() {
@@ -110,9 +127,14 @@ export class ReviewQueryDialog extends LitElement {
           <pre class="sql"><code>${sqlPreviewParts(preview).map((part) =>
             part.kind ? html`<span class=${part.kind}>${part.text}</span>` : part.text,
           )}</code></pre>
+          ${this._error ? html`<p class="error" role="alert">${this._error}</p>` : ''}
           <div class="actions">
-            <button class="secondary" @click=${this._cancel}>Cancel</button>
-            <button class="primary" @click=${this._confirm}>${this.confirmLabel}</button>
+            <button class="secondary" ?disabled=${this._applying} @click=${this._cancel}>Cancel</button>
+            <button class="primary" ?disabled=${this._applying} @click=${this._confirm}>
+              ${this._applying
+                ? html`<i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> Applying…`
+                : this.confirmLabel}
+            </button>
           </div>
         </div>
       </div>
@@ -120,12 +142,13 @@ export class ReviewQueryDialog extends LitElement {
   }
 
   private _onKeydown = (event: KeyboardEvent) => {
-    if (event.key !== 'Escape') return
+    if (event.key !== 'Escape' || this._applying) return
     event.preventDefault()
     this._cancel()
   }
 
   private _onBackdropDown(event: MouseEvent) {
+    if (this._applying) return
     if (event.target === event.currentTarget) this._cancel()
   }
 
@@ -133,14 +156,31 @@ export class ReviewQueryDialog extends LitElement {
     this.dispatchEvent(new CustomEvent('dialog-cancel', { bubbles: true, composed: true }))
   }
 
-  private _confirm() {
-    this.dispatchEvent(new CustomEvent('dialog-confirm', { bubbles: true, composed: true }))
+  private async _confirm() {
+    if (this._applying || !this.run) return
+    this._applying = true
+    this._error = ''
+    try {
+      const error = await this.run()
+      if (error !== null) {
+        this._error = error
+        this._applying = false
+        return
+      }
+      this.dispatchEvent(new CustomEvent('dialog-done', { bubbles: true, composed: true }))
+    } catch (error) {
+      // A run should resolve to an error string, not throw; recover anyway so a
+      // rejecting producer can't leave the dialog stuck with every exit disabled.
+      this._error = (error as Error).message
+      this._applying = false
+    }
   }
 
   static styles = [
     typography,
     controls,
     scrollbars,
+    codicons,
     css`
       :host {
         display: contents;
@@ -196,6 +236,16 @@ export class ReviewQueryDialog extends LitElement {
         line-height: 1.4;
       }
 
+      .error {
+        margin: 0;
+        padding: 8px 10px;
+        color: var(--text);
+        background: color-mix(in srgb, var(--status-dot-error) 14%, transparent);
+        border: 1px solid color-mix(in srgb, var(--status-dot-error) 45%, transparent);
+        border-radius: 4px;
+        line-height: 1.4;
+      }
+
       .sql code {
         font: inherit;
       }
@@ -215,6 +265,21 @@ export class ReviewQueryDialog extends LitElement {
         justify-content: flex-end;
         gap: 8px;
         margin-top: 12px;
+      }
+
+      .actions button {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .codicon-modifier-spin {
+        --codicon-size: 13px;
       }
     `,
   ]

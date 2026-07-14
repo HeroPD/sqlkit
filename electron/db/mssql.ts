@@ -571,7 +571,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         ? `${dialect.quoteIdent(table.schema)}.${dialect.quoteIdent(table.name)}`
         : dialect.quoteIdent(table.name)
 
-      const [columns, foreignKeys, checks, indexes, triggers] = await Promise.all([
+      const [columns, primaryKey, foreignKeys, checks, indexes, triggers] = await Promise.all([
         metaRows<{
           name: string
           data_type: string
@@ -600,6 +600,19 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
            left join sys.default_constraints dc on dc.object_id = c.default_object_id
            where c.object_id = object_id(@p1)
            order by c.column_id`,
+          [qualified],
+          childDb,
+        ),
+        // The primary key (its own constraint name); one row or none.
+        metaRows<Row>(
+          `select kc.name as name,
+                  concat('PRIMARY KEY (',
+                         stuff((select ', ' + col_name(ic.object_id, ic.column_id)
+                                from sys.index_columns ic
+                                where ic.object_id = kc.parent_object_id and ic.index_id = kc.unique_index_id
+                                order by ic.key_ordinal for xml path('')), 1, 2, ''), ')') as definition
+           from sys.key_constraints kc
+           where kc.parent_object_id = object_id(@p1) and kc.type = 'PK'`,
           [qualified],
           childDb,
         ),
@@ -651,7 +664,8 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
       const sections: InspectSection[] = [
         { title: 'Foreign Keys', rows: foreignKeys },
-        { title: 'Constraints', rows: checks },
+        // PK is shown read-only in the UI (also the columns table's key marker), like FKs.
+        { title: 'Constraints', rows: [...primaryKey, ...checks] },
         { title: 'Indexes', rows: indexes },
         { title: 'Triggers', rows: triggers },
       ]
