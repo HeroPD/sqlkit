@@ -343,6 +343,7 @@ describeDb('postgres driver (integration)', () => {
     try {
       const inspection = await driver.inspectTable({ schema: 'sqlkit_it', name: 'books', kind: 'table' })
       expect(inspection.columns.map((column) => column.name)).toEqual(['id', 'author_id', 'title', 'published'])
+      expect(inspection.columns.find((column) => column.name === 'author_id')).toMatchObject({ foreignKey: true })
       const foreignKeys = inspection.sections.find((section) => section.title === 'Foreign Keys')
       expect(foreignKeys?.rows[0]?.definition).toMatch(/REFERENCES sqlkit_it\.authors/i)
       const indexes = inspection.sections.find((section) => section.title === 'Indexes')

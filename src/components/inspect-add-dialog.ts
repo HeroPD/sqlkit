@@ -1,14 +1,13 @@
 import { LitElement, css, html, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
-import type { Engine, TableRef } from '../electron'
+import type { ColumnRef, DbObject, Engine, TableRef } from '../electron'
+import './sql-expression-editor'
+import './picker-input'
+import type { PickerInputItem } from './picker-input'
+import { buildInspectOperation, type InspectOperation } from '../inspect-operations'
 import {
   PG_INDEX_METHODS,
-  buildAddConstraint,
-  buildAddForeignKey,
-  buildAddPartition,
-  buildCreateIndex,
-  buildCreateTrigger,
   foreignKeyActions,
   triggerCapabilities,
   type ForeignKeyAction,
@@ -17,7 +16,7 @@ import {
 } from '../sql-write'
 
 export type AddObjectKind = 'index' | 'trigger' | 'partition' | 'foreignKey' | 'constraint'
-export type AddObjectDetail = { statements: string[] }
+export type AddObjectDetail = { operation: InspectOperation }
 
 const TRIGGER_EVENTS: TriggerEvent[] = ['INSERT', 'UPDATE', 'DELETE']
 const KIND_TITLES: Record<AddObjectKind, string> = {
@@ -45,6 +44,15 @@ export class InspectAddDialog extends LitElement {
   /** Table column names, for the index/FK/unique column pickers. */
   @property({ attribute: false })
   columns: string[] = []
+
+  @property({ attribute: false })
+  tables: TableRef[] = []
+
+  @property({ attribute: false })
+  referenceColumns: ColumnRef[] = []
+
+  @property({ attribute: false })
+  functions: DbObject[] = []
 
   @state() private _name = ''
   @state() private _indexColumns: string[] = []
@@ -129,35 +137,32 @@ export class InspectAddDialog extends LitElement {
 
   private _foreignKeyFields() {
     const actions = foreignKeyActions(this.engine)
+    const refColumns = this._referenceColumnItems()
     return html`
       ${this._field('Name', this._nameInput(`fk_${this.table?.name ?? ''}`))}
       ${this._field('Columns', this._columnChecks(this._fkColumns, (column) => this._toggleFkColumn(column)), 'Local columns, in reference order.')}
       ${this._field(
         'References',
-        html`
-          <input
-            type="text"
-            placeholder="schema.table"
-            spellcheck="false"
-            autocomplete="off"
-            .value=${this._refTable}
-            @input=${(e: Event) => (this._refTable = (e.target as HTMLInputElement).value)}
-          />
-        `,
+        html`<picker-input
+          placeholder="schema.table"
+          .value=${this._refTable}
+          .items=${this._referenceTableItems()}
+          @value-change=${(event: CustomEvent<{ value: string }>) => {
+            this._refTable = event.detail.value
+            this._refColumns = ''
+          }}
+        ></picker-input>`,
         'Referenced table.',
       )}
       ${this._field(
         'Ref columns',
-        html`
-          <input
-            type="text"
-            placeholder="id"
-            spellcheck="false"
-            autocomplete="off"
-            .value=${this._refColumns}
-            @input=${(e: Event) => (this._refColumns = (e.target as HTMLInputElement).value)}
-          />
-        `,
+        html`<picker-input
+          placeholder="id"
+          .value=${this._refColumns}
+          .items=${refColumns}
+          multiple
+          @value-change=${(event: CustomEvent<{ value: string }>) => (this._refColumns = event.detail.value)}
+        ></picker-input>`,
         'Comma-separated; must match the local column count.',
       )}
       ${this._field('On delete', this._actionSelect(this._onDelete, actions, (value) => (this._onDelete = value)))}
@@ -188,15 +193,12 @@ export class InspectAddDialog extends LitElement {
       ${this._constraintType === 'CHECK'
         ? this._field(
             'Expression',
-            html`
-              <textarea
-                rows="3"
-                spellcheck="false"
-                placeholder=${'age >= 0'}
-                .value=${this._checkExpression}
-                @input=${(e: Event) => (this._checkExpression = (e.target as HTMLTextAreaElement).value)}
-              ></textarea>
-            `,
+            html`<sql-expression-editor
+              .value=${this._checkExpression}
+              .engine=${this.engine}
+              .columns=${this.columns}
+              @expression-change=${(event: CustomEvent<{ value: string }>) => (this._checkExpression = event.detail.value)}
+            ></sql-expression-editor>`,
             'A boolean expression each row must satisfy.',
           )
         : this._field('Columns', this._columnChecks(this._uniqueColumns, (column) => this._toggleUniqueColumn(column)), 'Rows must be unique across these columns.')}
@@ -296,16 +298,12 @@ export class InspectAddDialog extends LitElement {
       ${caps.usesFunction
         ? this._field(
             'Function',
-            html`
-              <input
-                type="text"
-                placeholder="schema.function_name"
-                spellcheck="false"
-                autocomplete="off"
-                .value=${this._functionName}
-                @input=${(e: Event) => (this._functionName = (e.target as HTMLInputElement).value)}
-              />
-            `,
+            html`<picker-input
+              placeholder="schema.function_name"
+              .value=${this._functionName}
+              .items=${this._functionItems()}
+              @value-change=${(event: CustomEvent<{ value: string }>) => (this._functionName = event.detail.value)}
+            ></picker-input>`,
             'Existing trigger function to EXECUTE; () is added if omitted.',
           )
         : this._field(
@@ -406,51 +404,73 @@ export class InspectAddDialog extends LitElement {
     this.dispatchEvent(new CustomEvent('dialog-cancel', { bubbles: true, composed: true }))
   }
 
-  private _statement(table: TableRef): string {
+  private _operation(): InspectOperation {
     const caps = triggerCapabilities(this.engine)
     switch (this.kind) {
       case 'index':
-        return buildCreateIndex(table, { name: this._name, columns: this._indexColumns, unique: this._unique, method: this._method }, this.engine)
+        return { kind: 'index', spec: { name: this._name, columns: this._indexColumns, unique: this._unique, method: this._method } }
       case 'trigger':
-        return buildCreateTrigger(table, {
+        return { kind: 'trigger', spec: {
           name: this._name,
           timing: this._timing ?? caps.timings[0]!,
           events: this._events,
           level: this._level ?? caps.levels[0]!,
           functionName: this._functionName,
           body: this._body,
-        }, this.engine)
+        } }
       case 'partition':
-        return buildAddPartition(table, { name: this._name, bounds: this._bounds }, this.engine)
+        return { kind: 'partition', spec: { name: this._name, bounds: this._bounds } }
       case 'foreignKey':
-        return buildAddForeignKey(table, {
+        return { kind: 'foreignKey', spec: {
           name: this._name,
           columns: this._fkColumns,
           refTable: this._refTable,
           refColumns: this._refColumns.split(',').map((column) => column.trim()).filter(Boolean),
           onDelete: this._onDelete,
           onUpdate: this._onUpdate,
-        }, this.engine)
+        } }
       case 'constraint':
-        return buildAddConstraint(table, {
+        return { kind: 'constraint', spec: {
           name: this._name,
           type: this._constraintType,
           expression: this._checkExpression,
           columns: this._uniqueColumns,
-        }, this.engine)
+        } }
     }
   }
 
   private _create() {
     if (!this.table) return
     try {
-      const statement = this._statement(this.table)
+      const operation = this._operation()
+      buildInspectOperation(this.table, operation, this.engine)
       this.dispatchEvent(
-        new CustomEvent<AddObjectDetail>('add-ddl', { detail: { statements: [statement] }, bubbles: true, composed: true }),
+        new CustomEvent<AddObjectDetail>('add-ddl', { detail: { operation }, bubbles: true, composed: true }),
       )
     } catch (error) {
       this._error = (error as Error).message
     }
+  }
+
+  private _referenceTableItems(): PickerInputItem[] {
+    return this.tables
+      .filter((table) => table.kind === 'table')
+      .map((table) => ({ value: table.schema ? `${table.schema}.${table.name}` : table.name }))
+  }
+
+  private _referenceColumnItems(): PickerInputItem[] {
+    const target = this._refTable.trim().toLowerCase()
+    if (!target) return []
+    return this.referenceColumns
+      .filter((column) => `${column.schema ? `${column.schema}.` : ''}${column.table}`.toLowerCase() === target)
+      .map((column) => ({ value: column.name, detail: column.dataType }))
+  }
+
+  private _functionItems(): PickerInputItem[] {
+    return this.functions.map((fn) => ({
+      value: fn.schema ? `${fn.schema}.${fn.name}` : fn.name,
+      detail: fn.detail,
+    }))
   }
 
   static styles = [

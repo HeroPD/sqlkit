@@ -578,6 +578,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           nullable: boolean
           default_expr: string | null
           pk: number
+          fk: number
           identity: boolean
           computed: boolean
           collation: string | null
@@ -589,6 +590,8 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
                   iif(exists (select 1 from sys.index_columns ic
                               join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
                               where i.is_primary_key = 1 and ic.object_id = c.object_id and ic.column_id = c.column_id), 1, 0) as pk,
+                  iif(exists (select 1 from sys.foreign_key_columns fkc
+                              where fkc.parent_object_id = c.object_id and fkc.parent_column_id = c.column_id), 1, 0) as fk,
                   c.is_identity as [identity],
                   c.is_computed as computed,
                   nullif(c.collation_name, convert(sysname, databasepropertyex(db_name(), 'Collation'))) as collation
@@ -660,6 +663,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           // identity plays the role of a default, like auto_increment on MySQL.
           default: row.default_expr ?? (row.identity ? 'identity' : null),
           primaryKey: !!row.pk,
+          foreignKey: !!row.fk,
           comment: null,
           collation: row.collation,
           generated: !!row.computed,

@@ -452,12 +452,15 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const args = [table.name]
 
       const [columns, foreignKeys, checks, indexes, partitions, triggers] = await Promise.all([
-        metaRows<{ name: string; data_type: string; nullable: number; default_expr: string | null; pk: number; comment: string | null; extra: string }>(
-          `select column_name as name, column_type as data_type, is_nullable = 'YES' as nullable,
-                  column_default as default_expr, column_key = 'PRI' as pk,
-                  nullif(column_comment, '') as comment, extra as extra
-           from information_schema.columns
-           where table_schema = database() and table_name = ? order by ordinal_position`,
+        metaRows<{ name: string; data_type: string; nullable: number; default_expr: string | null; pk: number; fk: number; comment: string | null; extra: string }>(
+          `select c.column_name as name, c.column_type as data_type, c.is_nullable = 'YES' as nullable,
+                  c.column_default as default_expr, c.column_key = 'PRI' as pk,
+                  exists (select 1 from information_schema.key_column_usage k
+                          where k.table_schema = c.table_schema and k.table_name = c.table_name
+                            and k.column_name = c.column_name and k.referenced_table_name is not null) as fk,
+                  nullif(c.column_comment, '') as comment, c.extra as extra
+           from information_schema.columns c
+           where c.table_schema = database() and c.table_name = ? order by c.ordinal_position`,
           args,
           childDb,
         ),
@@ -531,6 +534,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           // auto_increment lives in `extra`, but it plays the role of a default.
           default: row.default_expr ?? (row.extra.includes('auto_increment') ? 'auto_increment' : null),
           primaryKey: !!row.pk,
+          foreignKey: !!row.fk,
           // extra reads "STORED GENERATED" / "VIRTUAL GENERATED" for a generated column.
           generated: /generated/i.test(row.extra),
           comment: row.comment,

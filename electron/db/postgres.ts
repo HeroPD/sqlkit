@@ -615,6 +615,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
                   not a.attnotnull as nullable,
                   pg_catalog.pg_get_expr(d.adbin, d.adrelid) as default_expr,
                   coalesce(i.indisprimary, false) as primary_key,
+                  exists (select 1 from pg_catalog.pg_constraint fk
+                          where fk.contype = 'f' and fk.conrelid = a.attrelid
+                            and a.attnum = any(fk.conkey)) as foreign_key,
                   a.attgenerated as generated,
                   pg_catalog.col_description(a.attrelid, a.attnum) as comment
            from pg_catalog.pg_attribute a
@@ -688,6 +691,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
             nullable: boolean
             default_expr: string | null
             primary_key: boolean
+            foreign_key: boolean
             generated: string | null
             comment: string | null
           }) => ({
@@ -696,6 +700,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
             nullable: row.nullable,
             default: row.default_expr,
             primaryKey: row.primary_key,
+            foreignKey: row.foreign_key,
             // attgenerated is '' for a normal column, 's'/'v' for a generated one.
             generated: !!row.generated,
             comment: row.comment,

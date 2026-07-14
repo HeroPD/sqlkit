@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TableRef } from '../electron'
 import './inspect-add-dialog'
 import type { AddObjectDetail, InspectAddDialog } from './inspect-add-dialog'
+import type { PickerInput } from './picker-input'
+import { buildInspectOperation } from '../inspect-operations'
 
 const users: TableRef = { schema: 'public', name: 'users', kind: 'table' }
 
@@ -50,7 +52,7 @@ describe('inspect-add-dialog: index', () => {
 
     expect(onDdl).toHaveBeenCalledOnce()
     const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
-    expect(detail.statements).toEqual(['CREATE INDEX "idx_users_name" ON "public"."users" ("name", "age")'])
+    expect(buildInspectOperation(users, detail.operation, 'postgresql')).toBe('CREATE INDEX "idx_users_name" ON "public"."users" ("name", "age")')
   })
 
   it('shows the builder error inline instead of emitting', async () => {
@@ -85,7 +87,7 @@ describe('inspect-add-dialog: trigger', () => {
     create(el)
 
     const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
-    expect(detail.statements[0]).toBe(
+    expect(buildInspectOperation(users, detail.operation, 'mysql')).toBe(
       'CREATE TRIGGER `trg_users`\nBEFORE INSERT ON `public`.`users`\nFOR EACH ROW\nBEGIN\nSET NEW.updated_at = NOW();\nEND',
     )
   })
@@ -94,21 +96,49 @@ describe('inspect-add-dialog: trigger', () => {
     const el = await mount((dialog) => {
       dialog.kind = 'trigger'
       dialog.engine = 'postgresql'
+      dialog.functions = [{ schema: 'audit', name: 'log_change', detail: '()' }]
     })
     const onDdl = vi.fn()
     el.addEventListener('add-ddl', onDdl)
 
     expect(el.shadowRoot!.querySelector('textarea')).toBeNull()
+    expect(el.shadowRoot!.querySelector<PickerInput>('picker-input[placeholder="schema.function_name"]')!.items).toEqual([
+      { value: 'audit.log_change', detail: '()' },
+    ])
     await setInput(el, 'input[type="text"]', 'audit')
-    await setInput(el, 'input[placeholder="schema.function_name"]', 'log_change')
+    el.shadowRoot!.querySelector('picker-input[placeholder="schema.function_name"]')!.dispatchEvent(
+      new CustomEvent('value-change', { detail: { value: 'log_change' }, bubbles: true, composed: true }),
+    )
     create(el)
 
     const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
-    expect(detail.statements[0]).toContain('FOR EACH ROW EXECUTE FUNCTION log_change()')
+    expect(buildInspectOperation(users, detail.operation, 'postgresql')).toContain('FOR EACH ROW EXECUTE FUNCTION log_change()')
   })
 })
 
 describe('inspect-add-dialog: foreign key', () => {
+  it('completes referenced tables and then columns from connection metadata', async () => {
+    const el = await mount((dialog) => {
+      dialog.kind = 'foreignKey'
+      dialog.engine = 'postgresql'
+      dialog.tables = [{ schema: 'public', name: 'accounts', kind: 'table' }]
+      dialog.referenceColumns = [
+        { schema: 'public', table: 'accounts', name: 'id', dataType: 'uuid', nullable: false, primaryKey: true, foreignKey: false },
+      ]
+    })
+    const tablePicker = el.shadowRoot!.querySelector<PickerInput>('picker-input[placeholder="schema.table"]')!
+    expect(tablePicker.items).toEqual([{ value: 'public.accounts' }])
+
+    tablePicker.dispatchEvent(new CustomEvent('value-change', {
+      detail: { value: 'public.accounts' },
+      bubbles: true,
+      composed: true,
+    }))
+    await el.updateComplete
+
+    expect(el.shadowRoot!.querySelector<PickerInput>('picker-input[placeholder="id"]')!.items).toEqual([{ value: 'id', detail: 'uuid' }])
+  })
+
   it('builds ALTER TABLE ADD CONSTRAINT FOREIGN KEY with picked columns and actions', async () => {
     const el = await mount((dialog) => {
       dialog.kind = 'foreignKey'
@@ -122,11 +152,12 @@ describe('inspect-add-dialog: foreign key', () => {
     // Second column checkbox = user_id.
     el.shadowRoot!.querySelectorAll<HTMLInputElement>('.checks input[type="checkbox"]')[1]!.click()
     await el.updateComplete
-    const texts = [...el.shadowRoot!.querySelectorAll<HTMLInputElement>('input[type="text"]')]
-    texts.find((i) => i.placeholder === 'schema.table')!.value = 'public.accounts'
-    texts.find((i) => i.placeholder === 'schema.table')!.dispatchEvent(new Event('input'))
-    texts.find((i) => i.placeholder === 'id')!.value = 'id'
-    texts.find((i) => i.placeholder === 'id')!.dispatchEvent(new Event('input'))
+    el.shadowRoot!.querySelector('picker-input[placeholder="schema.table"]')!.dispatchEvent(
+      new CustomEvent('value-change', { detail: { value: 'public.accounts' }, bubbles: true, composed: true }),
+    )
+    el.shadowRoot!.querySelector('picker-input[placeholder="id"]')!.dispatchEvent(
+      new CustomEvent('value-change', { detail: { value: 'id' }, bubbles: true, composed: true }),
+    )
     const onDelete = el.shadowRoot!.querySelectorAll<HTMLSelectElement>('select')[0]!
     onDelete.value = 'CASCADE'
     onDelete.dispatchEvent(new Event('change'))
@@ -134,7 +165,7 @@ describe('inspect-add-dialog: foreign key', () => {
     create(el)
 
     const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
-    expect(detail.statements[0]).toBe(
+    expect(buildInspectOperation(users, detail.operation, 'postgresql')).toBe(
       'ALTER TABLE "public"."users" ADD CONSTRAINT "fk_users_user" FOREIGN KEY ("user_id") REFERENCES "public"."accounts" ("id") ON DELETE CASCADE',
     )
   })
@@ -151,11 +182,17 @@ describe('inspect-add-dialog: constraint', () => {
     el.addEventListener('add-ddl', onDdl)
 
     await setInput(el, 'input[type="text"]', 'age_nonneg')
-    await setInput(el, 'textarea', 'age >= 0')
+    const expression = el.shadowRoot!.querySelector('sql-expression-editor')!
+    expression.dispatchEvent(new CustomEvent('expression-change', {
+      detail: { value: 'age >= 0' },
+      bubbles: true,
+      composed: true,
+    }))
+    await el.updateComplete
     create(el)
 
     const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
-    expect(detail.statements[0]).toBe('ALTER TABLE "public"."users" ADD CONSTRAINT "age_nonneg" CHECK (age >= 0)')
+    expect(buildInspectOperation(users, detail.operation, 'postgresql')).toBe('ALTER TABLE "public"."users" ADD CONSTRAINT "age_nonneg" CHECK (age >= 0)')
   })
 
   it('switches to UNIQUE and picks columns', async () => {
@@ -177,7 +214,7 @@ describe('inspect-add-dialog: constraint', () => {
     create(el)
 
     const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
-    expect(detail.statements[0]).toBe('ALTER TABLE `public`.`users` ADD CONSTRAINT `uq_email` UNIQUE (`email`, `tenant`)')
+    expect(buildInspectOperation(users, detail.operation, 'mysql')).toBe('ALTER TABLE `public`.`users` ADD CONSTRAINT `uq_email` UNIQUE (`email`, `tenant`)')
   })
 })
 
@@ -199,7 +236,7 @@ describe('inspect-add-dialog: partition', () => {
     create(el)
 
     const detail = (onDdl.mock.calls[0]![0] as CustomEvent<AddObjectDetail>).detail
-    expect(detail.statements).toEqual(['CREATE TABLE "public"."users_2026" PARTITION OF "public"."users" FOR VALUES IN (1, 2)'])
+    expect(buildInspectOperation(users, detail.operation, 'postgresql')).toBe('CREATE TABLE "public"."users_2026" PARTITION OF "public"."users" FOR VALUES IN (1, 2)')
   })
 
   it('cancels from the backdrop without emitting', async () => {

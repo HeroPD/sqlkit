@@ -4,6 +4,7 @@ import { dialectFor } from '../dialect'
 import { buildColumnAdd, buildColumnAlter, buildColumnDrop, quoteQualified, type ColumnAdd, type ColumnAlter } from '../sql-write'
 import { TABLE_KIND_LABELS } from '../table-kinds'
 import { capabilitiesFor } from '../engine-capabilities'
+import { buildInspectOperation, type InspectOperation } from '../inspect-operations'
 
 // Staged column edits from the Inspect tab, plus how to reach the connection and
 // refresh the view once the change lands. `onApplied` reloads the inspect tab.
@@ -15,6 +16,7 @@ export type ColumnAlterSpec = {
   edits: ColumnAlter[]
   additions: ColumnAdd[]
   drops: string[]
+  operations?: InspectOperation[]
   onApplied: () => void
 }
 
@@ -98,6 +100,7 @@ export class SchemaOpsController {
       ...buildColumnDrop(spec.table, spec.drops, spec.engine),
       ...buildColumnAlter(spec.table, spec.edits, spec.engine),
       ...buildColumnAdd(spec.table, spec.additions, spec.engine),
+      ...(spec.operations ?? []).map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
     ]
     if (!statements.length) return
     this.deps.dialogs.review = {
@@ -105,17 +108,6 @@ export class SchemaOpsController {
       params: [],
       warning: this._ddlWarning(spec.engine, statements.length),
       run: () => void this._runAlter(spec, statements),
-    }
-  }
-
-  // Reviewed DDL statements from the inspect add dialogs (index/trigger/partition).
-  applyStatements(spec: { profileId: string; childDb: string | null; engine: Engine; statements: string[]; onApplied: () => void }) {
-    if (!spec.statements.length) return
-    this.deps.dialogs.review = {
-      sql: spec.statements.map((statement) => `${statement};`).join('\n\n'),
-      params: [],
-      warning: this._ddlWarning(spec.engine, spec.statements.length),
-      run: () => void this._runAlter(spec, spec.statements),
     }
   }
 

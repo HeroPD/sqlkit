@@ -20,11 +20,9 @@ import {
 } from '@codemirror/commands'
 import {
   bracketMatching,
-  HighlightStyle,
   indentOnInput,
   syntaxHighlighting,
 } from '@codemirror/language'
-import { tags as t } from '@lezer/highlight'
 import {
   autocompletion,
   closeBrackets,
@@ -46,39 +44,7 @@ import type { ColumnRef } from '../electron'
 import { quoteStyleFor } from '../dialect'
 import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
-
-// One Dark's highlight palette pre-blended toward the dark --editor-bg,
-// matching the softened contrast of the app theme tokens in index.css.
-const chalky = 'var(--syntax-literal)',
-  coral = 'var(--syntax-name)',
-  cyan = 'var(--syntax-variable)',
-  invalid = 'var(--syntax-invalid)',
-  ivory = 'var(--syntax-bracket)',
-  stone = 'var(--syntax-comment)',
-  malibu = 'var(--syntax-heading)',
-  sage = 'var(--syntax-string)',
-  whiskey = 'var(--syntax-type)',
-  violet = 'var(--syntax-keyword)'
-
-// Same tag mapping as oneDarkHighlightStyle, only the colors are softened.
-const softHighlightStyle = HighlightStyle.define([
-  { tag: t.keyword, color: violet },
-  { tag: [t.name, t.deleted, t.character, t.propertyName, t.macroName], color: coral },
-  { tag: [t.function(t.variableName), t.labelName], color: malibu },
-  { tag: [t.color, t.constant(t.name), t.standard(t.name)], color: whiskey },
-  { tag: [t.definition(t.name), t.separator], color: ivory },
-  { tag: [t.typeName, t.className, t.number, t.changed, t.annotation, t.modifier, t.self, t.namespace], color: chalky },
-  { tag: [t.operator, t.operatorKeyword, t.url, t.escape, t.regexp, t.link, t.special(t.string)], color: cyan },
-  { tag: [t.meta, t.comment], color: stone },
-  { tag: t.strong, fontWeight: 'bold' },
-  { tag: t.emphasis, fontStyle: 'italic' },
-  { tag: t.strikethrough, textDecoration: 'line-through' },
-  { tag: t.link, color: stone, textDecoration: 'underline' },
-  { tag: t.heading, fontWeight: 'bold', color: coral },
-  { tag: [t.atom, t.bool, t.special(t.variableName)], color: whiskey },
-  { tag: [t.processingInstruction, t.string, t.inserted], color: sage },
-  { tag: t.invalid, color: invalid },
-])
+import { softHighlightStyle } from '../codemirror/highlight'
 
 const appTheme = EditorView.theme(
   {

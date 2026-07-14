@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import type { InspectColumn, InspectResult, TableInspection, TableRef } from '../electron'
-import { TableInspect, type ColumnAlterEventDetail } from './table-inspect'
+import { clearInspectDraftCache, dropInspectDraft, TableInspect, type ColumnAlterEventDetail } from './table-inspect'
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
 const defer = <T>(): Deferred<T> => {
@@ -123,6 +123,28 @@ describe('TableInspect reload triggers', () => {
 })
 
 describe('TableInspect column editing', () => {
+  it('renders foreign-key columns with the blue key indicator', async () => {
+    const column = inspectCol({ name: 'account_id', primaryKey: true, foreignKey: true })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: { columns: [column], sections: [] },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'orders', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    const icon = view.shadowRoot!.querySelector<HTMLElement>('.icon-cell .fk')
+    expect(icon?.classList.contains('codicon-key')).toBe(true)
+    expect(icon?.title).toBe('Foreign key')
+    expect(view.shadowRoot!.querySelector('.icon-cell .pk')).toBeTruthy()
+    view.remove()
+  })
+
   it('stages a text edit and drops it when reverted to the original', () => {
     stubInspect()
     const view = new TableInspect()
@@ -666,6 +688,88 @@ describe('TableInspect column editing', () => {
 })
 
 describe('TableInspect undo/redo and reset', () => {
+  it('keeps staged operations in the same undo history as column edits', () => {
+    stubInspect()
+    const view = new TableInspect()
+    const inner = internals(view) as ReturnType<typeof internals> & {
+      _operations: Array<{ kind: string }>
+      _commitDraft(edits: Map<string, unknown>, operations: Array<{ kind: string; spec: { name: string; columns: string[] } }>): void
+    }
+    inner._commitDraft(new Map(), [{ kind: 'index', spec: { name: 'idx', columns: ['age'] } }])
+    expect(view.hasPendingChanges()).toBe(true)
+
+    expect(view.undo()).toBe(true)
+    expect(view.hasPendingChanges()).toBe(false)
+    expect(view.redo()).toBe(true)
+    expect(inner._operations).toHaveLength(1)
+  })
+
+  it('restores a staged draft when its Inspect tab remounts', async () => {
+    clearInspectDraftCache()
+    const column = inspectCol({ name: 'age' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: { columns: [column], sections: [] },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const first = new TableInspect()
+    first.tabId = 'inspect:users'
+    first.profileId = 'p1'
+    first.engine = 'postgresql'
+    first.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(first)
+    await internals(first)._load()
+    internals(first)._commitText(column, 'name', 'age_years')
+    first.remove()
+
+    const second = new TableInspect()
+    second.tabId = 'inspect:users'
+    second.profileId = 'p1'
+    second.engine = 'postgresql'
+    second.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(second)
+    await internals(second)._load()
+
+    expect(internals(second)._edits.get('age')).toEqual({ name: 'age_years' })
+    second.remove()
+    clearInspectDraftCache()
+  })
+
+  it('does not resurrect a dropped draft after its tab is closed', async () => {
+    clearInspectDraftCache()
+    const column = inspectCol({ name: 'age' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: { columns: [column], sections: [] },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const first = new TableInspect()
+    first.tabId = 'inspect:users'
+    first.profileId = 'p1'
+    first.engine = 'postgresql'
+    first.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(first)
+    await internals(first)._load()
+    internals(first)._commitText(column, 'name', 'age_years')
+    // The workbench close flow drops the cached draft, then unmounts the element.
+    dropInspectDraft('inspect:users')
+    first.remove()
+
+    const second = new TableInspect()
+    second.tabId = 'inspect:users'
+    second.profileId = 'p1'
+    second.engine = 'postgresql'
+    second.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(second)
+    await internals(second)._load()
+
+    expect(internals(second)._edits.size).toBe(0)
+    second.remove()
+    clearInspectDraftCache()
+  })
+
   it('undoes and redoes staged edits one commit at a time', () => {
     stubInspect()
     const view = new TableInspect()
@@ -1263,7 +1367,7 @@ describe('TableInspect section add buttons', () => {
     view.remove()
   })
 
-  it('opens the add dialog from a section button and forwards create-ddl', async () => {
+  it('stages an add-dialog operation until the combined save', async () => {
     const inspectTable = vi.fn(() =>
       Promise.resolve<InspectResult>({ success: true, inspection: { columns: [inspectCol({ name: 'id' })], sections: [] } }),
     )
@@ -1278,8 +1382,8 @@ describe('TableInspect section add buttons', () => {
     await internals(view)._load()
     await view.updateComplete
 
-    const onCreate = vi.fn()
-    view.addEventListener('create-ddl', onCreate)
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
     // The columns table also has an .add-btn; pick the Indexes section button.
     const indexBtn = [...view.shadowRoot!.querySelectorAll<HTMLButtonElement>('.add-btn')]
       .find((btn) => btn.getAttribute('aria-label') === 'Add Indexes')!
@@ -1288,14 +1392,21 @@ describe('TableInspect section add buttons', () => {
 
     const dialog = view.shadowRoot!.querySelector('inspect-add-dialog')!
     expect(dialog).toBeTruthy()
-    dialog.dispatchEvent(new CustomEvent('add-ddl', { detail: { statements: ['CREATE INDEX "i" ON "users" ("id")'] }, bubbles: true, composed: true }))
-
-    expect(onCreate).toHaveBeenCalledOnce()
-    const detail = (onCreate.mock.calls[0]![0] as CustomEvent<{ engine: string; statements: string[] }>).detail
-    expect(detail.engine).toBe('sqlite')
-    expect(detail.statements).toEqual(['CREATE INDEX "i" ON "users" ("id")'])
+    dialog.dispatchEvent(new CustomEvent('add-ddl', {
+      detail: { operation: { kind: 'index', spec: { name: 'i', columns: ['id'] } } },
+      bubbles: true,
+      composed: true,
+    }))
     await view.updateComplete
     expect(view.shadowRoot!.querySelector('inspect-add-dialog')).toBeNull()
+    expect(onSave).not.toHaveBeenCalled()
+    expect(view.shadowRoot!.textContent).toContain('i •')
+
+    view.save()
+    expect(onSave).toHaveBeenCalledOnce()
+    expect((onSave.mock.calls[0]![0] as CustomEvent<ColumnAlterEventDetail>).detail.operations).toEqual([
+      { kind: 'index', spec: { name: 'i', columns: ['id'] } },
+    ])
     view.remove()
   })
 })

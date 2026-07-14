@@ -36,7 +36,7 @@ import './sql-editor'
 import './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
-import type { ColumnAlterEventDetail, CreateDdlEventDetail } from './table-inspect'
+import { clearInspectDraftCache, dropInspectDraft, type ColumnAlterEventDetail } from './table-inspect'
 import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectInspectDetail, TableBrowseDetail, TableSelectDetail } from './explorer-view'
@@ -120,11 +120,8 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _activeView: ViewId | null = 'explorer'
 
-  // Id of the inspect tab with unsaved column edits, if any. Only the active tab
-  // can be dirty (its edits live in the mounted component, dropped on switch), so
-  // this resets whenever the active tab changes.
   @state()
-  private _inspectDirtyTabId: string | null = null
+  private _inspectDirtyTabIds = new Set<string>()
 
   private _lastActiveTabId: string | null = null
 
@@ -325,18 +322,17 @@ export class WorkbenchScreen extends LitElement {
       this._cmdPalette.close()
       this._queries.reset()
       clearEditorStateCache()
+      clearInspectDraftCache()
+      this._inspectDirtyTabIds = new Set()
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
       void this._live.disconnectAll()
       if (this.workspace) void this._loadConfig()
     }
-    // Switching tabs unmounts the inspect component, dropping its staged edits;
-    // clear the dirty marker so it can't linger on a tab that's no longer editing.
     if (this._ctx.activeTabId !== this._lastActiveTabId) {
       this._captureTabScroll(this._lastActiveTabId)
       this._lastActiveTabId = this._ctx.activeTabId
       this._restoreScrollTabId = this._ctx.activeTabId
-      this._inspectDirtyTabId = null
     }
   }
 
@@ -537,7 +533,7 @@ export class WorkbenchScreen extends LitElement {
   private _requestCloseTab(id: string) {
     const tab = this._ctx.tabs.find((entry) => entry.id === id)
     const fileDirty = tab?.kind === 'sql' && tab.content !== tab.savedContent
-    const inspectDirty = id === this._inspectDirtyTabId
+    const inspectDirty = this._inspectDirtyTabIds.has(id)
     const stagedDirty = this._queries.hasStaged(id) || inspectDirty
     if (fileDirty || stagedDirty) {
       const title = tab ? (tab.kind === 'sql' ? tab.name : tabTitle(tab)) : 'tab'
@@ -546,16 +542,22 @@ export class WorkbenchScreen extends LitElement {
         : fileDirty
           ? 'Unsaved changes will be lost.'
           : inspectDirty
-            ? 'Unsaved column changes will be lost.'
+            ? 'Unsaved schema changes will be lost.'
             : 'Staged result edits/new rows will be lost.'
       this._dialogs.confirm = {
         message: `Close "${title}" without saving?`,
         detail,
         confirmLabel: fileDirty ? 'Close Without Saving' : 'Discard and Close',
-        action: () => this._ctx.closeTab(id),
+        action: () => {
+          dropInspectDraft(id)
+          this._inspectDirtyTabIds = new Set([...this._inspectDirtyTabIds].filter((tabId) => tabId !== id))
+          this._ctx.closeTab(id)
+        },
       }
       return
     }
+    dropInspectDraft(id)
+    this._inspectDirtyTabIds = new Set([...this._inspectDirtyTabIds].filter((tabId) => tabId !== id))
     this._ctx.closeTab(id)
   }
 
@@ -726,7 +728,7 @@ export class WorkbenchScreen extends LitElement {
                     (tab) => html`
                       <editor-tab
                         tabId=${tab.id}
-                        name=${tab.id === this._inspectDirtyTabId ? `${tabTitle(tab)} •` : tabTitle(tab)}
+                        name=${this._inspectDirtyTabIds.has(tab.id) ? `${tabTitle(tab)} •` : tabTitle(tab)}
                         .active=${tab.id === this._ctx.activeTabId}
                         .preview=${tab.kind === 'sql' && (tab.preview ?? false)}
                       ></editor-tab>
@@ -948,12 +950,15 @@ export class WorkbenchScreen extends LitElement {
       return html`
         <div class="editor-content inspect">
           <table-inspect
+            .tabId=${activeTab.id}
             .profileId=${activeTab.profileId}
             .childDb=${this._ctx.activeChildDb}
             .table=${activeTab.table}
             .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
+            .tables=${this._live.tables[activeTab.profileId] ?? []}
+            .referenceColumns=${this._live.columns[activeTab.profileId] ?? []}
+            .functions=${this._live.objects[activeTab.profileId]?.functions ?? []}
             @alter-columns=${this._onAlterColumns}
-            @create-ddl=${this._onCreateDdl}
             @inspect-dirty=${this._onInspectDirty}
           ></table-inspect>
         </div>
@@ -1170,12 +1175,13 @@ export class WorkbenchScreen extends LitElement {
     this._schemaOps.alterColumns((event as CustomEvent<ColumnAlterEventDetail>).detail)
   }
 
-  private _onCreateDdl(event: Event) {
-    this._schemaOps.applyStatements((event as CustomEvent<CreateDdlEventDetail>).detail)
-  }
-
   private _onInspectDirty(event: Event) {
-    this._inspectDirtyTabId = (event as CustomEvent<{ dirty: boolean }>).detail.dirty ? this._ctx.activeTabId : null
+    const { tabId, dirty } = (event as CustomEvent<{ tabId: string; dirty: boolean }>).detail
+    if (!tabId) return
+    const next = new Set(this._inspectDirtyTabIds)
+    if (dirty) next.add(tabId)
+    else next.delete(tabId)
+    this._inspectDirtyTabIds = next
   }
 
   // Inspect opens (or revisits) the table's structure tab — columns,

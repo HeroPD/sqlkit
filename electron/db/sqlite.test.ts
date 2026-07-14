@@ -593,9 +593,9 @@ describe('sqlite driver: inspectTable', () => {
 
     const inspection = await driver.inspectTable({ schema: null, name: 't', kind: 'table' })
     expect(inspection.columns).toEqual([
-      { name: 'id', dataType: 'INTEGER', nullable: true, default: null, primaryKey: true, comment: null },
-      { name: 'a', dataType: 'INTEGER', nullable: true, default: '5', primaryKey: false, comment: null },
-      { name: 'b', dataType: 'TEXT', nullable: false, default: null, primaryKey: false, comment: null },
+      { name: 'id', dataType: 'INTEGER', nullable: true, default: null, primaryKey: true, foreignKey: false, comment: null },
+      { name: 'a', dataType: 'INTEGER', nullable: true, default: '5', primaryKey: false, foreignKey: false, comment: null },
+      { name: 'b', dataType: 'TEXT', nullable: false, default: null, primaryKey: false, foreignKey: false, comment: null },
     ])
     expect(inspection.sections).toEqual([])
   })
@@ -609,9 +609,9 @@ describe('sqlite driver: inspectTable', () => {
 
     const inspection = await driver.inspectTable({ schema: null, name: 'child', kind: 'table' })
     expect(inspection.columns).toEqual([
-      { name: 'id', dataType: 'INTEGER', nullable: true, default: null, primaryKey: true, comment: null },
-      { name: 'parent_id', dataType: 'INTEGER', nullable: true, default: null, primaryKey: false, comment: null },
-      { name: 'note', dataType: 'TEXT', nullable: true, default: null, primaryKey: false, comment: null },
+      { name: 'id', dataType: 'INTEGER', nullable: true, default: null, primaryKey: true, foreignKey: false, comment: null },
+      { name: 'parent_id', dataType: 'INTEGER', nullable: true, default: null, primaryKey: false, foreignKey: true, comment: null },
+      { name: 'note', dataType: 'TEXT', nullable: true, default: null, primaryKey: false, foreignKey: false, comment: null },
     ])
     expect(inspection.sections).toEqual([
       {

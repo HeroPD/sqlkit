@@ -4,6 +4,7 @@ import type { ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile, TableRef } from '../electron'
 import { DialogsController } from './dialogs'
 import { SchemaOpsController, type ColumnAlterSpec } from './schema-ops'
+import type { InspectOperation } from '../inspect-operations'
 
 const host = (): ReactiveControllerHost =>
   ({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
@@ -153,6 +154,28 @@ describe('alterColumns', () => {
     expect(h.refresh).toHaveBeenCalledWith('p1')
   })
 
+  it('includes staged columns and schema objects in one review and one DDL batch', async () => {
+    sqlkit.runDdl.mockResolvedValue({ success: true })
+    const h = harness()
+    const s = spec({
+      additions: [{ name: 'tenant_id', dataType: 'integer', nullable: false, default: null, comment: null }],
+      operations: [{ kind: 'index', spec: { name: 'users_tenant_idx', columns: ['tenant_id'] } }] as InspectOperation[],
+    })
+
+    h.ops.alterColumns(s)
+
+    expect(h.dialogs.review?.sql).toBe(
+      'ALTER TABLE "public"."users" ADD COLUMN "tenant_id" integer NOT NULL;\n\n' +
+      'CREATE INDEX "users_tenant_idx" ON "public"."users" ("tenant_id");',
+    )
+    h.dialogs.acceptReview()
+    await flush()
+    expect(sqlkit.runDdl).toHaveBeenCalledWith('p1', null, [
+      'ALTER TABLE "public"."users" ADD COLUMN "tenant_id" integer NOT NULL',
+      'CREATE INDEX "users_tenant_idx" ON "public"."users" ("tenant_id")',
+    ])
+  })
+
   it('opens no review when the staged edits produce no statements', () => {
     const h = harness()
     h.ops.alterColumns(spec())
@@ -241,29 +264,5 @@ describe('createDatabase / dropDatabase', () => {
     await flush()
     expect(h.dialogs.confirm?.message).toBe('Could not drop "analytics"')
     expect(h.onDatabaseDropped).not.toHaveBeenCalled()
-  })
-})
-
-describe('applyStatements', () => {
-  it('reviews the statements and runs them on accept', async () => {
-    sqlkit.runDdl.mockResolvedValue({ success: true })
-    const h = harness()
-    const onApplied = vi.fn()
-    h.ops.applyStatements({ profileId: 'p1', childDb: null, engine: 'postgresql', statements: ['CREATE INDEX "i" ON "t" ("a")'], onApplied })
-
-    expect(h.dialogs.review?.sql).toBe('CREATE INDEX "i" ON "t" ("a");')
-    expect(sqlkit.runDdl).not.toHaveBeenCalled()
-
-    h.dialogs.acceptReview()
-    await flush()
-    expect(sqlkit.runDdl).toHaveBeenCalledWith('p1', null, ['CREATE INDEX "i" ON "t" ("a")'])
-    expect(onApplied).toHaveBeenCalledOnce()
-    expect(h.refresh).toHaveBeenCalledWith('p1')
-  })
-
-  it('is a no-op for an empty statement list', () => {
-    const h = harness()
-    h.ops.applyStatements({ profileId: 'p1', childDb: null, engine: 'postgresql', statements: [], onApplied: vi.fn() })
-    expect(h.dialogs.review).toBeNull()
   })
 })

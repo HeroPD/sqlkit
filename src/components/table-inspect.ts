@@ -1,7 +1,7 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
-import type { DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
+import type { ColumnRef, DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
 import { cellsToTsv } from '../result-export'
 import { canAddConstraint, type ColumnAdd, type ColumnAlter } from '../sql-write'
@@ -10,6 +10,7 @@ import './inspect-add-dialog'
 import type { AddObjectDetail, AddObjectKind } from './inspect-add-dialog'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
+import { buildInspectOperation, operationName, operationSection, type InspectOperation } from '../inspect-operations'
 
 // A column property the user can edit inline (click). Nullable is edited via a
 // yes/no menu; primary key stays read-only. Capabilities come from the dialect.
@@ -18,19 +19,16 @@ type EditField = 'name' | 'dataType' | 'comment' | 'default'
 // One column's staged edits — the fields that differ from what was loaded.
 // `drop: true` stages removing the column and replaces any field edits.
 type ColumnDiff = Partial<Omit<ColumnAlter, 'original'>> & { drop?: boolean }
+type DraftSnapshot = { edits: Map<string, ColumnDiff>; operations: InspectOperation[] }
+
+const draftCache = new Map<string, { snapshot: DraftSnapshot; history: DraftSnapshot[]; historyIndex: number; addSeq: number }>()
+
+export const clearInspectDraftCache = () => draftCache.clear()
+export const dropInspectDraft = (tabId: string) => draftCache.delete(tabId)
 
 // Right-click menu state. `col`/`field` are set for the columns table (they
 // gate the reset items); the section tables leave them undefined.
 type RowMenu = { x: number; y: number; name: string; definition: string | null; col?: InspectColumn; field?: EditField | 'nullable' }
-
-// Emitted by the section add dialogs; same SchemaOps review → runDdl route.
-export type CreateDdlEventDetail = {
-  profileId: string
-  childDb: string | null
-  engine: Engine
-  statements: string[]
-  onApplied: () => void
-}
 
 // Emitted on ⌘S / Save so the workbench routes the change through SchemaOps
 // (build DDL → review dialog → runDdl). `onApplied` reloads this tab on success.
@@ -41,6 +39,7 @@ export type ColumnAlterEventDetail = {
   engine: Engine
   edits: ColumnAlter[]
   additions: ColumnAdd[]
+  operations: InspectOperation[]
   /** Original names of columns staged for DROP COLUMN. */
   drops: string[]
   onApplied: () => void
@@ -97,6 +96,9 @@ const MAX_EDIT_HISTORY = 100
 @customElement('table-inspect')
 export class TableInspect extends LitElement {
   @property()
+  tabId = ''
+
+  @property()
   profileId = ''
 
   /** Child database this inspect tab belongs to (all-databases mode); null otherwise. */
@@ -116,6 +118,15 @@ export class TableInspect extends LitElement {
   @property()
   engine: Engine | null = null
 
+  @property({ attribute: false })
+  tables: TableRef[] = []
+
+  @property({ attribute: false })
+  referenceColumns: ColumnRef[] = []
+
+  @property({ attribute: false })
+  functions: DbObject[] = []
+
   @state()
   private _state: { phase: 'loading' } | { phase: 'error'; error: string } | { phase: 'done'; inspection: TableInspection } = {
     phase: 'loading',
@@ -128,12 +139,15 @@ export class TableInspect extends LitElement {
   @state()
   private _addDialog: AddObjectKind | null = null
 
+  @state()
+  private _operations: InspectOperation[] = []
+
   /** Staged column edits, keyed by the column's original name. */
   @state()
   private _edits = new Map<string, ColumnDiff>()
 
-  /** Undo/redo stack of `_edits` snapshots; `_historyIndex` points at the live one. */
-  private _history: Map<string, ColumnDiff>[] = [new Map<string, ColumnDiff>()]
+  /** Undo/redo stack for the complete Inspect draft. */
+  private _history: DraftSnapshot[] = [{ edits: new Map(), operations: [] }]
 
   private _historyIndex = 0
 
@@ -181,6 +195,8 @@ export class TableInspect extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback()
+    // No stash here: every mutation already stashes, and re-stashing on unmount
+    // would resurrect a draft the workbench just dropped when closing the tab.
     window.removeEventListener('mousedown', this._onWindowMouseDown, true)
     this._endSelDrag()
   }
@@ -232,9 +248,13 @@ export class TableInspect extends LitElement {
       }
     }
     // Surface the dirty state so the workbench can mark the tab (the • marker).
-    if (changed.has('_edits')) {
+    if (changed.has('_edits') || changed.has('_operations')) {
       this.dispatchEvent(
-        new CustomEvent('inspect-dirty', { detail: { dirty: this._edits.size > 0 }, bubbles: true, composed: true }),
+        new CustomEvent('inspect-dirty', {
+          detail: { tabId: this.tabId, dirty: this.hasPendingChanges() },
+          bubbles: true,
+          composed: true,
+        }),
       )
     }
   }
@@ -246,10 +266,7 @@ export class TableInspect extends LitElement {
     const object = this.object
     const objectKind = this.objectKind
     if (!profileId || (!table && !object)) return
-    // A fresh structure invalidates any staged edits against the old one.
-    this._edits = new Map()
-    this._history = [this._edits]
-    this._historyIndex = 0
+    this._restoreDraft()
     this._editing = null
     this._cellMenu = null
     this._typePicker = null
@@ -273,6 +290,37 @@ export class TableInspect extends LitElement {
       return
     }
     this._state = result.success ? { phase: 'done', inspection: result.inspection } : { phase: 'error', error: result.error }
+  }
+
+  private _restoreDraft() {
+    const cached = this.tabId ? draftCache.get(this.tabId) : undefined
+    if (cached) {
+      this._edits = new Map(cached.snapshot.edits)
+      this._operations = [...cached.snapshot.operations]
+      this._history = cached.history.map((snapshot) => ({ edits: new Map(snapshot.edits), operations: [...snapshot.operations] }))
+      this._historyIndex = cached.historyIndex
+      this._addSeq = cached.addSeq
+      return
+    }
+    this._edits = new Map()
+    this._operations = []
+    this._history = [{ edits: new Map(), operations: [] }]
+    this._historyIndex = 0
+    this._addSeq = 0
+  }
+
+  private _stashDraft() {
+    if (!this.tabId) return
+    if (!this.hasPendingChanges()) {
+      draftCache.delete(this.tabId)
+      return
+    }
+    draftCache.set(this.tabId, {
+      snapshot: { edits: new Map(this._edits), operations: [...this._operations] },
+      history: this._history.map((snapshot) => ({ edits: new Map(snapshot.edits), operations: [...snapshot.operations] })),
+      historyIndex: this._historyIndex,
+      addSeq: this._addSeq,
+    })
   }
 
   render() {
@@ -302,6 +350,12 @@ export class TableInspect extends LitElement {
           <button class="refresh" title="Reload structure" aria-label="Reload structure" @click=${() => void this._load()}>
             <i class="codicon codicon-refresh" aria-hidden="true"></i>
           </button>
+          ${this.hasPendingChanges()
+            ? html`
+                <button class="draft-action" @click=${this.discard}>Discard</button>
+                <button class="draft-action primary" @click=${() => this.save()}>Save</button>
+              `
+            : ''}
         </div>
         ${this._renderBody()}
       </div>
@@ -317,7 +371,10 @@ export class TableInspect extends LitElement {
         .kind=${this._addDialog}
         .table=${this.table}
         .engine=${this.engine}
-        .columns=${this._state.phase === 'done' ? this._state.inspection.columns.map((column) => column.name) : []}
+        .columns=${this._effectiveColumnNames()}
+        .tables=${this.tables}
+        .referenceColumns=${this._effectiveReferenceColumns()}
+        .functions=${this.functions}
         @dialog-cancel=${() => (this._addDialog = null)}
         @add-ddl=${this._onAddDdl}
       ></inspect-add-dialog>
@@ -326,22 +383,8 @@ export class TableInspect extends LitElement {
 
   private _onAddDdl(event: CustomEvent<AddObjectDetail>) {
     event.stopPropagation()
-    const engine = this.engine
-    if (!engine) return
+    this._commitDraft(this._edits, [...this._operations, event.detail.operation])
     this._addDialog = null
-    this.dispatchEvent(
-      new CustomEvent<CreateDdlEventDetail>('create-ddl', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          profileId: this.profileId,
-          childDb: this.childDb,
-          engine,
-          statements: event.detail.statements,
-          onApplied: () => void this._load(),
-        },
-      }),
-    )
   }
 
   private _renderMenu() {
@@ -424,6 +467,33 @@ export class TableInspect extends LitElement {
     return [...columns, ...this._additionColumns()]
   }
 
+  private _effectiveColumnNames(): string[] {
+    if (this._state.phase !== 'done') return []
+    const loaded = this._state.inspection.columns
+      .filter((column) => !this._isDropped(column.name))
+      .map((column) => String(this._fieldText(column, 'name')).trim())
+    const additions = this._additionColumns().map((column) => String(this._fieldText(column, 'name')).trim())
+    return [...loaded, ...additions].filter(Boolean)
+  }
+
+  private _effectiveReferenceColumns(): ColumnRef[] {
+    if (!this.table || this._state.phase !== 'done') return this.referenceColumns
+    const sameTable = (column: ColumnRef) => column.table === this.table!.name && column.schema === this.table!.schema
+    const others = this.referenceColumns.filter((column) => !sameTable(column))
+    const current = this._gridRows()
+      .filter((column) => !this._isDropped(column.name))
+      .map((column) => ({
+        schema: this.table!.schema,
+        table: this.table!.name,
+        name: String(this._fieldText(column, 'name')),
+        dataType: String(this._fieldText(column, 'dataType')),
+        nullable: this._fieldNullable(column),
+        primaryKey: column.primaryKey,
+        foreignKey: column.foreignKey ?? false,
+      }))
+    return [...others, ...current]
+  }
+
   // A grid's cell fields, in column order. Section tables are name + definition.
   private _gridFields(grid: number): string[] {
     if (grid !== COLUMNS_GRID) return ['name', 'definition']
@@ -433,12 +503,36 @@ export class TableInspect extends LitElement {
 
   // The sections as rendered (scaffold included): every grid index means this.
   private _sections(): TableInspection['sections'] {
-    return this._state.phase === 'done' ? this._displaySections(this._state.inspection.sections) : []
+    if (this._state.phase !== 'done') return []
+    const sections = this._displaySections(this._state.inspection.sections).map((section) => ({
+      ...section,
+      rows: [...section.rows],
+    }))
+    if (!this.table || !this.engine) return sections
+    for (const operation of this._operations) {
+      const title = operationSection(operation)
+      let section = sections.find((candidate) => candidate.title === title)
+      if (!section) {
+        section = { title, rows: [] }
+        sections.push(section)
+      }
+      section.rows.push({
+        name: `${operationName(operation)} •`,
+        definition: buildInspectOperation(this.table, operation, this.engine),
+      })
+    }
+    return sections
   }
 
   private _gridRowCount(grid: number): number {
     if (grid === COLUMNS_GRID) return this._gridRows().length
     return this._sections()[grid]?.rows.length ?? 0
+  }
+
+  private _stagedOperationIndex(section: string, rowName: string): number {
+    if (!rowName.endsWith(' •')) return -1
+    const name = rowName.slice(0, -2)
+    return this._operations.findIndex((operation) => operationSection(operation) === section && operationName(operation) === name)
   }
 
   // The grid coordinate of a DOM node's cell; null off any grid (icon cell, header).
@@ -736,21 +830,35 @@ export class TableInspect extends LitElement {
   }
 
   private _applyEdit(colName: string, edit: ColumnDiff) {
+    const previousName = this._effectiveNameForKey(colName, this._edits.get(colName))
+    const nextName = this._effectiveNameForKey(colName, edit)
     const next = new Map(this._edits)
     if (Object.keys(edit).length) next.set(colName, edit)
     else next.delete(colName)
-    this._commitEdits(next)
+    const operations = previousName !== nextName ? this._renameOperationColumn(previousName, nextName) : this._operations
+    this._commitDraft(next, operations)
+  }
+
+  private _effectiveNameForKey(key: string, edit: ColumnDiff | undefined): string {
+    return edit?.name ?? (this._isAddition(key) ? NEW_COLUMN_NAME : key)
   }
 
   // The single funnel for staging edits: swaps them in and records the step on
   // the (capped) undo stack, dropping the redo branch and no-op changes.
   private _commitEdits(next: Map<string, ColumnDiff>) {
-    if (this._editsEqual(next, this._edits)) return
+    this._commitDraft(next, this._operations)
+  }
+
+  private _commitDraft(edits: Map<string, ColumnDiff>, operations: InspectOperation[]) {
+    if (this._editsEqual(edits, this._edits) && JSON.stringify(operations) === JSON.stringify(this._operations)) return
     this._saveError = null
-    this._edits = next
-    this._history = [...this._history.slice(0, this._historyIndex + 1), next]
+    this._edits = new Map(edits)
+    this._operations = [...operations]
+    const snapshot = { edits: new Map(edits), operations: [...operations] }
+    this._history = [...this._history.slice(0, this._historyIndex + 1), snapshot]
     if (this._history.length > MAX_EDIT_HISTORY) this._history = this._history.slice(this._history.length - MAX_EDIT_HISTORY)
     this._historyIndex = this._history.length - 1
+    this._stashDraft()
   }
 
   private _editsEqual(a: Map<string, ColumnDiff>, b: Map<string, ColumnDiff>): boolean {
@@ -783,14 +891,20 @@ export class TableInspect extends LitElement {
   undo(): boolean {
     if (this._editing || this._historyIndex <= 0) return false
     this._historyIndex--
-    this._edits = new Map(this._history[this._historyIndex])
+    const snapshot = this._history[this._historyIndex]!
+    this._edits = new Map(snapshot.edits)
+    this._operations = [...snapshot.operations]
+    this._stashDraft()
     return true
   }
 
   redo(): boolean {
     if (this._editing || this._historyIndex >= this._history.length - 1) return false
     this._historyIndex++
-    this._edits = new Map(this._history[this._historyIndex])
+    const snapshot = this._history[this._historyIndex]!
+    this._edits = new Map(snapshot.edits)
+    this._operations = [...snapshot.operations]
+    this._stashDraft()
     return true
   }
 
@@ -810,6 +924,18 @@ export class TableInspect extends LitElement {
     this._editing = null
     this._typePicker = null
     this._defaultPicker = null
+  }
+
+  private _renameOperationColumn(from: string, to: string): InspectOperation[] {
+    const rename = (columns: string[] | undefined) => columns?.map((column) => column === from ? to : column)
+    return this._operations.map((operation) => {
+      if (operation.kind === 'index') return { ...operation, spec: { ...operation.spec, columns: rename(operation.spec.columns) ?? [] } }
+      if (operation.kind === 'foreignKey') return { ...operation, spec: { ...operation.spec, columns: rename(operation.spec.columns) ?? [] } }
+      if (operation.kind === 'constraint' && operation.spec.type === 'UNIQUE') {
+        return { ...operation, spec: { ...operation.spec, columns: rename(operation.spec.columns) } }
+      }
+      return operation
+    })
   }
 
   private _fieldOriginal(col: InspectColumn, field: EditField): string {
@@ -939,7 +1065,18 @@ export class TableInspect extends LitElement {
 
   /** Whether there are staged column edits. Read by the workbench close-confirm. */
   hasPendingChanges() {
-    return this._edits.size > 0
+    return this._edits.size > 0 || this._operations.length > 0
+  }
+
+  discard = () => {
+    this._edits = new Map()
+    this._operations = []
+    this._history = [{ edits: new Map(), operations: [] }]
+    this._historyIndex = 0
+    this._addSeq = 0
+    this._editing = null
+    this._saveError = null
+    if (this.tabId) draftCache.delete(this.tabId)
   }
 
   // Commits any focused editor, then emits the staged edits for the workbench to
@@ -947,7 +1084,7 @@ export class TableInspect extends LitElement {
   // staged.
   save() {
     this.renderRoot.querySelector<HTMLElement>('.cell-input')?.blur()
-    if (this._state.phase !== 'done' || !this._edits.size || !this.table || !this.engine) return
+    if (this._state.phase !== 'done' || !this.hasPendingChanges() || !this.table || !this.engine) return
     const byName = new Map(this._state.inspection.columns.map((column) => [column.name, column]))
     const edits: ColumnAlter[] = []
     const additions: ColumnAdd[] = []
@@ -964,10 +1101,26 @@ export class TableInspect extends LitElement {
       const original = byName.get(name)
       if (original) edits.push({ original, ...diff })
     }
-    if (!edits.length && !additions.length && !drops.length) return
+    if (!edits.length && !additions.length && !drops.length && !this._operations.length) return
     const duplicate = this._duplicateName(edits, additions, drops)
     if (duplicate !== null) {
       this._saveError = `Duplicate column name "${duplicate}" — rename one before saving.`
+      return
+    }
+    const effectiveColumns = new Set(this._effectiveColumnNames())
+    try {
+      for (const operation of this._operations) {
+        const localColumns = operation.kind === 'index' || operation.kind === 'foreignKey'
+          ? operation.spec.columns
+          : operation.kind === 'constraint' && operation.spec.type === 'UNIQUE'
+            ? operation.spec.columns ?? []
+            : []
+        const missing = localColumns.find((column) => !effectiveColumns.has(column))
+        if (missing) throw new Error(`Staged ${operation.kind} references removed column "${missing}"`)
+        buildInspectOperation(this.table, operation, this.engine)
+      }
+    } catch (error) {
+      this._saveError = (error as Error).message
       return
     }
     // The workbench reuses this element across tables; capture the target so a
@@ -985,6 +1138,7 @@ export class TableInspect extends LitElement {
           edits,
           additions,
           drops,
+          operations: [...this._operations],
           onApplied: () => {
             if (
               this.profileId !== target.profileId
@@ -993,6 +1147,11 @@ export class TableInspect extends LitElement {
               || (this.table?.name ?? null) !== target.name
             ) return
             this._edits = new Map()
+            this._operations = []
+            this._history = [{ edits: new Map(), operations: [] }]
+            this._historyIndex = 0
+            this._addSeq = 0
+            if (this.tabId) draftCache.delete(this.tabId)
             this._editing = null
             void this._load()
           },
@@ -1135,20 +1294,38 @@ export class TableInspect extends LitElement {
             </colgroup>
             <tbody>
               ${section.rows.map(
-                (row, index) => html`
-                  <tr data-row=${index} @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}>
+                (row, index) => {
+                  const stagedIndex = this._stagedOperationIndex(section.title, row.name)
+                  return html`
+                  <tr
+                    data-row=${index}
+                    class=${stagedIndex >= 0 ? 'staged-operation' : ''}
+                    @contextmenu=${(event: MouseEvent) => this._onRowMenu(event, row.name, row.definition)}
+                  >
                     <td
                       data-field="name"
                       class="mono name-cell${this._isSelected(grid, index, 0) ? ' selected' : ''}"
                       title=${row.name}
                     >
                       ${this.engine ? dialectFor(this.engine).displayConstraintName(row.name) : row.name}
+                      ${stagedIndex >= 0
+                        ? html`<button
+                            class="remove-staged"
+                            title="Remove staged change"
+                            aria-label="Remove staged change"
+                            @pointerdown=${(event: PointerEvent) => event.stopPropagation()}
+                            @click=${() => this._commitDraft(
+                              this._edits,
+                              this._operations.filter((_, operationIndex) => operationIndex !== stagedIndex),
+                            )}
+                          ><i class="codicon codicon-close" aria-hidden="true"></i></button>`
+                        : ''}
                     </td>
                     <td data-field="definition" class="mono def${this._isSelected(grid, index, 1) ? ' selected' : ''}" title=${row.definition}>
                       ${highlightDefinition(row.definition)}
                     </td>
                   </tr>
-                `,
+                `},
               )}
             </tbody>
           </table>`}
@@ -1249,8 +1426,15 @@ export class TableInspect extends LitElement {
                     <i class="codicon codicon-discard" aria-hidden="true"></i>
                   </button>
                 `
-              : column.primaryKey
-                ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>`
+              : column.primaryKey || column.foreignKey
+                ? html`<span class="key-icons">
+                    ${column.primaryKey
+                      ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>`
+                      : ''}
+                    ${column.foreignKey
+                      ? html`<i class="codicon codicon-key fk" aria-hidden="true" title="Foreign key"></i>`
+                      : ''}
+                  </span>`
                 : ''}
         </td>
         ${this._renderTextCell(column, 'name', 'mono clip', this._fieldText(column, 'name'), row)}
@@ -1556,6 +1740,22 @@ export class TableInspect extends LitElement {
         background: var(--list-hover);
       }
 
+      .draft-action {
+        height: 24px;
+        padding: 0 9px;
+        color: var(--text-2);
+        background: var(--btn-secondary-bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        font-size: var(--font-size-sm);
+      }
+
+      .draft-action.primary {
+        color: var(--btn-fg);
+        background: var(--btn-bg);
+        border-color: var(--btn-bg);
+      }
+
       h4 {
         display: flex;
         align-items: center;
@@ -1634,12 +1834,23 @@ export class TableInspect extends LitElement {
       }
 
       .icon-cell {
-        width: 18px;
+        width: 30px;
+      }
+
+      .key-icons {
+        display: flex;
+        align-items: center;
+        gap: 2px;
       }
 
       .icon-cell .pk {
         font-size: 12px;
         color: var(--status-dot-warning);
+      }
+
+      .icon-cell .fk {
+        font-size: 12px;
+        color: var(--accent);
       }
 
       /* Fixed layout + a shared name-column width keeps every section's
@@ -1661,7 +1872,7 @@ export class TableInspect extends LitElement {
       }
 
       .icon-col {
-        width: 18px;
+        width: 30px;
       }
 
       .type-col {
@@ -1705,6 +1916,29 @@ export class TableInspect extends LitElement {
         /* The editor's keyword violet (sql-editor.ts softHighlightStyle), so
            definitions read as the same language as the editor. */
         color: #a163b5;
+      }
+
+      .staged-operation td {
+        background: color-mix(in srgb, var(--status-dot-connected) 8%, var(--editor-bg));
+      }
+
+      .staged-operation .name-cell {
+        color: var(--status-dot-connected);
+      }
+
+      .remove-staged {
+        float: right;
+        display: inline-flex;
+        padding: 1px;
+        color: var(--text-3);
+        background: transparent;
+        border: 0;
+        border-radius: 3px;
+      }
+
+      .remove-staged:hover {
+        color: var(--text);
+        background: var(--list-hover);
       }
 
       .hint {
