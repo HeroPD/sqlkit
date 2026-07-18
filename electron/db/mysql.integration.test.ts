@@ -278,6 +278,34 @@ DELIMITER ;`)
     }
   }, 20000)
 
+  it('cancels an in-flight streaming export', async () => {
+    const driver = await connectDriver()
+    const file = join(mkdtempSync(join(tmpdir(), 'sqlkit-mysql-export-')), 'slow.csv')
+    try {
+      // A killed SLEEP() returns 1 rather than erroring, so assert on the
+      // cancel outcome and that the export ends promptly either way.
+      const running = driver.exportQuery!({
+        sql: 'select sleep(30) as s',
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'csv',
+        executionId: 'slow-export',
+      }).catch(() => null)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const outcome = await driver.cancel?.('slow-export')
+      expect(outcome?.running).toBeGreaterThanOrEqual(1)
+      expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
+      const started = performance.now()
+      await running
+      expect(performance.now() - started).toBeLessThan(5000)
+      expect((await driver.query('select 1')).rows).toEqual([[1]])
+    } finally {
+      await driver.disconnect()
+    }
+  }, 20000)
+
   it('reports nothing running when cancel finds no in-flight query', async () => {
     const driver = await connectDriver()
     try {

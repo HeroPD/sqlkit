@@ -464,6 +464,40 @@ export class QueriesController implements ReactiveController {
     this.host.requestUpdate()
   }
 
+  /** Tracks a streaming export in the Tasks view, so a long one is visible and
+   * stoppable (its executionId is the cancel target) like any running query. */
+  beginExport(args: { executionId: string; profileId: string; contextLabel: string; sql: string }) {
+    const task: TaskItem = {
+      id: args.executionId,
+      profileId: args.profileId,
+      contextLabel: `${args.contextLabel} — export`,
+      sql: args.sql,
+      startedAt: Date.now(),
+      status: 'running',
+      durationMs: null,
+      rowCount: null,
+    }
+    this.tasks = [task, ...this.tasks].slice(0, MAX_TASKS)
+    this.ensureTimer()
+    this.host.requestUpdate()
+  }
+
+  /** Settles an export's task. A cancelled save dialog or a stopped export both
+   * land as 'cancelled'; everything else follows success/error. */
+  finishExport(executionId: string, outcome: { success: boolean; rowCount?: number; error?: string; canceled?: boolean }) {
+    this.tasks = this.tasks.map((entry) =>
+      entry.id === executionId
+        ? {
+            ...entry,
+            status: outcome.success ? 'done' : outcome.canceled || outcome.error === 'Query cancelled.' ? 'cancelled' : 'error',
+            durationMs: Date.now() - entry.startedAt,
+            rowCount: outcome.rowCount ?? null,
+          }
+        : entry,
+    )
+    this.host.requestUpdate()
+  }
+
   private finishTask(taskId: string, response: QueryResponse, startedAt: number) {
     this.tasks = this.tasks.map((entry) =>
       entry.id === taskId

@@ -286,6 +286,44 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
+  it('does not leak a USE from user SQL into metadata reads on the shared pool', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('use master')
+      const tables = await driver.listTables()
+      expect(tables).toEqual(expect.arrayContaining([{ schema: 'dbo', name: 'authors', kind: 'table' }]))
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('rolls back a transaction left open by a failed script before the connection is pooled', async () => {
+    const driver = await connectDriver()
+    await fixtures.request().batch("drop table if exists lock_probe")
+    await fixtures.request().batch("create table lock_probe (id int primary key, v nvarchar(10))")
+    await fixtures.request().batch("insert into lock_probe values (1, 'a')")
+    try {
+      // Textually balanced so the guard admits it; THROW aborts the batch after
+      // the UPDATE took its lock, so COMMIT never runs.
+      await expect(
+        driver.query("begin tran update lock_probe set v = 'dirty' where id = 1; throw 50000, 'boom', 1; commit"),
+      ).rejects.toThrow('boom')
+      // A second session must not find the row still locked by an abandoned txn.
+      const probe = await new sql.ConnectionPool(configFromUrl(dbUrl, TEST_DB)).connect()
+      try {
+        await probe.request().batch("set lock_timeout 2000 update lock_probe set v = 'probe' where id = 1")
+      } finally {
+        await probe.close()
+      }
+      expect((await driver.query('select v from lock_probe')).rows).toEqual([['probe']])
+    } finally {
+      // Disconnect first: it rolls back any leaked transaction, so the drop
+      // below can't hang on its locks if this test ever regresses.
+      await driver.disconnect()
+      await fixtures.request().batch('drop table if exists lock_probe').catch(() => {})
+    }
+  }, 20000)
+
   it('returns safe decimal and datetime2 values as exact text', async () => {
     const driver = await connectDriver()
     try {
@@ -317,6 +355,30 @@ describeDb('mssql driver (integration)', () => {
       expect(await driver.cancel?.('other-query')).toEqual({ running: 0, cancelled: 0 })
       const outcome = await driver.cancel?.('slow-query')
       expect(outcome?.running).toBeGreaterThanOrEqual(1)
+      expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
+      await cancelled
+      expect((await driver.query('select 1')).rows).toEqual([[1]])
+    } finally {
+      await driver.disconnect()
+    }
+  }, 20000)
+
+  it('cancels an in-flight streaming export', async () => {
+    const driver = await connectDriver()
+    const file = join(mkdtempSync(join(tmpdir(), 'sqlkit-mssql-export-')), 'slow.csv')
+    try {
+      const running = driver.exportQuery!({
+        sql: "waitfor delay '00:00:30' select 1 as n",
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'csv',
+        executionId: 'slow-export',
+      })
+      const cancelled = expect(running).rejects.toThrow('Query cancelled.')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const outcome = await driver.cancel?.('slow-export')
       expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
       await cancelled
       expect((await driver.query('select 1')).rows).toEqual([[1]])

@@ -208,6 +208,28 @@ describe('sqlite driver: cancel', () => {
     expect(spawned).toHaveLength(2)
   })
 
+  it('cancels an in-flight export by killing and restarting the worker', async () => {
+    const { spawn, spawned } = hangingSpawner()
+    const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
+    await driver.connect()
+
+    const running = driver.exportQuery!({
+      sql: 'select 1',
+      params: [],
+      childDb: null,
+      sort: null,
+      filePath: 'unused.csv',
+      format: 'csv',
+      executionId: 'slow-export',
+    })
+    running.catch(() => {}) // asserted below; keep the rejection from going unhandled mid-cancel
+    const outcome = await driver.cancel?.('slow-export')
+    expect(outcome).toEqual({ running: 1, cancelled: 1 })
+    await expect(running).rejects.toThrow('Query cancelled.')
+    expect(spawned[0]?.killed).toBe(true)
+    expect(spawned).toHaveLength(2)
+  })
+
   it('cancels the active query while preserving unrelated queued work', async () => {
     const { spawn, spawned } = hangingSpawner()
     const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)

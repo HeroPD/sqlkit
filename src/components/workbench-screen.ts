@@ -1366,15 +1366,30 @@ export class WorkbenchScreen extends LitElement {
     if (!tabId || !profile || run.phase !== 'done' || !run.sql) return
     const tab = this._ctx.tabs.find((entry) => entry.id === tabId)
     const base = tab && 'name' in tab && typeof tab.name === 'string' ? tab.name.replace(/\.sql$/i, '') : 'results'
+    // Tracked as a task so a long export is visible and stoppable; the
+    // executionId is what Stop targets through cancelQuery.
+    const executionId = crypto.randomUUID()
+    const childDb = this._ctx.activeChildDb
+    this._queries.beginExport({
+      executionId,
+      profileId: profile.id,
+      contextLabel: childDb ? `${profile.name} / ${childDb}` : profile.name,
+      sql: run.sql,
+    })
     const result = await window.sqlkit.exportQuery(
       profile.id,
-      this._ctx.activeChildDb,
+      childDb,
       run.sql,
       this._queries.sortFor(tabId),
       format,
       `${base || 'results'}.${format}`,
+      executionId,
     )
-    if (!result.success && result.error) this._dialogs.notice('Export failed', result.error)
+    this._queries.finishExport(executionId, result)
+    // A stop the user asked for is not a failure; the task already shows it.
+    if (!result.success && result.error && result.error !== 'Query cancelled.') {
+      this._dialogs.notice('Export failed', result.error)
+    }
   }
 
   // Stages an empty new row in the grid (committed later via ⌘S / Save rows),

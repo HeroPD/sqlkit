@@ -135,6 +135,34 @@ describe('QueriesController.execute', () => {
   })
 })
 
+describe('QueriesController export tasks', () => {
+  it('tracks an export as a running task and settles each outcome', () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    const begin = (id: string) =>
+      controller.beginExport({ executionId: id, profileId: 'p1', contextLabel: 'Local / app', sql: 'SELECT 1' })
+
+    begin('e1')
+    expect(controller.tasks[0]).toMatchObject({ id: 'e1', status: 'running', contextLabel: 'Local / app — export' })
+
+    controller.finishExport('e1', { success: true, rowCount: 42 })
+    expect(controller.tasks[0]).toMatchObject({ status: 'done', rowCount: 42 })
+
+    begin('e2')
+    controller.finishExport('e2', { success: false, error: 'Query cancelled.' })
+    expect(controller.tasks[0]?.status).toBe('cancelled')
+
+    // A cancelled save dialog is a cancellation, not a failure.
+    begin('e3')
+    controller.finishExport('e3', { success: false, canceled: true })
+    expect(controller.tasks[0]?.status).toBe('cancelled')
+
+    begin('e4')
+    controller.finishExport('e4', { success: false, error: 'disk full' })
+    expect(controller.tasks[0]?.status).toBe('error')
+  })
+})
+
 describe('QueriesController drafts', () => {
   it('adds, edits, and drops staged new rows', () => {
     const controller = new QueriesController(host(), () => true)

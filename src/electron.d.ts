@@ -309,7 +309,8 @@ export type SqlkitApi = {
   fetchRows: (sessionId: string, offset: number, limit: number) => Promise<FetchRowsResult>
   /** Streams a full read-only result straight to a file the user picks, past the
    * in-memory row cap. Re-runs the query (with any injected sort), so the main
-   * process enforces read-only. Returns the number of rows written. */
+   * process enforces read-only. Returns the number of rows written. The
+   * executionId makes the export cancellable through cancelQuery. */
   exportQuery: (
     profileId: string,
     childDb: string | null,
@@ -317,6 +318,7 @@ export type SqlkitApi = {
     sort: QuerySort | null,
     format: ExportFormat,
     suggestedName: string,
+    executionId?: string,
   ) => Promise<ExportQueryResult>
   /** Releases a result's main-process buffer (tab closed / superseded). */
   closeSession: (sessionId: string) => Promise<void>

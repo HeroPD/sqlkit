@@ -265,9 +265,6 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           conn = await acquireConnection(pool)
           const active = conn
           entry.tediousCancel = () => active.cancel()
-          // Reset before use, not after release: a reused connection is scrubbed
-          // of any prior tab's transaction/SET/temp state right before it runs.
-          await resetConnection(conn)
           if (entry.cancelRequested) throw new Error('Query cancelled.')
           const resultSets: QueryResultSet[] = []
           let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
@@ -283,7 +280,10 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           throw isCancelled(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
         } finally {
           running.delete(entry)
-          if (conn) pool.release(conn)
+          // Reset on release, not before use: a failed script's open transaction
+          // rolls back now instead of holding locks while the connection idles,
+          // and metadata reads borrowing from this pool always start clean.
+          if (conn) await releaseClean(pool, conn)
         }
       }
 
@@ -440,22 +440,31 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { running: entries.length, cancelled: entries.length }
     },
 
-    async exportQuery({ sql: sqlText, params, childDb, sort, filePath, format }) {
+    async exportQuery({ sql: sqlText, params, childDb, sort, filePath, format, executionId }) {
       const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort })
       if (plan.batches.length !== 1) {
         throw new Error('Streaming export supports a single SQL Server batch — remove GO separators.')
       }
-      const userPool = await openUserPool(childDb)
-      const writer = openExportWriter(filePath, format)
+      // Registered like query() so Stop (and disconnect) can interrupt a
+      // runaway export instead of it streaming to completion unstoppably.
+      const entry = { executionId, request: null as sql.Request | null, cancelRequested: false }
+      running.add(entry)
+      let userPool: sql.ConnectionPool | null = null
+      let writer: ExportWriter | null = null
       try {
+        userPool = await openUserPool(childDb)
+        writer = openExportWriter(filePath, format)
         const request = bind(userPool.request(), plan.params)
+        entry.request = request
+        if (entry.cancelRequested) throw new Error('Query cancelled.')
         await streamMssqlExport(request, plan.batches[0]!, writer)
         return await writer.close()
       } catch (error) {
-        await writer.close().catch(() => {})
-        throw error
+        await writer?.close().catch(() => {})
+        throw isCancelled(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
       } finally {
-        await userPool.close().catch(() => {})
+        running.delete(entry)
+        await userPool?.close().catch(() => {})
       }
     },
 
@@ -871,6 +880,8 @@ type TediousConnection = {
   reset(callback: (err?: Error | null) => void): void
   execSqlBatch(request: TediousRequest): void
   cancel(): void
+  /** Synchronously marks the connection closed; the pool's validate discards it. */
+  close(): void
 }
 // node-mssql's ConnectionPool acquires/releases the underlying tedious Connection
 // through these methods; the public types omit them, so assert at this boundary.
@@ -884,6 +895,19 @@ export const acquireConnection = (pool: AcquirablePool): Promise<TediousConnecti
 
 export const resetConnection = (connection: TediousConnection): Promise<void> =>
   new Promise((resolve, reject) => connection.reset((err) => (err ? reject(err) : resolve())))
+
+// Returns a pooled connection clean: sp_reset_connection rolls back any open
+// transaction and clears USE/SET/temp state left by the run, whether it
+// succeeded or failed. A connection whose reset fails is closed instead, so
+// the pool discards it rather than handing out a session in an unknown state.
+export const releaseClean = async (pool: AcquirablePool, connection: TediousConnection): Promise<void> => {
+  try {
+    await resetConnection(connection)
+  } catch {
+    try { connection.close() } catch { /* already closed */ }
+  }
+  pool.release(connection)
+}
 
 // The lossless value-parser patch already decodes decimal/money/datetimeoffset to
 // strings, so those reach us as strings and normalizeMssqlRow leaves them. Only

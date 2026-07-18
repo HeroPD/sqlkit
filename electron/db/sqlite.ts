@@ -178,9 +178,14 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       return request({ type: 'runDdl', statements })
     },
 
-    async exportQuery({ sql, params, sort, filePath, format }) {
+    async exportQuery({ sql, params, sort, filePath, format, executionId }) {
       const plan = prepareSqlRun({ engine: 'sqlite', sql, params, sort })
-      return request({ type: 'exportQuery', sql: plan.batches[0]!, params: plan.params as SqliteParam[], filePath, format })
+      // Carries the executionId so cancel() can kill a runaway export like a query.
+      return request(
+        { type: 'exportQuery', sql: plan.batches[0]!, params: plan.params as SqliteParam[], filePath, format },
+        undefined,
+        executionId,
+      )
     },
 
     async listTables() {

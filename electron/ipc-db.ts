@@ -115,7 +115,7 @@ export function registerDbIpc(context: DbIpcContext) {
     ) ?? { success: false as const, error: 'No active session' })
   ipcMain.handle('db:close-session', (event, sessionId: unknown) =>
     existingManager(event)?.closeSession(stringValue(sessionId, 'Session id', 200)))
-  ipcMain.handle('db:export-query', async (event, profileId: unknown, childDb: unknown, sql: unknown, sort: unknown, format: unknown, suggestedName: unknown) => {
+  ipcMain.handle('db:export-query', async (event, profileId: unknown, childDb: unknown, sql: unknown, sort: unknown, format: unknown, suggestedName: unknown, executionId?: unknown) => {
     let parsed
     try {
       parsed = {
@@ -125,6 +125,7 @@ export function registerDbIpc(context: DbIpcContext) {
         sort: querySort(sort),
         format: exportFormat(format),
         name: stringValue(suggestedName, 'Suggested file name', 1_000),
+        executionId: executionId === undefined ? undefined : stringValue(executionId, 'Execution id', 200),
       }
     } catch (error) {
       return { success: false as const, error: (error as Error).message }
@@ -139,7 +140,7 @@ export function registerDbIpc(context: DbIpcContext) {
       filters: [{ name: parsed.format.toUpperCase(), extensions: [parsed.format] }],
     })
     if (result.canceled || !result.filePath) return { success: false as const, canceled: true }
-    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.sort, result.filePath, parsed.format)
+    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.sort, result.filePath, parsed.format, parsed.executionId)
   })
   ipcMain.handle('db:cancel', (event, profileId: unknown, executionId?: unknown) =>
     manager(event).cancelQuery(

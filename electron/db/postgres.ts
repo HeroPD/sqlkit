@@ -341,23 +341,37 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
-    async exportQuery({ sql, params, childDb, sort, filePath, format }) {
+    async exportQuery({ sql, params, childDb, sort, filePath, format, executionId }) {
       const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort })
-      const client = await poolForQuery(childDb).connect()
+      // Registered like query() so Stop (and disconnect) can interrupt a
+      // runaway export instead of it streaming to completion unstoppably.
+      const entry = { executionId, pid: null as number | null, cancelRequested: false }
+      running.add(entry)
+      let client: pg.PoolClient | null = null
       const writer = openExportWriter(filePath, format)
       try {
+        client = await poolForQuery(childDb).connect()
+        entry.pid = backendPid(client)
+        if (entry.cancelRequested) throw new Error('Query cancelled.')
         await streamPgExport(client, plan.batches[0]!, plan.params, writer)
         const result = await writer.close()
         // A streamed SELECT leaves the session clean, but reset it like query()
         // does before the connection re-enters the pool.
         await resetUserSession(client)
+        // Leaves `running` before the client re-enters the pool (see query()).
+        running.delete(entry)
         client.release()
+        client = null
         return result
       } catch (error) {
         await writer.close().catch(() => {})
         // Uncertain session state — drop the client rather than reuse it.
-        client.release(error as Error)
-        throw error
+        client?.release(error as Error)
+        throw (error as { code?: string }).code === '57014' || (error as Error).message === 'Query cancelled.'
+          ? new Error('Query cancelled.')
+          : error
+      } finally {
+        running.delete(entry)
       }
     },
 

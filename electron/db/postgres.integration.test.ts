@@ -289,6 +289,31 @@ describeDb('postgres driver (integration)', () => {
     }
   }, 20000)
 
+  it('cancels an in-flight streaming export', async () => {
+    const driver = await connectDriver()
+    const file = exportFile('slow.csv')
+    try {
+      const running = driver.exportQuery!({
+        sql: 'select pg_sleep(30) as x',
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'csv',
+        executionId: 'slow-export',
+      })
+      const cancelled = expect(running).rejects.toThrow('Query cancelled.')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const outcome = await driver.cancel?.('slow-export')
+      expect(outcome?.running).toBeGreaterThanOrEqual(1)
+      expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
+      await cancelled
+      expect((await driver.query('select 1')).rows).toEqual([[1]])
+    } finally {
+      await driver.disconnect()
+    }
+  }, 20000)
+
   it('reports nothing running when cancel finds no in-flight query', async () => {
     const driver = await connectDriver()
     try {

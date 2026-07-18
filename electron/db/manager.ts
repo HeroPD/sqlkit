@@ -234,13 +234,14 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     sort: QuerySort | null,
     filePath: string,
     format: ExportFormat,
+    executionId?: string,
   ): Promise<{ success: boolean; rowCount?: number; error?: string }> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     if (!driver.exportQuery) return { success: false, error: 'Export is not supported on this connection' }
     if (!isReadOnlyQuery(sql)) return { success: false, error: 'Only read-only queries can be exported to a file.' }
     try {
-      const { rowCount } = await driver.exportQuery({ sql, params: [], childDb, sort, filePath, format })
+      const { rowCount } = await driver.exportQuery({ sql, params: [], childDb, sort, filePath, format, executionId })
       return { success: true, rowCount }
     } catch (error) {
       await unlink(filePath).catch(() => {})

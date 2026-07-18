@@ -56,7 +56,8 @@ export type Driver = {
   /** Streams a read-only query straight to `filePath` in `format`, bypassing the
    * buffered/paged result path so a full large result exports without the row
    * cap. Returns the number of data rows written. The manager guarantees the SQL
-   * is read-only before calling. Undefined where the engine can't stream a run. */
+   * is read-only before calling. Registers under `executionId` so cancel() can
+   * interrupt it like any query. Undefined where the engine can't stream a run. */
   exportQuery?(args: {
     sql: string
     params: unknown[]
@@ -64,6 +65,7 @@ export type Driver = {
     sort: QuerySort | null
     filePath: string
     format: ExportFormat
+    executionId?: string
   }): Promise<{ rowCount: number }>
   // Metadata methods target `childDb` when given, else the active child — same
   // contract as query(), so listings never silently follow a different child

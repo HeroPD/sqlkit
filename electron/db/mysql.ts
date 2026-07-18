@@ -342,20 +342,32 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
-    async exportQuery({ sql, params, childDb, sort, filePath, format }) {
+    async exportQuery({ sql, params, childDb, sort, filePath, format, executionId }) {
       const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort })
-      const conn = await poolForQuery(childDb).getConnection()
+      // Registered like query() so Stop (and disconnect) can KILL QUERY a
+      // runaway export instead of it streaming to completion unstoppably.
+      const entry = { executionId, threadId: null as number | null, cancelRequested: false }
+      running.add(entry)
+      let conn: mysql.PoolConnection | null = null
       const writer = openExportWriter(filePath, format)
       try {
+        conn = await poolForQuery(childDb).getConnection()
+        entry.threadId = rawOf(conn).threadId ?? null
+        if (entry.cancelRequested) throw new Error('Query cancelled.')
         await streamMysqlExport(rawOf(conn), plan.batches[0]!, plan.params, writer)
         const result = await writer.close()
+        // Leaves `running` before the connection re-enters the pool (see query()).
+        running.delete(entry)
         conn.release()
+        conn = null
         return result
       } catch (error) {
         await writer.close().catch(() => {})
         // May hold half-read results; drop it rather than reuse.
-        conn.destroy()
-        throw error
+        conn?.destroy()
+        throw isInterrupted(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
+      } finally {
+        running.delete(entry)
       }
     },
 
