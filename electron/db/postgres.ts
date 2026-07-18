@@ -5,6 +5,7 @@ import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor } from '../../src/dialect'
+import { isReadOnlyQuery } from '../../src/sql-order'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -49,6 +50,11 @@ const backendPid = (client: pg.PoolClient): number | null =>
 // export. node-postgres doesn't expose it publicly, so reach it at one boundary.
 const clientSocket = (client: pg.PoolClient): { pause(): void; resume(): void } | null =>
   (client as pg.PoolClient & { connection?: { stream?: { pause(): void; resume(): void } } }).connection?.stream ?? null
+
+// The connection's transaction status from its last ReadyForQuery ('I' idle,
+// 'T' in transaction, 'E' failed). node-postgres records it but doesn't type it.
+const txStatus = (client: pg.PoolClient): string | null =>
+  (client as pg.PoolClient & { _txStatus?: string | null })._txStatus ?? null
 
 export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpoint, events: DriverEvents): Driver {
   let pools: Map<string, pg.Pool> | null = null
@@ -107,12 +113,28 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
   const dialect = dialectFor(profile.engine)
 
+  // Cached result-column → source-column lookups, per child database (attrelid
+  // OIDs are database-local, so children must not share keys). A child's cache
+  // is cleared whenever its session runs anything that could change the catalog.
+  const sourceCaches = new Map<string, Map<string, ColumnSource>>()
+  const sourceCacheFor = (childDb?: string | null) => {
+    const database = childDb ?? active
+    let cache = sourceCaches.get(database)
+    if (!cache) {
+      cache = new Map()
+      sourceCaches.set(database, cache)
+    }
+    return cache
+  }
+
   const resetUserSession = async (client: pg.PoolClient) => {
     // User SQL runs on pooled physical sessions. Always leave the session at
-    // its connection defaults before another tab can borrow it: ROLLBACK also
-    // catches implicit/unrecognised transaction starts, while DISCARD removes
+    // its connection defaults before another tab can borrow it: DISCARD removes
     // SET state, temp objects, prepared statements and LISTEN registrations.
-    await client.query('ROLLBACK')
+    // ROLLBACK only when the wire status reports an open/failed transaction
+    // (unknown counts as open) — the overwhelmingly common idle case skips a
+    // round trip and the "no transaction in progress" warning in server logs.
+    if (txStatus(client) !== 'I') await client.query('ROLLBACK')
     await client.query('DISCARD ALL')
   }
 
@@ -197,9 +219,20 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           releaseToPool()
           throw new Error('Query cancelled.')
         }
-        const result = await streamQuery(client, plan.batches[0]!, plan.params, started)
-        await resetUserSession(client)
-        releaseToPool()
+        const result = await streamQuery(client, plan.batches[0]!, plan.params, started, sourceCacheFor(childDb))
+        // Anything that could have changed the catalog invalidates the cached
+        // column-source lookups (a rename would otherwise map to stale names).
+        if (!isReadOnlyQuery(sql, 'postgresql')) sourceCacheFor(childDb).clear()
+        try {
+          await resetUserSession(client)
+          releaseToPool()
+        } catch (resetError) {
+          // The query itself succeeded; a failed reset (e.g. a pooler that
+          // refuses DISCARD ALL) condemns only this client, not the result.
+          running.delete(entry)
+          client.release(resetError as Error)
+          released = true
+        }
         return result
       } catch (error) {
         // Mirror pool.query: an errored client is destroyed, not reused.
@@ -280,6 +313,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           await client.query(statements[index]!)
         }
         await client.query('COMMIT')
+        // Schema changed: cached column-source lookups for this child are stale.
+        sourceCacheFor(childDb).clear()
         releaseToPool()
         return { success: true }
       } catch (error) {
@@ -320,6 +355,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         throw error
       }
       childNames = childNames.filter((child) => child !== name)
+      sourceCaches.delete(name)
     },
 
     async cancel(executionId) {
@@ -355,12 +391,17 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         if (entry.cancelRequested) throw new Error('Query cancelled.')
         await streamPgExport(client, plan.batches[0]!, plan.params, writer)
         const result = await writer.close()
-        // A streamed SELECT leaves the session clean, but reset it like query()
-        // does before the connection re-enters the pool.
-        await resetUserSession(client)
-        // Leaves `running` before the client re-enters the pool (see query()).
-        running.delete(entry)
-        client.release()
+        // Reset like query() before the connection re-enters the pool; a failed
+        // reset condemns only this client — the finished export still counts.
+        try {
+          await resetUserSession(client)
+          // Leaves `running` before the client re-enters the pool (see query()).
+          running.delete(entry)
+          client.release()
+        } catch (resetError) {
+          running.delete(entry)
+          client.release(resetError as Error)
+        }
         client = null
         return result
       } catch (error) {
@@ -747,6 +788,7 @@ function streamQuery(
   sql: string,
   params: unknown[],
   started: number,
+  sourceCache: Map<string, ColumnSource>,
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     const buffers = new Map<object, { rows: unknown[][]; total: number; bytes: number; limited: boolean }>()
@@ -785,7 +827,7 @@ function streamQuery(
           const buffer = buffers.get(entry as object) ?? { rows: [], total: 0, bytes: 0, limited: false }
           return {
             columns: entry.fields.map((field) => field.name),
-            columnSources: await columnSourcesForFields(client, entry.fields),
+            columnSources: await columnSourcesForFields(client, entry.fields, sourceCache),
             rows: buffer.rows,
             rowCount: entry.rowCount ?? buffer.total,
             truncated: buffer.limited || buffer.total > buffer.rows.length,
@@ -870,9 +912,21 @@ function streamPgExport(
   })
 }
 
-async function columnSourcesForFields(
+type ColumnSource = { schema: string | null; table: string | null; column: string | null }
+
+// Entries are tiny; the cap only guards a pathological session (generated
+// schemas, thousands of distinct relations) from growing without bound.
+const MAX_SOURCE_CACHE = 20_000
+
+// Resolves (tableID, columnID) field origins through `cache`, querying the
+// catalog only for keys not seen before — a re-run of the same query costs no
+// extra round trip. Unresolvable refs are cached too (as all-null sources),
+// or a dropped relation would re-query on every run. The caller clears the
+// cache whenever the session runs anything that could change the catalog.
+export async function columnSourcesForFields(
   client: pg.PoolClient,
   fields: pg.FieldDef[],
+  cache: Map<string, ColumnSource>,
 ): Promise<QueryResult['columnSources'] | undefined> {
   const keyed = new Map<string, { tableID: number; columnID: number }>()
   for (const field of fields) {
@@ -880,26 +934,30 @@ async function columnSourcesForFields(
   }
   if (!keyed.size) return undefined
 
-  const params: number[] = []
-  const where = [...keyed.values()]
-    .map((ref) => {
-      params.push(ref.tableID, ref.columnID)
-      return `(a.attrelid = $${params.length - 1}::oid AND a.attnum = $${params.length}::int)`
-    })
-    .join(' OR ')
-  const found = await client.query<{ table_id: string; column_id: number; schema: string; table: string; column: string }>(
-    `select a.attrelid::text as table_id, a.attnum::int as column_id, n.nspname as schema, c.relname as table, a.attname as column
-       from pg_attribute a
-       join pg_class c on c.oid = a.attrelid
-       join pg_namespace n on n.oid = c.relnamespace
-      where ${where}`,
-    params,
-  )
-  const byKey = new Map(found.rows.map((row) => [`${row.table_id}:${row.column_id}`, row]))
-  return fields.map((field) => {
-    const source = byKey.get(`${field.tableID}:${field.columnID}`)
-    return source ? { schema: source.schema, table: source.table, column: source.column } : { schema: null, table: null, column: null }
-  })
+  const missing = [...keyed].filter(([key]) => !cache.has(key))
+  if (missing.length) {
+    if (cache.size + missing.length > MAX_SOURCE_CACHE) cache.clear()
+    const params: number[] = []
+    const where = missing
+      .map(([, ref]) => {
+        params.push(ref.tableID, ref.columnID)
+        return `(a.attrelid = $${params.length - 1}::oid AND a.attnum = $${params.length}::int)`
+      })
+      .join(' OR ')
+    const found = await client.query<{ table_id: string; column_id: number; schema: string; table: string; column: string }>(
+      `select a.attrelid::text as table_id, a.attnum::int as column_id, n.nspname as schema, c.relname as table, a.attname as column
+         from pg_attribute a
+         join pg_class c on c.oid = a.attrelid
+         join pg_namespace n on n.oid = c.relnamespace
+        where ${where}`,
+      params,
+    )
+    for (const row of found.rows) cache.set(`${row.table_id}:${row.column_id}`, { schema: row.schema, table: row.table, column: row.column })
+    for (const [key] of missing) {
+      if (!cache.has(key)) cache.set(key, { schema: null, table: null, column: null })
+    }
+  }
+  return fields.map((field) => cache.get(`${field.tableID}:${field.columnID}`) ?? { schema: null, table: null, column: null })
 }
 
 /** "PostgreSQL 17.2 on aarch64-apple-darwin…" → "PostgreSQL 17.2"; also trims

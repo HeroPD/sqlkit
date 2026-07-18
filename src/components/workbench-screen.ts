@@ -1387,7 +1387,7 @@ export class WorkbenchScreen extends LitElement {
     )
     this._queries.finishExport(executionId, result)
     // A stop the user asked for is not a failure; the task already shows it.
-    if (!result.success && result.error && result.error !== 'Query cancelled.') {
+    if (!result.success && result.error && !result.cancelled) {
       this._dialogs.notice('Export failed', result.error)
     }
   }

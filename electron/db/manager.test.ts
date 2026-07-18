@@ -343,6 +343,14 @@ describe('connection manager: cancelQuery', () => {
     expect(await manager.cancelQuery('p1')).toEqual({ success: false, error: expect.stringContaining('not supported') })
   })
 
+  it('marks a cancelled run with the typed flag, other errors without it', async () => {
+    const manager = await connected({ query: vi.fn(() => Promise.reject(new Error('Query cancelled.'))) })
+    expect(await manager.query('p1', null, 'select 1')).toEqual({ success: false, error: 'Query cancelled.', cancelled: true })
+
+    const failing = await connected({ query: vi.fn(() => Promise.reject(new Error('boom'))) })
+    expect(await failing.query('p1', null, 'select 1')).toEqual({ success: false, error: 'boom' })
+  })
+
   it('reports nothing-running when no backend is in flight', async () => {
     const manager = await connected({ cancel: vi.fn(() => Promise.resolve({ running: 0, cancelled: 0 })) })
     expect(await manager.cancelQuery('p1')).toEqual({ success: false, error: expect.stringContaining('No query') })

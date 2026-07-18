@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
 import type { ConnectionProfile, SslConfig } from '../../src/electron'
-import { shortVersion, sslOptions } from './postgres'
+import { columnSourcesForFields, shortVersion, sslOptions } from './postgres'
 
 // Only the ssl field matters here; the rest is filler so the type compiles.
 const profileWithSsl = (ssl?: SslConfig): ConnectionProfile => ({
@@ -90,5 +90,50 @@ describe('shortVersion', () => {
     expect(shortVersion('CockroachDB CCL v26.2.3 (aarch64-unknown-linux-gnu, built 2026/06/24, go1.25.5)')).toBe(
       'CockroachDB CCL v26.2.3',
     )
+  })
+})
+
+describe('columnSourcesForFields', () => {
+  type Row = { table_id: string; column_id: number; schema: string; table: string; column: string }
+  const field = (name: string, tableID: number, columnID: number) =>
+    ({ name, tableID, columnID }) as unknown as import('pg').FieldDef
+  const clientReturning = (rows: Row[]) => {
+    const calls: unknown[][] = []
+    const client = {
+      query: (...args: unknown[]) => {
+        calls.push(args)
+        return Promise.resolve({ rows })
+      },
+    } as unknown as import('pg').PoolClient
+    return { client, calls }
+  }
+
+  it('resolves sources through the cache and skips the catalog on a repeat run', async () => {
+    const cache = new Map<string, { schema: string | null; table: string | null; column: string | null }>()
+    const { client, calls } = clientReturning([{ table_id: '10', column_id: 1, schema: 'public', table: 't', column: 'a' }])
+    const fields = [field('a', 10, 1)]
+
+    expect(await columnSourcesForFields(client, fields, cache)).toEqual([{ schema: 'public', table: 't', column: 'a' }])
+    expect(calls).toHaveLength(1)
+
+    expect(await columnSourcesForFields(client, fields, cache)).toEqual([{ schema: 'public', table: 't', column: 'a' }])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('caches unresolvable refs so a dropped relation does not re-query every run', async () => {
+    const cache = new Map<string, { schema: string | null; table: string | null; column: string | null }>()
+    const { client, calls } = clientReturning([])
+    const fields = [field('gone', 99, 2)]
+
+    expect(await columnSourcesForFields(client, fields, cache)).toEqual([{ schema: null, table: null, column: null }])
+    expect(await columnSourcesForFields(client, fields, cache)).toEqual([{ schema: null, table: null, column: null }])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('returns undefined for computed columns with no table origin, without querying', async () => {
+    const cache = new Map<string, { schema: string | null; table: string | null; column: string | null }>()
+    const { client, calls } = clientReturning([])
+    expect(await columnSourcesForFields(client, [field('expr', 0, 0)], cache)).toBeUndefined()
+    expect(calls).toHaveLength(0)
   })
 })

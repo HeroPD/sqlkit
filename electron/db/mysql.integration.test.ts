@@ -162,6 +162,47 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
+  it('refuses an atomic save on a non-transactional (MyISAM) table', async () => {
+    const driver = await connectDriver()
+    await admin.query('drop table if exists myisam_probe')
+    await admin.query("create table myisam_probe (id int primary key, v varchar(20)) engine = MyISAM")
+    await admin.query("insert into myisam_probe values (1, 'original')")
+    try {
+      const result = await driver.runBatch!([
+        { sql: 'update `myisam_probe` set v = ? where id = ?', params: ['changed', 1] },
+      ])
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error).toMatch(/non-transactional/)
+      const [rows] = await admin.query('select v from myisam_probe where id = 1')
+      expect(rows).toEqual([{ v: 'original' }])
+    } finally {
+      await admin.query('drop table if exists myisam_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('refuses an atomic save on a schema-qualified non-transactional table', async () => {
+    const driver = await connectDriver()
+    await admin.query('drop table if exists myisam_probe')
+    await admin.query("create table myisam_probe (id int primary key, v varchar(20)) engine = MyISAM")
+    await admin.query("insert into myisam_probe values (1, 'original')")
+    try {
+      // MyISAM can't roll back, so the refusal must come before anything runs —
+      // a qualified name must not slip past the storage-engine check.
+      const result = await driver.runBatch!([
+        { sql: `update \`${dbName()}\`.\`myisam_probe\` set v = ? where id = ?`, params: ['changed', 1] },
+        // Matches nothing: trips the zero-rows gate, which "rolls back" the batch.
+        { sql: `update \`${dbName()}\`.\`myisam_probe\` set v = ? where id = ?`, params: ['x', 999] },
+      ])
+      expect(result.success).toBe(false)
+      const [rows] = await admin.query('select v from myisam_probe where id = 1')
+      expect(rows).toEqual([{ v: 'original' }])
+    } finally {
+      await admin.query('drop table if exists myisam_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  }, 20000)
+
   it('does not trip the zero-rows gate on a no-op update (FOUND_ROWS)', async () => {
     const driver = await connectDriver()
     try {

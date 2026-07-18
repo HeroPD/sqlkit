@@ -224,6 +224,24 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  it('re-resolves cached column sources after DDL changes the catalog', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('drop table if exists src_probe; create table src_probe (a int)')
+      const before = await driver.query('select * from src_probe')
+      expect(before.columnSources?.[0]?.column).toBe('a')
+      // Same query again — served from the cache, must still be right.
+      expect((await driver.query('select * from src_probe')).columnSources?.[0]?.column).toBe('a')
+      // The rename keeps the column's (attrelid, attnum) key, so a stale cache
+      // would keep reporting 'a' — which the grid write path would target.
+      await driver.query('alter table src_probe rename column a to b')
+      expect((await driver.query('select * from src_probe')).columnSources?.[0]?.column).toBe('b')
+    } finally {
+      await driver.query('drop table if exists src_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('preserves temporal and exact numeric values as text', async () => {
     const driver = await connectDriver()
     try {

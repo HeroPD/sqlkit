@@ -484,12 +484,12 @@ export class QueriesController implements ReactiveController {
 
   /** Settles an export's task. A cancelled save dialog or a stopped export both
    * land as 'cancelled'; everything else follows success/error. */
-  finishExport(executionId: string, outcome: { success: boolean; rowCount?: number; error?: string; canceled?: boolean }) {
+  finishExport(executionId: string, outcome: { success: boolean; rowCount?: number; error?: string; canceled?: boolean; cancelled?: boolean }) {
     this.tasks = this.tasks.map((entry) =>
       entry.id === executionId
         ? {
             ...entry,
-            status: outcome.success ? 'done' : outcome.canceled || outcome.error === 'Query cancelled.' ? 'cancelled' : 'error',
+            status: outcome.success ? 'done' : outcome.canceled || outcome.cancelled ? 'cancelled' : 'error',
             durationMs: Date.now() - entry.startedAt,
             rowCount: outcome.rowCount ?? null,
           }
@@ -503,7 +503,7 @@ export class QueriesController implements ReactiveController {
       entry.id === taskId
         ? {
             ...entry,
-            status: response.success ? 'done' : response.error === 'Query cancelled.' ? 'cancelled' : 'error',
+            status: response.success ? 'done' : response.cancelled ? 'cancelled' : 'error',
             durationMs: response.success ? response.result.durationMs : Date.now() - startedAt,
             rowCount: response.success ? response.result.rowCount : null,
           }

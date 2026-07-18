@@ -194,7 +194,10 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       // cross IPC all at once. The renderer pages the rest via fetchRows.
       return { success: true, result: sessions.open(profileId, raw) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      // Typed here — same process as the drivers' throw — so the renderer never
+      // has to pattern-match the human-readable message.
+      const message = (error as Error).message
+      return { success: false, error: message, ...(message === 'Query cancelled.' ? { cancelled: true } : {}) }
     }
   }
 
@@ -235,7 +238,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     filePath: string,
     format: ExportFormat,
     executionId?: string,
-  ): Promise<{ success: boolean; rowCount?: number; error?: string }> {
+  ): Promise<{ success: boolean; rowCount?: number; error?: string; cancelled?: boolean }> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: 'Not connected' }
     if (!driver.exportQuery) return { success: false, error: 'Export is not supported on this connection' }
@@ -245,7 +248,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       return { success: true, rowCount }
     } catch (error) {
       await unlink(filePath).catch(() => {})
-      return { success: false, error: (error as Error).message }
+      const message = (error as Error).message
+      return { success: false, error: message, ...(message === 'Query cancelled.' ? { cancelled: true } : {}) }
     }
   }
 

@@ -33,6 +33,21 @@ const rawOf = (conn: mysql.PoolConnection): RawConnection => (conn as unknown as
 // ER_QUERY_INTERRUPTED — the server killed the statement (our cancel()).
 const isInterrupted = (error: unknown) => (error as { errno?: number }).errno === 1317
 
+// The target of one write statement: bare or backtick-quoted, optionally
+// schema-qualified. Null for any other shape, so the storage-engine guard
+// fails closed on statements it can't read instead of silently skipping them.
+const TARGET_PART = String.raw`(?:\`((?:\`\`|[^\`])+)\`|([0-9A-Za-z$_\u0080-\uffff]+))`
+const WRITE_TARGET = new RegExp(String.raw`^\s*(?:update|insert\s+into|delete\s+from)\s+${TARGET_PART}(?:\s*\.\s*${TARGET_PART})?`, 'i')
+
+export function writeTargetTable(sql: string): { schema: string | null; name: string } | null {
+  const match = WRITE_TARGET.exec(sql)
+  if (!match) return null
+  const unescape = (part: string) => part.replaceAll('``', '`')
+  const first = match[1] !== undefined ? unescape(match[1]) : match[2]!
+  const second = match[3] !== undefined ? unescape(match[3]) : match[4]
+  return second === undefined ? { schema: null, name: first } : { schema: first, name: second }
+}
+
 /** "9.3.0" → "MySQL 9.3.0"; "11.4.2-MariaDB-…" → "MariaDB 11.4.2". */
 export function mysqlVersion(raw: string): string {
   const maria = /^(.+?)-MariaDB/i.exec(raw)
@@ -212,25 +227,34 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       }
       let index = -1
       try {
-        const tableNames = statements.flatMap((statement) => {
-          const match = /^\s*(?:update|insert\s+into|delete\s+from)\s+`((?:``|[^`])+)`/i.exec(statement.sql)
-          return match?.[1] ? [match[1].replaceAll('``', '`')] : []
-        })
-        if (tableNames.length) {
-          const [rows] = await conn.query(
-            `select table_name, engine from information_schema.tables
-             where table_schema = database() and table_name in (${tableNames.map(() => '?').join(', ')})`,
-            tableNames,
-          )
-          const unsafe = (rows as Array<{ table_name: string; engine: string | null }>).filter(
-            (row) => row.engine !== null && !['InnoDB', 'NDBCLUSTER'].includes(row.engine),
-          )
-          if (unsafe.length) {
-            releaseToPool()
-            return {
-              success: false,
-              error: `Atomic saves are unavailable for non-transactional table(s): ${unsafe.map((row) => row.table_name).join(', ')}`,
-            }
+        // BEGIN/COMMIT are silent no-ops on MyISAM-style engines, so a mid-batch
+        // failure would half-apply: refuse before anything runs. A statement
+        // whose target can't be parsed fails closed rather than skipping the check.
+        const targets = statements.map((statement) => writeTargetTable(statement.sql))
+        if (targets.some((target) => target === null)) {
+          releaseToPool()
+          return { success: false, error: 'Could not verify transactional storage for this save; run the statements manually instead.' }
+        }
+        const unique = [...new Map(targets.map((target) => [`${target!.schema ?? ''}/${target!.name}`, target!])).values()]
+        const conditions = unique
+          .map((target) => (target.schema === null
+            ? '(table_schema = database() and table_name = ?)'
+            : '(table_schema = ? and table_name = ?)'))
+          .join(' or ')
+        // Aliased like every other metadata query: MySQL 8 returns
+        // information_schema columns uppercase unless forced.
+        const [rows] = await conn.query(
+          `select table_name as table_name, engine as engine from information_schema.tables where ${conditions}`,
+          unique.flatMap((target) => (target.schema === null ? [target.name] : [target.schema, target.name])),
+        )
+        const unsafe = (rows as Array<{ table_name: string; engine: string | null }>).filter(
+          (row) => row.engine !== null && !['InnoDB', 'NDBCLUSTER'].includes(row.engine),
+        )
+        if (unsafe.length) {
+          releaseToPool()
+          return {
+            success: false,
+            error: `Atomic saves are unavailable for non-transactional table(s): ${unsafe.map((row) => row.table_name).join(', ')}`,
           }
         }
         await conn.beginTransaction()

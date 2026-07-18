@@ -72,6 +72,17 @@ describe('QueriesController.execute', () => {
     expect(controller.tasks[0]?.status).toBe('done')
   })
 
+  it('marks a task cancelled from the typed response flag, not the error text', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute(runArgs)
+    settle({ success: false, error: 'anything at all', cancelled: true })
+    await done
+
+    expect(controller.tasks[0]?.status).toBe('cancelled')
+  })
+
   it('passes the captured child database to the query IPC', async () => {
     const { settle, runQuery } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)
@@ -149,7 +160,7 @@ describe('QueriesController export tasks', () => {
     expect(controller.tasks[0]).toMatchObject({ status: 'done', rowCount: 42 })
 
     begin('e2')
-    controller.finishExport('e2', { success: false, error: 'Query cancelled.' })
+    controller.finishExport('e2', { success: false, cancelled: true })
     expect(controller.tasks[0]?.status).toBe('cancelled')
 
     // A cancelled save dialog is a cancellation, not a failure.

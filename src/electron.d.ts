@@ -150,7 +150,9 @@ export type QueryResult = QueryResultSet & {
   resultSets?: QueryResultSet[]
 }
 
-export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string }
+/** `cancelled` marks a run stopped by the user, so callers never have to
+ * pattern-match the human-readable error text. */
+export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string; cancelled?: boolean }
 
 /** One parameterized statement in an atomic write batch. */
 export type BatchStatement = {
@@ -180,9 +182,10 @@ export type QuerySort = { columnIndex: number; direction: 'asc' | 'desc' }
 
 export type FetchRowsResult = { success: true; rows: unknown[][] } | { success: false; error: string }
 
+/** `canceled` is a dismissed save dialog; `cancelled` a stopped export run. */
 export type ExportQueryResult =
   | { success: true; rowCount: number }
-  | { success: false; error?: string; canceled?: boolean }
+  | { success: false; error?: string; canceled?: boolean; cancelled?: boolean }
 
 /** Partitioned tables count as plain tables — partitioning is hidden anyway. */
 export type TableKind = 'table' | 'view' | 'matview' | 'foreign'
