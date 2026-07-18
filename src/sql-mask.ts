@@ -1,12 +1,22 @@
 import type { Engine } from './electron'
 
+// MySQL sql_mode flags that change how scripts must be read. Detected by the
+// driver at connect and threaded into the main-process guards; renderer-side
+// (cosmetic) masking keeps the defaults.
+export type SqlModeFlags = {
+  /** NO_BACKSLASH_ESCAPES: backslash is a literal character inside strings. */
+  noBackslashEscapes?: boolean
+  /** ANSI_QUOTES: double quotes delimit identifiers, not strings. */
+  ansiQuotes?: boolean
+}
+
 // Masks quoted text and comments while preserving offsets/newlines, so batch
 // handling and edit-context inference never treat their contents as SQL syntax.
 // Dialect-aware: each engine's comment/quote/escape rules differ enough that a
 // generic scan misclassifies real scripts (MySQL '#'/backslash escapes, Postgres
 // nested comments and E'' strings, SQL Server [brackets]). Shared by the
 // renderer and the main-process drivers, like src/dialect.ts.
-export function maskSql(sql: string, engine?: Engine): string {
+export function maskSql(sql: string, engine?: Engine, mode?: SqlModeFlags): string {
   const chars = sql.split('')
   let i = 0
   const blank = (from: number, to: number) => {
@@ -75,7 +85,13 @@ export function maskSql(sql: string, engine?: Engine): string {
         && ch === "'"
         && /[eE]/.test(sql[i - 1] ?? '')
         && !/[A-Za-z0-9_$]/.test(sql[i - 2] ?? '')
-      const backslashEscapes = engine === 'mysql' || postgresEscapeString
+      // MySQL backslash escapes apply to string quotes only (backtick identifiers
+      // escape by doubling); sql_mode can disable them (NO_BACKSLASH_ESCAPES) or
+      // turn double quotes into identifiers (ANSI_QUOTES), which never escape.
+      const mysqlEscapes = engine === 'mysql'
+        && !mode?.noBackslashEscapes
+        && (ch === "'" || (ch === '"' && !mode?.ansiQuotes))
+      const backslashEscapes = mysqlEscapes || postgresEscapeString
       let p = i + 1
       while (p < sql.length) {
         if (backslashEscapes && sql[p] === '\\') {

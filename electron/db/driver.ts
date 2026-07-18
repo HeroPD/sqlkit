@@ -50,8 +50,10 @@ export type Driver = {
   /** Interrupts in-flight queries. Reports how many were `running` and how many
    * could be `cancelled` — a query whose backend PID isn't known yet can't be
    * targeted, so the caller can tell "nothing running" (running 0) from "running
-   * but un-cancellable" (running > 0, cancelled 0). Engines without server-side
-   * cancellation (sqlite) leave it undefined. */
+   * but un-cancellable" (running > 0, cancelled 0). With no executionId it
+   * targets everything in flight — on the server engines that includes runBatch
+   * /runDdl saves (their transactions roll back); SQLite deliberately never
+   * cancels saves, since its only interrupt is killing the worker mid-write. */
   cancel?(executionId?: string): Promise<{ running: number; cancelled: number }>
   /** Streams a read-only query straight to `filePath` in `format`, bypassing the
    * buffered/paged result path so a full large result exports without the row

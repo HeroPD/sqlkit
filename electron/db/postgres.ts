@@ -90,6 +90,10 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       types: losslessTypes,
       max: 4,
       connectionTimeoutMillis: 8000,
+      // TCP keepalive (on by default in mysql2/tedious, off in pg): a dead peer
+      // self-terminates, so an abandoned pool.end() can't hold sockets forever.
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 30_000,
     })
     // Idle clients emit 'error' when the server closes them (restart,
     // timeout); without a handler that exception takes down the main
@@ -147,6 +151,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       database,
       ssl,
       connectionTimeoutMillis: 8000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 30_000,
     })
     try {
       await client.connect()

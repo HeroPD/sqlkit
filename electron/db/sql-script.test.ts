@@ -57,6 +57,37 @@ describe('transaction safety', () => {
     expect(() => assertSelfContainedTransaction('BEGIN TRY\nBEGIN TRAN\nupdate t set a=1\nEND TRY\nBEGIN CATCH\nEND CATCH', 'sqlserver')).toThrow(/same query run/i)
   })
 
+  it('accepts open-heavy T-SQL that manages @@TRANCOUNT across exclusive branches', () => {
+    // Two textual BEGIN TRANs, one COMMIT — balanced at runtime because the
+    // branches are exclusive. A script consulting @@TRANCOUNT is managing its
+    // own transaction state; token counting cannot judge it.
+    expect(() => assertSelfContainedTransaction(
+      'IF @@TRANCOUNT = 0\n  BEGIN TRANSACTION\nELSE\n  BEGIN TRAN sqlkit_inner\nupdate t set a = 1\nWHILE @@TRANCOUNT > 0 COMMIT',
+      'sqlserver',
+    )).not.toThrow()
+    // Without a @@TRANCOUNT reference the same imbalance is still a leak.
+    expect(() => assertSelfContainedTransaction(
+      'IF @x = 0\n  BEGIN TRANSACTION\nELSE\n  BEGIN TRAN\nupdate t set a = 1\nCOMMIT',
+      'sqlserver',
+    )).toThrow(/same query run/i)
+  })
+
+  it('sees transaction control hidden by NO_BACKSLASH_ESCAPES string semantics', () => {
+    const script = "select 'a\\'; begin; update t set a = 1"
+    // Default mode: \' is an escaped quote, so the begin is string content.
+    expect(() => assertSelfContainedTransaction(script, 'mysql')).not.toThrow()
+    // NO_BACKSLASH_ESCAPES: the string ends at that quote; the BEGIN is real and unbalanced.
+    expect(() => assertSelfContainedTransaction(script, 'mysql', { noBackslashEscapes: true })).toThrow(/same query run/i)
+  })
+
+  it('treats double quotes as identifiers under ANSI_QUOTES', () => {
+    const script = 'select "x\\"; begin; update t set a = 1'
+    // Default mode: \" is an escaped quote inside a string, swallowing the begin.
+    expect(() => assertSelfContainedTransaction(script, 'mysql')).not.toThrow()
+    // ANSI_QUOTES: "x\" is an identifier ending at the quote; the BEGIN is real.
+    expect(() => assertSelfContainedTransaction(script, 'mysql', { ansiQuotes: true })).toThrow(/same query run/i)
+  })
+
   it('accepts SQLite END as an alias for COMMIT', () => {
     expect(() => assertSelfContainedTransaction('BEGIN; update t set a=1; END', 'sqlite')).not.toThrow()
     expect(() => assertSelfContainedTransaction('BEGIN; update t set a=1; END TRANSACTION', 'sqlite')).not.toThrow()

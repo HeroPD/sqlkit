@@ -201,6 +201,11 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
     },
 
     async cancel(executionId) {
+      // Only entries with an executionId (queries, exports) are cancellable:
+      // runBatch/runDdl saves never get one, so even a blanket cancel leaves
+      // them to finish — the one interrupt here is killing the worker, and the
+      // server engines' equivalent (cancel + transaction rollback) has no
+      // kill-free counterpart in node:sqlite.
       const targets = [...pending.entries()].filter(([, entry]) =>
         entry.executionId !== undefined && (executionId === undefined || entry.executionId === executionId),
       )

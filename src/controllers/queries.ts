@@ -10,6 +10,10 @@ import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
 // evict another context's history — the history view is filtered per context.
 const MAX_HISTORY = 200
 
+// History persists to .sqlkit/history.json; cap each entry's SQL so the file
+// (and the write-through IPC) stays small. The view never renders more anyway.
+const MAX_HISTORY_SQL = 10_000
+
 // Caps each context's entries to `max`, keeping the newest. Input is newest-first.
 export const capHistoryPerContext = (items: HistoryItem[], max: number): HistoryItem[] => {
   const seen = new Map<string, number>()
@@ -450,7 +454,7 @@ export class QueriesController implements ReactiveController {
         {
           id: crypto.randomUUID(),
           contextKey,
-          sql,
+          sql: sql.slice(0, MAX_HISTORY_SQL),
           success: response.success,
           durationMs: response.success ? response.result.durationMs : 0,
           rowCount: response.success ? response.result.rowCount : null,
@@ -461,6 +465,7 @@ export class QueriesController implements ReactiveController {
       ],
       MAX_HISTORY,
     )
+    this.persistHistory()
     this.host.requestUpdate()
   }
 
@@ -524,7 +529,31 @@ export class QueriesController implements ReactiveController {
 
   clearHistory(contextKey: string) {
     this.history = this.history.filter((item) => item.contextKey !== contextKey)
+    this.persistHistory()
     this.host.requestUpdate()
+  }
+
+  /** Restores the workspace's persisted history; called when a workspace opens.
+   * Runs already recorded this session stay ahead of the loaded entries. */
+  async loadHistory() {
+    const gen = this.generation
+    let items: HistoryItem[]
+    try {
+      items = await window.sqlkit.readHistory()
+    } catch {
+      return
+    }
+    // A workspace switch happened while reading: this history belongs to the
+    // old workspace and must not leak into the new one's list.
+    if (this.generation !== gen || !items.length) return
+    this.history = capHistoryPerContext([...this.history, ...items], MAX_HISTORY)
+    this.host.requestUpdate()
+  }
+
+  // Write-through: history changes at most once per run, so each mutation
+  // persists immediately — no debounce timer to race a workspace switch.
+  private persistHistory() {
+    void window.sqlkit.writeHistory(this.history).catch(() => {})
   }
 
   // Pulls the next page of a paged result from the main-process buffer and

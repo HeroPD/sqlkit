@@ -55,6 +55,39 @@ describe('WorkbenchScreen query orchestration', () => {
   })
 })
 
+describe('WorkbenchScreen metadata refresh after writes', () => {
+  const runningScreen = () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void; newQuery(): void }
+      _live: { statuses: unknown; phase(profileId: string): string | null; refresh: ReturnType<typeof vi.fn> }
+      _queries: { execute: ReturnType<typeof vi.fn> }
+      _runSql(sql: string): Promise<void>
+    }
+    workbench._config.connections = [profile]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._ctx.newQuery()
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', children: [{ name: 'db_a', inUse: true }] } }
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.refresh = vi.fn()
+    workbench._queries.execute = vi.fn(() => Promise.resolve())
+    return workbench
+  }
+
+  it('refreshes schema metadata after a run that could change the schema', async () => {
+    const workbench = runningScreen()
+    await workbench._runSql('create table brand_new (id int)')
+    expect(workbench._live.refresh).toHaveBeenCalledWith('p1')
+  })
+
+  it('does not refresh after a read-only run', async () => {
+    const workbench = runningScreen()
+    await workbench._runSql('select 1')
+    expect(workbench._live.refresh).not.toHaveBeenCalled()
+  })
+})
+
 describe('WorkbenchScreen tab scroll state', () => {
   it('restores inspect and result scroll offsets for each tab', async () => {
     const screen = new WorkbenchScreen()

@@ -82,6 +82,9 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     await Promise.race([teardown, new Promise<void>((resolve) => setTimeout(resolve, 3000))])
     // A hung disconnect can deadlock on its own tunnel (pool.end waits for a
     // client whose socket rides it); force the tunnel down so both unstick.
+    // Without a tunnel, the abandoned teardown still settles on its own:
+    // every driver's sockets carry TCP keepalive, so a dead peer terminates
+    // them and pool.end() completes rather than holding sockets forever.
     if (!settled) void active.tunnel?.close().catch(() => {})
   }
 

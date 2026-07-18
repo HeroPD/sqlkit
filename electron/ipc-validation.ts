@@ -1,4 +1,4 @@
-import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
+import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
 import type { ExportFormat } from '../src/result-export'
 
 const MAX_ID = 200
@@ -165,6 +165,36 @@ export function batchStatements(value: unknown): BatchStatement[] {
 export function ddlStatements(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > MAX_BATCH) throw new IpcValidationError(`DDL batch must contain at most ${MAX_BATCH} statements`)
   return value.map((statement, index) => stringValue(statement, `DDL statement ${index + 1}`))
+}
+
+const MAX_HISTORY_ITEMS = 5_000
+const MAX_HISTORY_SQL = 10_000
+const MAX_HISTORY_ERROR = 2_000
+
+// History entries persist to disk, so bound each field. Oversized SQL/error
+// text is truncated rather than rejected — losing a tail beats losing the run.
+export function historyItems(value: unknown): HistoryItem[] {
+  if (!Array.isArray(value)) throw new IpcValidationError('History must be a list')
+  return value.slice(0, MAX_HISTORY_ITEMS).map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new IpcValidationError(`History entry ${index + 1} is invalid`)
+    const item = entry as Record<string, unknown>
+    const rowCount = item.rowCount
+    if (rowCount !== null && (typeof rowCount !== 'number' || !Number.isFinite(rowCount))) {
+      throw new IpcValidationError(`History entry ${index + 1} rowCount is invalid`)
+    }
+    const durationMs = item.durationMs
+    if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) throw new IpcValidationError(`History entry ${index + 1} duration is invalid`)
+    return {
+      id: stringValue(item.id, `History entry ${index + 1} id`, MAX_ID),
+      contextKey: stringValue(item.contextKey, `History entry ${index + 1} context`, 500),
+      sql: stringValue(item.sql, `History entry ${index + 1} SQL`).slice(0, MAX_HISTORY_SQL),
+      success: booleanValue(item.success, `History entry ${index + 1} success`),
+      durationMs,
+      rowCount,
+      error: stringValue(item.error, `History entry ${index + 1} error`).slice(0, MAX_HISTORY_ERROR),
+      createdAt: stringValue(item.createdAt, `History entry ${index + 1} createdAt`, 100),
+    }
+  })
 }
 
 export function exportFormat(value: unknown): ExportFormat {

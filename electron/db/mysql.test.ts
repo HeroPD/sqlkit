@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mysqlVersion, writeTargetTable } from './mysql'
+import { mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
 
 describe('mysqlVersion', () => {
   it('labels plain MySQL versions', () => {
@@ -9,6 +9,15 @@ describe('mysqlVersion', () => {
 
   it('recognizes MariaDB version strings', () => {
     expect(mysqlVersion('11.4.2-MariaDB-1:11.4.2+maria~ubu2404')).toBe('MariaDB 11.4.2')
+  })
+})
+
+describe('sqlModeFlags', () => {
+  it('detects the masking-relevant flags in an expanded sql_mode', () => {
+    expect(sqlModeFlags('STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES')).toEqual({ noBackslashEscapes: true, ansiQuotes: false })
+    expect(sqlModeFlags('REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ANSI')).toEqual({ noBackslashEscapes: false, ansiQuotes: true })
+    expect(sqlModeFlags('ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES')).toEqual({ noBackslashEscapes: false, ansiQuotes: false })
+    expect(sqlModeFlags('')).toEqual({ noBackslashEscapes: false, ansiQuotes: false })
   })
 })
 

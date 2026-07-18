@@ -1,6 +1,6 @@
 import { dialectFor } from '../../src/dialect'
 import type { Engine, QuerySort } from '../../src/electron'
-import { maskSql } from '../../src/sql-mask'
+import { maskSql, type SqlModeFlags } from '../../src/sql-mask'
 import { isReorderableQuery } from '../../src/sql-order'
 
 export { maskSql }
@@ -12,8 +12,8 @@ export const containsSqliteTrigger = (masked: string) => /\bcreate\s+(?:temp(?:o
 type SplitScript = { statements: { raw: string; masked: string }[]; masked: string }
 
 // One mask pass shared by the splitter and every per-statement consumer.
-function splitScript(sql: string, engine?: Engine): SplitScript {
-  const masked = maskSql(sql, engine)
+function splitScript(sql: string, engine?: Engine, mode?: SqlModeFlags): SplitScript {
+  const masked = maskSql(sql, engine, mode)
   const statements: SplitScript['statements'] = []
   let depth = 0
   let start = 0
@@ -32,8 +32,8 @@ function splitScript(sql: string, engine?: Engine): SplitScript {
   return { statements, masked }
 }
 
-export function splitTopLevelStatements(sql: string, engine?: Engine): string[] {
-  return splitScript(sql, engine).statements.map((statement) => statement.raw)
+export function splitTopLevelStatements(sql: string, engine?: Engine, mode?: SqlModeFlags): string[] {
+  return splitScript(sql, engine, mode).statements.map((statement) => statement.raw)
 }
 
 // Pooled server queries cannot safely leave a transaction open for a later run:
@@ -41,10 +41,10 @@ export function splitTopLevelStatements(sql: string, engine?: Engine): string[] 
 // remain supported because one driver.query call keeps one checked-out connection.
 // Returns whether the script drives its own transaction control, so a caller can
 // avoid wrapping it in a redundant outer transaction.
-export function assertSelfContainedTransaction(sql: string, engine: Engine): boolean {
+export function assertSelfContainedTransaction(sql: string, engine: Engine, mode?: SqlModeFlags): boolean {
   let depth = 0
   let sawControl = false
-  const script = splitScript(sql, engine)
+  const script = splitScript(sql, engine, mode)
   // SQLite spells COMMIT as END too, but trigger bodies (BEGIN stmt; … END)
   // split at their inner semicolons here — their END is not a commit.
   const endIsCommit = engine === 'postgresql' || (engine === 'sqlite' && !containsSqliteTrigger(script.masked))
@@ -81,7 +81,11 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine): boo
       depth -= 1
     }
   }
-  if (sawControl && depth !== 0) {
+  // A T-SQL script consulting @@TRANCOUNT manages its own transaction state
+  // across exclusive branches — token counting cannot judge it, and the
+  // session reset at release rolls back anything it truly leaks.
+  const managesTrancount = engine === 'sqlserver' && /@@trancount/i.test(script.masked)
+  if (sawControl && depth !== 0 && !managesTrancount) {
     throw new Error('Transactions must begin and commit or roll back in the same query run; pooled connections cannot preserve them across runs.')
   }
   return sawControl
@@ -108,7 +112,7 @@ export function splitSqlServerBatches(sql: string): string[] {
 }
 
 /** Removes mysql-client DELIMITER directives and restores terminators to `;`. */
-export function preprocessMysqlDelimiters(sql: string): string {
+export function preprocessMysqlDelimiters(sql: string, mode?: SqlModeFlags): string {
   let delimiter = ';'
   let state: 'normal' | 'single' | 'double' | 'backtick' | 'block' = 'normal'
   const output: string[] = []
@@ -136,7 +140,12 @@ export function preprocessMysqlDelimiters(sql: string): string {
         transformed += char
         index += 1
         const quote = state === 'single' ? "'" : state === 'double' ? '"' : '`'
-        if (char === '\\' && index < line.length) {
+        // Backslash escapes never apply inside backtick identifiers, and sql_mode
+        // can disable them for strings too (same rules as maskSql).
+        const backslashEscapes = state !== 'backtick'
+          && !mode?.noBackslashEscapes
+          && !(state === 'double' && mode?.ansiQuotes)
+        if (backslashEscapes && char === '\\' && index < line.length) {
           transformed += line[index]!
           index += 1
         } else if (char === quote && next === quote) {
@@ -189,16 +198,18 @@ export function prepareSqlRun(args: {
   sql: string
   params?: unknown[]
   sort?: QuerySort | null
+  /** MySQL: the session's masking-relevant sql_mode flags, read at connect. */
+  sqlMode?: SqlModeFlags
 }): SqlRunPlan {
   const params = args.params ?? []
-  let sql = args.engine === 'mysql' ? preprocessMysqlDelimiters(args.sql) : args.sql
+  let sql = args.engine === 'mysql' ? preprocessMysqlDelimiters(args.sql, args.sqlMode) : args.sql
 
   if (args.sort) {
     if (!isReorderableQuery(sql)) throw new Error('Sorting is only supported for a single SELECT statement.')
     sql = dialectFor(args.engine).applyOrderBy(sql, args.sort)
   }
 
-  assertSelfContainedTransaction(sql, args.engine)
+  assertSelfContainedTransaction(sql, args.engine, args.sqlMode)
   const batches = args.engine === 'sqlserver' ? splitSqlServerBatches(sql) : [sql]
   if (params.length && batches.length > 1) {
     throw new Error('Parameters cannot be used with a multi-batch SQL Server script.')

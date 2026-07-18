@@ -7,6 +7,7 @@ import type { Endpoint } from './transport'
 import { openExportWriter, type ExportWriter } from './export'
 import { sslOptions } from './postgres'
 import { prepareSqlRun } from './sql-script'
+import type { SqlModeFlags } from '../../src/sql-mask'
 
 // Schemas MySQL ships with; never listed as children or browsable databases.
 const SYSTEM_SCHEMAS = ['mysql', 'information_schema', 'performance_schema', 'sys']
@@ -54,6 +55,15 @@ export function mysqlVersion(raw: string): string {
   return maria ? `MariaDB ${maria[1]}` : `MySQL ${raw}`
 }
 
+/** The masking-relevant flags of an @@sql_mode value (composite modes like ANSI
+ * arrive pre-expanded by the server, so a plain token test suffices). */
+export function sqlModeFlags(mode: string): SqlModeFlags {
+  return {
+    noBackslashEscapes: /\bNO_BACKSLASH_ESCAPES\b/i.test(mode),
+    ansiQuotes: /\bANSI_QUOTES\b/i.test(mode),
+  }
+}
+
 // MySQL with all-databases support, mirroring the postgres driver: one pool per
 // child database (a MySQL "database" and "schema" are the same thing), queries
 // and metadata always target the active child via the pool's default schema.
@@ -65,6 +75,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   let pools: Map<string, mysql.Pool> | null = null
   let childNames: string[] = []
   let active = ''
+  // sql_mode flags that change how scripts must be masked (NO_BACKSLASH_ESCAPES,
+  // ANSI_QUOTES); read once at connect — pooled sessions inherit the same value.
+  let sqlMode: SqlModeFlags = {}
   // Thread ids of in-flight user statements, so cancel() can KILL QUERY them.
   const running = new Set<RunningEntry>()
   // The tls ConnectionOptions shape is what mysql2 forwards to tls.connect;
@@ -150,7 +163,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // Point metaRows at the discovery pool; re-resolved after children load.
       active = discovery
 
-      const version = mysqlVersion((await metaRows<{ version: string }>('select version() as version'))[0]?.version ?? '')
+      const banner = (await metaRows<{ version: string; mode: string }>('select version() as version, @@sql_mode as mode'))[0]
+      const version = mysqlVersion(banner?.version ?? '')
+      sqlMode = sqlModeFlags(banner?.mode ?? '')
 
       if (profile.databaseMode === 'all') {
         const listed = await metaRows<{ name: string }>(
@@ -180,7 +195,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
     async query(sql, params = [], childDb = null, sort = null, executionId) {
       const started = performance.now()
-      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort })
+      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, sqlMode })
       // Checked out manually so the thread id is known while the statement
       // runs and cancel() has a KILL QUERY target.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
@@ -367,7 +382,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async exportQuery({ sql, params, childDb, sort, filePath, format, executionId }) {
-      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort })
+      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, sqlMode })
       // Registered like query() so Stop (and disconnect) can KILL QUERY a
       // runaway export instead of it streaming to completion unstoppably.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }

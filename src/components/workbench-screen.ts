@@ -350,6 +350,7 @@ export class WorkbenchScreen extends LitElement {
     const { profileId, child } = await this._config.load()
     this._ctx.switchInstance(profileId, child)
     this._workspaceFiles.setFolder(this._contextFolder())
+    void this._queries.loadHistory()
   }
 
   // Files nest per context: connection-folder/child-folder for all-databases
@@ -621,6 +622,10 @@ export class WorkbenchScreen extends LitElement {
       sort,
       executionId,
     })
+    // A run that could have changed the schema updates what the tree,
+    // completions and grid editability believe — same as the Inspect apply
+    // path. Refreshed even on error: a failed script may have half-applied.
+    if (!isReadOnlyQuery(sqlText, profile.engine)) this._live.refresh(profile.id)
   }
 
   // Double-click browse: a tab named after the table, pre-filled with a capped SELECT and run.

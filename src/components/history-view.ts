@@ -7,17 +7,9 @@ import type { MenuItem, MenuPickDetail } from './context-menu'
 
 // One run in the query history. Runtime-only, like the reference app: capped
 // per workspace, scoped to the database context that ran it.
-export type HistoryItem = {
-  id: string
-  /** The context (connection + child) that ran the query. */
-  contextKey: string
-  sql: string
-  success: boolean
-  durationMs: number
-  rowCount: number | null
-  error: string
-  createdAt: string
-}
+// Shared with the main process (persistence), so the type lives in electron.d.ts.
+import type { HistoryItem } from '../electron'
+export type { HistoryItem }
 
 export type HistoryOpenDetail = { sql: string }
 export type HistoryExplainDetail = { sql: string; analyze: boolean }

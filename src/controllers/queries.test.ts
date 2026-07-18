@@ -32,12 +32,14 @@ const result = { columns: ['n'], rows: [[1]], rowCount: 1, durationMs: 3 }
 const paged = { columns: ['n'], rows: [[0], [1]], rowCount: 5, durationMs: 1, sessionId: 'sess1', bufferedRowCount: 5 }
 const runArgs = { tabId: 't1', profile, childDb: null, contextKey: 'p1', sql: 'SELECT 1', executionId: 'exec1' }
 
-// window.sqlkit stub with the query/paging methods the controller calls.
-function stubSqlkit(over: Partial<Record<'runQuery' | 'fetchRows' | 'closeSession', unknown>> = {}) {
+// window.sqlkit stub with the query/paging/history methods the controller calls.
+function stubSqlkit(over: Partial<Record<'runQuery' | 'fetchRows' | 'closeSession' | 'readHistory' | 'writeHistory', unknown>> = {}) {
   const api = {
     runQuery: vi.fn(() => Promise.resolve({ success: true, result: paged })),
     fetchRows: vi.fn(() => Promise.resolve({ success: true, rows: [] as unknown[][] })),
     closeSession: vi.fn(() => Promise.resolve()),
+    readHistory: vi.fn(() => Promise.resolve([] as HistoryItem[])),
+    writeHistory: vi.fn(() => Promise.resolve({ success: true })),
     ...over,
   }
   ;(window as unknown as { sqlkit: unknown }).sqlkit = api
@@ -50,8 +52,9 @@ function deferRunQuery() {
   let settle!: (response: QueryResponse) => void
   const pending = new Promise<QueryResponse>((res) => (settle = res))
   const runQuery = vi.fn(() => pending)
-  ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery }
-  return { settle, runQuery }
+  const writeHistory = vi.fn((_items: HistoryItem[]) => Promise.resolve({ success: true }))
+  ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery, writeHistory }
+  return { settle, runQuery, writeHistory }
 }
 
 afterEach(() => {
@@ -136,6 +139,7 @@ describe('QueriesController.execute', () => {
   it('marks the run errored instead of stuck when the IPC call rejects', async () => {
     ;(window as unknown as { sqlkit: unknown }).sqlkit = {
       runQuery: () => Promise.reject(new Error('channel closed')),
+      writeHistory: () => Promise.resolve({ success: true }),
     }
     const controller = new QueriesController(host(), () => true)
 
@@ -143,6 +147,45 @@ describe('QueriesController.execute', () => {
 
     expect(controller.runFor('t1')).toEqual({ phase: 'error', error: 'channel closed' })
     expect(controller.tasks[0]?.status).toBe('error')
+  })
+})
+
+describe('QueriesController history persistence', () => {
+  it('writes history through after every run', async () => {
+    const { settle, writeHistory } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute(runArgs)
+    settle({ success: true, result })
+    await done
+
+    expect(writeHistory).toHaveBeenCalledOnce()
+    const written = writeHistory.mock.calls[0]?.[0]
+    expect(written?.[0]).toMatchObject({ contextKey: 'p1', sql: 'SELECT 1', success: true })
+  })
+
+  it('loads persisted history behind entries already recorded this session', async () => {
+    const api = stubSqlkit({ readHistory: vi.fn(() => Promise.resolve([historyItem('p1', 'old-run')])) })
+    const controller = new QueriesController(host(), () => true)
+    controller.history = [historyItem('p1', 'fresh-run')]
+
+    await controller.loadHistory()
+
+    expect(controller.history.map((item) => item.id)).toEqual(['fresh-run', 'old-run'])
+    expect(api.readHistory).toHaveBeenCalledOnce()
+  })
+
+  it('drops a history load that resolves after a workspace switch', async () => {
+    let resolve!: (items: HistoryItem[]) => void
+    stubSqlkit({ readHistory: vi.fn(() => new Promise<HistoryItem[]>((res) => (resolve = res))) })
+    const controller = new QueriesController(host(), () => true)
+
+    const loading = controller.loadHistory()
+    controller.reset()
+    resolve([historyItem('p1', 'stale')])
+    await loading
+
+    expect(controller.history).toEqual([])
   })
 })
 

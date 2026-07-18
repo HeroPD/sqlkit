@@ -77,6 +77,9 @@ function installContentSecurityPolicy() {
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] } })
   })
+  // The renderer never needs a Chromium permission (camera, geolocation, …);
+  // deny them all rather than inherit Electron's grant-by-default.
+  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
 }
 
 const workspaceFor = (contents: WebContents) => workspacePaths.get(contents.id) ?? null

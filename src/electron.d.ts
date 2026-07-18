@@ -154,6 +154,19 @@ export type QueryResult = QueryResultSet & {
  * pattern-match the human-readable error text. */
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string; cancelled?: boolean }
 
+/** One entry of the per-workspace query history (persisted in .sqlkit/history.json). */
+export type HistoryItem = {
+  id: string
+  /** The context (connection + child) that ran the query. */
+  contextKey: string
+  sql: string
+  success: boolean
+  durationMs: number
+  rowCount: number | null
+  error: string
+  createdAt: string
+}
+
 /** One parameterized statement in an atomic write batch. */
 export type BatchStatement = {
   sql: string
@@ -282,6 +295,10 @@ export type SqlkitApi = {
   getTheme: () => Promise<ThemeId>
   getWorkspaceConfig: () => Promise<WorkspaceConfigResult>
   saveWorkspaceConfig: (config: WorkspaceConfig) => Promise<SaveResult>
+  /** The workspace's persisted query history, newest first. */
+  readHistory: () => Promise<HistoryItem[]>
+  /** Replaces the workspace's persisted query history (write-through per run). */
+  writeHistory: (items: HistoryItem[]) => Promise<SaveResult>
   testConnection: (profile: ConnectionProfile) => Promise<TestConnectionResult>
   testSshTunnel: (profile: ConnectionProfile) => Promise<TestSshResult>
   connectDatabase: (profile: ConnectionProfile) => Promise<ConnectResult>

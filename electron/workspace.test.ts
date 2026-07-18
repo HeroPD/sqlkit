@@ -8,9 +8,11 @@ import {
   openWorkspace,
   readWorkspaceConfig,
   readWorkspaceConfigForRenderer,
+  readWorkspaceHistory,
   readTheme,
   isWeakStorageBackend,
   writeWorkspaceConfig,
+  writeWorkspaceHistory,
   writeTheme,
 } from './workspace'
 
@@ -247,11 +249,13 @@ describe('workspace config: credential round-trip', () => {
 describe('workspace config: credential .gitignore guard', () => {
   const gitignore = () => fs.readFileSync(path.join(workspaceDir, '.sqlkit', '.gitignore'), 'utf8')
 
-  it('ignores config.json and its atomic-write temp file', () => {
+  it('ignores config.json, history.json and their atomic-write temp files', () => {
     writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] })
     const lines = gitignore().split('\n')
     expect(lines).toContain('config.json')
     expect(lines).toContain('config.json.tmp')
+    expect(lines).toContain('history.json')
+    expect(lines).toContain('history.json.tmp')
   })
 
   it('augments a hand-edited .gitignore with the missing rules instead of skipping', () => {
@@ -322,5 +326,32 @@ describe('workspace open: legacy migration', () => {
     // rewritten as-is rather than encrypted or blanked.
     const stored = JSON.parse(rawConfig()) as { connections: { password: string }[] }
     expect(stored.connections[0]?.password).toBe('legacy-plain')
+  })
+})
+
+describe('workspace query history', () => {
+  const item = (id: string, sql = 'select 1'): import('../src/electron').HistoryItem =>
+    ({ id, contextKey: 'p1', sql, success: true, durationMs: 3, rowCount: 1, error: '', createdAt: '2026-07-19T00:00:00Z' })
+
+  it('round-trips history through .sqlkit/history.json', () => {
+    expect(writeWorkspaceHistory(workspaceDir, [item('a'), item('b')])).toEqual({ success: true })
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['a', 'b'])
+    // The file holds query text (possibly secrets) — the gitignore guard covers it.
+    const rules = fs.readFileSync(path.join(workspaceDir, '.sqlkit', '.gitignore'), 'utf8').split('\n')
+    expect(rules).toContain('history.json')
+  })
+
+  it('reads missing or corrupt history as empty instead of failing', () => {
+    expect(readWorkspaceHistory(workspaceDir)).toEqual([])
+    fs.mkdirSync(path.join(workspaceDir, '.sqlkit'), { recursive: true })
+    fs.writeFileSync(path.join(workspaceDir, '.sqlkit', 'history.json'), '{not json')
+    expect(readWorkspaceHistory(workspaceDir)).toEqual([])
+    fs.writeFileSync(path.join(workspaceDir, '.sqlkit', 'history.json'), JSON.stringify([{ bogus: true }, item('ok')]))
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['ok'])
+  })
+
+  it('reports no-workspace instead of writing anywhere', () => {
+    expect(writeWorkspaceHistory(null, [item('a')]).success).toBe(false)
+    expect(readWorkspaceHistory(null)).toEqual([])
   })
 })

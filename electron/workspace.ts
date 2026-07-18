@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type {
   ConnectionProfile,
+  HistoryItem,
   RecentWorkspace,
   SaveResult,
   WorkspaceConfig,
@@ -107,9 +108,10 @@ const hasWeaklyProtectedSecrets = (connections: ConnectionProfile[]) => {
 
 // Keeps config.json — and the temp file the atomic write leaves on a crash —
 // out of version control; both hold credentials, plaintext on a keyless system.
+// History holds query text, which can embed secrets, so it stays out too.
 // Appends any missing rule to a hand-edited .gitignore rather than skipping, so
 // a pre-existing file can't defeat the guard. Best-effort and idempotent.
-const GITIGNORE_RULES = ['config.json', 'config.json.tmp']
+const GITIGNORE_RULES = ['config.json', 'config.json.tmp', 'history.json', 'history.json.tmp']
 const ensureInternalGitignore = (workspacePath: string) => {
   try {
     const dir = path.join(workspacePath, '.sqlkit')
@@ -302,6 +304,42 @@ export function writeWorkspaceConfig(workspacePath: string | null, config: Works
       connections: normalized.connections.map((connection) => mapSecrets(connection, encryptSecret)),
     }
     writeFileAtomic(workspaceConfigPathFor(workspacePath), JSON.stringify(stored, null, 2))
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+}
+
+// --- Query history ----------------------------------------------------------
+
+const historyPathFor = (wsPath: string) => path.join(wsPath, '.sqlkit', 'history.json')
+const MAX_HISTORY_BYTES = 64 * 1024 * 1024
+
+/** The workspace's persisted query history, newest first. Missing or unreadable
+ * files read as empty — history is a convenience, never worth blocking on. */
+export function readWorkspaceHistory(workspacePath: string | null): HistoryItem[] {
+  if (!workspacePath) return []
+  try {
+    const file = historyPathFor(workspacePath)
+    if (fs.statSync(file).size > MAX_HISTORY_BYTES) return []
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((entry): entry is HistoryItem =>
+      !!entry && typeof entry === 'object'
+      && typeof (entry as HistoryItem).id === 'string'
+      && typeof (entry as HistoryItem).contextKey === 'string'
+      && typeof (entry as HistoryItem).sql === 'string'
+      && typeof (entry as HistoryItem).success === 'boolean')
+  } catch {
+    return []
+  }
+}
+
+export function writeWorkspaceHistory(workspacePath: string | null, items: HistoryItem[]): SaveResult {
+  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  try {
+    ensureInternalGitignore(workspacePath)
+    writeFileAtomic(historyPathFor(workspacePath), JSON.stringify(items, null, 2))
     return { success: true }
   } catch (error) {
     return { success: false, error: (error as Error).message }

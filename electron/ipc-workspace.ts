@@ -16,14 +16,16 @@ import {
   startWorkspaceWatcher,
   stopWorkspaceWatcher,
 } from './files'
-import { stringValue, workspaceConfig } from './ipc-validation'
+import { historyItems, stringValue, workspaceConfig } from './ipc-validation'
 import {
   isDirectory,
   openWorkspace,
   readGlobalConfig,
   readTheme,
   readWorkspaceConfigForRenderer,
+  readWorkspaceHistory,
   writeWorkspaceConfig,
+  writeWorkspaceHistory,
 } from './workspace'
 
 const IPC_PATH_LIMIT = 20_000
@@ -207,6 +209,14 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
   ipcMain.handle('workspace:save-config', (event, config: WorkspaceConfig) => {
     try {
       return writeWorkspaceConfig(context.workspaceFor(event.sender), workspaceConfig(config))
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message }
+    }
+  })
+  ipcMain.handle('workspace:history-read', (event) => readWorkspaceHistory(context.workspaceFor(event.sender)))
+  ipcMain.handle('workspace:history-write', (event, items: unknown) => {
+    try {
+      return writeWorkspaceHistory(context.workspaceFor(event.sender), historyItems(items))
     } catch (error) {
       return { success: false as const, error: (error as Error).message }
     }

@@ -5,6 +5,7 @@ import {
   databaseObject,
   databaseObjectKind,
   exportFormat,
+  historyItems,
   nonNegativeInteger,
   queryPayload,
   querySort,
@@ -77,5 +78,39 @@ describe('querySort', () => {
     expect(() => querySort({ columnIndex: -1, direction: 'asc' })).toThrow()
     expect(() => querySort({ columnIndex: 'x', direction: 'asc' })).toThrow()
     expect(() => querySort('name')).toThrow()
+  })
+})
+
+describe('historyItems', () => {
+  const entry = (over: Record<string, unknown> = {}) => ({
+    id: 'h1',
+    contextKey: 'p1',
+    sql: 'select 1',
+    success: true,
+    durationMs: 4,
+    rowCount: 1,
+    error: '',
+    createdAt: '2026-07-19T00:00:00Z',
+    ...over,
+  })
+
+  it('accepts well-formed entries and truncates oversized text instead of rejecting', () => {
+    const [item] = historyItems([entry({ sql: 'x'.repeat(20_000), error: 'e'.repeat(5_000) })])
+    expect(item?.sql).toHaveLength(10_000)
+    expect(item?.error).toHaveLength(2_000)
+    expect(item?.rowCount).toBe(1)
+  })
+
+  it('rejects malformed shapes', () => {
+    expect(() => historyItems('nope')).toThrow()
+    expect(() => historyItems([entry({ success: 'yes' })])).toThrow()
+    expect(() => historyItems([entry({ durationMs: 'slow' })])).toThrow()
+    expect(() => historyItems([entry({ rowCount: 'many' })])).toThrow()
+    expect(() => historyItems([null])).toThrow()
+  })
+
+  it('caps the number of stored entries', () => {
+    const flood = Array.from({ length: 6_000 }, (_, index) => entry({ id: `h${index}` }))
+    expect(historyItems(flood)).toHaveLength(5_000)
   })
 })
