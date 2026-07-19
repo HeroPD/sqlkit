@@ -1,5 +1,5 @@
-appId: com.sqlkitapp.sqlkit
-productName: sqlkit
+appId: com.sqlkitapp.sqlkitstudio
+productName: SqlKit Studio
 
 directories:
   output: release

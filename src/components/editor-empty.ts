@@ -28,7 +28,7 @@ export class EditorEmpty extends LitElement {
   render() {
     return html`
       <div class="mark"><i class="codicon codicon-database" aria-hidden="true"></i></div>
-      <h2>SqlKit</h2>
+      <h2>SqlKit Studio</h2>
       <p>No query editor is open.</p>
       <div class="actions">
         ${ACTIONS.map(

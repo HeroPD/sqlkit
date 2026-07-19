@@ -300,7 +300,7 @@ void app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 }).catch((error: unknown) => {
-  console.error('SqlKit failed to start:', error)
+  console.error('SqlKit Studio failed to start:', error)
   app.exit(1)
 })
 

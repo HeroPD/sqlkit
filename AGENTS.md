@@ -1,6 +1,6 @@
 # AGENTS.md
 
-SqlKit is an Electron + Lit desktop SQL workbench supporting PostgreSQL, MySQL/MariaDB, Microsoft SQL Server, and SQLite. Read this file and `CLAUDE.md` before reviewing or changing the repository.
+SqlKit Studio is an Electron + Lit desktop SQL workbench supporting PostgreSQL, MySQL/MariaDB, Microsoft SQL Server, and SQLite. Read this file and `CLAUDE.md` before reviewing or changing the repository.
 
 ## Product priorities
 
@@ -38,7 +38,7 @@ SqlKit is an Electron + Lit desktop SQL workbench supporting PostgreSQL, MySQL/M
 - Report only evidence-backed findings with a specific file/function, realistic impact, and proportionate severity.
 - It is acceptable to report fewer findings than requested, including none. Never fill a quota with theoretical concerns.
 - Separate bugs from accepted product tradeoffs, optional hardening, and operational maturity.
-- Do not assign a low score merely because alternative practices exist. Judge fitness for SqlKit's goals.
+- Do not assign a low score merely because alternative practices exist. Judge fitness for SqlKit Studio's goals.
 - Current code quality is approximately 9/10. A materially lower assessment requires concrete, important defects.
 - Low-priority durability ideas, such as atomic replacement of an existing export file, belong in the backlog and should not be presented as release blockers.
 

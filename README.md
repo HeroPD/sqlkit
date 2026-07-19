@@ -1,6 +1,6 @@
-# sqlkit
+# SqlKit Studio
 
-SQL desktop client for PostgreSQL, MySQL, SQL Server, and SQLite, built with Electron, Lit, and Vite.
+A fast, multi-database SQL workbench for PostgreSQL, MySQL, SQL Server, and SQLite, built with Electron, Lit, and Vite.
 
 - Tabbed SQL editor (CodeMirror 6) with dialect-aware completion
 - Results grid with inline editing, sorting, and CSV/TSV/JSON export

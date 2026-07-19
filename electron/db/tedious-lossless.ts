@@ -100,7 +100,7 @@ export function installLosslessTediousParsers() {
   if (parser[PATCHED]) return
   const helpers = require('tedious/lib/token/helpers.js') as Helpers
   if (typeof parser.readValue !== 'function' || typeof helpers.NotEnoughDataError !== 'function') {
-    throw new Error('The installed Tedious version is incompatible with SqlKit lossless value decoding.')
+    throw new Error('The installed Tedious version is incompatible with SqlKit Studio lossless value decoding.')
   }
   const original = parser.readValue.bind(parser)
   parser.readValue = (buffer, offset, metadata, options) => {

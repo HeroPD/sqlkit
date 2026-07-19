@@ -163,7 +163,7 @@ export class QueriesController implements ReactiveController {
       if (tabId === protectedTabId || entry.phase !== 'done' || this.hasStaged(tabId)) continue
       total -= retainedResultBytes(entry.result)
       this.closeResultSessions(entry.result)
-      next.set(tabId, { phase: 'error', error: 'This result was released to keep SqlKit memory usage bounded. Run the query again to reload it.' })
+      next.set(tabId, { phase: 'error', error: 'This result was released to keep SqlKit Studio memory usage bounded. Run the query again to reload it.' })
     }
     this.runs = next
   }

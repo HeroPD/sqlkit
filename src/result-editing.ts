@@ -246,7 +246,7 @@ export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): E
       ok: false,
       issue: {
         title: 'Cannot safely delete this row',
-        detail: 'Refresh with every table column in the result before deleting. SqlKit uses the original row values to avoid deleting a row changed by another session.',
+        detail: 'Refresh with every table column in the result before deleting. SqlKit Studio uses the original row values to avoid deleting a row changed by another session.',
       },
     }
   }

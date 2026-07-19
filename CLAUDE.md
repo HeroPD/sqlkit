@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-SQL desktop app: Electron main process + Lit renderer, bundled with Vite. Test via `npm run dev`, not packaged builds (EDR kills them on this machine).
+SqlKit Studio desktop app: Electron main process + Lit renderer, bundled with Vite. Test via `npm run dev`, not packaged builds (EDR kills them on this machine).
 
 ## Architecture
 

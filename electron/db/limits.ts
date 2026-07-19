@@ -17,7 +17,7 @@ export function boundedRow(row: unknown[], usedBytes: number): { row: unknown[];
   const overhead = 16 * (row.length + 1)
   const valueBudget = Math.max(0, Math.min(MAX_CELL_BYTES, Math.floor((MAX_BUFFERED_ROW_BYTES - overhead) / Math.max(1, row.length))))
   const truncateText = (value: string, label: string) => {
-    const suffix = `\n… [${label} truncated by SqlKit]`
+    const suffix = `\n… [${label} truncated by SqlKit Studio]`
     if (valueBudget <= utf8Bytes(suffix)) return ''
     let low = 0
     let high = Math.min(value.length, valueBudget)

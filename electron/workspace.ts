@@ -121,7 +121,7 @@ const ensureInternalGitignore = (workspacePath: string) => {
     const present = new Set(existing.split(/\r?\n/).map((line) => line.trim()))
     const missing = GITIGNORE_RULES.filter((rule) => !present.has(rule))
     if (!missing.length) return
-    const lead = existing ? (existing.endsWith('\n') ? '' : '\n') : '# SqlKit: connection credentials — never commit.\n'
+    const lead = existing ? (existing.endsWith('\n') ? '' : '\n') : '# SqlKit Studio: connection credentials — never commit.\n'
     fs.writeFileSync(file, existing + lead + missing.join('\n') + '\n')
   } catch {
     // A read-only workspace simply doesn't get the guard.

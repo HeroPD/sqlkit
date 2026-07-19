@@ -1,8 +1,8 @@
 {
-  "name": "sqlkit",
+  "name": "sqlkit-studio",
   "private": true,
   "version": "0.1.0",
-  "description": "SQL toolkit desktop app",
+  "description": "SqlKit Studio multi-database desktop workbench",
   "author": "Munkhbaatar <munkhbaatar@opl.mn>",
   "type": "module",
   "main": "dist-electron/main.js",

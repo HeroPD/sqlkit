@@ -72,7 +72,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     if (result.canceled || !folder) return { success: false, canceled: true }
     if (context.focusExistingWorkspace(folder, event.sender.id)) return { success: false, canceled: true }
     const opened = openWorkspace(folder)
-    if (opened.success) window.setTitle(`SqlKit — ${opened.name}`)
+    if (opened.success) window.setTitle(`SqlKit Studio — ${opened.name}`)
     await watchOpened(event.sender, opened)
     return opened
   })
@@ -89,7 +89,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     if (context.focusExistingWorkspace(wsPath, event.sender.id)) return { success: false, canceled: true }
     const opened = openWorkspace(wsPath)
     const window = BrowserWindow.fromWebContents(event.sender)
-    if (opened.success && window) window.setTitle(`SqlKit — ${opened.name}`)
+    if (opened.success && window) window.setTitle(`SqlKit Studio — ${opened.name}`)
     await watchOpened(event.sender, opened)
     return opened
   })
@@ -98,7 +98,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     context.clearWorkspace(event.sender.id)
     stopWorkspaceWatcher(event.sender.id)
     await context.managerFor(event.sender.id)?.disconnectAll()
-    BrowserWindow.fromWebContents(event.sender)?.setTitle('SqlKit')
+    BrowserWindow.fromWebContents(event.sender)?.setTitle('SqlKit Studio')
   })
 
   ipcMain.handle('app:new-window', () => context.createWindow())
@@ -153,7 +153,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     if ('error' in resolved) return { success: false, error: resolved.error }
     const action = externalOpenAction(resolved.path)
     if (action === 'reject') {
-      return { success: false, error: "For safety, SqlKit won't open this file type in an external app. Open it from your file manager if you trust it." }
+      return { success: false, error: "For safety, SqlKit Studio won't open this file type in an external app. Open it from your file manager if you trust it." }
     }
     if (action === 'reveal') {
       shell.showItemInFolder(resolved.path)

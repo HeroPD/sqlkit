@@ -30,7 +30,7 @@ export class StatusBar extends LitElement {
 
     return html`
       <footer class=${this.connectedCount ? 'connected' : ''}>
-        <span>${this.workspaceName || 'SqlKit'}</span>
+        <span>${this.workspaceName || 'SqlKit Studio'}</span>
         ${this.contextName
           ? html`<span><i class="codicon codicon-database" aria-hidden="true"></i> ${this.contextName}</span>`
           : ''}

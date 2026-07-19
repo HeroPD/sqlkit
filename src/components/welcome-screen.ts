@@ -16,7 +16,7 @@ export class WelcomeScreen extends LitElement {
       <div class="inner">
         <div class="brand">
           <i class="codicon codicon-database logo" aria-hidden="true"></i>
-          <h1>SqlKit</h1>
+          <h1>SqlKit Studio</h1>
           <p class="muted">SQL Database Explorer</p>
         </div>
 
