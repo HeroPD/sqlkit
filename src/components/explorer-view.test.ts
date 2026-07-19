@@ -171,4 +171,15 @@ describe('ExplorerView context menu', () => {
 
     expect((onCreate.mock.calls[0]![0] as CustomEvent).detail).toEqual({ schema: 'billing' })
   })
+
+  it('copies an engine-correct, safely quoted browse query', () => {
+    const writeText = vi.fn(() => Promise.resolve())
+    Object.assign(navigator, { clipboard: { writeText } })
+    const view = new ExplorerView()
+    view.engine = 'sqlserver'
+
+    internals(view)._onTableMenuPick('copy-select', table('order details', 'sales'))
+
+    expect(writeText).toHaveBeenCalledWith('SELECT TOP (100) * FROM [sales].[order details];')
+  })
 })

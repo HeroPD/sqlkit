@@ -20,6 +20,7 @@ import './activity-button'
 import './command-palette'
 import './confirm-dialog'
 import './prompt-dialog'
+import './parameter-dialog'
 import './review-query-dialog'
 import './table-inspect'
 import './databases-view'
@@ -52,6 +53,8 @@ import type { QuerySort } from '../electron'
 import { stripExplain } from '../sql-types'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
+import { bindParameterValues, queryParameters, type QueryParameter } from '../query-parameters'
+import type { ParametersConfirmDetail } from './parameter-dialog'
 
 const VIEWS = [
   { id: 'explorer', title: 'Explorer', icon: 'codicon-files', hint: 'No files yet.' },
@@ -93,6 +96,7 @@ const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind
   { id: 'new-window', label: 'New Window', icon: 'codicon-window', keybind: `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}N` },
   { id: 'run-query', label: 'Run Query', icon: 'codicon-play', keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
   { id: 'save-file', label: 'Save File', icon: 'codicon-save', keybind: mod('S') },
+  { id: 'format-sql', label: 'Format SQL', icon: 'codicon-symbol-keyword', keybind: isMac ? '⇧⌥F' : 'Shift+Alt+F' },
   { id: 'quick-open', label: 'Quick Open…', icon: 'codicon-file-code', keybind: mod('P') },
   { id: 'switch-database', label: 'Switch Database…', icon: 'codicon-database', keybind: mod('K') },
   { id: 'add-database', label: 'Add Database', icon: 'codicon-add' },
@@ -122,6 +126,9 @@ export class WorkbenchScreen extends LitElement {
 
   @state()
   private _inspectDirtyTabIds = new Set<string>()
+
+  @state()
+  private _parameterPrompt: { parameters: QueryParameter[]; resolve: (values: string[] | null) => void } | null = null
 
   private _lastActiveTabId: string | null = null
 
@@ -179,6 +186,7 @@ export class WorkbenchScreen extends LitElement {
       if (tab?.content.trim()) void this._runSql(tab.content.trim())
     },
     saveActiveTab: () => void this._fileOps.saveActive(),
+    formatActiveTab: () => this.renderRoot.querySelector('sql-editor')?.formatSql(),
     addDatabase: () => this._onAddDatabase(),
     refreshFiles: () => void this._workspaceFiles.reload(),
     toggleSidebar: () => this._toggleSidebar(),
@@ -456,6 +464,14 @@ export class WorkbenchScreen extends LitElement {
       return
     }
 
+    // ⇧⌥F formats the active SQL tab; event.code sidesteps Option-key characters
+    // on macOS. A focused editor already handled it (defaultPrevented above).
+    if (event.code === 'KeyF' && event.altKey && event.shiftKey && !hasMod) {
+      if (this._inTextField(event)) return
+      if (this.renderRoot.querySelector('sql-editor')?.formatSql()) event.preventDefault()
+      return
+    }
+
     if (!hasMod) return
 
     // ⌘Z / ⌘⇧Z steps the active tab's staged edits from anywhere in the
@@ -566,7 +582,7 @@ export class WorkbenchScreen extends LitElement {
 
   // Runs against the in-use context (⌘K), connecting it first if needed.
   // `sort` re-runs with a grid-injected ORDER BY; omitting it clears any sort.
-  private async _runSql(sqlText: string, sort?: QuerySort | null) {
+  private async _runSql(sqlText: string, sort?: QuerySort | null, suppliedParams?: unknown[]) {
     // The run belongs to the tab it started from, even if the user switches
     // tabs or contexts before it finishes.
     const tabId = this._ctx.activeTabId
@@ -583,11 +599,29 @@ export class WorkbenchScreen extends LitElement {
       return
     }
 
+    // Capture before a parameter dialog can await user input; context switches
+    // while it is open must not retarget the pending run.
+    const childDb = this._ctx.activeChildDb
+    const runContextKey = contextKey(profile.id, childDb)
+
+    let params = suppliedParams
+    if (params === undefined) {
+      const parameters = queryParameters(sqlText, profile.engine)
+      if (parameters.length) {
+        if (this._parameterPrompt) return
+        const values = await new Promise<string[] | null>((resolve) => {
+          this._parameterPrompt = { parameters, resolve }
+        })
+        if (values === null) return
+        // Another run may have started on this tab while the dialog was open.
+        if (this._queries.runFor(tabId).phase === 'running') return
+        params = bindParameterValues(parameters, values)
+      }
+    }
+
     // Capture the context the run started in. The connect/align below await,
     // and the user may switch child or profile meanwhile; the run must target
     // and be logged under the context Run was pressed in, not the current one.
-    const childDb = this._ctx.activeChildDb
-    const runContextKey = contextKey(profile.id, childDb)
     const executionId = crypto.randomUUID()
     const phase = this._live.phase(profile.id)
     this._queries.beginRun(tabId, executionId, profile.id, phase === 'connected' ? undefined : `Connecting to ${profile.name}…`)
@@ -619,6 +653,7 @@ export class WorkbenchScreen extends LitElement {
       childDb,
       contextKey: runContextKey,
       sql: sqlText,
+      params,
       sort,
       executionId,
     })
@@ -626,6 +661,19 @@ export class WorkbenchScreen extends LitElement {
     // completions and grid editability believe — same as the Inspect apply
     // path. Refreshed even on error: a failed script may have half-applied.
     if (!isReadOnlyQuery(sqlText, profile.engine)) this._live.refresh(profile.id)
+  }
+
+  private _cancelParameterPrompt = () => {
+    const prompt = this._parameterPrompt
+    this._parameterPrompt = null
+    prompt?.resolve(null)
+  }
+
+  private _confirmParameterPrompt = (event: Event) => {
+    const prompt = this._parameterPrompt
+    const { values } = (event as CustomEvent<ParametersConfirmDetail>).detail
+    this._parameterPrompt = null
+    prompt?.resolve(values)
   }
 
   // Double-click browse: a tab named after the table, pre-filled with a capped SELECT and run.
@@ -796,6 +844,15 @@ export class WorkbenchScreen extends LitElement {
               @dialog-cancel=${() => (this._dialogs.review = null)}
               @dialog-done=${() => (this._dialogs.review = null)}
             ></review-query-dialog>
+          `
+        : ''}
+      ${this._parameterPrompt
+        ? html`
+            <parameter-dialog
+              .parameters=${this._parameterPrompt.parameters}
+              @dialog-cancel=${this._cancelParameterPrompt}
+              @parameters-confirm=${this._confirmParameterPrompt}
+            ></parameter-dialog>
           `
         : ''}
 
@@ -998,6 +1055,7 @@ export class WorkbenchScreen extends LitElement {
               .dialect=${dialect}
               .tables=${tables}
               .columns=${columns}
+              @editor-notice=${this._onGridNotice}
             ></sql-editor>
           </div>
           <div
@@ -1385,6 +1443,7 @@ export class WorkbenchScreen extends LitElement {
       profile.id,
       childDb,
       run.sql,
+      run.params,
       this._queries.sortFor(tabId),
       format,
       `${base || 'results'}.${format}`,
@@ -1455,7 +1514,7 @@ export class WorkbenchScreen extends LitElement {
     const { columnIndex, direction } = (event as CustomEvent<SortColumnDetail>).detail
     const run = this._queries.runFor(this._ctx.activeTabId)
     if (run.phase !== 'done' || !run.sql || !isReorderableQuery(run.sql)) return
-    void this._runSql(run.sql, direction ? { columnIndex, direction } : undefined)
+    void this._runSql(run.sql, direction ? { columnIndex, direction } : undefined, run.params)
   }
 
   private _onDeleteRows(event: Event) {

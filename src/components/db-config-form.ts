@@ -2,6 +2,7 @@ import { LitElement, css, html, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
 import type { ConnectionProfile, DatabaseMode, Engine, EngineFlavor, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
+import { connectionUrlFromProfile, profileFromConnectionUrl } from '../connection-url'
 
 // Verified wire-compatible variants (Supabase, MariaDB) ride their parent
 // engine's driver, distinguished only by `flavor`. Roadmapped engines are
@@ -61,6 +62,13 @@ export class DbConfigForm extends LitElement {
 
   @state()
   private _sshTest: TestState = { phase: 'idle' }
+
+  // Raw URL text while the user edits it; null shows the URL derived from the fields.
+  @state()
+  private _urlDraft: string | null = null
+
+  @state()
+  private _urlError = ''
 
   render() {
     const draft = this.profile
@@ -124,6 +132,21 @@ export class DbConfigForm extends LitElement {
           <h4>Connection</h4>
           <p class="muted small">Server location and credentials</p>
         </div>
+        ${this._field(
+          'Connection URL',
+          html`
+            <input
+              type="text"
+              placeholder="postgresql://user:password@host/database"
+              .value=${this._urlDraft ?? connectionUrlFromProfile(draft)}
+              @input=${(e: Event) => this._onUrlInput((e.target as HTMLInputElement).value)}
+              @blur=${this._onUrlBlur}
+              autocomplete="off"
+              spellcheck="false"
+            />
+          `,
+          this._urlError || 'Synced with the fields below — paste a PostgreSQL, MySQL/MariaDB, or SQL Server URL to fill them.',
+        )}
         ${this._field('Name', this._input(draft, 'name'), 'Shown in the Databases list.')}
         ${this._field('Host', this._input(draft, 'host'), 'Hostname, IP, or server name.')}
         ${this._field('Port', this._input(draft, 'port'))}
@@ -395,6 +418,9 @@ export class DbConfigForm extends LitElement {
   private _patch(partial: Partial<ConnectionProfile>) {
     if (!this.profile) return
     this._test = { phase: 'idle' }
+    // Field edits re-derive the URL text, so drop any leftover draft.
+    this._urlDraft = null
+    this._urlError = ''
     const profile = { ...this.profile, ...partial }
     this.dispatchEvent(new CustomEvent('config-change', { detail: { profile }, bubbles: true, composed: true }))
   }
@@ -410,6 +436,34 @@ export class DbConfigForm extends LitElement {
         : this.profile.port
     // flavor is set for variants and explicitly cleared for plain engines.
     this._patch({ engine: entry.engine, flavor: entry.flavor, port, passwordSaved: false })
+  }
+
+  // The URL field and the fields below are two views of the same profile:
+  // a parseable URL patches the fields as it is typed, and blur snaps the
+  // text back to the canonical form. Mid-typing parse failures stay silent.
+  private _onUrlInput(value: string) {
+    this._urlDraft = value
+    this._urlError = ''
+    if (!this.profile || !value.trim()) return
+    try {
+      const profile = profileFromConnectionUrl(value, this.profile)
+      this._test = { phase: 'idle' }
+      this.dispatchEvent(new CustomEvent('config-change', { detail: { profile }, bubbles: true, composed: true }))
+    } catch {
+      // Incomplete URLs are expected while typing; _onUrlBlur reports them.
+    }
+  }
+
+  private _onUrlBlur = () => {
+    const draft = this._urlDraft
+    this._urlDraft = null
+    if (!draft?.trim() || !this.profile) return
+    try {
+      profileFromConnectionUrl(draft, this.profile)
+    } catch (error) {
+      this._urlDraft = draft
+      this._urlError = (error as Error).message
+    }
   }
 
   private async _onBrowse() {
@@ -528,6 +582,11 @@ export class DbConfigForm extends LitElement {
       .file-row {
         display: flex;
         gap: 8px;
+      }
+
+      .file-row input {
+        flex: 1;
+        min-width: 0;
       }
 
       .file-row button {

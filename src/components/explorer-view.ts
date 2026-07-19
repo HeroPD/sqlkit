@@ -5,6 +5,8 @@ import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
 import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
 import type { ColumnRef, DbObject, DbObjectKind, DbObjects, Engine, FileInfo, TableRef } from '../electron'
+import { dialectFor } from '../dialect'
+import { quoteQualified } from '../sql-write'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './file-tree'
@@ -286,7 +288,10 @@ export class ExplorerView extends LitElement {
       )
     }
     if (id === 'copy-name') void navigator.clipboard.writeText(tableLabel(table))
-    if (id === 'copy-select') void navigator.clipboard.writeText(`select * from ${tableLabel(table)} limit 100;`)
+    if (id === 'copy-select' && this.engine) {
+      const dialect = dialectFor(this.engine)
+      void navigator.clipboard.writeText(`${dialect.browseTable(quoteQualified(table, dialect), 100)};`)
+    }
     if (id === 'refresh') this._refresh()
   }
 

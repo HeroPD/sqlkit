@@ -237,6 +237,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     profileId: string,
     childDb: string | null,
     sql: string,
+    params: unknown[] | undefined,
     sort: QuerySort | null,
     filePath: string,
     format: ExportFormat,
@@ -247,7 +248,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     if (!driver.exportQuery) return { success: false, error: 'Export is not supported on this connection' }
     if (!isReadOnlyQuery(sql)) return { success: false, error: 'Only read-only queries can be exported to a file.' }
     try {
-      const { rowCount } = await driver.exportQuery({ sql, params: [], childDb, sort, filePath, format, executionId })
+      const { rowCount } = await driver.exportQuery({ sql, params: params ?? [], childDb, sort, filePath, format, executionId })
       return { success: true, rowCount }
     } catch (error) {
       await unlink(filePath).catch(() => {})

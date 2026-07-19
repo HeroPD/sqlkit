@@ -156,6 +156,19 @@ test('external rewrite of the active tab replaces the doc', async () => {
   el.remove()
 })
 
+test('formats the whole document using the active SQL dialect', async () => {
+  const el = await mount('format-document', 'select id,name from users where id=1;')
+  el.dialect = 'postgres'
+  await el.updateComplete
+
+  expect(el.formatSql()).toBe(true)
+  await sleep(25)
+  expect((el as unknown as { _view: EditorView })._view.state.doc.toString()).toBe(
+    'SELECT\n  id,\n  name\nFROM\n  users\nWHERE\n  id = 1;',
+  )
+  el.remove()
+})
+
 test('a changed doc under a reused tab id is not resurrected from cache', async () => {
   const first = await mount('tab-reuse', 'original;')
   first.remove()

@@ -393,10 +393,11 @@ export class QueriesController implements ReactiveController {
     childDb: string | null
     contextKey: string
     sql: string
+    params?: unknown[]
     sort?: QuerySort | null
     executionId?: string
   }) {
-    const { tabId, profile, childDb, contextKey, sql, sort } = args
+    const { tabId, profile, childDb, contextKey, sql, params, sort } = args
     const executionId = args.executionId ?? crypto.randomUUID()
     if (sort) this.sorts.set(tabId, sort)
     else this.sorts.delete(tabId)
@@ -420,7 +421,7 @@ export class QueriesController implements ReactiveController {
 
     let response: QueryResponse
     try {
-      response = await window.sqlkit.runQuery(profile.id, childDb, sql, undefined, sort, executionId)
+      response = await window.sqlkit.runQuery(profile.id, childDb, sql, params, sort, executionId)
     } catch (error) {
       // A rejected IPC (channel error, main-side throw) would otherwise leave
       // the run and its task stuck on 'running' forever.
@@ -446,7 +447,7 @@ export class QueriesController implements ReactiveController {
     this.realignStaged(tabId, response.success ? response.result.columns.length : null)
     this.setRun(
       tabId,
-      response.success ? { phase: 'done', result: response.result, sql } : { phase: 'error', error: response.error },
+      response.success ? { phase: 'done', result: response.result, sql, params } : { phase: 'error', error: response.error },
     )
     this.finishTask(task.id, response, task.startedAt)
     this.history = capHistoryPerContext(
@@ -593,7 +594,7 @@ export class QueriesController implements ReactiveController {
       // bufferedRowCount to what's loaded so the grid stops asking.
       if (!response.success || response.rows.length === 0) {
         if (currentResult.bufferedRowCount !== currentResult.rows.length) {
-          this.setRun(tabId, { phase: 'done', result: replaceResult({ ...currentResult, bufferedRowCount: currentResult.rows.length }), sql: current.sql })
+          this.setRun(tabId, { phase: 'done', result: replaceResult({ ...currentResult, bufferedRowCount: currentResult.rows.length }), sql: current.sql, params: current.params })
         }
         return
       }
@@ -601,6 +602,7 @@ export class QueriesController implements ReactiveController {
         phase: 'done',
         result: replaceResult({ ...currentResult, rows: [...currentResult.rows, ...response.rows] }),
         sql: current.sql,
+        params: current.params,
       })
     } finally {
       this.fetching.delete(fetchKey)

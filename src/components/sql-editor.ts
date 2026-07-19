@@ -46,6 +46,13 @@ import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirr
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 import { softHighlightStyle } from '../codemirror/highlight'
 
+const FORMAT_LANGUAGE = {
+  postgres: 'postgresql',
+  mysql: 'mysql',
+  sqlite: 'sqlite',
+  mssql: 'transactsql',
+} as const satisfies Record<SqlDialectName, string>
+
 const appTheme = EditorView.theme(
   {
     // Override One Dark's #282c34 so the editor matches --editor-bg (and the
@@ -431,7 +438,11 @@ export class SqlEditor extends LitElement {
 
   // Everything that captures `this` — rebound whenever a state lands in a view.
   private _handlerExtensions() {
-    return [runQuery((sql) => this._emitRun(sql)), this._changeListener]
+    return [
+      runQuery((sql) => this._emitRun(sql)),
+      keymap.of([{ key: 'Shift-Alt-f', run: () => this.formatSql() }]),
+      this._changeListener,
+    ]
   }
 
   // A restored state carries the closures and config of the element/props it
@@ -538,6 +549,44 @@ export class SqlEditor extends LitElement {
 
   focusEditor() {
     this._view?.focus()
+  }
+
+  /** Formats the selection, or the whole document when the selection is empty. */
+  formatSql(): boolean {
+    const view = this._view
+    if (!view) return false
+    const selection = view.state.selection.main
+    const from = selection.empty ? 0 : selection.from
+    const to = selection.empty ? view.state.doc.length : selection.to
+    const source = view.state.sliceDoc(from, to)
+    if (!source.trim()) return false
+    const originalDoc = view.state.doc.toString()
+    const language = FORMAT_LANGUAGE[this.dialect]
+    void import('sql-formatter')
+      .then(({ format }) => {
+        // Loading is lazy; never overwrite edits made while the formatter chunk arrived.
+        if (this._view !== view || view.state.doc.toString() !== originalDoc) return
+        const formatted = format(source, {
+          language,
+          keywordCase: 'upper',
+          tabWidth: 2,
+        })
+        view.dispatch({
+          changes: { from, to, insert: formatted },
+          selection: selection.empty
+            ? { anchor: Math.min(from + selection.head, from + formatted.length) }
+            : { anchor: from, head: from + formatted.length },
+          scrollIntoView: true,
+        })
+      })
+      .catch((error: unknown) => {
+        this.dispatchEvent(new CustomEvent('editor-notice', {
+          detail: { title: 'Could not format SQL', detail: (error as Error).message },
+          bubbles: true,
+          composed: true,
+        }))
+      })
+    return true
   }
 
   private _sqlExtension() {

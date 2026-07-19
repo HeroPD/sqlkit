@@ -97,6 +97,18 @@ describe('QueriesController.execute', () => {
     expect(runQuery).toHaveBeenCalledWith('p1', 'analytics', 'SELECT 1', undefined, undefined, 'exec1')
   })
 
+  it('forwards bound query parameters and retains them with the result', async () => {
+    const { settle, runQuery } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute({ ...runArgs, params: ['42', null] })
+    settle({ success: true, result })
+    await done
+
+    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', ['42', null], undefined, 'exec1')
+    expect(controller.runFor('t1')).toMatchObject({ phase: 'done', params: ['42', null] })
+  })
+
   it('forwards a column sort to the query IPC and tracks it per tab', async () => {
     const { settle, runQuery } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)

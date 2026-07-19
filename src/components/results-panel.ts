@@ -16,7 +16,7 @@ import type { ExportConfirmDetail } from './export-dialog'
 export type QueryRun =
   | { phase: 'idle' }
   | { phase: 'running'; executionId: string; profileId: string; note?: string }
-  | { phase: 'done'; result: QueryResult; sql?: string }
+  | { phase: 'done'; result: QueryResult; sql?: string; params?: unknown[] }
   | { phase: 'error'; error: string }
 
 export type CellCoord = { row: number; col: number }

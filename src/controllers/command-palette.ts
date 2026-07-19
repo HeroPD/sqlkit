@@ -19,6 +19,7 @@ type Deps = {
   newQuery: () => void
   runActiveTab: () => void
   saveActiveTab: () => void
+  formatActiveTab: () => void
   addDatabase: () => void
   refreshFiles: () => void
   toggleSidebar: () => void
@@ -215,6 +216,9 @@ export class CommandPaletteController implements ReactiveController {
         break
       case 'save-file':
         this.deps.saveActiveTab()
+        break
+      case 'format-sql':
+        this.deps.formatActiveTab()
         break
       case 'quick-open':
         this.open('quick')

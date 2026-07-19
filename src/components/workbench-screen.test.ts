@@ -86,6 +86,40 @@ describe('WorkbenchScreen metadata refresh after writes', () => {
     await workbench._runSql('select 1')
     expect(workbench._live.refresh).not.toHaveBeenCalled()
   })
+
+  it('prompts for native placeholders and forwards bound values', async () => {
+    const workbench = runningScreen() as ReturnType<typeof runningScreen> & {
+      _parameterPrompt: { parameters: Array<{ label: string; position: number }> } | null
+      _confirmParameterPrompt(event: Event): void
+    }
+
+    const running = workbench._runSql('select * from accounts where id = $1 and tenant_id = $2')
+    await Promise.resolve()
+
+    expect(workbench._parameterPrompt?.parameters).toEqual([
+      { label: '$1', position: 0 }, { label: '$2', position: 1 },
+    ])
+    workbench._confirmParameterPrompt(new CustomEvent('parameters-confirm', { detail: { values: ['42', 'NULL'] } }))
+    await running
+
+    expect(workbench._queries.execute).toHaveBeenCalledWith(expect.objectContaining({ params: ['42', null] }))
+  })
+
+  it('drops a prompted run when another run started while its dialog was open', async () => {
+    const workbench = runningScreen() as ReturnType<typeof runningScreen> & {
+      _confirmParameterPrompt(event: Event): void
+    }
+
+    const prompted = workbench._runSql('select * from accounts where id = $1')
+    await Promise.resolve()
+    await workbench._runSql('select 1')
+
+    workbench._confirmParameterPrompt(new CustomEvent('parameters-confirm', { detail: { values: ['7'] } }))
+    await prompted
+
+    expect(workbench._queries.execute).toHaveBeenCalledTimes(1)
+    expect(workbench._queries.execute).toHaveBeenCalledWith(expect.objectContaining({ sql: 'select 1' }))
+  })
 })
 
 describe('WorkbenchScreen tab scroll state', () => {
@@ -138,7 +172,7 @@ describe('WorkbenchScreen result sorting', () => {
 
     workbench._onSortColumn(new CustomEvent('sort-column', { detail: { columnIndex: 0, direction: 'asc' } }))
 
-    expect(runSql).toHaveBeenCalledWith('select id from accounts', { columnIndex: 0, direction: 'asc' })
+    expect(runSql).toHaveBeenCalledWith('select id from accounts', { columnIndex: 0, direction: 'asc' }, undefined)
     expect(workbench._dialogs.confirm).toBeNull()
   })
 })

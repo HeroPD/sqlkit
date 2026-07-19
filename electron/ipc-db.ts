@@ -14,7 +14,6 @@ import {
   nullableStringValue,
   nonNegativeInteger,
   queryPayload,
-  querySort,
   stringValue,
   tableReference,
 } from './ipc-validation'
@@ -115,14 +114,14 @@ export function registerDbIpc(context: DbIpcContext) {
     ) ?? { success: false as const, error: 'No active session' })
   ipcMain.handle('db:close-session', (event, sessionId: unknown) =>
     existingManager(event)?.closeSession(stringValue(sessionId, 'Session id', 200)))
-  ipcMain.handle('db:export-query', async (event, profileId: unknown, childDb: unknown, sql: unknown, sort: unknown, format: unknown, suggestedName: unknown, executionId?: unknown) => {
+  ipcMain.handle('db:export-query', async (event, profileId: unknown, childDb: unknown, sql: unknown, params: unknown, sort: unknown, format: unknown, suggestedName: unknown, executionId?: unknown) => {
     let parsed
     try {
+      const payload = queryPayload(sql, params, sort, executionId)
       parsed = {
         profileId: stringValue(profileId, 'Profile id', 200),
         childDb: childDb === null ? null : stringValue(childDb, 'Database name', 2_000),
-        sql: stringValue(sql, 'SQL'),
-        sort: querySort(sort),
+        ...payload,
         format: exportFormat(format),
         name: stringValue(suggestedName, 'Suggested file name', 1_000),
         executionId: executionId === undefined ? undefined : stringValue(executionId, 'Execution id', 200),
@@ -140,7 +139,7 @@ export function registerDbIpc(context: DbIpcContext) {
       filters: [{ name: parsed.format.toUpperCase(), extensions: [parsed.format] }],
     })
     if (result.canceled || !result.filePath) return { success: false as const, canceled: true }
-    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.sort, result.filePath, parsed.format, parsed.executionId)
+    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.params, parsed.sort ?? null, result.filePath, parsed.format, parsed.executionId)
   })
   ipcMain.handle('db:cancel', (event, profileId: unknown, executionId?: unknown) =>
     manager(event).cancelQuery(

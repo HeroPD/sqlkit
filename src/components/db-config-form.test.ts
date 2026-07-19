@@ -24,6 +24,10 @@ const internals = (form: DbConfigForm) =>
     _sshTest: TestState
     _patch(partial: Partial<ConnectionProfile>): void
     _onEngineChange(id: string): void
+    _urlDraft: string | null
+    _urlError: string
+    _onUrlInput(value: string): void
+    _onUrlBlur(): void
     _onSave(): void
     _onTest(): Promise<void>
     _onTestSsh(): Promise<void>
@@ -104,6 +108,39 @@ describe('DbConfigForm engine switch port carry', () => {
     const { form, changes } = setup()
     internals(form)._onEngineChange('clickhouse')
     expect(changes).toHaveLength(0)
+  })
+})
+
+describe('DbConfigForm connection URL', () => {
+  it('patches the profile live as a parseable URL is typed', () => {
+    const { form, changes } = setup()
+    internals(form)._onUrlInput('postgresql://app:secret@db.example.com:6543/prod?sslmode=require')
+
+    expect(changes[0]).toMatchObject({
+      engine: 'postgresql', host: 'db.example.com', port: '6543', username: 'app', password: 'secret',
+      database: 'prod', ssl: { mode: 'require' },
+    })
+    expect(internals(form)._urlError).toBe('')
+  })
+
+  it('stays quiet on an incomplete URL while typing and reports it on blur', () => {
+    const { form, changes } = setup()
+    internals(form)._onUrlInput('not a url')
+    expect(changes).toHaveLength(0)
+    expect(internals(form)._urlError).toBe('')
+
+    internals(form)._onUrlBlur()
+    expect(internals(form)._urlError).toBe('Enter a valid database URL.')
+  })
+
+  it('drops the URL draft when a field edit re-derives the URL', () => {
+    const { form } = setup()
+    internals(form)._onUrlInput('nope')
+    expect(internals(form)._urlDraft).toBe('nope')
+
+    internals(form)._patch({ host: 'db.internal' })
+    expect(internals(form)._urlDraft).toBeNull()
+    expect(internals(form)._urlError).toBe('')
   })
 })
 

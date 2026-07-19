@@ -34,6 +34,7 @@ function setup(opts: Opts = {}) {
     newQuery: vi.fn(),
     runActiveTab: vi.fn(),
     saveActiveTab: vi.fn(),
+    formatActiveTab: vi.fn(),
     addDatabase: vi.fn(),
     refreshFiles: vi.fn(),
     toggleSidebar: vi.fn(),

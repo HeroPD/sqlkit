@@ -335,6 +335,7 @@ export type SqlkitApi = {
     profileId: string,
     childDb: string | null,
     sql: string,
+    params: unknown[] | undefined,
     sort: QuerySort | null,
     format: ExportFormat,
     suggestedName: string,
