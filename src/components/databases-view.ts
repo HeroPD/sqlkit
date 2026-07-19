@@ -5,6 +5,7 @@ import type { ConnectionProfile, ConnectionStatus } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './db-list-item'
+import { t } from '../i18n'
 
 // The Databases sidebar view: connection list with live status, the child
 // databases of all-databases connections (display-only — the active child
@@ -35,11 +36,11 @@ export class DatabasesView extends LitElement {
       <div class="db-list">
         ${this.connections.length
           ? this.connections.map((connection) => this._renderItem(connection))
-          : html`<p class="muted hint">No database connections yet.</p>`}
+          : html`<p class="muted hint">${t('view.databases.empty')}</p>`}
       </div>
       <button class="link add" @click=${this._onAdd}>
         <i class="codicon codicon-add" aria-hidden="true"></i>
-        <span>Add Database</span>
+        <span>${t('action.addDatabase')}</span>
       </button>
       ${this._renderMenu()} ${this._renderChildMenu()}
     `
@@ -51,10 +52,10 @@ export class DatabasesView extends LitElement {
     const connected = this.statuses[menu.id]?.phase === 'connected'
     const engine = this.connections.find((connection) => connection.id === menu.id)?.engine
     const items: MenuItem[] = [
-      connected ? { id: 'disconnect', label: 'Disconnect' } : { id: 'connect', label: 'Connect' },
-      ...(connected && engine !== 'sqlite' ? [{ id: 'create-db', label: 'Create Database…' }] : []),
-      { id: 'edit', label: 'Edit Connection' },
-      { id: 'remove', label: 'Remove Database…', danger: true },
+      connected ? { id: 'disconnect', label: t('database.disconnect') } : { id: 'connect', label: t('database.connect') },
+      ...(connected && engine !== 'sqlite' ? [{ id: 'create-db', label: t('database.create') }] : []),
+      { id: 'edit', label: t('database.edit') },
+      { id: 'remove', label: t('database.remove'), danger: true },
     ]
     return html`
       <context-menu
@@ -70,7 +71,7 @@ export class DatabasesView extends LitElement {
   private _renderChildMenu() {
     const menu = this._childMenu
     if (!menu) return ''
-    const items: MenuItem[] = [{ id: 'drop-db', label: `Drop Database "${menu.database}"…`, danger: true }]
+    const items: MenuItem[] = [{ id: 'drop-db', label: t('database.drop', { name: menu.database }), danger: true }]
     return html`
       <context-menu
         .x=${menu.x}
@@ -156,7 +157,7 @@ export class DatabasesView extends LitElement {
             >
               <i class="codicon codicon-symbol-namespace" aria-hidden="true"></i>
               <span class="child-name">${child.name}</span>
-              ${child.inUse ? html`<span class="child-tag">active</span>` : ''}
+              ${child.inUse ? html`<span class="child-tag">${t('database.active')}</span>` : ''}
             </div>
           `,
         )}

@@ -55,14 +55,15 @@ import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
 import { bindParameterValues, queryParameters, type QueryParameter } from '../query-parameters'
 import type { ParametersConfirmDetail } from './parameter-dialog'
+import { t } from '../i18n'
 
 const VIEWS = [
-  { id: 'explorer', title: 'Explorer', icon: 'codicon-files', hint: 'No files yet.' },
-  { id: 'search', title: 'Search', icon: 'codicon-search', hint: 'Search across your SQL files.' },
-  { id: 'databases', title: 'Databases', icon: 'codicon-database', hint: 'No database connections yet.' },
-  { id: 'history', title: 'History', icon: 'codicon-history', hint: 'No query history yet.' },
-  { id: 'tasks', title: 'Tasks', icon: 'codicon-checklist', hint: 'No running jobs.' },
-  { id: 'server', title: 'Server', icon: 'codicon-server', hint: 'Connect a database to see its server.' },
+  { id: 'explorer', title: t('view.explorer'), icon: 'codicon-files', hint: t('view.explorer.empty') },
+  { id: 'search', title: t('view.search'), icon: 'codicon-search', hint: t('view.search.empty') },
+  { id: 'databases', title: t('view.databases'), icon: 'codicon-database', hint: t('view.databases.empty') },
+  { id: 'history', title: t('view.history'), icon: 'codicon-history', hint: t('view.history.empty') },
+  { id: 'tasks', title: t('view.tasks'), icon: 'codicon-checklist', hint: t('view.tasks.empty') },
+  { id: 'server', title: t('view.server'), icon: 'codicon-server', hint: t('view.server.empty') },
 ] as const
 
 
@@ -92,20 +93,20 @@ const childFolderSegment = (name: string) => {
 
 // Commands offered by the ⌘⇧P palette; ids are dispatched to _runCommand.
 const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind?: string }> = [
-  { id: 'new-query', label: 'New Query', icon: 'codicon-new-file', keybind: mod('N') },
-  { id: 'new-window', label: 'New Window', icon: 'codicon-window', keybind: `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}N` },
-  { id: 'run-query', label: 'Run Query', icon: 'codicon-play', keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
-  { id: 'save-file', label: 'Save File', icon: 'codicon-save', keybind: mod('S') },
-  { id: 'format-sql', label: 'Format SQL', icon: 'codicon-symbol-keyword', keybind: isMac ? '⇧⌥F' : 'Shift+Alt+F' },
-  { id: 'quick-open', label: 'Quick Open…', icon: 'codicon-file-code', keybind: mod('P') },
-  { id: 'switch-database', label: 'Switch Database…', icon: 'codicon-database', keybind: mod('K') },
-  { id: 'add-database', label: 'Add Database', icon: 'codicon-add' },
-  { id: 'disconnect-all', label: 'Disconnect All Databases', icon: 'codicon-debug-disconnect' },
-  { id: 'refresh-files', label: 'Refresh Files', icon: 'codicon-sync' },
-  { id: 'toggle-sidebar', label: 'Toggle Sidebar', icon: 'codicon-layout-sidebar-left', keybind: mod('B') },
-  { id: 'toggle-results-panel', label: 'Toggle Results Panel', icon: 'codicon-layout-panel', keybind: mod('J') },
+  { id: 'new-query', label: t('action.newQuery'), icon: 'codicon-new-file', keybind: mod('N') },
+  { id: 'new-window', label: t('action.newWindow'), icon: 'codicon-window', keybind: `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}N` },
+  { id: 'run-query', label: t('action.runQuery'), icon: 'codicon-play', keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
+  { id: 'save-file', label: t('action.saveFile'), icon: 'codicon-save', keybind: mod('S') },
+  { id: 'format-sql', label: t('action.formatSql'), icon: 'codicon-symbol-keyword', keybind: isMac ? '⇧⌥F' : 'Shift+Alt+F' },
+  { id: 'quick-open', label: t('action.quickOpen'), icon: 'codicon-file-code', keybind: mod('P') },
+  { id: 'switch-database', label: t('action.switchDatabase'), icon: 'codicon-database', keybind: mod('K') },
+  { id: 'add-database', label: t('action.addDatabase'), icon: 'codicon-add' },
+  { id: 'disconnect-all', label: t('action.disconnectAll'), icon: 'codicon-debug-disconnect' },
+  { id: 'refresh-files', label: t('action.refreshFiles'), icon: 'codicon-sync' },
+  { id: 'toggle-sidebar', label: t('action.toggleSidebar'), icon: 'codicon-layout-sidebar-left', keybind: mod('B') },
+  { id: 'toggle-results-panel', label: t('action.toggleResults'), icon: 'codicon-layout-panel', keybind: mod('J') },
   ...VIEWS.map((view) => ({ id: `show-${view.id}`, label: `Show ${view.title}`, icon: view.icon })),
-  { id: 'close-workspace', label: 'Close Workspace', icon: 'codicon-folder-opened' },
+  { id: 'close-workspace', label: t('action.closeWorkspace'), icon: 'codicon-folder-opened' },
 ]
 
 // Workbench shell and orchestrator: owns the tab model, the in-use database

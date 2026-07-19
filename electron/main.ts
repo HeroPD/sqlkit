@@ -11,6 +11,7 @@ import { realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { ConnectionStatus, ThemeId } from '../src/electron'
+import { t } from '../src/i18n'
 import { createConnectionManager, type ConnectionManager } from './db/manager'
 import { stopWorkspaceWatcher } from './files'
 import { registerDbIpc } from './ipc-db'
@@ -239,32 +240,32 @@ function buildAppMenu() {
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' } as MenuItemConstructorOptions] : []),
     {
-      label: 'File',
+      label: t('menu.file'),
       submenu: [
-        { label: 'New Window', accelerator: 'Shift+CmdOrCtrl+N', click: () => createWindow() },
+        { label: t('menu.newWindow'), accelerator: 'Shift+CmdOrCtrl+N', click: () => createWindow() },
         { type: 'separator' },
-        { label: 'New Query', accelerator: 'CmdOrCtrl+N', click: menuAction('new-query') },
+        { label: t('menu.newQuery'), accelerator: 'CmdOrCtrl+N', click: menuAction('new-query') },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: menuAction('save') },
-        { label: 'Save As…', accelerator: 'Shift+CmdOrCtrl+S', click: menuAction('save-as') },
+        { label: t('menu.save'), accelerator: 'CmdOrCtrl+S', click: menuAction('save') },
+        { label: t('menu.saveAs'), accelerator: 'Shift+CmdOrCtrl+S', click: menuAction('save-as') },
         { type: 'separator' },
-        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: menuAction('close-tab') },
-        { label: 'Close Window', accelerator: 'Shift+CmdOrCtrl+W', role: 'close' },
+        { label: t('menu.closeTab'), accelerator: 'CmdOrCtrl+W', click: menuAction('close-tab') },
+        { label: t('menu.closeWindow'), accelerator: 'Shift+CmdOrCtrl+W', role: 'close' },
         ...(isMac ? [] : [{ type: 'separator' } as MenuItemConstructorOptions, { role: 'quit' } as MenuItemConstructorOptions]),
       ],
     },
     { role: 'editMenu' },
     {
-      label: 'View',
+      label: t('menu.view'),
       submenu: [
-        { label: 'Refresh Results', accelerator: 'CmdOrCtrl+R', click: menuAction('refresh-results') },
+        { label: t('menu.refreshResults'), accelerator: 'CmdOrCtrl+R', click: menuAction('refresh-results') },
         {
-          label: 'Theme',
+          label: t('menu.theme'),
           submenu: [
-            { label: 'Dark', type: 'radio', checked: selectedTheme === 'dark', click: () => selectTheme('dark') },
-            { label: 'Light', type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
-            { label: 'Midnight Blue', type: 'radio', checked: selectedTheme === 'midnight-blue', click: () => selectTheme('midnight-blue') },
-            { label: 'Warm Dark', type: 'radio', checked: selectedTheme === 'warm-dark', click: () => selectTheme('warm-dark') },
+            { label: t('menu.theme.dark'), type: 'radio', checked: selectedTheme === 'dark', click: () => selectTheme('dark') },
+            { label: t('menu.theme.light'), type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
+            { label: t('menu.theme.midnightBlue'), type: 'radio', checked: selectedTheme === 'midnight-blue', click: () => selectTheme('midnight-blue') },
+            { label: t('menu.theme.warmDark'), type: 'radio', checked: selectedTheme === 'warm-dark', click: () => selectTheme('warm-dark') },
           ],
         },
         { type: 'separator' },
@@ -279,7 +280,7 @@ function buildAppMenu() {
       ],
     },
     {
-      label: 'Window',
+      label: t('menu.window'),
       submenu: [
         { role: 'minimize' },
         { role: 'zoom' },

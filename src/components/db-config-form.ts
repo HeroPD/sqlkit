@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
 import type { ConnectionProfile, DatabaseMode, Engine, EngineFlavor, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
 import { connectionUrlFromProfile, profileFromConnectionUrl } from '../connection-url'
+import { t } from '../i18n'
 
 // Verified wire-compatible variants (Supabase, MariaDB) ride their parent
 // engine's driver, distinguished only by `flavor`. Roadmapped engines are
@@ -92,17 +93,17 @@ export class DbConfigForm extends LitElement {
     return html`
       <div class="card" @keydown=${this._onFieldKeydown}>
         <header>
-          <h1>${draft.name.trim() || 'New Database'}</h1>
-          <p class="muted">Connection settings are saved into this workspace's .sqlkit folder.</p>
+          <h1>${draft.name.trim() || t('config.newDatabase')}</h1>
+          <p class="muted">${t('config.savedLocation')}</p>
         </header>
 
         <section>
           <div class="section-head">
-            <h4>Engine</h4>
-            <p class="muted small">Pick the database driver</p>
+            <h4>${t('config.engine')}</h4>
+            <p class="muted small">${t('config.engineHelp')}</p>
           </div>
           ${this._field(
-            'Driver',
+            t('config.driver'),
             html`
               <select @change=${(e: Event) => this._onEngineChange((e.target as HTMLSelectElement).value)}>
                 ${ENGINES.map(
@@ -126,14 +127,14 @@ export class DbConfigForm extends LitElement {
         ${draft.engine === 'sqlite' ? '' : this._sshSection(draft)}
 
         <footer>
-          <button class="primary" @click=${this._onSave}>Save</button>
-          <button class="secondary" @click=${this._onCancel}>Cancel</button>
+          <button class="primary" @click=${this._onSave}>${t('common.save')}</button>
+          <button class="secondary" @click=${this._onCancel}>${t('common.cancel')}</button>
           <span class="spacer"></span>
           <span class="test-result ${this._test.phase}" title=${'message' in this._test ? this._test.message : ''}>
             ${'message' in this._test ? this._test.message : ''}
           </span>
           <button class="secondary" @click=${this._onTest} ?disabled=${this._test.phase === 'testing'}>
-            ${this._test.phase === 'testing' ? 'Testing…' : 'Test Connection'}
+            ${this._test.phase === 'testing' ? t('config.testing') : t('config.testConnection')}
           </button>
         </footer>
       </div>
@@ -144,11 +145,11 @@ export class DbConfigForm extends LitElement {
     return html`
       <section>
         <div class="section-head">
-          <h4>Connection</h4>
-          <p class="muted small">Server location and credentials</p>
+          <h4>${t('config.connection')}</h4>
+          <p class="muted small">${t('config.connectionHelp')}</p>
         </div>
         ${this._field(
-          'Connection URL',
+          t('config.connectionUrl'),
           html`
             <input
               type="text"
@@ -160,30 +161,30 @@ export class DbConfigForm extends LitElement {
               spellcheck="false"
             />
           `,
-          this._urlError || 'Synced with the fields below — paste a PostgreSQL, MySQL/MariaDB, or SQL Server URL to fill them.',
+          this._urlError || t('config.urlHelp'),
         )}
-        ${this._field('Name', this._input(draft, 'name'), 'Shown in the Databases list.')}
-        ${this._field('Host', this._input(draft, 'host'), 'Hostname, IP, or server name.')}
-        ${this._field('Port', this._input(draft, 'port'))}
-        ${this._field('User', this._input(draft, 'username'))}
+        ${this._field(t('config.name'), this._input(draft, 'name'), t('config.nameHelp'))}
+        ${this._field(t('config.host'), this._input(draft, 'host'), t('config.hostHelp'))}
+        ${this._field(t('config.port'), this._input(draft, 'port'))}
+        ${this._field(t('config.user'), this._input(draft, 'username'))}
         ${this._field(
-          'Password',
+          t('config.password'),
           this._input(draft, 'password', 'password'),
-          draft.passwordSaved ? 'A password is saved. Leave blank to keep it; typing replaces it.' : '',
+          draft.passwordSaved ? t('config.passwordSaved') : '',
         )}
-        ${this._field('Database', this._input(draft, 'database'))}
+        ${this._field(t('config.database'), this._input(draft, 'database'))}
         ${this._field(
-          'Mode',
+          t('config.mode'),
           html`
             <select
               @change=${(e: Event) =>
                 this._patch({ databaseMode: (e.target as HTMLSelectElement).value as DatabaseMode })}
             >
-              <option value="single" ?selected=${(draft.databaseMode ?? 'single') === 'single'}>Single database</option>
-              <option value="all" ?selected=${draft.databaseMode === 'all'}>All databases</option>
+              <option value="single" ?selected=${(draft.databaseMode ?? 'single') === 'single'}>${t('config.singleDatabase')}</option>
+              <option value="all" ?selected=${draft.databaseMode === 'all'}>${t('config.allDatabases')}</option>
             </select>
           `,
-          'All databases lists every database on the server; switch the active one in the sidebar.',
+          t('config.allDatabasesHelp'),
         )}
       </section>
     `
@@ -193,19 +194,19 @@ export class DbConfigForm extends LitElement {
     return html`
       <section>
         <div class="section-head">
-          <h4>Connection</h4>
-          <p class="muted small">Database file on disk</p>
+          <h4>${t('config.connection')}</h4>
+          <p class="muted small">${t('config.fileHelp')}</p>
         </div>
-        ${this._field('Name', this._input(draft, 'name'), 'Shown in the Databases list.')}
+        ${this._field(t('config.name'), this._input(draft, 'name'), t('config.nameHelp'))}
         ${this._field(
-          'File',
+          t('config.file'),
           html`
             <div class="file-row">
               ${this._input(draft, 'file')}
-              <button class="secondary" @click=${this._onBrowse}>Browse…</button>
+              <button class="secondary" @click=${this._onBrowse}>${t('config.browse')}</button>
             </div>
           `,
-          'Path to the database file. A new file is created if it does not exist.',
+          t('config.filePathHelp'),
         )}
       </section>
     `
@@ -217,31 +218,30 @@ export class DbConfigForm extends LitElement {
       <section>
         <div class="section-head">
           <h4>SSL</h4>
-          <p class="muted small">Encrypt the database connection</p>
+          <p class="muted small">${t('config.sslHelp')}</p>
         </div>
         ${this._field(
-          'Mode',
+          t('config.mode'),
           html`
             <select @change=${(e: Event) => this._patchSsl(ssl, { mode: (e.target as HTMLSelectElement).value as SslMode })}>
-              <option value="disable" ?selected=${ssl.mode === 'disable'}>Disable</option>
-              <option value="require" ?selected=${ssl.mode === 'require'}>Require encryption (no certificate check)</option>
-              <option value="verify-ca" ?selected=${ssl.mode === 'verify-ca'} ?disabled=${draft.engine === 'sqlserver'}>Verify CA</option>
-              <option value="verify-full" ?selected=${ssl.mode === 'verify-full'}>Verify full</option>
+              <option value="disable" ?selected=${ssl.mode === 'disable'}>${t('config.disable')}</option>
+              <option value="require" ?selected=${ssl.mode === 'require'}>${t('config.requireEncryption')}</option>
+              <option value="verify-ca" ?selected=${ssl.mode === 'verify-ca'} ?disabled=${draft.engine === 'sqlserver'}>${t('config.verifyCa')}</option>
+              <option value="verify-full" ?selected=${ssl.mode === 'verify-full'}>${t('config.verifyFull')}</option>
             </select>
           `,
-          ssl.mode === 'require' ? '' : 'Verify full validates both the certificate chain and hostname.',
+          ssl.mode === 'require' ? '' : t('config.verifyFullHelp'),
         )}
         ${ssl.mode === 'require'
           ? html`<p class="ssl-warning" role="alert">
               <span aria-hidden="true">⚠</span>
               <span
-                ><strong>“Require” encrypts but does not verify the server’s certificate</strong>, so it can’t stop a
-                man-in-the-middle on an untrusted network. Use <strong>Verify full</strong> for that.</span
+                ><strong>${t('config.requireWarningStrong')}</strong>${t('config.requireWarningTail')}</span
               >
             </p>`
           : ''}
         ${ssl.mode === 'verify-ca' || ssl.mode === 'verify-full'
-          ? this._field('CA certificate', this._sslInput(ssl, 'ca'), 'Optional path to a custom root CA certificate. System roots are used when empty.')
+          ? this._field(t('config.caCertificate'), this._sslInput(ssl, 'ca'), t('config.caHelp'))
           : ''}
       </section>
     `
@@ -296,11 +296,11 @@ export class DbConfigForm extends LitElement {
     return html`
       <section>
         <div class="section-head">
-          <h4>SSH Tunnel</h4>
-          <p class="muted small">Reach the server through a bastion host</p>
+          <h4>${t('config.sshTunnel')}</h4>
+          <p class="muted small">${t('config.sshHelp')}</p>
         </div>
         ${this._field(
-          'Tunnel',
+          t('config.tunnel'),
           html`
             <label class="toggle">
               <input
@@ -308,7 +308,7 @@ export class DbConfigForm extends LitElement {
                 .checked=${ssh.enabled}
                 @change=${(e: Event) => this._patchSsh(ssh, { enabled: (e.target as HTMLInputElement).checked })}
               />
-              <span>Connect through an SSH tunnel</span>
+              <span>${t('config.tunnelToggle')}</span>
             </label>
           `,
         )}
@@ -319,11 +319,11 @@ export class DbConfigForm extends LitElement {
 
   private _sshFields(ssh: SshConfig) {
     return html`
-      ${this._field('SSH host', this._sshInput(ssh, 'host'), 'Bastion hostname or IP.')}
-      ${this._field('SSH port', this._sshInput(ssh, 'port'))}
-      ${this._field('SSH user', this._sshInput(ssh, 'username'))}
+      ${this._field(t('config.sshHost'), this._sshInput(ssh, 'host'), t('config.sshHostHelp'))}
+      ${this._field(t('config.sshPort'), this._sshInput(ssh, 'port'))}
+      ${this._field(t('config.sshUser'), this._sshInput(ssh, 'username'))}
       ${this._field(
-        'Auth method',
+        t('config.authMethod'),
         html`
           <select
             @change=${(e: Event) => this._patchSsh(ssh, {
@@ -332,23 +332,23 @@ export class DbConfigForm extends LitElement {
               passphraseSaved: false,
             })}
           >
-            <option value="key" ?selected=${ssh.authType === 'key'}>Private key</option>
-            <option value="password" ?selected=${ssh.authType === 'password'}>Password</option>
+            <option value="key" ?selected=${ssh.authType === 'key'}>${t('config.privateKey')}</option>
+            <option value="password" ?selected=${ssh.authType === 'password'}>${t('config.password')}</option>
           </select>
         `,
       )}
       ${ssh.authType === 'key'
         ? html`
-            ${this._field('Key path', this._sshInput(ssh, 'keyPath'), 'Private key file; ~ expands to your home folder.')}
-            ${this._field('Passphrase', this._sshInput(ssh, 'passphrase', 'password'), 'Leave empty for unencrypted keys.')}
+            ${this._field(t('config.keyPath'), this._sshInput(ssh, 'keyPath'), t('config.keyPathHelp'))}
+            ${this._field(t('config.passphrase'), this._sshInput(ssh, 'passphrase', 'password'), t('config.passphraseHelp'))}
           `
-        : this._field('SSH password', this._sshInput(ssh, 'password', 'password'))}
+        : this._field(t('config.sshPassword'), this._sshInput(ssh, 'password', 'password'))}
       ${this._field(
         '',
         html`
           <div class="test-row">
             <button class="secondary" @click=${this._onTestSsh} ?disabled=${this._sshTest.phase === 'testing'}>
-              ${this._sshTest.phase === 'testing' ? 'Testing…' : 'Test SSH'}
+              ${this._sshTest.phase === 'testing' ? t('config.testing') : t('config.testSsh')}
             </button>
             <span class="test-result ${this._sshTest.phase}" title=${'message' in this._sshTest ? this._sshTest.message : ''}>
               ${'message' in this._sshTest ? this._sshTest.message : ''}

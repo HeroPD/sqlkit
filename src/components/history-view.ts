@@ -4,6 +4,7 @@ import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import type { Engine } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
+import { formatInteger, formatTime, rowWord, t } from '../i18n'
 
 // One run in the query history. Runtime-only, like the reference app: capped
 // per workspace, scoped to the database context that ran it.
@@ -15,8 +16,6 @@ export type HistoryOpenDetail = { sql: string }
 export type HistoryExplainDetail = { sql: string; analyze: boolean }
 
 const summarize = (sql: string) => sql.replace(/\s+/g, ' ').trim().slice(0, 120)
-
-const timeOf = (iso: string) => new Date(iso).toLocaleTimeString('en-US', { hour12: false })
 
 // The History sidebar view: the active context's runs, newest first. Rows
 // dispatch `history-open` with their SQL (the workbench opens it in the
@@ -38,7 +37,7 @@ export class HistoryView extends LitElement {
       <div class="list">
         ${this.items.length
           ? this.items.map((item) => this._renderItem(item))
-          : html`<p class="muted hint">No queries run yet.</p>`}
+          : html`<p class="muted hint">${t('history.empty')}</p>`}
       </div>
       ${this._renderMenu()}
     `
@@ -48,13 +47,13 @@ export class HistoryView extends LitElement {
     const menu = this._menu
     if (!menu) return ''
     const items: MenuItem[] = [
-      { id: 'explain', label: 'Explain' },
+      { id: 'explain', label: t('history.explain') },
       // ANALYZE actually executes the query — Postgres and MySQL 8.0.18+;
       // SQLite's counterpart is the single `explain query plan` mode.
       ...(this.engine === 'postgresql' || this.engine === 'mysql'
-        ? [{ id: 'explain-analyze', label: 'Explain Analyze' }]
+        ? [{ id: 'explain-analyze', label: t('history.explainAnalyze') }]
         : []),
-      { id: 'copy-sql', label: 'Copy SQL' },
+      { id: 'copy-sql', label: t('history.copySql') },
     ]
     return html`
       <context-menu
@@ -83,10 +82,10 @@ export class HistoryView extends LitElement {
 
   private _renderItem(item: HistoryItem) {
     const meta = [
-      timeOf(item.createdAt),
-      item.success ? 'OK' : 'Error',
+      formatTime(item.createdAt),
+      item.success ? t('common.ok') : t('common.error'),
       `${Math.max(1, Math.round(item.durationMs))} ms`,
-      item.rowCount !== null ? `${item.rowCount} row${item.rowCount === 1 ? '' : 's'}` : '',
+      item.rowCount !== null ? `${formatInteger(item.rowCount)} ${rowWord(item.rowCount)}` : '',
     ]
       .filter(Boolean)
       .join(' · ')

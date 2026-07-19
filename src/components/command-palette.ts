@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { t } from '../i18n'
 
 export type PaletteMode = 'commands' | 'quick' | 'databases'
 
@@ -24,9 +25,9 @@ export type PaletteEntry = {
 }
 
 const PLACEHOLDERS: Record<PaletteMode, string> = {
-  commands: 'Type a command…',
-  quick: 'Search files…',
-  databases: 'Switch database…',
+  commands: t('palette.commands'),
+  quick: t('palette.quick'),
+  databases: t('palette.databases'),
 }
 
 // Every whitespace-separated term must appear somewhere in the entry's text.
@@ -137,12 +138,12 @@ export class CommandPalette extends LitElement {
   }
 
   private _emptyMessage() {
-    if (this.entries.length) return 'No matches'
+    if (this.entries.length) return t('palette.noMatches')
     return this.mode === 'quick'
-      ? 'No .sql files in this workspace'
+      ? t('palette.noFiles')
       : this.mode === 'databases'
-        ? 'No database connections yet'
-        : 'No commands'
+        ? t('palette.noDatabases')
+        : t('palette.noCommands')
   }
 
   private _renderEntry(entry: PaletteEntry, index: number, active: number) {

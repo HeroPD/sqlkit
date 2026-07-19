@@ -3,6 +3,7 @@ import { customElement, property } from 'lit/decorators.js'
 import { codicons } from '../shared-styles'
 import type { ConnectionPhase, Engine, EngineFlavor } from '../electron'
 import './engine-badge'
+import { t } from '../i18n'
 
 // One row in the Databases sidebar list. Dispatches `db-select` with its
 // profile id; the workbench decides what selecting it means (open the form).
@@ -58,8 +59,8 @@ export class DbListItem extends LitElement {
       </span>
       <button
         class="action"
-        title=${live ? 'Disconnect' : 'Connect'}
-        aria-label=${live ? 'Disconnect' : 'Connect'}
+        title=${live ? t('database.disconnect') : t('database.connect')}
+        aria-label=${live ? t('database.disconnect') : t('database.connect')}
         @click=${this._onToggleConnection}
       >
         ${this.status === 'connecting'

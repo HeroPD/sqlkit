@@ -2,6 +2,7 @@ import { LitElement, css, html } from 'lit'
 import { customElement } from 'lit/decorators.js'
 import { codicons, controls, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
+import { t } from '../i18n'
 
 export type EmptyAction =
   | 'new-query'
@@ -12,12 +13,12 @@ export type EmptyAction =
   | 'close-workspace'
 
 const ACTIONS: { action: EmptyAction; label: string; kbd?: string }[] = [
-  { action: 'new-query', label: 'New Query', kbd: mod('N') },
-  { action: 'quick-open', label: 'Quick Open', kbd: mod('P') },
-  { action: 'switch-database', label: 'Switch Database', kbd: mod('K') },
-  { action: 'command-palette', label: 'Command Palette', kbd: isMac ? '⇧⌘P' : 'Ctrl+Shift+P' },
-  { action: 'add-database', label: 'Add Database' },
-  { action: 'close-workspace', label: 'Close Workspace' },
+  { action: 'new-query', label: t('action.newQuery'), kbd: mod('N') },
+  { action: 'quick-open', label: t('action.quickOpen').replace(/…$/, ''), kbd: mod('P') },
+  { action: 'switch-database', label: t('action.switchDatabase').replace(/…$/, ''), kbd: mod('K') },
+  { action: 'command-palette', label: t('action.commandPalette'), kbd: isMac ? '⇧⌘P' : 'Ctrl+Shift+P' },
+  { action: 'add-database', label: t('action.addDatabase') },
+  { action: 'close-workspace', label: t('action.closeWorkspace') },
 ]
 
 // Empty-editor placeholder, ported from the reference: brand mark over a list
@@ -28,8 +29,8 @@ export class EditorEmpty extends LitElement {
   render() {
     return html`
       <div class="mark"><i class="codicon codicon-database" aria-hidden="true"></i></div>
-      <h2>SqlKit Studio</h2>
-      <p>No query editor is open.</p>
+      <h2>${t('app.name')}</h2>
+      <p>${t('empty.noEditor')}</p>
       <div class="actions">
         ${ACTIONS.map(
           (entry) => html`

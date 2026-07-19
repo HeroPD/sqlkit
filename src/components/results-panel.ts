@@ -11,6 +11,7 @@ import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './export-dialog'
 import type { ExportConfirmDetail } from './export-dialog'
+import { formatInteger, rowWord, t } from '../i18n'
 
 /** What the results panel is currently showing. */
 export type QueryRun =
@@ -614,12 +615,17 @@ export class ResultsPanel extends LitElement {
     const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
       <div class="head">
-        <span>Results</span>
+        <span>${t('results.title')}</span>
         ${this.run.phase === 'done' && (this.run.result.resultSets?.length ?? 0) > 1
           ? html`
-              <select class="result-set-select" aria-label="Result set" @change=${this._selectResultSet} .value=${String(this._resultSetIndex)}>
+              <select class="result-set-select" aria-label=${t('results.resultSet')} @change=${this._selectResultSet} .value=${String(this._resultSetIndex)}>
                 ${this.run.result.resultSets!.map((set, index) =>
-                  html`<option value=${index}>Result ${index + 1} · ${set.rowCount}${set.rowCountExact === false ? '+' : ''} row${set.rowCount === 1 ? '' : 's'}</option>`,
+                  html`<option value=${index}>${t('results.resultOption', {
+                    index: index + 1,
+                    count: formatInteger(set.rowCount),
+                    approximate: set.rowCountExact === false ? '+' : '',
+                    rows: rowWord(set.rowCount),
+                  })}</option>`,
                 )}
               </select>
             `
@@ -629,13 +635,13 @@ export class ResultsPanel extends LitElement {
               <div class="toolbar" aria-label="Result edit actions">
                 ${this.rowEditable && canEditResult
                   ? html`
-                      <button class="head-action" title="Add new row" aria-label="Add new row" @click=${this._addRow}>
+                      <button class="head-action" title=${t('results.addRow')} aria-label=${t('results.addRow')} @click=${this._addRow}>
                         <i class="codicon codicon-add" aria-hidden="true"></i>
                       </button>
                       <button
                         class="head-action danger"
-                        title="Delete selected rows"
-                        aria-label="Delete selected rows"
+                        title=${t('results.deleteRows')}
+                        aria-label=${t('results.deleteRows')}
                         ?disabled=${!hasDeletable}
                         @click=${() => this._deleteSelection()}
                       >
@@ -644,7 +650,7 @@ export class ResultsPanel extends LitElement {
                       <button
                         class="head-action"
                         title=${`Duplicate selected rows (${isMac ? '⌘D' : 'Ctrl+D'})`}
-                        aria-label="Duplicate selected rows"
+                        aria-label=${t('results.duplicateRows')}
                         ?disabled=${selected.results.length === 0 || !!result?.truncated}
                         @click=${this._duplicateSelection}
                       >
@@ -655,7 +661,7 @@ export class ResultsPanel extends LitElement {
                 <button
                   class="head-action"
                   title=${`Save ${pendingCount} pending change${pendingCount === 1 ? '' : 's'} (${isMac ? '⌘S' : 'Ctrl+S'})`}
-                  aria-label="Save changes"
+                  aria-label=${t('results.saveChanges')}
                   ?disabled=${pendingCount === 0}
                   @click=${this._saveRows}
                 >
@@ -664,7 +670,7 @@ export class ResultsPanel extends LitElement {
                 <button
                   class="head-action"
                   title="Discard all changes (Esc Esc)"
-                  aria-label="Discard changes"
+                  aria-label=${t('results.discardChanges')}
                   ?disabled=${pendingCount === 0}
                   @click=${this._discardChanges}
                 >
@@ -678,8 +684,8 @@ export class ResultsPanel extends LitElement {
               <div class="toolbar view-toolbar" aria-label="Result view actions">
                 <button
                   class="head-action"
-                  title=${this._record ? 'Grid view (Tab)' : 'List view (Tab)'}
-                  aria-label=${this._record ? 'Grid view' : 'List view'}
+                  title=${`${this._record ? t('results.gridView') : t('results.listView')} (Tab)`}
+                  aria-label=${this._record ? t('results.gridView') : t('results.listView')}
                   ?disabled=${!canToggleRecord}
                   @click=${this._toggleRecordView}
                 >
@@ -693,8 +699,8 @@ export class ResultsPanel extends LitElement {
           ? html`
               <button
                 class="head-action"
-                title="Export results…"
-                aria-label="Export results"
+                title=${t('results.export')}
+                aria-label=${t('results.export')}
                 @click=${() => (this._exportOpen = true)}
               >
                 <i class="codicon codicon-download" aria-hidden="true"></i>
@@ -703,8 +709,8 @@ export class ResultsPanel extends LitElement {
           : ''}
         <button
           class="head-action"
-          title=${this.collapsed ? 'Expand results panel' : 'Collapse results panel'}
-          aria-label=${this.collapsed ? 'Expand results panel' : 'Collapse results panel'}
+          title=${this.collapsed ? t('results.expand') : t('results.collapse')}
+          aria-label=${this.collapsed ? t('results.expand') : t('results.collapse')}
           aria-expanded=${!this.collapsed}
           @click=${this._toggleCollapse}
         >
@@ -1322,7 +1328,10 @@ export class ResultsPanel extends LitElement {
 
   private _status() {
     if (this._draining) {
-      return html`Preparing ${this._draining.done.toLocaleString()} of ${this._draining.total.toLocaleString()} rows…`
+      return html`${t('results.preparing', {
+        done: formatInteger(this._draining.done),
+        total: formatInteger(this._draining.total),
+      })}`
     }
     if (this.run.phase !== 'done') return ''
     const result = this._shownResult()
@@ -1332,12 +1341,14 @@ export class ResultsPanel extends LitElement {
     // is a lower bound ("N+ rows"). Scripts that must drain may know the total.
     const totalKnown = result.rowCountExact !== false && (!result.truncated || buffered === undefined || result.rowCount > buffered)
     const rows = totalKnown
-      ? `${result.rowCount.toLocaleString()} row${result.rowCount === 1 ? '' : 's'}`
-      : `${(buffered ?? result.rows.length).toLocaleString()}+ rows`
+      ? `${formatInteger(result.rowCount)} ${rowWord(result.rowCount)}`
+      : `${formatInteger(buffered ?? result.rows.length)}+ ${t('results.rows')}`
     // Only a result past the buffer cap is partial; everything else is fully
     // scrollable (paged in on demand), so no "showing first N" caveat.
     const capped =
-      result.truncated && totalKnown && buffered !== undefined ? ` · first ${buffered.toLocaleString()} loaded` : ''
+      result.truncated && totalKnown && buffered !== undefined
+        ? ` · ${t('results.loadedPrefix', { count: formatInteger(buffered) })}`
+        : ''
     const pace = result.durationMs < 500 ? 'fast' : result.durationMs < 2000 ? 'medium' : 'slow'
     return html`${rows}${capped} · <span class="duration ${pace}">${Math.max(1, Math.round(result.durationMs))} ms</span>`
   }
@@ -1345,7 +1356,7 @@ export class ResultsPanel extends LitElement {
   private _renderBody() {
     const run = this.run
     if (run.phase === 'idle') {
-      return html`<p class="hint">Run a query with ${isMac ? '⌘↵' : 'Ctrl+↵'}; selection runs alone, otherwise nearest block.</p>`
+      return html`<p class="hint">${t('results.idle', { shortcut: isMac ? '⌘↵' : 'Ctrl+↵' })}</p>`
     }
     if (run.phase === 'running') {
       // A note means connecting, which has no backend to cancel yet.
@@ -1353,8 +1364,8 @@ export class ResultsPanel extends LitElement {
       return html`
         <p class="hint">
           <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i>
-          ${run.note ?? 'Running…'}
-          ${cancellable ? html`<button class="stop" @click=${this._cancel}>Stop</button>` : ''}
+          ${run.note ?? t('results.running')}
+          ${cancellable ? html`<button class="stop" @click=${this._cancel}>${t('common.stop')}</button>` : ''}
         </p>
       `
     }
@@ -1364,7 +1375,10 @@ export class ResultsPanel extends LitElement {
 
     const result = this._shownResult()!
     if (!result.columns.length) {
-      return html`<p class="hint">OK — ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} affected.</p>`
+      return html`<p class="hint">${t('results.affected', {
+        count: formatInteger(result.rowCount),
+        rows: rowWord(result.rowCount),
+      })}</p>`
     }
     if (this._record) return this._renderRecordView()
     // Header sort buttons re-run the query with a driver-built ORDER BY (only

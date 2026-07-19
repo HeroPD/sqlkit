@@ -4,6 +4,7 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { WorkspaceConfig } from '../src/electron'
 import type { ConnectionManager } from './db/manager'
+import { t } from '../src/i18n'
 import {
   createWorkspaceFile,
   externalOpenAction,
@@ -65,8 +66,8 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     if (!window) return { success: false, error: 'Window not ready' }
     const result = await dialog.showOpenDialog(window, {
       properties: ['openDirectory', 'createDirectory'],
-      title: 'Open Workspace Folder',
-      buttonLabel: 'Open',
+      title: t('workspace.openTitle'),
+      buttonLabel: t('workspace.openButton'),
     })
     const [folder] = result.filePaths
     if (result.canceled || !folder) return { success: false, canceled: true }
@@ -98,7 +99,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     context.clearWorkspace(event.sender.id)
     stopWorkspaceWatcher(event.sender.id)
     await context.managerFor(event.sender.id)?.disconnectAll()
-    BrowserWindow.fromWebContents(event.sender)?.setTitle('SqlKit Studio')
+    BrowserWindow.fromWebContents(event.sender)?.setTitle(t('app.name'))
   })
 
   ipcMain.handle('app:new-window', () => context.createWindow())

@@ -2,6 +2,7 @@ import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { codicons, controls, typography } from '../shared-styles'
 import type { RecentWorkspace } from '../electron'
+import { t } from '../i18n'
 
 // Welcome view: brand, start actions, and the recent-workspace list (passed
 // down by <app-root>). The screen is dumb — it dispatches `open-folder` /
@@ -16,19 +17,19 @@ export class WelcomeScreen extends LitElement {
       <div class="inner">
         <div class="brand">
           <i class="codicon codicon-database logo" aria-hidden="true"></i>
-          <h1>SqlKit Studio</h1>
-          <p class="muted">SQL Database Explorer</p>
+          <h1>${t('app.name')}</h1>
+          <p class="muted">${t('app.tagline')}</p>
         </div>
 
         <div class="section">
-          <h3>Start</h3>
-          <button class="link" @click=${this._onOpenFolder}>Open Folder...</button>
+          <h3>${t('welcome.start')}</h3>
+          <button class="link" @click=${this._onOpenFolder}>${t('welcome.openFolder')}</button>
         </div>
 
         ${this.recents.length
           ? html`
               <div class="section">
-                <h3>Recent</h3>
+                <h3>${t('welcome.recent')}</h3>
                 ${this.recents.map(
                   (workspace) => html`
                     <button class="link recent" title=${workspace.path} @click=${() => this._onOpenRecent(workspace)}>

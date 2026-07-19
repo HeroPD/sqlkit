@@ -1,6 +1,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { codicons } from '../shared-styles'
+import { t } from '../i18n'
 
 // The workbench footer: workspace name, the in-use database context, and a
 // connection summary that flips the bar's color when anything is live.
@@ -23,14 +24,14 @@ export class StatusBar extends LitElement {
   render() {
     const summary =
       this.connectedCount === 0
-        ? 'Not connected'
+        ? t('status.notConnected')
         : this.connectedCount === 1
-          ? this.connectedName || '1 connected'
-          : `${this.connectedCount} connected`
+          ? this.connectedName || t('status.oneConnected')
+          : t('status.manyConnected', { count: this.connectedCount })
 
     return html`
       <footer class=${this.connectedCount ? 'connected' : ''}>
-        <span>${this.workspaceName || 'SqlKit Studio'}</span>
+        <span>${this.workspaceName || t('app.name')}</span>
         ${this.contextName
           ? html`<span><i class="codicon codicon-database" aria-hidden="true"></i> ${this.contextName}</span>`
           : ''}
