@@ -1,4 +1,4 @@
-import { LitElement, css, html, type TemplateResult } from 'lit'
+import { LitElement, css, html, type PropertyValues, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
 import type { ConnectionProfile, DatabaseMode, Engine, EngineFlavor, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
@@ -69,6 +69,21 @@ export class DbConfigForm extends LitElement {
 
   @state()
   private _urlError = ''
+
+  // The form element is reused across connections (one instance, swapped
+  // `profile`), so transient test/URL feedback must clear when the connection
+  // changes — otherwise one connection shows the previous one's error.
+  private _shownProfileId: string | null = null
+
+  willUpdate(changed: PropertyValues<this>) {
+    if (changed.has('profile') && (this.profile?.id ?? null) !== this._shownProfileId) {
+      this._shownProfileId = this.profile?.id ?? null
+      this._test = { phase: 'idle' }
+      this._sshTest = { phase: 'idle' }
+      this._urlDraft = null
+      this._urlError = ''
+    }
+  }
 
   render() {
     const draft = this.profile

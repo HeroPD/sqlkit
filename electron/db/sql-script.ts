@@ -16,14 +16,34 @@ function splitScript(sql: string, engine?: Engine, mode?: SqlModeFlags): SplitSc
   const masked = maskSql(sql, engine, mode)
   const statements: SplitScript['statements'] = []
   let depth = 0
+  // PostgreSQL's SQL-standard routine body is part of one CREATE statement
+  // even though it contains semicolon-terminated statements. CASE has its own
+  // END inside that body, so retain a tiny construct stack rather than treating
+  // the first END as the end of BEGIN ATOMIC.
+  const postgresBlocks: Array<'atomic' | 'case'> = []
+  let previousWord = ''
   let start = 0
   const push = (from: number, to: number) => {
     if (masked.slice(from, to).trim()) statements.push({ raw: sql.slice(from, to).trim(), masked: masked.slice(from, to).trim() })
   }
   for (let i = 0; i < masked.length; i += 1) {
-    if (masked[i] === '(') depth += 1
-    else if (masked[i] === ')') depth = Math.max(0, depth - 1)
-    else if (masked[i] === ';' && depth === 0) {
+    const char = masked[i]!
+    if (engine === 'postgresql' && /[A-Za-z_]/.test(char) && !/[A-Za-z0-9_$]/.test(masked[i - 1] ?? '')) {
+      let end = i + 1
+      while (/[A-Za-z0-9_$]/.test(masked[end] ?? '')) end += 1
+      const word = masked.slice(i, end).toLowerCase()
+      if (word === 'begin' && /^\s+atomic\b/i.test(masked.slice(end))) {
+        postgresBlocks.push('atomic')
+      } else if (postgresBlocks.length && word === 'case' && previousWord !== 'end') {
+        postgresBlocks.push('case')
+      } else if (postgresBlocks.length && word === 'end') {
+        postgresBlocks.pop()
+      }
+      previousWord = word
+      i = end - 1
+    } else if (char === '(') depth += 1
+    else if (char === ')') depth = Math.max(0, depth - 1)
+    else if (char === ';' && depth === 0 && postgresBlocks.length === 0) {
       push(start, i)
       start = i + 1
     }
@@ -48,16 +68,38 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
   // SQLite spells COMMIT as END too, but trigger bodies (BEGIN stmt; … END)
   // split at their inner semicolons here — their END is not a commit.
   const endIsCommit = engine === 'postgresql' || (engine === 'sqlite' && !containsSqliteTrigger(script.masked))
+  const sqlServerTransactionNames = new Set<string>()
+  const sqlServerSavepoints = new Set<string>()
   for (const statement of script.statements) {
     const masked = statement.masked.toLowerCase()
     if (engine === 'sqlserver') {
       // T-SQL semicolons are optional, so scan bodies for tokens; a close at depth
       // 0 may sit in an unexecuted branch (TRY/CATCH), so leave it to the server.
-      const controls = masked.matchAll(/\b(?:(begin\s+tran(?:saction)?)|commit(?:\s+(?:tran(?:saction)?|work))?|rollback(?:\s+(?:tran(?:saction)?|work))?)\b/g)
+      const name = String.raw`[@#A-Za-z_][@#$A-Za-z0-9_]*`
+      const transactionName = String.raw`(?!(?:begin|commit|delete|exec(?:ute)?|if|insert|merge|print|raiserror|return|rollback|save|select|set|throw|update|while|with)\b)${name}`
+      const controls = masked.matchAll(new RegExp(
+        String.raw`\b(?:(begin\s+tran(?:saction)?)(?:[ \t]+(${transactionName}))?|(save\s+tran(?:saction)?)[ \t]+(${transactionName})|(commit(?:\s+(?:tran(?:saction)?|work))?)(?:[ \t]+${transactionName})?|(rollback(?:\s+(?:tran(?:saction)?|work))?)(?:[ \t]+(${transactionName}))?)\b`,
+        'g',
+      ))
       for (const match of controls) {
-        sawControl = true
-        if (match[1]) depth += 1
-        else if (depth > 0) depth -= 1
+        if (match[1]) {
+          sawControl = true
+          depth += 1
+          if (match[2]) sqlServerTransactionNames.add(match[2].toLowerCase())
+        } else if (match[3]) {
+          sqlServerSavepoints.add(match[4]!.toLowerCase())
+        } else if (match[5]) {
+          sawControl = true
+          if (depth > 0) depth -= 1
+        } else if (depth > 0) {
+          sawControl = true
+          const rollbackName = match[7]?.toLowerCase()
+          // An unnamed rollback, or one naming the outer transaction, clears
+          // SQL Server's entire transaction stack. A known savepoint rollback
+          // leaves @@TRANCOUNT unchanged. Unknown named targets fail closed.
+          if (!rollbackName || sqlServerTransactionNames.has(rollbackName)) depth = 0
+          else if (sqlServerSavepoints.has(rollbackName)) continue
+        }
       }
       continue
     }
@@ -65,6 +107,7 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
     // engines, so heads suffice — bodies would false-positive on CASE … END.
     const head = masked.trimStart()
     const begins = /^(?:begin(?:\s+(?:work|transaction))?|start\s+transaction)\b/.test(head)
+      && !/^begin\s+atomic\b/.test(head)
       // MariaDB's anonymous compound block, not a transaction start.
       && !/^begin\s+not\s+atomic\b/.test(head)
     const closes = /^commit(?:\s+(?:work|transaction))?\b/.test(head)

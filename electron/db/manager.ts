@@ -40,6 +40,9 @@ export type ConnectionManager = ReturnType<typeof createConnectionManager>
 // until the user reconnects or disconnects.
 export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]) => void) {
   const connections = new Map<string, Active>()
+  // Latest requested connect per profile. This exists independently of the
+  // active map because teardown removes that entry before its awaits settle.
+  const connectAttempts = new Map<string, symbol>()
   // Buffered result rows the renderer pages through; freed on disconnect.
   const sessions = new ResultSessionStore()
 
@@ -65,7 +68,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     if (connections.delete(profileId)) broadcast(statuses())
   }
 
-  async function disconnect(profileId: string) {
+  async function disconnectActive(profileId: string) {
     const active = connections.get(profileId)
     if (!active) return
     remove(profileId)
@@ -88,11 +91,31 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     if (!settled) void active.tunnel?.close().catch(() => {})
   }
 
+  async function disconnect(profileId: string) {
+    // An explicit disconnect also supersedes a connect still opening its
+    // tunnel/driver, including one waiting for an older session to tear down.
+    connectAttempts.delete(profileId)
+    await disconnectActive(profileId)
+  }
+
+  // Drops a stale 'error' entry so the status list stops reporting a failure for
+  // settings that no longer exist (e.g. after the profile is edited and saved).
+  // A live or in-flight connection is left untouched; teardown here is a no-op
+  // for a failed connect (already cleaned up) and closes any lingering pool/tunnel
+  // left by a transport error.
+  async function clearError(profileId: string) {
+    if (connections.get(profileId)?.phase === 'error') await disconnect(profileId)
+  }
+
   async function connect(profile: ConnectionProfile): Promise<ConnectResult> {
-    await disconnect(profile.id)
+    const attempt = Symbol(profile.id)
+    connectAttempts.set(profile.id, attempt)
+    await disconnectActive(profile.id)
+    // A newer connect may have completed while this call awaited the previous
+    // session's teardown. Never let the older call register over it.
+    if (connectAttempts.get(profile.id) !== attempt) return { success: false, error: 'Connection superseded' }
 
     const resources: ConnectionResources = { driver: null, tunnel: null }
-    const attempt = Symbol(profile.id)
     const attempts = new WeakMap<Active, symbol>()
     const register = (state: Active) => {
       attempts.set(state, attempt)
@@ -107,7 +130,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     // leave the newer entry's state alone.
     const isCurrent = () => {
       const current = connections.get(profile.id)
-      return !!current && attempts.get(current) === attempt
+      return connectAttempts.get(profile.id) === attempt && !!current && attempts.get(current) === attempt
     }
 
     // Closes only the resources this attempt opened — used on failure and when
@@ -168,7 +191,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   }
 
   async function disconnectAll() {
-    await Promise.all([...connections.keys()].map((profileId) => disconnect(profileId)))
+    const profileIds = new Set([...connections.keys(), ...connectAttempts.keys()])
+    await Promise.all([...profileIds].map((profileId) => disconnect(profileId)))
   }
 
   const connectedDriver = (profileId: string) => {
@@ -389,6 +413,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     connect,
     disconnect,
     disconnectAll,
+    clearError,
     statuses,
     query,
     runBatch,

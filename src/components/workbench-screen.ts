@@ -1548,6 +1548,10 @@ export class WorkbenchScreen extends LitElement {
     const { profile } = (event as CustomEvent<{ profile: ConnectionProfile }>).detail
     if (!(await this._config.save(profile))) return
 
+    // The saved edit may have fixed what failed, so a stale error for these
+    // now-gone settings is misleading — drop it (reconnecting will re-test).
+    void this._live.clearError(profile.id)
+
     // Close the config tab before _loadConfig switches context — otherwise
     // switchInstance stashes the live tabs (still holding this config tab) under
     // the old context and the tab resurfaces on switch-back.

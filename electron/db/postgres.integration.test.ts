@@ -200,6 +200,19 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  it('executes a SQL-standard BEGIN ATOMIC function body as one statement', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query(`create or replace function sqlkit_it.atomic_one() returns integer language sql
+        begin atomic
+          select 1;
+        end`)
+      expect((await driver.query('select sqlkit_it.atomic_one()')).rows).toEqual([[1]])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('drains a capped read without cancelling statement semantics', async () => {
     const driver = await connectDriver()
     try {

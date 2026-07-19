@@ -226,6 +226,17 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
+  it('rejects a transaction left open after rollback to a savepoint', async () => {
+    const driver = await connectDriver()
+    try {
+      await expect(driver.query(
+        'BEGIN TRAN; SAVE TRAN sqlkit_save; SELECT 1; ROLLBACK TRAN sqlkit_save;',
+      )).rejects.toThrow(/same query run/i)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('supports GO batches and exposes every result set', async () => {
     const driver = await connectDriver()
     try {

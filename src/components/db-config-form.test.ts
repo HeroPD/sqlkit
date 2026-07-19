@@ -205,6 +205,42 @@ describe('DbConfigForm connection tests', () => {
   })
 })
 
+describe('DbConfigForm connection switch', () => {
+  it('clears stale test and URL feedback when the edited connection changes', async () => {
+    const { form } = setup()
+    document.body.appendChild(form)
+    await form.updateComplete
+
+    internals(form)._test = { phase: 'error', message: 'connection refused' }
+    internals(form)._sshTest = { phase: 'error', message: 'auth failed' }
+    internals(form)._urlDraft = 'postgres://bad'
+    internals(form)._urlError = 'Enter a valid database URL.'
+
+    form.profile = profile({ id: 'p2', name: 'Other' })
+    await form.updateComplete
+
+    expect(internals(form)._test).toEqual({ phase: 'idle' })
+    expect(internals(form)._sshTest).toEqual({ phase: 'idle' })
+    expect(internals(form)._urlDraft).toBeNull()
+    expect(internals(form)._urlError).toBe('')
+    form.remove()
+  })
+
+  it('keeps test feedback when the same connection is re-rendered by a field edit', async () => {
+    const { form } = setup()
+    document.body.appendChild(form)
+    await form.updateComplete
+
+    internals(form)._test = { phase: 'ok', message: 'Connected' }
+    // A parent field edit re-renders with a fresh profile object of the same id.
+    form.profile = profile({ host: 'db.internal' })
+    await form.updateComplete
+
+    expect(internals(form)._test).toEqual({ phase: 'ok', message: 'Connected' })
+    form.remove()
+  })
+})
+
 describe('DbConfigForm sqlite file picker', () => {
   it('patches the file path when the picker returns one', async () => {
     ;(window as never as { sqlkit: { pickSqliteFile: () => Promise<string | null> } }).sqlkit = {

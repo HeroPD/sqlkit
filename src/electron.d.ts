@@ -306,6 +306,8 @@ export type SqlkitApi = {
   /** Switches the active child database of an all-databases connection. */
   setActiveChildDb: (profileId: string, database: string) => Promise<{ success: boolean; error?: string }>
   disconnectAllDatabases: () => Promise<void>
+  /** Drops a stale error status for a profile (e.g. after its config is re-saved). */
+  clearConnectionError: (profileId: string) => Promise<void>
   getConnectionStatuses: () => Promise<ConnectionStatus[]>
   /** Subscribes to status pushes from the main process; returns unsubscribe. */
   onConnectionStatus: (listener: (statuses: ConnectionStatus[]) => void) => () => void

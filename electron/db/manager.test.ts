@@ -164,6 +164,33 @@ describe('connection manager: connect lifecycle', () => {
     expect(secondClose).not.toHaveBeenCalled()
     expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'connected', serverVersion: 'PG second' })])
   })
+
+  it('does not let an older reconnect overtake a newer one while teardown is pending', async () => {
+    let releaseOld!: () => void
+    const oldDisconnect = vi.fn(() => new Promise<void>((resolve) => { releaseOld = resolve }))
+    const newerDisconnect = vi.fn(() => Promise.resolve())
+    const oldDriver = fakeDriver({ connect: vi.fn(() => Promise.resolve('PG initial')), disconnect: oldDisconnect })
+    const newerDriver = fakeDriver({ connect: vi.fn(() => Promise.resolve('PG newer')), disconnect: newerDisconnect })
+    hoisted.createImpl = (...args: unknown[]) => {
+      const candidate = args[0] as ConnectionProfile
+      return candidate.name === 'initial' ? oldDriver : newerDriver
+    }
+
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile({ name: 'initial' }))
+
+    const olderPromise = manager.connect(profile({ name: 'older-attempt' }))
+    await vi.waitFor(() => expect(oldDisconnect).toHaveBeenCalled())
+    const newerResult = await manager.connect(profile({ name: 'newer' }))
+    expect(newerResult).toEqual({ success: true, serverVersion: 'PG newer' })
+
+    releaseOld()
+    expect(await olderPromise).toEqual({ success: false, error: 'Connection superseded' })
+    expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'connected', serverVersion: 'PG newer' })])
+
+    await manager.disconnect('p1')
+    expect(newerDisconnect).toHaveBeenCalled()
+  })
 })
 
 describe('connection manager: disconnect', () => {
@@ -219,6 +246,39 @@ describe('connection manager: disconnect', () => {
     await manager.disconnectAll()
 
     expect(manager.statuses()).toEqual([])
+  })
+})
+
+describe('connection manager: clearError', () => {
+  it('drops a stale error status and closes any resources it left', async () => {
+    const close = vi.fn(() => Promise.resolve())
+    const disconnect = vi.fn(() => Promise.resolve())
+    hoisted.endpoint = tunnelEndpoint(close)
+    hoisted.driver = fakeDriver({ connect: vi.fn(() => Promise.reject(new Error('auth failed'))), disconnect })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'error' })])
+
+    await manager.clearError('p1')
+
+    expect(manager.statuses()).toEqual([])
+  })
+
+  it('leaves a connected profile untouched', async () => {
+    const disconnect = vi.fn(() => Promise.resolve())
+    hoisted.driver = fakeDriver({ disconnect })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+
+    await manager.clearError('p1')
+
+    expect(disconnect).not.toHaveBeenCalled()
+    expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'connected' })])
+  })
+
+  it('is a no-op for an unknown profile', async () => {
+    const manager = createConnectionManager(vi.fn())
+    await expect(manager.clearError('missing')).resolves.toBeUndefined()
   })
 })
 

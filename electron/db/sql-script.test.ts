@@ -47,6 +47,26 @@ describe('transaction safety', () => {
     expect(() => assertSelfContainedTransaction("select 'COMMIT' -- COMMIT", 'sqlserver')).not.toThrow()
   })
 
+  it('keeps SQL Server savepoint rollbacks inside the outer transaction', () => {
+    expect(() => assertSelfContainedTransaction(
+      'BEGIN TRAN; SAVE TRAN s; update t set a=1; ROLLBACK TRAN s;',
+      'sqlserver',
+    )).toThrow(/same query run/i)
+    expect(() => assertSelfContainedTransaction(
+      'BEGIN TRAN; SAVE TRAN s; update t set a=1; ROLLBACK TRAN s; COMMIT;',
+      'sqlserver',
+    )).not.toThrow()
+    expect(() => assertSelfContainedTransaction(
+      'BEGIN TRAN outer_tx; update t set a=1; ROLLBACK TRAN outer_tx;',
+      'sqlserver',
+    )).not.toThrow()
+    expect(() => assertSelfContainedTransaction(
+      'BEGIN TRAN\nupdate t set a=1\nROLLBACK TRAN\nSELECT 1',
+      'sqlserver',
+    )).not.toThrow()
+    expect(() => assertSelfContainedTransaction('BEGIN TRAN COMMIT', 'sqlserver')).not.toThrow()
+  })
+
   it('accepts T-SQL closes in unexecuted branches (TRY/CATCH, @@TRANCOUNT guards)', () => {
     expect(() => assertSelfContainedTransaction(
       'BEGIN TRY\nBEGIN TRAN\nupdate t set a=1\nCOMMIT\nEND TRY\nBEGIN CATCH\nIF @@TRANCOUNT > 0 ROLLBACK\nEND CATCH',
@@ -153,6 +173,16 @@ describe('dialect script handling', () => {
   it('splits only top-level semicolons', () => {
     expect(splitTopLevelStatements("select ';'; select (1 + 2);")).toEqual(["select ';'", 'select (1 + 2)'])
     expect(splitTopLevelStatements("select 'can\\'t; stop'; select 2", 'mysql')).toEqual(["select 'can\\'t; stop'", 'select 2'])
+  })
+
+  it('keeps PostgreSQL BEGIN ATOMIC routine bodies in one statement', () => {
+    const routine = `CREATE FUNCTION f() RETURNS integer LANGUAGE SQL
+BEGIN ATOMIC
+  SELECT CASE WHEN true THEN 1 ELSE 0 END;
+  SELECT 2;
+END`
+    expect(splitTopLevelStatements(`${routine}; SELECT 3`, 'postgresql')).toEqual([routine, 'SELECT 3'])
+    expect(() => prepareSqlRun({ engine: 'postgresql', sql: `${routine};` })).not.toThrow()
   })
 })
 

@@ -87,6 +87,12 @@ export class ConnectionsController implements ReactiveController {
     return window.sqlkit.disconnectAllDatabases()
   }
 
+  /** Clears a stale error status (e.g. after the profile's config is re-saved). */
+  clearError(profileId: string) {
+    if (this.statuses[profileId]?.phase !== 'error') return Promise.resolve()
+    return window.sqlkit.clearConnectionError(profileId)
+  }
+
   /** Re-fetches a connected database's tables and columns. */
   refresh(profileId: string) {
     if (this.statuses[profileId]?.phase !== 'connected') return

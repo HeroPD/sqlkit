@@ -55,6 +55,8 @@ export function registerDbIpc(context: DbIpcContext) {
   ipcMain.handle('db:disconnect', (event, profileId: unknown) =>
     existingManager(event)?.disconnect(stringValue(profileId, 'Profile id', 200)))
   ipcMain.handle('db:disconnect-all', (event) => existingManager(event)?.disconnectAll())
+  ipcMain.handle('db:clear-error', (event, profileId: unknown) =>
+    existingManager(event)?.clearError(stringValue(profileId, 'Profile id', 200)))
   ipcMain.handle('db:set-active-child', (event, profileId: unknown, database: unknown) => {
     try {
       return manager(event).setActiveChild(

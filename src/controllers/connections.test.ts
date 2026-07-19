@@ -174,3 +174,30 @@ describe('ConnectionsController metadata', () => {
     expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_b'])
   })
 })
+
+describe('ConnectionsController.clearError', () => {
+  const withClear = () => {
+    const clearConnectionError = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { clearConnectionError }
+    return { controller: new ConnectionsController(host()), clearConnectionError }
+  }
+
+  it('clears an error status through IPC', async () => {
+    const { controller, clearConnectionError } = withClear()
+    controller.statuses = { p1: { profileId: 'p1', phase: 'error', error: 'boom' } }
+
+    await controller.clearError('p1')
+
+    expect(clearConnectionError).toHaveBeenCalledWith('p1')
+  })
+
+  it('is a no-op for a connected profile or one with no status', async () => {
+    const { controller, clearConnectionError } = withClear()
+    controller.statuses = { p1: { profileId: 'p1', phase: 'connected' } }
+
+    await controller.clearError('p1')
+    await controller.clearError('missing')
+
+    expect(clearConnectionError).not.toHaveBeenCalled()
+  })
+})

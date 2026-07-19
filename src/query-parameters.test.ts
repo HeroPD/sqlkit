@@ -25,6 +25,25 @@ describe('queryParameters', () => {
       { label: '@p2', position: 1 },
     ])
   })
+
+  it('does not let a semicolon-free SQL Server DECLARE consume the next statement', () => {
+    expect(queryParameters('declare @local int\nselect * from t where id = @p1', 'sqlserver')).toEqual([
+      { label: '@p1', position: 0 },
+    ])
+    expect(queryParameters('declare @local int select * from t where id = @p1', 'sqlserver')).toEqual([
+      { label: '@p1', position: 0 },
+    ])
+  })
+
+  it('recognizes multiline SQL Server declaration lists without swallowing initializer parameters', () => {
+    expect(queryParameters(
+      'declare\n  @p1 decimal(10, 2),\n  @p2 int = @p3\nselect @p1, @p2, @p4',
+      'sqlserver',
+    )).toEqual([
+      { label: '@p3', position: 2 },
+      { label: '@p4', position: 3 },
+    ])
+  })
 })
 
 it('binds text verbatim and treats an explicit NULL token as SQL null', () => {
