@@ -236,7 +236,8 @@ function createBuildConfig(
       // Main and preload share outDir, so neither build may empty it;
       // closeBundle clears it once before the production builds.
       emptyOutDir: false,
-      minify: false,
+      // Minify the real build; keep dev/watch readable for debugging.
+      minify: !watch,
       sourcemap: watch,
       target: 'node22',
       watch: watch ? {} : null,

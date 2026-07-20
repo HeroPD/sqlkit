@@ -48,5 +48,11 @@
     "pg": "^8.21.0",
     "ssh2": "^1.17.0",
     "tedious": "19.2.2"
+  },
+  "allowScripts": {
+    "cpu-features@0.0.10": true,
+    "electron-winstaller@5.4.0": true,
+    "fsevents@2.3.3": true,
+    "ssh2@1.17.0": true
   }
 }
