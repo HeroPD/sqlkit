@@ -12,6 +12,7 @@ import type {
 } from '../src/electron'
 import type { ThemeId } from '../src/electron'
 import { workspaceConfig as validateWorkspaceConfig } from './ipc-validation'
+import { t } from '../src/i18n'
 
 // temp+rename so a crash mid-write can't leave a half-written (and for the
 // workspace config, connection-wiping) file behind.
@@ -285,7 +286,7 @@ export function hydrateConnectionProfile(workspacePath: string | null, incoming:
 }
 
 export function writeWorkspaceConfig(workspacePath: string | null, config: WorkspaceConfig): SaveResult {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   try {
     const savedById = new Map(
       readWorkspaceConfig(workspacePath).config.connections.map((connection) => [connection.id, connection]),
@@ -336,7 +337,7 @@ export function readWorkspaceHistory(workspacePath: string | null): HistoryItem[
 }
 
 export function writeWorkspaceHistory(workspacePath: string | null, items: HistoryItem[]): SaveResult {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   try {
     ensureInternalGitignore(workspacePath)
     writeFileAtomic(historyPathFor(workspacePath), JSON.stringify(items, null, 2))
@@ -391,7 +392,7 @@ export function isDirectory(checkPath: string) {
 // the global recent list.
 export function openWorkspace(wsPath: string): WorkspaceResult {
   if (!isDirectory(wsPath)) {
-    return { success: false, error: 'Directory not found' }
+    return { success: false, error: t('workspace.directoryNotFound') }
   }
 
   const workspacePath = path.resolve(wsPath)

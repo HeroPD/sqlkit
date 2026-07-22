@@ -2,6 +2,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { closeSync, openSync, writeSync } from 'node:fs'
 import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, QueryResultSet, TableInspection, TableRef } from '../../src/electron'
 import { createExportSerializer, type ExportFormat } from '../../src/result-export'
+import { t } from '../../src/i18n'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import { assertSelfContainedTransaction, containsSqliteTrigger } from './sql-script'
 
@@ -41,7 +42,7 @@ export function queryDatabase(db: DatabaseSync, sql: string, params: SqliteParam
 
   // SQLite treats unbound ? placeholders as NULL — running a parameterized
   // script statement-by-statement with no binds would silently write NULLs.
-  if (params.length > 0) throw new Error('Parameters can only be bound to a single-statement SQLite query.')
+  if (params.length > 0) throw new Error(t('sqlite.singleStatementParams'))
 
   // CREATE TRIGGER bodies carry their own semicolons that a top-level split
   // would break, so let exec run the whole script authoritatively. exec returns
@@ -102,10 +103,10 @@ export function exportQuery(
   format: ExportFormat,
 ): { rowCount: number } {
   const statements = splitStatements(sql, maskSqlite(sql))
-  if (statements.length !== 1) throw new Error('Export supports a single statement.')
+  if (statements.length !== 1) throw new Error(t('export.singleStatement'))
   const statement = db.prepare(statements[0]!)
   const columns = statement.columns().map((column) => column.name)
-  if (!columns.length) throw new Error('Only a result-returning query can be exported.')
+  if (!columns.length) throw new Error(t('export.resultOnly'))
   const serializer = createExportSerializer(columns, format)
   statement.setReturnArrays(true)
   const fd = openSync(filePath, 'w')

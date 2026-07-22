@@ -3,6 +3,18 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import type { InspectSection } from '../electron'
+import { t, type MessageKey } from '../i18n'
+
+const SECTION_KEYS: Record<string, MessageKey> = {
+  Extensions: 'server.extensions',
+  Roles: 'server.roles',
+  Tablespaces: 'server.tablespaces',
+  'Settings (non-default)': 'server.settingsNonDefault',
+  'Storage Engines': 'server.storageEngines',
+  Users: 'server.users',
+  'Server Properties': 'server.properties',
+  Logins: 'server.logins',
+}
 
 // The Server sidebar view: cluster/database-scoped reference — extensions,
 // roles, tablespaces, non-default settings — as collapsible groups with
@@ -49,11 +61,11 @@ export class ServerView extends LitElement {
   render() {
     const state = this._state
     if (state.phase === 'idle') {
-      return html`<p class="muted hint">Connect a database to see its server (${mod('K')}).</p>`
+      return html`<p class="muted hint">${t('server.connectHint', { shortcut: mod('K') })}</p>`
     }
     if (state.phase === 'loading') {
       return html`<p class="muted hint">
-        <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> Loading server info…
+        <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> ${t('server.loading')}
       </p>`
     }
     if (state.phase === 'error') return html`<p class="muted hint error">${state.error}</p>`
@@ -67,10 +79,11 @@ export class ServerView extends LitElement {
 
   private _renderSection(section: InspectSection) {
     const expanded = this._expanded.has(section.title)
+    const sectionKey = SECTION_KEYS[section.title]
     return html`
       <button class="group" @click=${() => this._toggle(section.title)}>
         <i class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}" aria-hidden="true"></i>
-        <span>${section.title}</span>
+        <span>${sectionKey ? t(sectionKey) : section.title}</span>
         <span class="count">${section.rows.length}</span>
       </button>
       ${expanded

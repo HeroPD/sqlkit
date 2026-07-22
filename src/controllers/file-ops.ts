@@ -3,6 +3,7 @@ import type { ContextsController } from './contexts'
 import type { FilesController } from './files'
 import type { QueriesController } from './queries'
 import type { DialogsController } from './dialogs'
+import { t } from '../i18n'
 
 type Deps = {
   ctx: ContextsController
@@ -43,7 +44,7 @@ export class FileOpsController {
     }
     const result = await window.sqlkit.readFile(file.path)
     if (!result.success) {
-      this.deps.dialogs.notice('Could not open file', result.error ?? 'Unknown error')
+      this.deps.dialogs.notice(t('file.openFailed'), result.error ?? t('common.unknownError'))
       return
     }
     this.deps.ctx.addTabToContext(context.profileId, context.childDb, {
@@ -64,7 +65,7 @@ export class FileOpsController {
       return
     }
     void window.sqlkit.openExternal(file.path).then((result) => {
-      if (!result.success) this.deps.dialogs.notice('Could not open file', result.error ?? 'Unknown error')
+      if (!result.success) this.deps.dialogs.notice(t('file.openFailed'), result.error ?? t('common.unknownError'))
     })
   }
 
@@ -94,7 +95,7 @@ export class FileOpsController {
   // true when the save went through and the caller should apply it.
   private reportSaveError(result: FileSaveResult): boolean {
     if (result.success) return true
-    if (!result.canceled) this.deps.dialogs.notice('Could not save file', result.error ?? 'Unknown error')
+    if (!result.canceled) this.deps.dialogs.notice(t('file.saveFailed'), result.error ?? t('common.unknownError'))
     return false
   }
 
@@ -104,7 +105,7 @@ export class FileOpsController {
     const context = this.currentContext()
     const result = await window.sqlkit.createFile(folder, parent ? `${parent}/${name}` : name)
     if (!result.success) {
-      this.deps.dialogs.notice('Could not create file', result.error ?? 'Unknown error')
+      this.deps.dialogs.notice(t('file.createFailed'), result.error ?? t('common.unknownError'))
       return
     }
     await this.deps.files.reload()
@@ -120,7 +121,7 @@ export class FileOpsController {
   async rename(file: FileInfo, newName: string) {
     const result = await window.sqlkit.renameFile(file.path, newName)
     if (!result.success) {
-      this.deps.dialogs.notice('Could not rename file', result.error ?? 'Unknown error')
+      this.deps.dialogs.notice(t('file.renameFailed'), result.error ?? t('common.unknownError'))
       return
     }
     const oldId = fileTabId(file.path)
@@ -132,9 +133,9 @@ export class FileOpsController {
 
   requestDelete(path: string, name: string) {
     this.deps.dialogs.confirm = {
-      message: `Delete "${name}"?`,
-      detail: 'It will be moved to the Trash.',
-      confirmLabel: 'Move to Trash',
+      message: t('file.deletePrompt', { name }),
+      detail: t('file.deleteTrashDetail'),
+      confirmLabel: t('file.moveToTrash'),
       action: () => void this.performDelete(path),
     }
   }
@@ -142,7 +143,7 @@ export class FileOpsController {
   private async performDelete(targetPath: string) {
     const result = await window.sqlkit.deleteFile(targetPath)
     if (!result.success) {
-      this.deps.dialogs.notice('Could not delete file', result.error ?? 'Unknown error')
+      this.deps.dialogs.notice(t('file.deleteFailed'), result.error ?? t('common.unknownError'))
       return
     }
     this.deps.ctx.closeFilesUnder(targetPath)

@@ -3,6 +3,7 @@ import type { ConnectionProfile, FileInfo } from '../electron'
 import type { ConnectionsController } from './connections'
 import type { PaletteEntry, PaletteMode } from '../components/command-palette'
 import { tableKey } from '../components/explorer-view'
+import { t } from '../i18n'
 
 type Deps = {
   live: ConnectionsController
@@ -103,14 +104,14 @@ export class CommandPaletteController implements ReactiveController {
             {
               id: `hdr:${connection.id}`,
               label: connection.name,
-              detail: `${connection.engine} · Connected`,
+              detail: `${connection.engine} · ${t('palette.connected')}`,
               icon: 'codicon-database',
               header: true,
             },
             ...children.map((child) => ({
               id: `child:${connection.id}:${child.name}`,
               label: child.name,
-              detail: this.deps.activeDbId() === connection.id && this.deps.activeChildDb() === child.name ? 'In use' : '',
+              detail: this.deps.activeDbId() === connection.id && this.deps.activeChildDb() === child.name ? t('palette.inUse') : '',
               icon: 'codicon-symbol-namespace',
               indent: true,
             })),
@@ -119,18 +120,18 @@ export class CommandPaletteController implements ReactiveController {
 
         const label =
           phase === 'connected'
-            ? 'Connected'
+            ? t('palette.connected')
             : phase === 'connecting'
-              ? 'Connecting…'
+              ? t('palette.connecting')
               : phase === 'error'
-                ? `Error — ${this.deps.live.statuses[connection.id]?.error ?? ''}`
-                : 'Disconnected'
+                ? t('palette.error', { error: this.deps.live.statuses[connection.id]?.error ?? '' })
+                : t('palette.disconnected')
         const parts = [connection.engine, label]
-        if (this.deps.activeDbId() === connection.id) parts.push('In use')
+        if (this.deps.activeDbId() === connection.id) parts.push(t('palette.inUse'))
         // The children of a disconnected all-databases connection aren't
         // known yet; picking it connects and discovers them.
         if (connection.databaseMode === 'all' && phase !== 'connected' && phase !== 'connecting') {
-          parts.push('connect to list databases')
+          parts.push(t('palette.connectToList'))
         }
         return [
           {

@@ -124,7 +124,7 @@ export function workspaceConfig(value: unknown): WorkspaceConfig {
   }
 }
 
-export function queryPayload(sql: unknown, params: unknown, sort: unknown, executionId: unknown) {
+export function queryPayload(sql: unknown, params: unknown, sort: unknown, filter: unknown, executionId: unknown) {
   const parsedSql = stringValue(sql, 'SQL')
   if (params !== undefined && (!Array.isArray(params) || params.length > MAX_PARAMS)) {
     throw new IpcValidationError(`Query params must contain at most ${MAX_PARAMS.toLocaleString()} values`)
@@ -140,6 +140,7 @@ export function queryPayload(sql: unknown, params: unknown, sort: unknown, execu
     sql: parsedSql,
     params: params as unknown[] | undefined,
     sort: parsedSort,
+    filter: filter === null || filter === undefined ? filter : stringValue(filter, 'Filter condition', 10_000),
     executionId: optionalString(executionId, 'Execution id', MAX_ID),
   }
 }

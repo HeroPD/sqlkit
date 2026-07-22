@@ -3,13 +3,14 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
-import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
+import { TABLE_KIND_ICONS, tableKindLabel } from '../table-kinds'
 import type { ColumnRef, DbObject, DbObjectKind, DbObjects, Engine, FileInfo, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './file-tree'
+import { t } from '../i18n'
 
 export const tableKey = (profileId: string, table: TableRef) => `${profileId}:${table.schema ?? ''}:${table.name}`
 
@@ -161,7 +162,7 @@ export class ExplorerView extends LitElement {
       <div class="x-section ${filesCollapsed ? 'collapsed' : ''}" style=${filesStyle}>
         <button class="section-head-row" @click=${() => this._patchLayout({ filesCollapsed: !filesCollapsed })}>
           <i class="codicon codicon-chevron-right chevron ${filesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
-          <span>Files</span>
+          <span>${t('explorer.files')}</span>
           ${this.contextName ? html`<span class="section-detail">${this.contextName}</span>` : ''}
         </button>
         ${filesCollapsed
@@ -170,7 +171,7 @@ export class ExplorerView extends LitElement {
               <div class="section-body">
                 ${this.contextName
                   ? html`<file-tree .files=${this.files} .activePath=${this.activePath}></file-tree>`
-                  : html`<p class="muted hint">Add a database to get its files folder.</p>`}
+                  : html`<p class="muted hint">${t('explorer.addDatabaseForFiles')}</p>`}
               </div>
             `}
       </div>
@@ -180,8 +181,8 @@ export class ExplorerView extends LitElement {
             <div
               class="x-resize ${resizing ? 'active' : ''}"
               role="separator"
-              aria-label="Resize Files and Tables"
-              title="Resize Files and Tables"
+              aria-label=${t('explorer.resize')}
+              title=${t('explorer.resize')}
               @pointerdown=${this._onResizeStart}
               @pointermove=${this._onResizeMove}
               @pointerup=${this._onResizeEnd}
@@ -197,14 +198,14 @@ export class ExplorerView extends LitElement {
         <div class="section-head">
           <button class="section-head-row" @click=${() => this._patchLayout({ tablesCollapsed: !tablesCollapsed })}>
             <i class="codicon codicon-chevron-right chevron ${tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
-            <span>Tables</span>
+            <span>${t('explorer.tables')}</span>
           </button>
           ${this.tables !== null
             ? html`
                 <button
                   class="head-action"
-                  title="Refresh tables and columns"
-                  aria-label="Refresh tables and columns"
+                  title=${t('explorer.refreshMetadata')}
+                  aria-label=${t('explorer.refreshMetadata')}
                   @click=${this._refresh}
                 >
                   <i class="codicon codicon-refresh" aria-hidden="true"></i>
@@ -229,8 +230,8 @@ export class ExplorerView extends LitElement {
           .x=${menu.x}
           .y=${menu.y}
           .items=${[
-            { id: 'create', label: 'Create Table…' },
-            ...(this.tables !== null ? [{ id: 'refresh', label: 'Refresh Tables' }] : []),
+            { id: 'create', label: t('explorer.createTable') },
+            ...(this.tables !== null ? [{ id: 'refresh', label: t('explorer.refreshTables') }] : []),
           ]}
           @menu-pick=${(e: CustomEvent<MenuPickDetail>) => {
             if (e.detail.id === 'create') this._createTable(menu.schema)
@@ -241,18 +242,18 @@ export class ExplorerView extends LitElement {
       `
     }
     const kind = menu.table.kind
-    const dropLabel = TABLE_KIND_LABELS[kind].replace(/\b\w/g, (c) => c.toUpperCase())
+    const dropLabel = tableKindLabel(kind).replace(/\b\w/g, (c) => c.toUpperCase())
     const items: MenuItem[] = [
-      { id: 'create', label: 'Create Table…' },
-      { id: 'browse', label: 'Browse Data' },
-      { id: 'inspect', label: 'Inspect Table' },
-      ...(kind === 'table' ? [{ id: 'import', label: 'Import CSV…' }] : []),
-      ...(kind === 'matview' ? [{ id: 'refresh-matview', label: 'Refresh Materialized View' }] : []),
-      { id: 'copy-name', label: 'Copy Name' },
-      { id: 'copy-select', label: 'Copy SELECT' },
-      { id: 'refresh', label: 'Refresh Tables' },
-      ...(kind === 'table' ? [{ id: 'truncate', label: 'Truncate Table…', danger: true }] : []),
-      { id: 'drop', label: `Drop ${dropLabel}…`, danger: true },
+      { id: 'create', label: t('explorer.createTable') },
+      { id: 'browse', label: t('explorer.browseData'), separatorBefore: true },
+      { id: 'inspect', label: t('explorer.inspectTable') },
+      ...(kind === 'table' ? [{ id: 'import', label: t('explorer.importCsv') }] : []),
+      ...(kind === 'matview' ? [{ id: 'refresh-matview', label: t('explorer.refreshMaterializedView') }] : []),
+      { id: 'copy-name', label: t('explorer.copyName'), separatorBefore: true },
+      { id: 'copy-select', label: t('explorer.copySelect') },
+      { id: 'refresh', label: t('explorer.refreshTables'), separatorBefore: true },
+      ...(kind === 'table' ? [{ id: 'truncate', label: t('explorer.truncateTable'), danger: true, separatorBefore: true }] : []),
+      { id: 'drop', label: t('explorer.dropObject', { kind: dropLabel }), danger: true, separatorBefore: kind !== 'table' },
     ]
     return html`
       <context-menu
@@ -314,12 +315,12 @@ export class ExplorerView extends LitElement {
 
   private _renderTables() {
     if (this.awaitingDatabaseSelection) {
-      return html`<p class="muted hint">Select a database to see its tables (${mod('K')}).</p>`
+      return html`<p class="muted hint">${t('explorer.selectDatabase', { shortcut: mod('K') })}</p>`
     }
     if (this.tables === null || !this.profileId) {
-      return html`<p class="muted hint">Connect a database to see tables (${mod('K')}).</p>`
+      return html`<p class="muted hint">${t('explorer.connectDatabase', { shortcut: mod('K') })}</p>`
     }
-    if (!this.tables.length) return html`<p class="muted hint">No tables.</p>`
+    if (!this.tables.length) return html`<p class="muted hint">${t('explorer.noTables')}</p>`
     const profileId = this.profileId
 
     // Group by schema, preserving the driver's order. With one schema (or
@@ -387,7 +388,7 @@ export class ExplorerView extends LitElement {
     return html`
       <button class="object-group ${nested ? 'nested' : ''}" @click=${() => this._toggleObjectGroup(key)}>
         <i class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}" aria-hidden="true"></i>
-        <span>${label}</span>
+        <span>${t(label === 'Functions' ? 'explorer.functions' : 'explorer.types')}</span>
         <span class="schema-count">${items.length}</span>
       </button>
       ${expanded
@@ -398,7 +399,7 @@ export class ExplorerView extends LitElement {
                 class="object-row ${nested ? 'nested' : ''}"
                 title="${label === 'Functions'
                   ? `${item.name}(${item.detail})`
-                  : `${item.name} · ${item.detail}`} — double-click to inspect"
+                  : `${item.name} · ${item.detail}`} — ${t('explorer.doubleClickInspect')}"
                 @dblclick=${() => this._inspectObject(item, objectKind)}
                 @contextmenu=${(event: MouseEvent) => {
                   event.preventDefault()
@@ -419,8 +420,8 @@ export class ExplorerView extends LitElement {
     const menu = this._menu?.kind === 'object' ? this._menu : null
     if (!menu) return ''
     const items: MenuItem[] = [
-      { id: 'inspect', label: 'Inspect' },
-      { id: 'copy-name', label: 'Copy Name' },
+      { id: 'inspect', label: t('explorer.inspect') },
+      { id: 'copy-name', label: t('explorer.copyName') },
     ]
     return html`
       <context-menu
@@ -462,7 +463,7 @@ export class ExplorerView extends LitElement {
     return html`
       <div
         class="etable-row ${nested ? 'nested' : ''} ${this.selectedTable === key ? 'selected' : ''}"
-        title="${tableLabel(table)}${table.kind !== 'table' ? ` · ${TABLE_KIND_LABELS[table.kind]}` : ''} — double-click to browse"
+        title="${tableLabel(table)}${table.kind !== 'table' ? ` · ${tableKindLabel(table.kind)}` : ''} — ${t('explorer.doubleClickBrowse')}"
         @click=${() => this._select(key)}
         @dblclick=${() => this._browse(table)}
         @contextmenu=${(event: MouseEvent) => this._onTableMenu(event, table)}
@@ -482,13 +483,13 @@ export class ExplorerView extends LitElement {
 
   private _renderColumns(table: TableRef, nested: boolean) {
     const columns = this._tableColumns(table)
-    if (!columns) return html`<p class="muted hint col-hint">Loading columns…</p>`
-    if (!columns.length) return html`<p class="muted hint col-hint">No columns.</p>`
+    if (!columns) return html`<p class="muted hint col-hint">${t('explorer.loadingColumns')}</p>`
+    if (!columns.length) return html`<p class="muted hint col-hint">${t('explorer.noColumns')}</p>`
     return columns.map(
       (column) => html`
         <div
           class="ecol-row ${nested ? 'nested' : ''}"
-          title="${column.name} · ${column.dataType}${column.nullable ? '' : ' · not null'}${column.foreignKey ? ' · foreign key' : ''}"
+          title="${column.name} · ${column.dataType}${column.nullable ? '' : ` · ${t('explorer.notNull')}`}${column.foreignKey ? ` · ${t('explorer.foreignKey')}` : ''}"
         >
           <i
             class="codicon ${column.primaryKey || column.foreignKey ? 'codicon-key' : 'codicon-symbol-field'} ${column.primaryKey ? 'pk' : column.foreignKey ? 'fk' : ''}"

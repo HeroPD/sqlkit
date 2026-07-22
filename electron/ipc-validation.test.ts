@@ -27,7 +27,8 @@ describe('IPC validation', () => {
   it('rejects invalid engines, malformed configs, and oversized collections', () => {
     expect(() => connectionProfile({ ...profile(), engine: 'oracle' })).toThrow(/engine/i)
     expect(() => workspaceConfig({ version: 1, connections: {} })).toThrow(/connections/i)
-    expect(() => queryPayload('select 1', Array.from({ length: 10_001 }), null, 'q1')).toThrow(/params/i)
+    expect(() => queryPayload('select 1', Array.from({ length: 10_001 }), null, null, 'q1')).toThrow(/params/i)
+    expect(() => queryPayload('select 1', [], null, 'x'.repeat(10_001), 'q1')).toThrow(/filter/i)
     expect(() => batchStatements(Array.from({ length: 1_001 }, () => ({ sql: 'select 1', params: [] })))).toThrow(/Batch/i)
   })
 

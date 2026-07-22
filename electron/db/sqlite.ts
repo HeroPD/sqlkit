@@ -6,6 +6,7 @@ import type { Driver } from './driver'
 import type { SqliteParam } from './sqlite-engine'
 import type { SqliteRequest, SqliteRequestBody, SqliteResponse, SqliteResultByRequest } from './sqlite-protocol'
 import { prepareSqlRun } from './sql-script'
+import { t } from '../../src/i18n'
 
 // node:sqlite is synchronous and has no statement interrupt, so a long query
 // blocks whatever runs it. We run it in a separate Electron utilityProcess to
@@ -118,7 +119,7 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
     executionId?: string,
     priority = false,
   ): Promise<SqliteResultByRequest[B['type']]> => {
-    if (!channel) return Promise.reject(new Error('Not connected'))
+    if (!channel) return Promise.reject(new Error(t('connection.notConnected')))
     const id = nextId++
     return new Promise<SqliteResultByRequest[B['type']]>((resolve, reject) => {
       pending.set(id, {
@@ -151,7 +152,7 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
   return {
     async connect() {
       file = profile.file.trim()
-      if (!file) throw new Error('Choose a database file first.')
+      if (!file) throw new Error(t('sqlite.chooseFileFirst'))
       // A reconnect replaces the worker (and its database handle) outright.
       if (channel) teardown('Reconnecting')
       return open(file)
@@ -162,8 +163,8 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       file = ''
     },
 
-    async query(sql, params = [], _childDb = null, sort = null, executionId) {
-      const plan = prepareSqlRun({ engine: 'sqlite', sql, params, sort })
+    async query(sql, params = [], _childDb = null, sort = null, filter = null, executionId) {
+      const plan = prepareSqlRun({ engine: 'sqlite', sql, params, sort, filter })
       return request({ type: 'query', sql: plan.batches[0]!, params: plan.params as SqliteParam[] }, undefined, executionId)
     },
 
@@ -178,8 +179,8 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       return request({ type: 'runDdl', statements })
     },
 
-    async exportQuery({ sql, params, sort, filePath, format, executionId }) {
-      const plan = prepareSqlRun({ engine: 'sqlite', sql, params, sort })
+    async exportQuery({ sql, params, sort, filter, filePath, format, executionId }) {
+      const plan = prepareSqlRun({ engine: 'sqlite', sql, params, sort, filter })
       // Carries the executionId so cancel() can kill a runaway export like a query.
       return request(
         { type: 'exportQuery', sql: plan.batches[0]!, params: plan.params as SqliteParam[], filePath, format },
@@ -213,7 +214,7 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       if (!running) return { running: 0, cancelled: 0 }
 
       const cancellingActive = activeId !== null && targets.some(([id]) => id === activeId)
-      for (const [id] of targets) rejectEntry(id, 'Query cancelled.')
+      for (const [id] of targets) rejectEntry(id, t('query.cancelled'))
 
       // A queued query can be removed without disturbing the running request.
       // Cancelling the active synchronous query requires replacing the worker

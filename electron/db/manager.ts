@@ -21,6 +21,7 @@ import type {
 import { unlink } from 'node:fs/promises'
 import type { ExportFormat } from '../../src/result-export'
 import { isReadOnlyQuery } from '../../src/sql-order'
+import { t } from '../../src/i18n'
 import { createDriver, type Driver } from './driver'
 import { ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
@@ -113,7 +114,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     await disconnectActive(profile.id)
     // A newer connect may have completed while this call awaited the previous
     // session's teardown. Never let the older call register over it.
-    if (connectAttempts.get(profile.id) !== attempt) return { success: false, error: 'Connection superseded' }
+    if (connectAttempts.get(profile.id) !== attempt) return { success: false, error: t('connection.superseded') }
 
     const resources: ConnectionResources = { driver: null, tunnel: null }
     const attempts = new WeakMap<Active, symbol>()
@@ -164,14 +165,14 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       // teardown can close it, then bail without overwriting the newer entry.
       if (!isCurrent()) {
         await teardown()
-        return { success: false, error: 'Connection superseded' }
+        return { success: false, error: t('connection.superseded') }
       }
       resources.driver = createDriver(profile, endpoint, { onError: onDriverError })
       if (isCurrent()) register({ phase: 'connecting', profileId: profile.id, ...resources })
       const serverVersion = await resources.driver.connect()
       if (!isCurrent()) {
         await teardown()
-        return { success: false, error: 'Connection superseded' }
+        return { success: false, error: t('connection.superseded') }
       }
       register({
         profileId: profile.id,
@@ -206,12 +207,13 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     sql: string,
     params?: unknown[],
     sort?: QuerySort | null,
+    filter?: string | null,
     executionId?: string,
   ): Promise<QueryResponse> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
     try {
-      const raw = await driver.query(sql, params, childDb, sort, executionId)
+      const raw = await driver.query(sql, params, childDb, sort, filter, executionId)
       // Disconnected mid-query: don't register a buffer no one can page or free
       // (disconnect already swept this profile's sessions). Return a single
       // page, sessionless, so it can't leak.
@@ -224,7 +226,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       // Typed here — same process as the drivers' throw — so the renderer never
       // has to pattern-match the human-readable message.
       const message = (error as Error).message
-      return { success: false, error: message, ...(message === 'Query cancelled.' ? { cancelled: true } : {}) }
+      return { success: false, error: message, ...(message === t('query.cancelled') ? { cancelled: true } : {}) }
     }
   }
 
@@ -233,8 +235,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   // failedIndex, since nothing ran.
   async function runBatch(profileId: string, childDb: string | null, statements: BatchStatement[]): Promise<BatchResult> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
-    if (!driver.runBatch) return { success: false, error: 'Atomic writes are not supported on this connection' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.runBatch) return { success: false, error: t('connection.atomicWritesUnsupported') }
     try {
       return await driver.runBatch(statements, childDb)
     } catch (error) {
@@ -245,8 +247,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   // Atomic schema batch: all statements commit or none do, on one connection.
   async function runDdl(profileId: string, childDb: string | null, statements: string[]): Promise<DdlResult> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
-    if (!driver.runDdl) return { success: false, error: 'Schema changes are not supported on this connection' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.runDdl) return { success: false, error: t('connection.schemaChangesUnsupported') }
     try {
       return await driver.runDdl(statements, childDb)
     } catch (error) {
@@ -263,21 +265,22 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     sql: string,
     params: unknown[] | undefined,
     sort: QuerySort | null,
+    filter: string | null,
     filePath: string,
     format: ExportFormat,
     executionId?: string,
   ): Promise<{ success: boolean; rowCount?: number; error?: string; cancelled?: boolean }> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
-    if (!driver.exportQuery) return { success: false, error: 'Export is not supported on this connection' }
-    if (!isReadOnlyQuery(sql)) return { success: false, error: 'Only read-only queries can be exported to a file.' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.exportQuery) return { success: false, error: t('connection.exportUnsupported') }
+    if (!isReadOnlyQuery(sql)) return { success: false, error: t('export.readOnlyOnly') }
     try {
-      const { rowCount } = await driver.exportQuery({ sql, params: params ?? [], childDb, sort, filePath, format, executionId })
+      const { rowCount } = await driver.exportQuery({ sql, params: params ?? [], childDb, sort, filter, filePath, format, executionId })
       return { success: true, rowCount }
     } catch (error) {
       await unlink(filePath).catch(() => {})
       const message = (error as Error).message
-      return { success: false, error: message, ...(message === 'Query cancelled.' ? { cancelled: true } : {}) }
+      return { success: false, error: message, ...(message === t('query.cancelled') ? { cancelled: true } : {}) }
     }
   }
 
@@ -285,21 +288,21 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   // connection dropped) so the renderer can fall back instead of seeing 0 rows.
   function fetchRows(sessionId: string, offset: number, limit: number): FetchRowsResult {
     const rows = sessions.fetch(sessionId, offset, limit)
-    return rows === null ? { success: false, error: 'Result buffer expired' } : { success: true, rows }
+    return rows === null ? { success: false, error: t('results.bufferExpired') } : { success: true, rows }
   }
 
   const closeSession = (sessionId: string) => sessions.close(sessionId)
 
   async function cancelQuery(profileId: string, executionId?: string): Promise<{ success: boolean; error?: string }> {
     const driver = connectedDriver(profileId)
-    if (!driver?.cancel) return { success: false, error: 'Cancel is not supported on this connection' }
+    if (!driver?.cancel) return { success: false, error: t('connection.cancelUnsupported') }
     try {
       const { running, cancelled } = await driver.cancel(executionId)
       if (cancelled > 0) return { success: true }
       if (running > 0) {
-        return { success: false, error: 'The query is starting up and could not be cancelled yet — try again in a moment.' }
+        return { success: false, error: t('connection.cancelStarting') }
       }
-      return { success: false, error: 'No query is currently running.' }
+      return { success: false, error: t('connection.noRunningQuery') }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
@@ -310,10 +313,10 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   function setActiveChild(profileId: string, database: string): { success: boolean; error?: string } {
     const active = connections.get(profileId)
     if (!active || active.phase !== 'connected') {
-      return { success: false, error: 'Not connected' }
+      return { success: false, error: t('connection.notConnected') }
     }
     if (!active.driver.useChild?.(database)) {
-      return { success: false, error: `Database "${database}" is not available on this connection` }
+      return { success: false, error: t('connection.databaseUnavailable', { database }) }
     }
     broadcast(statuses())
     return { success: true }
@@ -323,10 +326,10 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   // before a drop) and rebroadcast so every window sees the new child list.
   async function mutateDatabase(profileId: string, run: (driver: Driver) => Promise<void> | undefined) {
     const active = connections.get(profileId)
-    if (active?.phase !== 'connected') return { success: false, error: 'Not connected' }
+    if (active?.phase !== 'connected') return { success: false, error: t('connection.notConnected') }
     try {
       const pending = run(active.driver)
-      if (!pending) return { success: false, error: 'Not supported for this engine' }
+      if (!pending) return { success: false, error: t('connection.engineUnsupported') }
       await pending
       broadcast(statuses())
       return { success: true }
@@ -343,7 +346,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   async function listTables(profileId: string, childDb: string | null = null): Promise<TablesResult> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
     try {
       return { success: true, tables: await driver.listTables(childDb) }
     } catch (error) {
@@ -353,7 +356,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   async function listObjects(profileId: string, childDb: string | null = null): Promise<ObjectsResult> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
     try {
       // Engines without schema objects (sqlite) just have empty lists.
       return { success: true, objects: (await driver.listObjects?.(childDb)) ?? { functions: [], types: [] } }
@@ -369,8 +372,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     childDb: string | null = null,
   ): Promise<InspectResult> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
-    if (!driver.inspectObject) return { success: false, error: 'Not supported for this engine' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.inspectObject) return { success: false, error: t('connection.engineUnsupported') }
     try {
       return { success: true, inspection: await driver.inspectObject(object, objectKind, childDb) }
     } catch (error) {
@@ -380,8 +383,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   async function inspectServer(profileId: string, childDb: string | null = null): Promise<ServerInfoResult> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
-    if (!driver.inspectServer) return { success: false, error: 'No server info for this engine' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.inspectServer) return { success: false, error: t('connection.noServerInfo') }
     try {
       return { success: true, sections: await driver.inspectServer(childDb) }
     } catch (error) {
@@ -391,7 +394,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   async function inspectTable(profileId: string, table: TableRef, childDb: string | null = null): Promise<InspectResult> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
     try {
       return { success: true, inspection: await driver.inspectTable(table, childDb) }
     } catch (error) {
@@ -401,7 +404,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   async function listColumns(profileId: string, childDb: string | null = null): Promise<ColumnsResult> {
     const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: 'Not connected' }
+    if (!driver) return { success: false, error: t('connection.notConnected') }
     try {
       return { success: true, columns: await driver.listColumns(childDb) }
     } catch (error) {

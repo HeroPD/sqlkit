@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import type { FileInfo, FileReadResult, FileSaveResult, FilesResult } from '../src/electron'
+import { t } from '../src/i18n'
 
 const isSqlFile = (name: string) => path.extname(name).toLowerCase() === '.sql'
 const MAX_SQL_FILE_BYTES = 10 * 1024 * 1024
@@ -117,15 +118,15 @@ async function collectFilesAsync(root: string, dir: string, files: FileInfo[], d
 // connection (and each child database) keeps its files in its own subfolder
 // so contexts don't mix.
 export function listWorkspaceFiles(workspacePath: string | null, folder: string): FilesResult {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   const root = resolveContextRoot(workspacePath, folder)
-  if (!root) return { success: false, error: 'Invalid database folder' }
+  if (!root) return { success: false, error: t('file.invalidDatabaseFolder') }
 
   // Context folders are created on first save; a missing one (or a child
   // folder that doesn't exist yet) just lists as empty.
   if (!fs.existsSync(root)) return { success: true, files: [] }
-  if (!isInsideWorkspace(workspacePath, root)) return { success: false, error: 'Database folder is outside the workspace' }
-  if (isInternalWorkspacePath(workspacePath, root)) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (!isInsideWorkspace(workspacePath, root)) return { success: false, error: t('file.databaseFolderOutsideWorkspace') }
+  if (isInternalWorkspacePath(workspacePath, root)) return { success: false, error: t('file.internalFolder') }
 
   try {
     const files = collectFiles(root, root, [])
@@ -137,16 +138,16 @@ export function listWorkspaceFiles(workspacePath: string | null, folder: string)
 }
 
 export async function listWorkspaceFilesAsync(workspacePath: string | null, folder: string): Promise<FilesResult> {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   const root = resolveContextRoot(workspacePath, folder)
-  if (!root) return { success: false, error: 'Invalid database folder' }
+  if (!root) return { success: false, error: t('file.invalidDatabaseFolder') }
   try {
     await fsp.access(root)
   } catch {
     return { success: true, files: [] }
   }
-  if (!isInsideWorkspace(workspacePath, root)) return { success: false, error: 'Database folder is outside the workspace' }
-  if (isInternalWorkspacePath(workspacePath, root)) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (!isInsideWorkspace(workspacePath, root)) return { success: false, error: t('file.databaseFolderOutsideWorkspace') }
+  if (isInternalWorkspacePath(workspacePath, root)) return { success: false, error: t('file.internalFolder') }
   try {
     const files = await collectFilesAsync(root, root, [])
     files.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
@@ -160,16 +161,16 @@ export async function listWorkspaceFilesAsync(workspacePath: string | null, fold
 // renderer only ever hands back paths it got from listSqlFiles, but IPC input
 // is untrusted by construction.
 export function readWorkspaceFile(workspacePath: string | null, filePath: string): FileReadResult {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
 
   const resolved = path.resolve(filePath)
   if (!isInsideWorkspace(workspacePath, resolved)) {
-    return { success: false, error: 'Path is outside the workspace' }
+    return { success: false, error: t('file.pathOutsideWorkspace') }
   }
-  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be opened' }
+  if (!isSqlFile(resolved)) return { success: false, error: t('file.openSqlOnly') }
 
   try {
-    if (fs.statSync(resolved).size > MAX_SQL_FILE_BYTES) return { success: false, error: 'SQL files larger than 10 MB cannot be opened.' }
+    if (fs.statSync(resolved).size > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToOpen') }
     return { success: true, content: fs.readFileSync(resolved, 'utf8') }
   } catch (error) {
     return { success: false, error: (error as Error).message }
@@ -177,12 +178,12 @@ export function readWorkspaceFile(workspacePath: string | null, filePath: string
 }
 
 export async function readWorkspaceFileAsync(workspacePath: string | null, filePath: string): Promise<FileReadResult> {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   const resolved = path.resolve(filePath)
-  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: 'Path is outside the workspace' }
-  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be opened' }
+  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: t('file.pathOutsideWorkspace') }
+  if (!isSqlFile(resolved)) return { success: false, error: t('file.openSqlOnly') }
   try {
-    if ((await fsp.stat(resolved)).size > MAX_SQL_FILE_BYTES) return { success: false, error: 'SQL files larger than 10 MB cannot be opened.' }
+    if ((await fsp.stat(resolved)).size > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToOpen') }
     return { success: true, content: await fsp.readFile(resolved, 'utf8') }
   } catch (error) {
     return { success: false, error: (error as Error).message }
@@ -193,15 +194,15 @@ export async function readWorkspaceFileAsync(workspacePath: string | null, fileP
 // readWorkspaceFile. Used by both save (existing path) and save-as (path
 // picked in a native dialog — still validated, dialogs can navigate anywhere).
 export function saveWorkspaceFile(workspacePath: string | null, filePath: string, content: string): FileSaveResult {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
 
   const resolved = path.resolve(filePath)
   if (!isInsideWorkspace(workspacePath, resolved)) {
-    return { success: false, error: 'Files must stay inside the workspace' }
+    return { success: false, error: t('file.filesInsideWorkspace') }
   }
-  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
-  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be saved' }
-  if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: 'SQL files larger than 10 MB cannot be saved.' }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: t('file.internalFolder') }
+  if (!isSqlFile(resolved)) return { success: false, error: t('file.saveSqlOnly') }
+  if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToSave') }
 
   try {
     fs.mkdirSync(path.dirname(resolved), { recursive: true })
@@ -213,12 +214,12 @@ export function saveWorkspaceFile(workspacePath: string | null, filePath: string
 }
 
 export async function saveWorkspaceFileAsync(workspacePath: string | null, filePath: string, content: string): Promise<FileSaveResult> {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   const resolved = path.resolve(filePath)
-  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: 'Files must stay inside the workspace' }
-  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
-  if (!isSqlFile(resolved)) return { success: false, error: 'Only .sql files can be saved' }
-  if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: 'SQL files larger than 10 MB cannot be saved.' }
+  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: t('file.filesInsideWorkspace') }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: t('file.internalFolder') }
+  if (!isSqlFile(resolved)) return { success: false, error: t('file.saveSqlOnly') }
+  if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToSave') }
   try {
     await fsp.mkdir(path.dirname(resolved), { recursive: true })
     await fsp.writeFile(resolved, content, 'utf8')
@@ -231,18 +232,18 @@ export async function saveWorkspaceFileAsync(workspacePath: string | null, fileP
 // Creates an empty .sql file inside a database context's folder. Refuses to
 // overwrite — creation comes from the Explorer's inline "new file" input.
 export function createWorkspaceFile(workspacePath: string | null, folder: string, relativePath: string): FileSaveResult {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   const root = resolveContextRoot(workspacePath, folder)
-  if (!root) return { success: false, error: 'Invalid database folder' }
+  if (!root) return { success: false, error: t('file.invalidDatabaseFolder') }
 
   const resolved = path.resolve(root, relativePath)
   // Lexical check keeps relativePath inside this context folder; the realpath
   // check below additionally blocks escapes through a symlinked folder.
-  if (!resolved.startsWith(root + path.sep)) return { success: false, error: 'Files must stay inside the database folder' }
-  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (!resolved.startsWith(root + path.sep)) return { success: false, error: t('file.mustStayInDatabaseFolder') }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: t('file.internalFolder') }
 
   const target = isSqlFile(resolved) ? resolved : `${resolved}.sql`
-  if (!isInsideWorkspace(workspacePath, target)) return { success: false, error: 'Files must stay inside the database folder' }
+  if (!isInsideWorkspace(workspacePath, target)) return { success: false, error: t('file.mustStayInDatabaseFolder') }
   if (fs.existsSync(target)) return { success: false, error: `${path.basename(target)} already exists` }
 
   try {
@@ -258,15 +259,15 @@ export function createWorkspaceFile(workspacePath: string | null, folder: string
 // never a path. A new name without an extension keeps the old one's, so
 // renaming "report.sql" to "monthly" yields "monthly.sql" — same for .xlsx.
 export function renameWorkspaceFile(workspacePath: string | null, filePath: string, newName: string): FileSaveResult {
-  if (!workspacePath) return { success: false, error: 'No workspace open' }
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
 
   const resolved = path.resolve(filePath)
-  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: 'File is outside the workspace' }
-  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: 'The .sqlkit folder is internal' }
+  if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: t('file.fileOutsideWorkspace') }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: t('file.internalFolder') }
 
   const trimmed = newName.trim()
   if (!trimmed || trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('.')) {
-    return { success: false, error: 'Invalid file name' }
+    return { success: false, error: t('file.invalidName') }
   }
   const name = path.extname(trimmed) ? trimmed : `${trimmed}${path.extname(resolved)}`
   const target = path.join(path.dirname(resolved), name)
@@ -313,16 +314,16 @@ export function resolveWorkspaceItem(
   filePath: string,
   options: { allowRoot?: boolean } = {},
 ): { path: string } | { error: string } {
-  if (!workspacePath) return { error: 'No workspace open' }
+  if (!workspacePath) return { error: t('file.noWorkspace') }
   const resolved = path.resolve(filePath)
-  if (!isInsideWorkspace(workspacePath, resolved)) return { error: 'Path is outside the workspace' }
-  if (options.allowRoot === false && isWorkspaceRoot(workspacePath, resolved)) return { error: 'Cannot delete the workspace folder' }
-  if (isInternalWorkspacePath(workspacePath, resolved)) return { error: 'The .sqlkit folder is internal' }
+  if (!isInsideWorkspace(workspacePath, resolved)) return { error: t('file.pathOutsideWorkspace') }
+  if (options.allowRoot === false && isWorkspaceRoot(workspacePath, resolved)) return { error: t('file.cannotDeleteWorkspace') }
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { error: t('file.internalFolder') }
   try {
     fs.statSync(resolved)
     return { path: resolved }
   } catch {
-    return { error: 'File not found' }
+    return { error: t('file.notFound') }
   }
 }
 

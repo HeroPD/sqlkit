@@ -47,6 +47,7 @@ import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
 import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
+import { isFilterableQuery } from '../sql-filter'
 import { isReadOnlyQuery, isReorderableQuery } from '../sql-order'
 import type { ExportFormat } from '../result-export'
 import type { SortColumnDetail } from './results-panel'
@@ -72,9 +73,9 @@ const VIEWS = [
 type ViewId = (typeof VIEWS)[number]['id']
 
 const tabTitle = (tab: EditorTabState) => {
-  if (tab.kind === 'config') return tab.profile.name.trim() || 'New Database'
-  if (tab.kind === 'inspect') return tab.createTable ? 'New Table · create' : `${tab.table.name} · info`
-  if (tab.kind === 'inspect-object') return `${tab.object.name} · info`
+  if (tab.kind === 'config') return tab.profile.name.trim() || t('config.newDatabase')
+  if (tab.kind === 'inspect') return tab.createTable ? t('workbench.newTableTab') : t('workbench.infoTab', { name: tab.table.name })
+  if (tab.kind === 'inspect-object') return t('workbench.infoTab', { name: tab.object.name })
   return tab.content === tab.savedContent ? tab.name : `${tab.name} •`
 }
 
@@ -115,7 +116,7 @@ const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind
   { id: 'refresh-files', label: t('action.refreshFiles'), icon: 'codicon-sync' },
   { id: 'toggle-sidebar', label: t('action.toggleSidebar'), icon: 'codicon-layout-sidebar-left', keybind: mod('B') },
   { id: 'toggle-results-panel', label: t('action.toggleResults'), icon: 'codicon-layout-panel', keybind: mod('J') },
-  ...VIEWS.map((view) => ({ id: `show-${view.id}`, label: `Show ${view.title}`, icon: view.icon })),
+  ...VIEWS.map((view) => ({ id: `show-${view.id}`, label: t('workbench.showView', { view: view.title }), icon: view.icon })),
   { id: 'close-workspace', label: t('action.closeWorkspace'), icon: 'codicon-folder-opened' },
 ]
 
@@ -314,13 +315,13 @@ export class WorkbenchScreen extends LitElement {
     }
   }
 
-  // ⌘R: re-run the active tab's current result query, keeping its column sort.
-  // No-op until a query has produced a result (errored/idle runs store no SQL).
+  // ⌘R: re-run the active tab's current result query, keeping its filter and sort.
+  // No-op until a query has produced a result.
   private _refreshResults() {
     const tabId = this._ctx.activeTabId
     const run = this._queries.runFor(tabId)
     if (run.phase !== 'done' || !run.sql) return
-    void this._runSql(run.sql, this._queries.sortFor(tabId))
+    void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, this._queries.filterFor(tabId))
   }
 
   private _saveActive() {
@@ -445,7 +446,7 @@ export class WorkbenchScreen extends LitElement {
   // --- global shortcuts -----------------------------------------------------
 
   // ⌘⇧P commands, ⌘P quick open, ⌘K database switch, ⌘B sidebar, ⌘N new
-  // query, ⌘S save, ⌘↵ run, ⌘R/F5 refresh. Pressing a palette's own shortcut again closes it.
+  // query, ⌘S save, ⌘R/F5 refresh. The SQL editor alone owns ⌘↵.
   // True when the keystroke is inside an editable text field, which owns its own
   // native undo — inputs, textareas, or contenteditable (CodeMirror's editor).
   private _inTextField(event: KeyboardEvent): boolean {
@@ -461,8 +462,7 @@ export class WorkbenchScreen extends LitElement {
     // Mounted but hidden on the welcome screen; ignore global keys until a
     // workspace is open.
     if (!this.workspace) return
-    // The editor's own keymap (Mod-Enter) prevents default when it handles a
-    // chord; don't run it twice.
+    // Component keymaps prevent default when they own a chord.
     if (event.defaultPrevented) return
     const key = event.key.toLowerCase()
     const hasMod = event.metaKey || event.ctrlKey
@@ -545,13 +545,6 @@ export class WorkbenchScreen extends LitElement {
       this._saveActive()
       return
     }
-    if (key === 'enter') {
-      const tab = this._ctx.activeSqlTab()
-      if (tab?.content.trim()) {
-        event.preventDefault()
-        void this._runSql(tab.content.trim())
-      }
-    }
   }
 
   private _toggleSidebar() {
@@ -569,16 +562,16 @@ export class WorkbenchScreen extends LitElement {
     if (fileDirty || stagedDirty) {
       const title = tab ? (tab.kind === 'sql' ? tab.name : tabTitle(tab)) : 'tab'
       const detail = fileDirty && stagedDirty
-        ? 'Unsaved SQL changes and staged edits will be lost.'
+        ? t('workbench.unsavedSqlAndEdits')
         : fileDirty
-          ? 'Unsaved changes will be lost.'
+          ? t('workbench.unsavedChanges')
           : inspectDirty
-            ? 'Unsaved schema changes will be lost.'
-            : 'Staged result edits/new rows will be lost.'
+            ? t('workbench.unsavedSchema')
+            : t('workbench.unsavedResults')
       this._dialogs.confirm = {
-        message: `Close "${title}" without saving?`,
+        message: t('workbench.closeTabPrompt', { title }),
         detail,
-        confirmLabel: fileDirty ? 'Close Without Saving' : 'Discard and Close',
+        confirmLabel: fileDirty ? t('workbench.closeWithoutSaving') : t('workbench.discardAndClose'),
         action: () => {
           dropInspectDraft(id)
           this._inspectDirtyTabIds = new Set([...this._inspectDirtyTabIds].filter((tabId) => tabId !== id))
@@ -595,8 +588,8 @@ export class WorkbenchScreen extends LitElement {
   // --- query running ----------------------------------------------------------
 
   // Runs against the in-use context (⌘K), connecting it first if needed.
-  // `sort` re-runs with a grid-injected ORDER BY; omitting it clears any sort.
-  private async _runSql(sqlText: string, sort?: QuerySort | null, suppliedParams?: unknown[]) {
+  // `filter`/`sort` re-run with grid-injected clauses; omitting them clears both.
+  private async _runSql(sqlText: string, sort?: QuerySort | null, suppliedParams?: unknown[], filter?: string | null) {
     // The run belongs to the tab it started from, even if the user switches
     // tabs or contexts before it finishes.
     const tabId = this._ctx.activeTabId
@@ -609,7 +602,7 @@ export class WorkbenchScreen extends LitElement {
 
     const profile = this._config.activeProfile()
     if (!profile) {
-      this._queries.setRun(tabId, { phase: 'error', error: `No database selected — press ${mod('K')} to pick one.` })
+      this._queries.setRun(tabId, { phase: 'error', error: t('workbench.noDatabase', { shortcut: mod('K') }) })
       return
     }
 
@@ -638,7 +631,7 @@ export class WorkbenchScreen extends LitElement {
     // and be logged under the context Run was pressed in, not the current one.
     const executionId = crypto.randomUUID()
     const phase = this._live.phase(profile.id)
-    this._queries.beginRun(tabId, executionId, profile.id, phase === 'connected' ? undefined : `Connecting to ${profile.name}…`)
+    this._queries.beginRun(tabId, executionId, profile.id, phase === 'connected' ? undefined : t('workbench.connectingTo', { name: profile.name }))
 
     // The tab is already in phase 'running'; a rejection escaping here would
     // leave it spinning forever (the in-flight guard above blocks every rerun).
@@ -653,7 +646,7 @@ export class WorkbenchScreen extends LitElement {
       // The driver may be targeting the discovery database; point it at the
       // captured child before running.
       if ((await this._alignActiveChild(profile.id, childDb)) === 'unavailable') {
-        this._queries.setRun(tabId, { phase: 'error', error: `Database "${childDb}" is not available on this connection` })
+        this._queries.setRun(tabId, { phase: 'error', error: t('workbench.databaseUnavailable', { database: childDb ?? '' }) })
         return
       }
     } catch (error) {
@@ -669,6 +662,7 @@ export class WorkbenchScreen extends LitElement {
       sql: sqlText,
       params,
       sort,
+      filter,
       executionId,
     })
     // A run that could have changed the schema updates what the tree,
@@ -780,8 +774,8 @@ export class WorkbenchScreen extends LitElement {
               <div
                 class="sidebar-resize ${this._layout.resizing ? 'active' : ''}"
                 role="separator"
-                aria-label="Resize sidebar"
-                title="Resize sidebar"
+                aria-label=${t('workbench.resizeSidebar')}
+                title=${t('workbench.resizeSidebar')}
                 @pointerdown=${this._layout.onSidebarResizeStart}
                 @dblclick=${this._layout.resetSidebarWidth}
               ></div>
@@ -900,8 +894,8 @@ export class WorkbenchScreen extends LitElement {
       return html`
         <button
           class="title-action"
-          title="Clear history"
-          aria-label="Clear history"
+          title=${t('workbench.clearHistory')}
+          aria-label=${t('workbench.clearHistory')}
           ?disabled=${!count}
           @click=${this._onHistoryClear}
         >
@@ -914,8 +908,8 @@ export class WorkbenchScreen extends LitElement {
       return html`
         <button
           class="title-action"
-          title="Clear finished tasks"
-          aria-label="Clear finished tasks"
+          title=${t('workbench.clearTasks')}
+          aria-label=${t('workbench.clearTasks')}
           ?disabled=${!finished}
           @click=${this._onTasksClear}
         >
@@ -1077,13 +1071,14 @@ export class WorkbenchScreen extends LitElement {
           <div
             class="panel-resize ${this._layout.panelResizing ? 'active' : ''}"
             role="separator"
-            aria-label="Resize results panel"
-            title="Resize results panel"
+            aria-label=${t('workbench.resizeResults')}
+            title=${t('workbench.resizeResults')}
             @pointerdown=${this._layout.onPanelResizeStart}
             @dblclick=${this._layout.resetPanelHeight}
           ></div>
           <results-panel
             .run=${this._queries.runFor(this._ctx.activeTabId)}
+            .engine=${this._config.activeProfile()?.engine ?? 'postgresql'}
             .canCancel=${this._config.activeProfile()?.engine !== 'sqlite'}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
@@ -1091,6 +1086,7 @@ export class WorkbenchScreen extends LitElement {
             .drafts=${this._queries.draftsFor(this._ctx.activeTabId)}
             .edits=${this._queries.editsFor(this._ctx.activeTabId)}
             .sort=${this._queries.sortFor(this._ctx.activeTabId)}
+            .filter=${this._queries.filterFor(this._ctx.activeTabId)}
             .columnWidths=${this._resultColumnWidths()}
             .streamExportAvailable=${this._canStreamExport()}
             @cancel-query=${this._onCancelQuery}
@@ -1109,6 +1105,7 @@ export class WorkbenchScreen extends LitElement {
             @discard-changes=${this._onDiscardChanges}
             @resize-columns=${this._onResizeColumns}
             @sort-column=${this._onSortColumn}
+            @filter-condition=${this._onFilterCondition}
             @toggle-collapse=${() => this._layout.togglePanelCollapse()}
             style="height: ${this._layout.panelStyleHeight()}"
           ></results-panel>
@@ -1199,9 +1196,9 @@ export class WorkbenchScreen extends LitElement {
     const profile = this._config.byId(id)
     if (!profile) return
     this._dialogs.confirm = {
-      message: `Remove "${profile.name.trim() || 'New Database'}"?`,
-      detail: 'The connection is removed from this workspace. Its files folder stays on disk.',
-      confirmLabel: 'Remove',
+      message: t('workbench.removeDatabasePrompt', { name: profile.name.trim() || t('config.newDatabase') }),
+      detail: t('workbench.removeDatabaseDetail'),
+      confirmLabel: t('common.remove'),
       action: () => void this._removeDatabase(id),
     }
   }
@@ -1262,18 +1259,18 @@ export class WorkbenchScreen extends LitElement {
       (column) => column.table === table.name && column.schema === table.schema,
     )
     if (!columnRefs.length) {
-      this._dialogs.notice('Could not import CSV', 'No column metadata is available for this table. Refresh Tables and try again.')
+      this._dialogs.notice(t('import.failedTitle'), t('import.noMetadata'))
       return
     }
     let result
     try {
       result = await window.sqlkit.inspectTable(profile.id, childDb, table)
     } catch (error) {
-      this._dialogs.notice('Could not import CSV', (error as Error).message)
+      this._dialogs.notice(t('import.failedTitle'), (error as Error).message)
       return
     }
     if (!result.success) {
-      this._dialogs.notice('Could not import CSV', result.error)
+      this._dialogs.notice(t('import.failedTitle'), result.error)
       return
     }
     // The context may have changed while metadata was loading; never open a
@@ -1315,13 +1312,15 @@ export class WorkbenchScreen extends LitElement {
       return (error as Error).message
     }
     if (statements.length > 1_000) {
-      return 'This import needs more than 1,000 atomic batches. Import fewer rows or map fewer columns.'
+      return t('import.tooManyBatches')
     }
     try {
       const result = await window.sqlkit.runBatch(state.profileId, state.childDb, statements)
       if (result.success) return null
-      const position = result.failedIndex === undefined ? '' : `Batch ${result.failedIndex + 1} of ${statements.length}: `
-      return `${position}${result.error} The import was rolled back; no rows were added.`
+      const error = result.failedIndex === undefined
+        ? result.error
+        : t('import.batchFailure', { index: result.failedIndex + 1, total: statements.length, error: result.error })
+      return t('import.rolledBack', { error })
     } catch (error) {
       return (error as Error).message
     }
@@ -1453,7 +1452,7 @@ export class WorkbenchScreen extends LitElement {
     }
     // A failed cancel must not be silent — the user thinks the query stopped and
     // keeps waiting. Surface why (backend still starting up, nothing running, …).
-    if (!result.success && result.error) this._dialogs.notice('Could not cancel query', result.error)
+    if (!result.success && result.error) this._dialogs.notice(t('workbench.cancelFailed'), result.error)
   }
 
   // The results grid scrolled near the end of what's loaded: page in more rows.
@@ -1535,6 +1534,7 @@ export class WorkbenchScreen extends LitElement {
       run.sql,
       run.params,
       this._queries.sortFor(tabId),
+      this._queries.filterFor(tabId),
       format,
       `${base || 'results'}.${format}`,
       executionId,
@@ -1542,7 +1542,7 @@ export class WorkbenchScreen extends LitElement {
     this._queries.finishExport(executionId, result)
     // A stop the user asked for is not a failure; the task already shows it.
     if (!result.success && result.error && !result.cancelled) {
-      this._dialogs.notice('Export failed', result.error)
+      this._dialogs.notice(t('workbench.exportFailed'), result.error)
     }
   }
 
@@ -1604,7 +1604,20 @@ export class WorkbenchScreen extends LitElement {
     const { columnIndex, direction } = (event as CustomEvent<SortColumnDetail>).detail
     const run = this._queries.runFor(this._ctx.activeTabId)
     if (run.phase !== 'done' || !run.sql || !isReorderableQuery(run.sql)) return
-    void this._runSql(run.sql, direction ? { columnIndex, direction } : undefined, run.params)
+    void this._runSql(
+      run.sql,
+      direction ? { columnIndex, direction } : undefined,
+      run.params,
+      this._queries.filterFor(this._ctx.activeTabId),
+    )
+  }
+
+  private _onFilterCondition(event: Event) {
+    const condition = (event as CustomEvent<{ condition: string | null }>).detail.condition
+    const tabId = this._ctx.activeTabId
+    const run = this._queries.runFor(tabId)
+    if ((run.phase !== 'done' && run.phase !== 'error') || !run.sql || !isFilterableQuery(run.sql)) return
+    void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, condition)
   }
 
   private _onDeleteRows(event: Event) {
@@ -1659,9 +1672,9 @@ export class WorkbenchScreen extends LitElement {
   private _onCloseWorkspace() {
     if (this._queries.hasAnyStaged()) {
       this._dialogs.confirm = {
-        message: 'Close workspace and discard staged result changes?',
-        detail: 'Unsaved result edits and new rows in open tabs will be lost.',
-        confirmLabel: 'Discard and Close',
+        message: t('workbench.closeWorkspacePrompt'),
+        detail: t('workbench.closeWorkspaceDetail'),
+        confirmLabel: t('workbench.discardAndClose'),
         action: () => this._closeWorkspaceNow(),
       }
       return

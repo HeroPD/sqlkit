@@ -2,6 +2,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { SQL_NULL } from '../sql-write'
 import './results-panel'
+import type { SqlExpressionEditor } from './sql-expression-editor'
 
 beforeAll(() => {
   Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
@@ -337,11 +338,62 @@ describe('results-panel draft rows', () => {
     cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
     await el.updateComplete
     const menu = el.shadowRoot!.querySelector('context-menu')!
+    expect(menu.items).toContainEqual(expect.objectContaining({ id: 'view-record', shortcut: 'Tab' }))
     menu.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'set-null' } }))
 
     expect(fill).toHaveBeenCalledOnce()
     const detail = (fill.mock.calls[0]![0] as CustomEvent).detail as { edits: Array<{ row: number; col: number; value: unknown }> }
     expect(detail.edits).toEqual([{ row: 0, col: 0, value: SQL_NULL }])
+    el.remove()
+  })
+
+  it('selects every cell in a row when Copy Row is chosen', async () => {
+    const writeClipboardText = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }
+    const el = await mountGrid(2)
+    const cell = el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="1"] td:nth-child(2)')!
+    cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+
+    el.shadowRoot!.querySelector('context-menu')!.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'copy-row' } }))
+    await el.updateComplete
+
+    expect(writeClipboardText).toHaveBeenCalledWith('a1\tb1')
+    expect(el.shadowRoot!.querySelectorAll('tr[data-row="1"] td.selected')).toHaveLength(2)
+    expect(el.shadowRoot!.querySelectorAll('tr[data-row="0"] td.selected')).toHaveLength(0)
+    el.remove()
+  })
+
+  it('copies every selected row when Copy Row is chosen inside a multi-row selection', async () => {
+    const writeClipboardText = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }
+    const el = await mountGrid(3)
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    await el.updateComplete
+    const selectedCell = el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="1"] td:nth-child(2)')!
+    selectedCell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('context-menu')!.items).toContainEqual(
+      expect.objectContaining({ id: 'copy-row', label: 'Copy Selected Rows' }),
+    )
+
+    el.shadowRoot!.querySelector('context-menu')!.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'copy-row' } }))
+    await el.updateComplete
+
+    expect(writeClipboardText).toHaveBeenCalledWith('a0\tb0\na1\tb1')
+    expect(el.shadowRoot!.querySelectorAll('tr[data-row="0"] td.selected')).toHaveLength(2)
+    expect(el.shadowRoot!.querySelectorAll('tr[data-row="1"] td.selected')).toHaveLength(2)
+    el.remove()
+  })
+
+  it('selects the whole row when its number cell opens the context menu', async () => {
+    const el = await mountGrid(2)
+    const rowNumber = el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="1"] td.num')!
+
+    rowNumber.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+
+    expect(el.shadowRoot!.querySelectorAll('tr[data-row="1"] td.selected')).toHaveLength(2)
     el.remove()
   })
 
@@ -498,6 +550,63 @@ describe('results-panel draft rows', () => {
     el.remove()
   })
 
+  it('copies the displayed cell through the desktop clipboard', async () => {
+    const writeClipboardText = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }
+    const el = await mountGrid(2)
+    el.edits = new Map([['0:0', 'pending value']])
+    await el.updateComplete
+
+    key(el, { key: 'c', metaKey: true })
+
+    expect(writeClipboardText).toHaveBeenCalledWith('pending value')
+    el.remove()
+  })
+
+  it('pastes a TSV rectangle from the selected cell in one batch', async () => {
+    const el = await mountGrid(3)
+    const fill = vi.fn()
+    el.addEventListener('cells-fill', fill)
+    const paste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, 'clipboardData', {
+      value: { getData: (type: string) => type === 'text/plain' ? 'x\ty\nz\tw' : '' },
+    })
+
+    el.shadowRoot!.querySelector('table')!.dispatchEvent(paste)
+
+    expect(paste.defaultPrevented).toBe(true)
+    expect((fill.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+      edits: [
+        { row: 0, col: 0, value: 'x' },
+        { row: 0, col: 1, value: 'y' },
+        { row: 1, col: 0, value: 'z' },
+        { row: 1, col: 1, value: 'w' },
+      ],
+      clears: [],
+      draftCells: [],
+    })
+    el.remove()
+  })
+
+  it('pastes one value across the current selection', async () => {
+    const el = await mountGrid(3)
+    const fill = vi.fn()
+    el.addEventListener('cells-fill', fill)
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    const paste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, 'clipboardData', { value: { getData: () => 'same' } })
+
+    el.shadowRoot!.querySelector('table')!.dispatchEvent(paste)
+
+    expect((fill.mock.calls[0]?.[0] as CustomEvent).detail.edits).toEqual([
+      { row: 0, col: 0, value: 'same' },
+      { row: 1, col: 0, value: 'same' },
+      { row: 2, col: 0, value: 'same' },
+    ])
+    el.remove()
+  })
+
   it('pressing Enter on an unchanged editor does not fill a multi-cell selection', async () => {
     const el = await mountGrid(3)
     const cellEdit = vi.fn()
@@ -620,18 +729,68 @@ describe('results-panel DBeaver-style editing', () => {
   it('the result toolbar List and Grid buttons switch result views', async () => {
     const el = await mountGrid(2)
 
-    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    const listButton = el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!
+    expect(listButton.dataset.tooltip).toBe('List view (Tab)')
+    expect(listButton.title).toBe('')
+    listButton.click()
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('.record-view')).toBeTruthy()
     expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')).toBeNull()
-    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')).toBeTruthy()
+    const gridButton = el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')!
+    expect(gridButton.dataset.tooltip).toBe('Grid view (Tab)')
 
-    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')!.click()
+    gridButton.click()
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
     expect(el.shadowRoot!.querySelector('table')).toBeTruthy()
     expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')).toBeNull()
     expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')).toBeTruthy()
+    el.remove()
+  })
+
+  it('opens a condition-only filter field and emits apply/clear requests', async () => {
+    const el = await mountGrid(2)
+    if (el.run.phase !== 'done') throw new Error('Expected a completed result')
+    el.run = { phase: 'done', result: el.run.result, sql: 'SELECT a, b FROM sample' }
+    const applied = vi.fn()
+    el.addEventListener('filter-condition', applied)
+    await el.updateComplete
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Filter results"]')!.click()
+    await el.updateComplete
+    const editor = el.shadowRoot!.querySelector<SqlExpressionEditor>('.filter-input')!
+    expect(editor.placeholderText).toContain('Filter condition')
+    expect(editor.placeholderText).not.toMatch(/^WHERE/i)
+    expect(editor.columns).toEqual(['a', 'b'])
+    expect(editor.engine).toBe('postgresql')
+    expect(el.shadowRoot!.querySelector('.filter-apply .codicon-check')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.filter-clear .codicon-close')).toBeTruthy()
+
+    editor.dispatchEvent(new CustomEvent('expression-change', {
+      detail: { value: "a = 'a1'" },
+      bubbles: true,
+    }))
+    editor.dispatchEvent(new CustomEvent('expression-submit', { bubbles: true, cancelable: true }))
+    expect(applied.mock.calls[0]?.[0].detail).toEqual({ condition: "a = 'a1'" })
+
+    el.filter = "a = 'a1'"
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.filter-clear')!.click()
+    expect(applied.mock.calls[1]?.[0].detail).toEqual({ condition: null })
+    el.remove()
+  })
+
+  it('keeps the active filter available on a query error', async () => {
+    const el = document.createElement('results-panel')
+    el.filter = 'missing_column = 1'
+    el.run = { phase: 'error', error: 'column does not exist', sql: 'SELECT * FROM sample' }
+    document.body.append(el)
+    await el.updateComplete
+
+    expect(el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Filter results"]')).toBeTruthy()
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Filter results"]')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector<SqlExpressionEditor>('.filter-input')?.value).toBe('missing_column = 1')
     el.remove()
   })
 

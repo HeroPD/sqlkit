@@ -4,6 +4,7 @@ import { codicons, scrollbars, typography } from '../shared-styles'
 import type { FileInfo } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
+import { t } from '../i18n'
 
 type FileNode = {
   type: 'file' | 'folder'
@@ -130,7 +131,7 @@ export class FileTree extends LitElement {
 
     return html`
       <div class="tree" role="tree" @contextmenu=${this._onBackgroundMenu}>
-        ${rows.length ? rows : hasFiles ? '' : html`<p class="muted hint">No .sql files yet. Right-click to create one.</p>`}
+        ${rows.length ? rows : hasFiles ? '' : html`<p class="muted hint">${t('file.empty')}</p>`}
       </div>
       ${this._renderMenu()}
     `
@@ -192,9 +193,9 @@ export class FileTree extends LitElement {
     const menu = this._menu
     if (!menu) return ''
     const node = menu.node
-    const items: MenuItem[] = [{ id: 'new', label: 'New File' }]
-    if (node?.type === 'file') items.push({ id: 'rename', label: `Rename (${isMac ? '↵' : 'F2'})` })
-    if (node) items.push({ id: 'delete', label: 'Delete', danger: true })
+    const items: MenuItem[] = [{ id: 'new', label: t('file.new') }]
+    if (node?.type === 'file') items.push({ id: 'rename', label: t('file.rename'), shortcut: isMac ? '↵' : 'F2' })
+    if (node) items.push({ id: 'delete', label: t('file.delete'), danger: true, separatorBefore: true })
 
     return html`
       <context-menu

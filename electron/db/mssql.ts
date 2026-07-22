@@ -11,6 +11,7 @@ import type { Endpoint } from './transport'
 import { openExportWriter, type ExportWriter } from './export'
 import { prepareSqlRun } from './sql-script'
 import { installLosslessTediousParsers } from './tedious-lossless'
+import { t } from '../../src/i18n'
 
 // Always-present databases; hidden from all-databases children except master,
 // which is a legitimate browsing target (it's the default sa database).
@@ -112,12 +113,12 @@ export function mssqlTls(profile: ConnectionProfile): { encrypt: boolean; trustS
   if (mode === 'disable') return { encrypt: false, trustServerCertificate: true }
   if (mode === 'require') return { encrypt: true, trustServerCertificate: true }
   if (mode === 'verify-ca') {
-    throw new Error('SQL Server does not support CA-only verification; use Verify full to verify the certificate and hostname.')
+    throw new Error(t('connection.sqlServerCaUnsupported'))
   }
   const caPath = profile.ssl?.ca.trim()
   if (!caPath) return { encrypt: true, trustServerCertificate: false }
   try {
-    if (statSync(expandHome(caPath)).size > 5 * 1024 * 1024) throw new Error('certificate file exceeds 5 MB')
+    if (statSync(expandHome(caPath)).size > 5 * 1024 * 1024) throw new Error(t('connection.caTooLarge'))
     return { encrypt: true, trustServerCertificate: false, ca: readFileSync(expandHome(caPath), 'utf8') }
   } catch (error) {
     throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`, { cause: error })
@@ -171,7 +172,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
   const connectedPool = async (database: string) => {
     const pool = pools?.get(database)
-    if (!pool) throw new Error(database ? `Database "${database}" is not available on this connection` : 'Not connected')
+    if (!pool) throw new Error(database ? t('connection.databaseUnavailable', { database }) : t('connection.notConnected'))
     // connect() is a no-op when already connected; pools open lazily.
     return pool.connected ? pool : pool.connect()
   }
@@ -180,7 +181,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
   const databaseForQuery = (childDb?: string | null) => {
     const database = childDb ?? active
-    if (!pools?.has(database)) throw new Error(database ? `Database "${database}" is not available on this connection` : 'Not connected')
+    if (!pools?.has(database)) throw new Error(database ? t('connection.databaseUnavailable', { database }) : t('connection.notConnected'))
     return database
   }
 
@@ -238,9 +239,9 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       await Promise.all([...closing.values()].map((pool) => pool.close().catch(() => {})))
     },
 
-    async query(sqlText, params = [], childDb = null, sort = null, executionId) {
+    async query(sqlText, params = [], childDb = null, sort = null, filter = null, executionId) {
       const started = performance.now()
-      const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort })
+      const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort, filter })
       const collect = (result: QueryResult, resultSets: QueryResultSet[]) =>
         resultSets.push(...(result.resultSets ?? [{
           columns: result.columns,
@@ -265,19 +266,19 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           conn = await acquireConnection(pool)
           const active = conn
           entry.tediousCancel = () => active.cancel()
-          if (entry.cancelRequested) throw new Error('Query cancelled.')
+          if (entry.cancelRequested) throw new Error(t('query.cancelled'))
           const resultSets: QueryResultSet[] = []
           let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
           const budget = { bytes: 0 }
           for (const batch of plan.batches) {
-            if (entry.cancelRequested) throw new Error('Query cancelled.')
+            if (entry.cancelRequested) throw new Error(t('query.cancelled'))
             result = await streamTediousBatch(conn, batch, started, budget)
             collect(result, resultSets)
           }
           const selected = resultSets[resultSets.length - 1] ?? result
           return { ...selected, durationMs: result.durationMs, ...(resultSets.length > 1 ? { resultSets } : {}) }
         } catch (error) {
-          throw isCancelled(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
+          throw isCancelled(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
         } finally {
           running.delete(entry)
           // Reset on release, not before use: a failed script's open transaction
@@ -293,13 +294,13 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       try {
         const pool = await openUserPool(childDb)
         userPool = pool
-        if (entry.cancelRequested) throw new Error('Query cancelled.')
+        if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
         const resultSets: QueryResultSet[] = []
         const budget = { bytes: 0 }
         for (const batch of plan.batches) {
           entry.request = bind(pool.request(), plan.params)
-          if (entry.cancelRequested) throw new Error('Query cancelled.')
+          if (entry.cancelRequested) throw new Error(t('query.cancelled'))
           result = await streamQuery(entry.request, batch, started, budget)
           collect(result, resultSets)
         }
@@ -310,7 +311,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           ...(resultSets.length > 1 ? { resultSets } : {}),
         }
       } catch (error) {
-        throw isCancelled(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
+        throw isCancelled(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
       } finally {
         running.delete(entry)
         await userPool?.close().catch(() => {})
@@ -328,11 +329,11 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         userPool = await openUserPool(childDb)
         transaction = new sql.Transaction(userPool)
         await transaction.begin()
-        if (entry.cancelRequested) throw new Error('Query cancelled.')
+        if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         for (index = 0; index < statements.length; index += 1) {
           const statement = statements[index]!
           entry.request = bind(new sql.Request(transaction), statement.params)
-          if (entry.cancelRequested) throw new Error('Query cancelled.')
+          if (entry.cancelRequested) throw new Error(t('query.cancelled'))
           const result = await entry.request.query(statement.sql)
           // A write that matched nothing means the row moved or vanished since
           // the user reviewed it — abort the whole batch rather than half-apply.
@@ -355,7 +356,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
-          error: isCancelled(error) || (error as Error).message === 'Query cancelled.' ? 'Save cancelled.' : (error as Error).message,
+          error: isCancelled(error) || (error as Error).message === t('query.cancelled') ? t('query.saveCancelled') : (error as Error).message,
         }
       } finally {
         running.delete(entry)
@@ -375,12 +376,12 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         userPool = await openUserPool(childDb)
         transaction = new sql.Transaction(userPool)
         await transaction.begin()
-        if (entry.cancelRequested) throw new Error('Query cancelled.')
+        if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         for (index = 0; index < statements.length; index += 1) {
           // batch() not query(): DDL like CREATE VIEW must be alone in a batch,
           // and sp_executesql (query with params) counts as one.
           entry.request = new sql.Request(transaction)
-          if (entry.cancelRequested) throw new Error('Query cancelled.')
+          if (entry.cancelRequested) throw new Error(t('query.cancelled'))
           await entry.request.batch(statements[index]!)
         }
         await transaction.commit()
@@ -390,7 +391,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
-          error: isCancelled(error) || (error as Error).message === 'Query cancelled.' ? 'Save cancelled.' : (error as Error).message,
+          error: isCancelled(error) || (error as Error).message === t('query.cancelled') ? t('query.saveCancelled') : (error as Error).message,
         }
       } finally {
         running.delete(entry)
@@ -409,9 +410,9 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async dropDatabase(name) {
-      if (!pools) throw new Error('Not connected')
+      if (!pools) throw new Error(t('connection.notConnected'))
       if (name === active) {
-        throw new Error('Cannot drop the database currently in use — switch to another one first.')
+        throw new Error(t('database.cannotDropCurrent'))
       }
       const pool = pools.get(name)
       if (pool) {
@@ -440,10 +441,10 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { running: entries.length, cancelled: entries.length }
     },
 
-    async exportQuery({ sql: sqlText, params, childDb, sort, filePath, format, executionId }) {
-      const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort })
+    async exportQuery({ sql: sqlText, params, childDb, sort, filter, filePath, format, executionId }) {
+      const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort, filter })
       if (plan.batches.length !== 1) {
-        throw new Error('Streaming export supports a single SQL Server batch — remove GO separators.')
+        throw new Error(t('export.sqlServerSingleBatch'))
       }
       // Registered like query() so Stop (and disconnect) can interrupt a
       // runaway export instead of it streaming to completion unstoppably.
@@ -456,12 +457,12 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         writer = openExportWriter(filePath, format)
         const request = bind(userPool.request(), plan.params)
         entry.request = request
-        if (entry.cancelRequested) throw new Error('Query cancelled.')
+        if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         await streamMssqlExport(request, plan.batches[0]!, writer)
         return await writer.close()
       } catch (error) {
         await writer?.close().catch(() => {})
-        throw isCancelled(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
+        throw isCancelled(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
       } finally {
         running.delete(entry)
         await userPool?.close().catch(() => {})

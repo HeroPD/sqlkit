@@ -4,6 +4,7 @@ import type { ColumnRef, InspectColumn, TableRef } from '../electron'
 import { csvShapeError, parseCsv } from '../csv-import'
 import { SQL_NULL, type CellInput } from '../sql-write'
 import { controls, scrollbars, typography } from '../shared-styles'
+import { formatInteger, rowWord, t } from '../i18n'
 
 export type ImportConfirmDetail = { columns: ColumnRef[]; rows: CellInput[][] }
 export type ImportColumn = {
@@ -52,35 +53,35 @@ export class ImportDialog extends LitElement {
     const table = this.table ? (this.table.schema ? `${this.table.schema}.${this.table.name}` : this.table.name) : ''
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
-        <div class="panel" role="dialog" aria-label="Import CSV">
-          <h4>Import CSV · ${table}</h4>
+        <div class="panel" role="dialog" aria-label=${t('import.title', { table })}>
+          <h4>${t('import.title', { table })}</h4>
           <div class="toolbar">
             <label class="file secondary">
               <input type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values" @change=${this._onFileChange} />
-              ${this._fileName || 'Choose CSV…'}
+              ${this._fileName || t('import.chooseCsv')}
             </label>
             <label class="compact">
-              <span>Delimiter</span>
+              <span>${t('import.delimiter')}</span>
               <select .value=${this._delimiter} @change=${this._onDelimiterChange}>
-                <option value=",">Comma</option>
-                <option value="\t">Tab</option>
-                <option value=";">Semicolon</option>
+                <option value=",">${t('import.comma')}</option>
+                <option value="\t">${t('import.tab')}</option>
+                <option value=";">${t('import.semicolon')}</option>
               </select>
             </label>
           </div>
           <div class="options">
-            <label><input type="checkbox" .checked=${this._header} @change=${this._onHeaderChange} /> First row contains column names</label>
-            <label><input type="checkbox" .checked=${this._emptyAsNull} @change=${this._onNullChange} /> Import empty fields as NULL</label>
+            <label><input type="checkbox" .checked=${this._header} @change=${this._onHeaderChange} /> ${t('import.firstRowHeaders')}</label>
+            <label><input type="checkbox" .checked=${this._emptyAsNull} @change=${this._onNullChange} /> ${t('import.emptyAsNull')}</label>
           </div>
           ${headers.length
             ? html`
                 <div class="mapping-wrap">
-                  <div class="mapping-title">Column mapping</div>
+                  <div class="mapping-title">${t('import.columnMapping')}</div>
                   <div class="mapping">
                     ${this.columns.map((importColumn, targetIndex) => {
                       const { column, generated, identity } = importColumn
                       const locked = generated || identity === 'always'
-                      const qualifier = generated ? 'generated' : identity ? 'identity' : ''
+                      const qualifier = generated ? t('import.generated') : identity ? t('import.identity') : ''
                       return html`
                       <label>
                         <span title=${`${column.dataType}${qualifier ? ` · ${qualifier}` : ''}`}>
@@ -91,9 +92,9 @@ export class ImportDialog extends LitElement {
                           ?disabled=${locked}
                           @change=${(event: Event) => this._mapColumn(targetIndex, event)}
                         >
-                          <option value="">${locked ? 'Not insertable' : 'Skip'}</option>
+                          <option value="">${locked ? t('import.notInsertable') : t('import.skip')}</option>
                           ${headers.map((header, sourceIndex) => html`
-                            <option value=${sourceIndex}>${header || `Column ${sourceIndex + 1}`}</option>
+                            <option value=${sourceIndex}>${header || t('import.column', { index: sourceIndex + 1 })}</option>
                           `)}
                         </select>
                       </label>
@@ -102,14 +103,16 @@ export class ImportDialog extends LitElement {
                 </div>
                 ${this._renderPreview(headers, data)}
               `
-            : html`<div class="empty muted">Choose a CSV file to map and preview its columns.</div>`}
+            : html`<div class="empty muted">${t('import.emptyHint')}</div>`}
           ${this._error ? html`<p class="error" role="alert">${this._error}</p>` : ''}
           <div class="footer">
-            <span class="muted small">${data.length ? `${data.length.toLocaleString()} data row${data.length === 1 ? '' : 's'}` : ''}</span>
+            <span class="muted small">${data.length
+              ? t('import.dataRows', { count: formatInteger(data.length), rows: rowWord(data.length) })
+              : ''}</span>
             <div class="actions">
-              <button class="secondary" ?disabled=${this._importing} @click=${this._cancel}>Cancel</button>
+              <button class="secondary" ?disabled=${this._importing} @click=${this._cancel}>${t('common.cancel')}</button>
               <button class="primary" ?disabled=${!data.length || this._loading || this._importing} @click=${this._confirm}>
-                ${this._importing ? 'Importing…' : 'Import'}
+                ${this._importing ? t('common.importing') : t('common.import')}
               </button>
             </div>
           </div>
@@ -120,9 +123,9 @@ export class ImportDialog extends LitElement {
 
   private _renderPreview(headers: string[], rows: string[][]) {
     return html`
-      <div class="preview" role="region" aria-label="CSV preview">
+      <div class="preview" role="region" aria-label=${t('import.preview')}>
         <table>
-          <thead><tr>${headers.map((header, index) => html`<th>${header || `Column ${index + 1}`}</th>`)}</tr></thead>
+          <thead><tr>${headers.map((header, index) => html`<th>${header || t('import.column', { index: index + 1 })}</th>`)}</tr></thead>
           <tbody>
             ${rows.slice(0, 8).map((row) => html`<tr>${headers.map((_, index) => html`<td>${row[index] ?? ''}</td>`)}</tr>`)}
           </tbody>
@@ -134,7 +137,7 @@ export class ImportDialog extends LitElement {
   private _sourceHeaders() {
     const first = this._rows[0]
     if (!first) return []
-    return this._header ? first : first.map((_, index) => `Column ${index + 1}`)
+    return this._header ? first : first.map((_, index) => t('import.column', { index: index + 1 }))
   }
 
   private _dataRows() {
@@ -148,7 +151,7 @@ export class ImportDialog extends LitElement {
       this._fileName = file.name
       this._source = ''
       this._rows = []
-      this._error = 'CSV files are limited to 25 MB.'
+      this._error = t('import.fileTooLarge')
       return
     }
     this._loading = true
@@ -170,8 +173,8 @@ export class ImportDialog extends LitElement {
     const shapeError = csvShapeError(rows)
     if (shapeError) throw new Error(shapeError)
     const dataCount = Math.max(0, rows.length - (this._header ? 1 : 0))
-    if (!dataCount) throw new Error('The CSV does not contain any data rows.')
-    if (dataCount > MAX_ROWS) throw new Error(`CSV imports are limited to ${MAX_ROWS.toLocaleString()} rows.`)
+    if (!dataCount) throw new Error(t('import.noData'))
+    if (dataCount > MAX_ROWS) throw new Error(t('import.tooManyRows', { count: formatInteger(MAX_ROWS) }))
     this._rows = rows
     this._mapping = this._defaultMapping()
     this._error = ''
@@ -244,15 +247,15 @@ export class ImportDialog extends LitElement {
       .map((source, target) => ({ source, importColumn: this.columns[target] }))
       .filter((entry): entry is { source: number; importColumn: ImportColumn } => entry.source !== null && entry.importColumn !== undefined)
     if (!selected.length) {
-      this._error = 'Map at least one CSV field to a table column.'
+      this._error = t('import.mapOne')
       return
     }
     if (selected.some((entry) => entry.importColumn.generated || entry.importColumn.identity === 'always')) {
-      this._error = 'Generated and always-identity columns cannot receive imported values.'
+      this._error = t('import.generatedBlocked')
       return
     }
     if (new Set(selected.map((entry) => entry.source)).size !== selected.length) {
-      this._error = 'Each CSV field can map to only one table column.'
+      this._error = t('import.uniqueMapping')
       return
     }
     const rows = this._dataRows().map((row) => selected.map(({ source }) => {

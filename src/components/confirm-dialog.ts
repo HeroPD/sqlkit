@@ -1,6 +1,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
+import { t } from '../i18n'
 
 // In-app confirmation modal (native dialogs would clash with the app's
 // look). Render it conditionally; it dispatches `dialog-confirm` /
@@ -14,7 +15,7 @@ export class ConfirmDialog extends LitElement {
   detail = ''
 
   @property()
-  confirmLabel = 'Confirm'
+  confirmLabel = t('common.confirm')
 
   connectedCallback() {
     super.connectedCallback()
@@ -33,7 +34,7 @@ export class ConfirmDialog extends LitElement {
           <h4>${this.message}</h4>
           <p class="muted small">${this.detail}</p>
           <div class="actions">
-            <button class="secondary" @click=${this._cancel}>Cancel</button>
+            <button class="secondary" @click=${this._cancel}>${t('common.cancel')}</button>
             <button class="primary danger" @click=${this._confirm}>${this.confirmLabel}</button>
           </div>
         </div>

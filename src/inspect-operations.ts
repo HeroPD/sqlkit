@@ -1,5 +1,6 @@
 import type { Engine, TableRef } from './electron'
 import { dialectFor } from './dialect'
+import { t } from './i18n'
 import {
   buildAddConstraint,
   buildAddForeignKey,
@@ -61,7 +62,7 @@ export const canRenameInspectObject = (target: InspectDropTarget, engine: Engine
 }
 
 function buildDropInspectObject(table: TableRef, target: InspectDropTarget, name: string, engine: Engine): string {
-  if (!canDropInspectObject(target, engine)) throw new Error(`SQLite cannot drop a ${target} without rebuilding the table`)
+  if (!canDropInspectObject(target, engine)) throw new Error(t('inspect.sqliteDropUnsupported', { target }))
   const dialect = dialectFor(engine)
   const tableName = quoteQualified(table, dialect)
   const objectName = quoteQualified({ schema: table.schema, name, kind: 'table' }, dialect)
@@ -89,7 +90,7 @@ function buildRenameInspectObject(
   to: string,
   engine: Engine,
 ): string {
-  if (!canRenameInspectObject(target, engine)) throw new Error(`${engine} cannot rename a ${target} without recreating it`)
+  if (!canRenameInspectObject(target, engine)) throw new Error(t('inspect.renameUnsupported', { engine, target }))
   const dialect = dialectFor(engine)
   const tableName = quoteQualified(table, dialect)
   if (engine === 'postgresql') {

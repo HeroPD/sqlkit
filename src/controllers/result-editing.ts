@@ -14,6 +14,7 @@ import {
   type DraftRow,
   type EditIssue,
 } from '../result-editing'
+import { t } from '../i18n'
 
 type Deps = {
   activeTab: () => SqlTabState | null
@@ -112,9 +113,9 @@ export class ResultEditingController {
     if (!outcome.success) {
       const reason =
         outcome.failedIndex !== undefined
-          ? `Change ${outcome.failedIndex + 1} of ${statements.length} could not be applied: ${outcome.error}`
+          ? t('editing.changeFailed', { index: outcome.failedIndex + 1, total: statements.length, error: outcome.error })
           : outcome.error
-      return `${reason} The save was rolled back; no changes were made.`
+      return t('editing.saveRolledBack', { error: reason })
     }
     const { hadEdits, draftCount, tabId, refreshSql } = applied
     if (tabId && hadEdits) this.deps.clearEdits(tabId)
@@ -170,7 +171,7 @@ export class ResultEditingController {
   private activeProfileForWrite() {
     const profile = this.deps.activeProfile()
     if (profile) return profile
-    this.deps.dialogs.notice('Cannot edit this result', 'Select a database connection before writing changes.')
+    this.deps.dialogs.notice(t('editing.noConnectionTitle'), t('editing.noConnectionDetail'))
     return null
   }
 

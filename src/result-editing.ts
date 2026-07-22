@@ -3,6 +3,7 @@ import type { QueryRun, CellCoord } from './components/results-panel'
 import type { SqlTabState } from './controllers/contexts'
 import { inferEditableTable } from './sql-edit-context'
 import { supportsOptimisticComparison, type BatchUpdateEdit, type CellInput, type RowKey } from './sql-write'
+import { t } from './i18n'
 
 // An unsaved new row staged in the grid. `cells` align to the result's columns:
 // null = never touched (omit from INSERT so the DB default applies); CellInput
@@ -38,8 +39,8 @@ export type EditIssue = { title: string; detail: string }
 export type EditResult<T> = { ok: true; value: T } | { ok: false; issue: EditIssue }
 
 const cannotEditColumn: EditIssue = {
-  title: 'Cannot edit this column',
-  detail: 'The selected column is not an editable table column with its primary key in the result.',
+  title: t('editing.cannotEditColumnTitle'),
+  detail: t('editing.cannotEditColumnDetail'),
 }
 
 export function hasResultCells(run: QueryRun): boolean {
@@ -122,8 +123,8 @@ export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEd
 }
 
 const cannotCompareColumn = (column: ColumnRef, action: string): EditIssue => ({
-  title: `Cannot safely ${action}`,
-  detail: `${column.name} (${column.dataType}) cannot be compared safely for concurrent changes. Use explicit SQL, or add a version column to guard on.`,
+  title: t('editing.cannotSafely', { action }),
+  detail: t('editing.unsafeComparison', { column: column.name, dataType: column.dataType }),
 })
 
 export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value: CellInput): EditResult<{ table: TableRef; edits: BatchUpdateEdit[] }> {
@@ -133,17 +134,17 @@ export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value
     const ctx = cellEditContext(input, cell)
     if (!ctx) return { ok: false, issue: cannotEditColumn }
     if (table && !sameTable(table, ctx.table)) {
-      return { ok: false, issue: { title: 'Cannot edit this selection', detail: 'Selected cells must belong to the same source table.' } }
+      return { ok: false, issue: { title: t('editing.cannotEditSelectionTitle'), detail: t('editing.sameTableDetail') } }
     }
     table = ctx.table
     const row = ctx.result.rows[cell.row]
-    if (!row) return { ok: false, issue: { title: 'Cannot edit this row', detail: 'It is no longer loaded in the current result.' } }
+    if (!row) return { ok: false, issue: { title: t('editing.cannotEditRowTitle'), detail: t('editing.rowNotLoaded') } }
     if (input.engine && !supportsOptimisticComparison(input.engine, ctx.columnMeta)) {
-      return { ok: false, issue: cannotCompareColumn(ctx.columnMeta, 'edit this cell') }
+      return { ok: false, issue: cannotCompareColumn(ctx.columnMeta, t('editing.actionEditCell')) }
     }
     const pks = rowKey(ctx, cell.row)
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
-      return { ok: false, issue: { title: 'Cannot edit this row', detail: 'Its primary key value is missing from the result.' } }
+      return { ok: false, issue: { title: t('editing.cannotEditRowTitle'), detail: t('editing.missingPrimaryKey') } }
     }
     specs.push({ column: ctx.columnName, columnMeta: ctx.columnMeta, value, originalValue: row[cell.col], pks })
   }
@@ -169,10 +170,10 @@ export function buildInsertRows(
   input: ResultEditInput,
   drafts: DraftRow[],
 ): EditResult<{ table: TableRef; rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: CellInput[] }> }> {
-  if (!drafts.length) return { ok: false, issue: { title: 'No new rows', detail: 'Add a row before saving.' } }
+  if (!drafts.length) return { ok: false, issue: { title: t('editing.noNewRowsTitle'), detail: t('editing.addRowFirst') } }
   const ctx = singleTableEditContext(input)
   if (!ctx) {
-    return { ok: false, issue: { title: 'Cannot add rows here', detail: 'New rows can only be saved to a result that maps to one editable table.' } }
+    return { ok: false, issue: { title: t('editing.cannotAddRowsTitle'), detail: t('editing.singleTableResult') } }
   }
   const rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: CellInput[] }> = []
   for (const draft of drafts) {
@@ -182,7 +183,7 @@ export function buildInsertRows(
       const cell = draft.cells[col]
       if (cell === null || cell === undefined) continue
       const ref = insertableColumn(ctx, col)
-      if (!ref) return { ok: false, issue: { title: 'Cannot save this row', detail: 'A filled column is not an editable column of the table.' } }
+      if (!ref) return { ok: false, issue: { title: t('editing.cannotSaveRowTitle'), detail: t('editing.nonEditableColumn') } }
       columns.push(ref)
       values.push(cell)
     }
@@ -204,18 +205,18 @@ export function buildPendingUpdate(
     const ctx = cellEditContext(input, { row: edit.row, col: edit.col })
     if (!ctx) return { ok: false, issue: cannotEditColumn }
     if (table && !sameTable(table, ctx.table)) {
-      return { ok: false, issue: { title: 'Cannot save these edits', detail: 'Edited cells must belong to the same source table.' } }
+      return { ok: false, issue: { title: t('editing.cannotSaveEditsTitle'), detail: t('editing.sameSourceTable') } }
     }
     table = ctx.table
     if (!ctx.result.rows[edit.row]) {
-      return { ok: false, issue: { title: 'Cannot save an edit', detail: 'A row is no longer loaded in the current result.' } }
+      return { ok: false, issue: { title: t('editing.cannotSaveEditTitle'), detail: t('editing.saveRowNotLoaded') } }
     }
     if (input.engine && !supportsOptimisticComparison(input.engine, ctx.columnMeta)) {
-      return { ok: false, issue: cannotCompareColumn(ctx.columnMeta, 'save this edit') }
+      return { ok: false, issue: cannotCompareColumn(ctx.columnMeta, t('editing.actionSaveEdit')) }
     }
     const pks = rowKey(ctx, edit.row)
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
-      return { ok: false, issue: { title: 'Cannot save an edit', detail: 'A row\'s primary key value is missing from the result.' } }
+      return { ok: false, issue: { title: t('editing.cannotSaveEditTitle'), detail: t('editing.saveMissingPrimaryKey') } }
     }
     specs.push({
       column: ctx.columnName,
@@ -235,7 +236,7 @@ export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): E
   const version = versionGuard(ctx)
   const guardColumns = version ? [version.columnMeta] : ctx.columns
   const unsupported = ctx.engine ? guardColumns.find((column) => !supportsOptimisticComparison(ctx.engine!, column)) : undefined
-  if (unsupported) return { ok: false, issue: cannotCompareColumn(unsupported, 'delete this row') }
+  if (unsupported) return { ok: false, issue: cannotCompareColumn(unsupported, t('editing.actionDeleteRow')) }
   const guards = guardColumns.map((column) => {
     const sourceIndex = columnSourceIndex(ctx.result, ctx.table, column.name)
     const fallbackIndex = !hasSources ? simpleColumnProjectionIndex(ctx.result.columns, ctx.sql, column.name) : -1
@@ -245,19 +246,19 @@ export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): E
     return {
       ok: false,
       issue: {
-        title: 'Cannot safely delete this row',
-        detail: 'Refresh with every table column in the result before deleting. SqlKit Studio uses the original row values to avoid deleting a row changed by another session.',
+        title: t('editing.cannotSafelyDeleteTitle'),
+        detail: t('editing.deleteNeedsAllColumns'),
       },
     }
   }
   const keys: RowKey[] = []
   for (const rowIndex of rows) {
     if (!ctx.result.rows[rowIndex]) {
-      return { ok: false, issue: { title: 'Cannot delete this row', detail: 'It is no longer loaded in the current result.' } }
+      return { ok: false, issue: { title: t('editing.cannotDeleteRowTitle'), detail: t('editing.rowNotLoaded') } }
     }
     const pks = rowKey(ctx, rowIndex, false)
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
-      return { ok: false, issue: { title: 'Cannot delete this row', detail: 'Its primary key value is missing from the result.' } }
+      return { ok: false, issue: { title: t('editing.cannotDeleteRowTitle'), detail: t('editing.missingPrimaryKey') } }
     }
     const byName = new Map(pks.map((key) => [key.name.toLowerCase(), key]))
     for (const guard of guards) {
@@ -269,7 +270,7 @@ export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): E
     }
     keys.push([...byName.values()])
   }
-  return keys.length ? { ok: true, value: keys } : { ok: false, issue: { title: 'Cannot delete rows', detail: 'No rows are selected.' } }
+  return keys.length ? { ok: true, value: keys } : { ok: false, issue: { title: t('editing.cannotDeleteRowsTitle'), detail: t('editing.noRowsSelected') } }
 }
 
 function columnsForTable(columns: ColumnRef[], table: TableRef) {

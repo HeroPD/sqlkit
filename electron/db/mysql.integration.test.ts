@@ -304,7 +304,7 @@ DELIMITER ;`)
     try {
       // A killed SLEEP() returns 1 rather than erroring, so assert on the
       // cancel outcome and that the statement ends promptly either way.
-      const running = driver.query('select sleep(30) as s', [], null, null, 'slow-query').catch(() => null)
+      const running = driver.query('select sleep(30) as s', [], null, null, null, 'slow-query').catch(() => null)
       await new Promise((resolve) => setTimeout(resolve, 400))
       expect(await driver.cancel?.('other-query')).toEqual({ running: 0, cancelled: 0 })
       const outcome = await driver.cancel?.('slow-query')

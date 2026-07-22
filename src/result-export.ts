@@ -61,6 +61,56 @@ export const cellToTsv = (value: unknown): string => {
 // cell on paste — and formula-leading cells are neutralized.
 export const cellsToTsv = (rows: unknown[][]): string => rows.map((row) => delimitedRow(row, '\t')).join('\n')
 
+/** Parses a spreadsheet clipboard block, including quoted tabs, newlines, and doubled quotes. */
+export function parseClipboardTsv(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let quoted = false
+  let endedRow = false
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (quoted) {
+      if (char === '"') {
+        if (text[index + 1] === '"') {
+          field += '"'
+          index += 1
+        } else {
+          quoted = false
+        }
+      } else {
+        field += char
+      }
+      endedRow = false
+      continue
+    }
+    if (char === '"' && field === '') {
+      quoted = true
+      endedRow = false
+    } else if (char === '\t') {
+      row.push(field)
+      field = ''
+      endedRow = false
+    } else if (char === '\n' || char === '\r') {
+      if (char === '\r' && text[index + 1] === '\n') index += 1
+      row.push(field)
+      rows.push(row)
+      row = []
+      field = ''
+      endedRow = true
+    } else {
+      field += char
+      endedRow = false
+    }
+  }
+  if (!endedRow || row.length || field) {
+    row.push(field)
+    rows.push(row)
+  }
+  return rows.length ? rows : [['']]
+}
+
 // Numbered suffixes for duplicate column names (select a.id, b.id) so no value
 // is silently dropped when a row becomes an object.
 const jsonKeys = (columns: string[]): string[] => {

@@ -6,6 +6,7 @@ import type { ConnectionOptions } from 'node:tls'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor } from '../../src/dialect'
 import { isReadOnlyQuery } from '../../src/sql-order'
+import { t } from '../../src/i18n'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -23,7 +24,7 @@ export function sslOptions(profile: ConnectionProfile): boolean | ConnectionOpti
   const caPath = ssl.ca.trim()
   if (caPath) {
     try {
-      if (statSync(expandHome(caPath)).size > 5 * 1024 * 1024) throw new Error('certificate file exceeds 5 MB')
+      if (statSync(expandHome(caPath)).size > 5 * 1024 * 1024) throw new Error(t('connection.caTooLarge'))
       options.ca = readFileSync(expandHome(caPath), 'utf8')
     } catch (error) {
       throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`, { cause: error })
@@ -104,14 +105,14 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
   const activePool = () => {
     const pool = pools?.get(active)
-    if (!pool) throw new Error('Not connected')
+    if (!pool) throw new Error(t('connection.notConnected'))
     return pool
   }
 
   const poolForQuery = (childDb?: string | null) => {
     if (!childDb) return activePool()
     const pool = pools?.get(childDb)
-    if (!pool) throw new Error(`Database "${childDb}" is not available on this connection`)
+    if (!pool) throw new Error(t('connection.databaseUnavailable', { database: childDb ?? '' }))
     return pool
   }
 
@@ -201,9 +202,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       await Promise.all([...closing.values()].map((pool) => pool.end().catch(() => {})))
     },
 
-    async query(sql, params = [], childDb = null, sort = null, executionId) {
+    async query(sql, params = [], childDb = null, sort = null, filter = null, executionId) {
       const started = performance.now()
-      const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort })
+      const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort, filter })
       const pool = poolForQuery(childDb)
       // Checked out manually (not pool.query) so the backend PID is known
       // while the statement runs and cancel() has a target.
@@ -223,7 +224,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         entry.pid = backendPid(client)
         if (entry.cancelRequested) {
           releaseToPool()
-          throw new Error('Query cancelled.')
+          throw new Error(t('query.cancelled'))
         }
         const result = await streamQuery(client, plan.batches[0]!, plan.params, started, sourceCacheFor(childDb))
         // Anything that could have changed the catalog invalidates the cached
@@ -243,8 +244,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       } catch (error) {
         // Mirror pool.query: an errored client is destroyed, not reused.
         if (client && !released) client.release(error as Error)
-        throw (error as { code?: string }).code === '57014' || (error as Error).message === 'Query cancelled.'
-          ? new Error('Query cancelled.')
+        throw (error as { code?: string }).code === '57014' || (error as Error).message === t('query.cancelled')
+          ? new Error(t('query.cancelled'))
           : error
       } finally {
         running.delete(entry)
@@ -293,7 +294,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         // transaction state is discarded — closing the connection aborts the txn.
         client.release(error as Error)
         const cancelled = (error as { code?: string }).code === '57014'
-        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? 'Save cancelled.' : (error as Error).message }
+        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? t('query.saveCancelled') : (error as Error).message }
       } finally {
         running.delete(entry)
       }
@@ -326,7 +327,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       } catch (error) {
         client.release(error as Error)
         const cancelled = (error as { code?: string }).code === '57014'
-        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? 'Save cancelled.' : (error as Error).message }
+        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? t('query.saveCancelled') : (error as Error).message }
       } finally {
         running.delete(entry)
       }
@@ -343,9 +344,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     },
 
     async dropDatabase(name) {
-      if (!pools) throw new Error('Not connected')
+      if (!pools) throw new Error(t('connection.notConnected'))
       if (name === active) {
-        throw new Error('Cannot drop the database currently in use — switch to another one first.')
+        throw new Error(t('database.cannotDropCurrent'))
       }
       // The server refuses while connections exist; ours must go first.
       const pool = pools.get(name)
@@ -383,8 +384,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
-    async exportQuery({ sql, params, childDb, sort, filePath, format, executionId }) {
-      const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort })
+    async exportQuery({ sql, params, childDb, sort, filter, filePath, format, executionId }) {
+      const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort, filter })
       // Registered like query() so Stop (and disconnect) can interrupt a
       // runaway export instead of it streaming to completion unstoppably.
       const entry = { executionId, pid: null as number | null, cancelRequested: false }
@@ -394,7 +395,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       try {
         client = await poolForQuery(childDb).connect()
         entry.pid = backendPid(client)
-        if (entry.cancelRequested) throw new Error('Query cancelled.')
+        if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         await streamPgExport(client, plan.batches[0]!, plan.params, writer)
         const result = await writer.close()
         // Reset like query() before the connection re-enters the pool; a failed
@@ -414,8 +415,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         await writer.close().catch(() => {})
         // Uncertain session state — drop the client rather than reuse it.
         client?.release(error as Error)
-        throw (error as { code?: string }).code === '57014' || (error as Error).message === 'Query cancelled.'
-          ? new Error('Query cancelled.')
+        throw (error as { code?: string }).code === '57014' || (error as Error).message === t('query.cancelled')
+          ? new Error(t('query.cancelled'))
           : error
       } finally {
         running.delete(entry)

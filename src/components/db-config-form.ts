@@ -16,8 +16,8 @@ const ENGINES: ReadonlyArray<EngineOption> = [
   { id: 'sqlserver', engine: 'sqlserver', label: 'SQL Server' },
   { id: 'supabase', engine: 'postgresql', flavor: 'supabase', label: 'Supabase (Postgres)' },
   { id: 'mariadb', engine: 'mysql', flavor: 'mariadb', label: 'MariaDB (MySQL)' },
-  { id: 'clickhouse', label: 'ClickHouse (coming soon)', disabled: true },
-  { id: 'oracle', label: 'Oracle (coming soon)', disabled: true },
+  { id: 'clickhouse', label: `ClickHouse (${t('config.comingSoon')})`, disabled: true },
+  { id: 'oracle', label: `Oracle (${t('config.comingSoon')})`, disabled: true },
 ]
 
 const DEFAULT_PORTS: Partial<Record<Engine, string>> = {
@@ -217,7 +217,7 @@ export class DbConfigForm extends LitElement {
     return html`
       <section>
         <div class="section-head">
-          <h4>SSL</h4>
+          <h4>${t('config.sslTitle')}</h4>
           <p class="muted small">${t('config.sslHelp')}</p>
         </div>
         ${this._field(
@@ -396,7 +396,7 @@ export class DbConfigForm extends LitElement {
     this._sshTest = { phase: 'testing' }
     const result = await window.sqlkit.testSshTunnel(this.profile)
     this._sshTest = result.success
-      ? { phase: 'ok', message: `Tunnel OK (${result.tookMs} ms)` }
+      ? { phase: 'ok', message: t('config.tunnelOk', { duration: result.tookMs }) }
       : { phase: 'error', message: result.error }
   }
 
@@ -491,13 +491,13 @@ export class DbConfigForm extends LitElement {
     this._test = { phase: 'testing' }
     const result = await window.sqlkit.testConnection(this.profile)
     this._test = result.success
-      ? { phase: 'ok', message: `Connected — ${result.serverVersion} (${result.tookMs} ms)` }
+      ? { phase: 'ok', message: t('config.connectedVersion', { version: result.serverVersion, duration: result.tookMs }) }
       : { phase: 'error', message: result.error }
   }
 
   private _onSave() {
     if (!this.profile) return
-    const profile = { ...this.profile, name: this.profile.name.trim() || 'Untitled' }
+    const profile = { ...this.profile, name: this.profile.name.trim() || t('config.untitled') }
     this.dispatchEvent(new CustomEvent('config-save', { detail: { profile }, bubbles: true, composed: true }))
   }
 

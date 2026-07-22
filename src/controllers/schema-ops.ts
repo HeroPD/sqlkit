@@ -10,9 +10,10 @@ import {
   type ColumnAdd,
   type ColumnAlter,
 } from '../sql-write'
-import { TABLE_KIND_LABELS } from '../table-kinds'
+import { tableKindLabel } from '../table-kinds'
 import { capabilitiesFor } from '../engine-capabilities'
 import { buildInspectOperation, type InspectOperation } from '../inspect-operations'
+import { t } from '../i18n'
 
 // Staged column edits from the Inspect tab, plus how to reach the connection and
 // refresh the view once the change lands. `onApplied` reloads the inspect tab.
@@ -72,9 +73,9 @@ export class SchemaOpsController {
     if (!profile) return
     const statement = `${DROP_VERBS[table.kind]} ${quoteQualified(table, dialectFor(profile.engine))};`
     this.deps.dialogs.confirm = {
-      message: `Drop ${TABLE_KIND_LABELS[table.kind]} "${table.name}"?`,
-      detail: 'It is permanently deleted on the server. This cannot be undone.',
-      confirmLabel: 'Drop',
+      message: t('schema.dropPrompt', { kind: tableKindLabel(table.kind), name: table.name }),
+      detail: t('schema.dropDetail'),
+      confirmLabel: t('schema.drop'),
       action: () => {
         this.deps.openPreview(statement)
         // The schema changed: re-fetch tables/columns once the drop lands.
@@ -90,9 +91,9 @@ export class SchemaOpsController {
     const qualified = quoteQualified(table, dialectFor(profile.engine))
     const statement = profile.engine === 'sqlite' ? `DELETE FROM ${qualified};` : `TRUNCATE TABLE ${qualified};`
     this.deps.dialogs.confirm = {
-      message: `Truncate "${table.name}"?`,
-      detail: `All rows are permanently deleted (${statement}). This cannot be undone.`,
-      confirmLabel: 'Truncate',
+      message: t('schema.truncatePrompt', { name: table.name }),
+      detail: t('schema.truncateDetail', { statement }),
+      confirmLabel: t('schema.truncate'),
       action: () => {
         this.deps.openPreview(statement)
         void this.deps.runSql(statement)
@@ -140,7 +141,7 @@ export class SchemaOpsController {
 
   private _ddlWarning(engine: Engine, statementCount: number): string | undefined {
     if (statementCount < 2 || capabilitiesFor(engine).ddlAtomicity === 'atomic') return undefined
-    return 'This engine commits schema statements individually. If a later statement fails, earlier changes cannot be rolled back automatically.'
+    return t('schema.nonAtomicWarning')
   }
 
   // Resolves to an error message (shown inline in the review dialog) or null on
@@ -155,11 +156,11 @@ export class SchemaOpsController {
     if (!result.success) {
       const reason =
         result.failedIndex !== undefined
-          ? `Statement ${result.failedIndex + 1} of ${statements.length} failed: ${result.error}`
+          ? t('schema.statementFailed', { index: result.failedIndex + 1, total: statements.length, error: result.error })
           : result.error
       const outcome = result.partial
-        ? `${result.appliedCount ?? result.failedIndex ?? 0} earlier statement(s) were already committed by MySQL. Reload the schema before continuing.`
-        : 'No changes were made.'
+        ? t('schema.partialCommit', { count: result.appliedCount ?? result.failedIndex ?? 0 })
+        : t('schema.noChanges')
       return `${reason} ${outcome}`
     }
     spec.onApplied()
@@ -169,9 +170,9 @@ export class SchemaOpsController {
 
   createDatabase(profileId: string) {
     this.deps.dialogs.prompt = {
-      message: 'Create Database',
-      detail: 'Name of the new database on this server.',
-      confirmLabel: 'Create',
+      message: t('schema.createDatabase'),
+      detail: t('schema.createDatabaseDetail'),
+      confirmLabel: t('common.create'),
       placeholder: 'my_database',
       action: (name) => void this._createDatabase(profileId, name),
     }
@@ -179,22 +180,22 @@ export class SchemaOpsController {
 
   dropDatabase(profileId: string, database: string) {
     this.deps.dialogs.confirm = {
-      message: `Drop database "${database}"?`,
-      detail: 'All data in it is permanently deleted on the server. This cannot be undone.',
-      confirmLabel: 'Drop Database',
+      message: t('schema.dropDatabasePrompt', { database }),
+      detail: t('schema.dropDatabaseDetail'),
+      confirmLabel: t('schema.dropDatabase'),
       action: () => void this._dropDatabase(profileId, database),
     }
   }
 
   private async _createDatabase(profileId: string, name: string) {
     const result = await window.sqlkit.createDatabase(profileId, name)
-    if (!result.success) this.deps.dialogs.notice(`Could not create "${name}"`, result.error ?? 'Unknown error')
+    if (!result.success) this.deps.dialogs.notice(t('schema.createFailed', { name }), result.error ?? t('common.unknownError'))
   }
 
   private async _dropDatabase(profileId: string, database: string) {
     const result = await window.sqlkit.dropDatabase(profileId, database)
     if (!result.success) {
-      this.deps.dialogs.notice(`Could not drop "${database}"`, result.error ?? 'Unknown error')
+      this.deps.dialogs.notice(t('schema.dropFailed', { name: database }), result.error ?? t('common.unknownError'))
       return
     }
     this.deps.onDatabaseDropped(profileId, database)

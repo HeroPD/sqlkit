@@ -1,3 +1,5 @@
+import { t } from './i18n'
+
 const BYTE_ORDER_MARK = '\uFEFF'
 
 export type ParsedCsv = { rows: string[][] }
@@ -6,7 +8,7 @@ export type ParsedCsv = { rows: string[][] }
 // cross IPC. Quoted delimiters, escaped quotes, and embedded newlines survive.
 export function parseCsv(text: string, delimiter = ','): ParsedCsv {
   if (delimiter.length !== 1 || delimiter === '"' || delimiter === '\r' || delimiter === '\n') {
-    throw new Error('CSV delimiter must be one character')
+    throw new Error(t('csv.invalidDelimiter'))
   }
   const input = text.startsWith(BYTE_ORDER_MARK) ? text.slice(1) : text
   const rows: string[][] = []
@@ -59,17 +61,16 @@ export function parseCsv(text: string, delimiter = ','): ParsedCsv {
     fieldStarted = true
   }
 
-  if (quoted) throw new Error('CSV contains an unterminated quoted field')
+  if (quoted) throw new Error(t('csv.unterminatedQuote'))
   if (fieldStarted || field !== '' || row.length > 0) finishRow()
   return { rows }
 }
 
 export function csvShapeError(rows: string[][]): string | null {
   const width = rows[0]?.length ?? 0
-  if (!width) return 'The file does not contain any columns.'
+  if (!width) return t('csv.noColumns')
   const mismatch = rows.findIndex((row) => row.length !== width)
   return mismatch < 0
     ? null
-    : `CSV row ${mismatch + 1} has ${rows[mismatch]?.length ?? 0} fields; expected ${width}.`
+    : t('csv.rowWidth', { row: mismatch + 1, actual: rows[mismatch]?.length ?? 0, expected: width })
 }
-

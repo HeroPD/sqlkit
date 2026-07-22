@@ -206,6 +206,18 @@ describe('prepareSqlRun', () => {
     })).toThrow(/single SELECT/i)
   })
 
+  it('applies a result filter before an injected sort', () => {
+    expect(prepareSqlRun({
+      engine: 'postgresql',
+      sql: 'SELECT id, active FROM users ORDER BY id LIMIT 20',
+      filter: 'active = true',
+      sort: { columnIndex: 0, direction: 'desc' },
+    }).batches).toEqual([
+      'SELECT id, active FROM users\nWHERE (active = true)\nORDER BY 1 DESC\nLIMIT 20',
+    ])
+    expect(() => prepareSqlRun({ engine: 'postgresql', sql: 'DELETE FROM users', filter: 'id > 1' })).toThrow(/single SELECT/)
+  })
+
   it('normalizes MySQL client delimiters before validation and execution', () => {
     expect(prepareSqlRun({
       engine: 'mysql',

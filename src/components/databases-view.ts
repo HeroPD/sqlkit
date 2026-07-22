@@ -55,7 +55,7 @@ export class DatabasesView extends LitElement {
       connected ? { id: 'disconnect', label: t('database.disconnect') } : { id: 'connect', label: t('database.connect') },
       ...(connected && engine !== 'sqlite' ? [{ id: 'create-db', label: t('database.create') }] : []),
       { id: 'edit', label: t('database.edit') },
-      { id: 'remove', label: t('database.remove'), danger: true },
+      { id: 'remove', label: t('database.remove'), danger: true, separatorBefore: true },
     ]
     return html`
       <context-menu

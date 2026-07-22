@@ -8,6 +8,7 @@ import { openExportWriter, type ExportWriter } from './export'
 import { sslOptions } from './postgres'
 import { prepareSqlRun } from './sql-script'
 import type { SqlModeFlags } from '../../src/sql-mask'
+import { t } from '../../src/i18n'
 
 // Schemas MySQL ships with; never listed as children or browsable databases.
 const SYSTEM_SCHEMAS = ['mysql', 'information_schema', 'performance_schema', 'sys']
@@ -117,14 +118,14 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
   const activePool = () => {
     const pool = pools?.get(active)
-    if (!pool) throw new Error('Not connected')
+    if (!pool) throw new Error(t('connection.notConnected'))
     return pool
   }
 
   const poolForQuery = (childDb?: string | null) => {
     if (!childDb) return activePool()
     const pool = pools?.get(childDb)
-    if (!pool) throw new Error(`Database "${childDb}" is not available on this connection`)
+    if (!pool) throw new Error(t('connection.databaseUnavailable', { database: childDb ?? '' }))
     return pool
   }
 
@@ -193,9 +194,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       await Promise.all([...closing.values()].map((pool) => pool.end().catch(() => {})))
     },
 
-    async query(sql, params = [], childDb = null, sort = null, executionId) {
+    async query(sql, params = [], childDb = null, sort = null, filter = null, executionId) {
       const started = performance.now()
-      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, sqlMode })
+      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode })
       // Checked out manually so the thread id is known while the statement
       // runs and cancel() has a KILL QUERY target.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
@@ -214,7 +215,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         entry.threadId = raw.threadId ?? null
         if (entry.cancelRequested) {
           releaseToPool()
-          throw new Error('Query cancelled.')
+          throw new Error(t('query.cancelled'))
         }
         const result = await streamQuery(raw, plan.batches[0]!, plan.params, started)
         releaseToPool()
@@ -222,7 +223,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       } catch (error) {
         // The connection may hold half-read results; drop it rather than reuse.
         conn?.destroy()
-        throw isInterrupted(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
+        throw isInterrupted(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
       } finally {
         running.delete(entry)
       }
@@ -248,7 +249,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         const targets = statements.map((statement) => writeTargetTable(statement.sql))
         if (targets.some((target) => target === null)) {
           releaseToPool()
-          return { success: false, error: 'Could not verify transactional storage for this save; run the statements manually instead.' }
+          return { success: false, error: t('connection.mysqlTransactionUnknown') }
         }
         const unique = [...new Map(targets.map((target) => [`${target!.schema ?? ''}/${target!.name}`, target!])).values()]
         const conditions = unique
@@ -300,7 +301,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
-          error: isInterrupted(error) ? 'Save cancelled.' : (error as Error).message,
+          error: isInterrupted(error) ? t('query.saveCancelled') : (error as Error).message,
         }
       } finally {
         running.delete(entry)
@@ -333,7 +334,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           failedIndex: index >= 0 ? index : undefined,
           partial: index > 0,
           appliedCount: Math.max(0, index),
-          error: isInterrupted(error) ? 'Save cancelled.' : (error as Error).message,
+          error: isInterrupted(error) ? t('query.saveCancelled') : (error as Error).message,
         }
       } finally {
         running.delete(entry)
@@ -349,9 +350,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async dropDatabase(name) {
-      if (!pools) throw new Error('Not connected')
+      if (!pools) throw new Error(t('connection.notConnected'))
       if (name === active) {
-        throw new Error('Cannot drop the database currently in use — switch to another one first.')
+        throw new Error(t('database.cannotDropCurrent'))
       }
       const pool = pools.get(name)
       if (pool) {
@@ -381,8 +382,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
-    async exportQuery({ sql, params, childDb, sort, filePath, format, executionId }) {
-      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, sqlMode })
+    async exportQuery({ sql, params, childDb, sort, filter, filePath, format, executionId }) {
+      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode })
       // Registered like query() so Stop (and disconnect) can KILL QUERY a
       // runaway export instead of it streaming to completion unstoppably.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
@@ -392,7 +393,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       try {
         conn = await poolForQuery(childDb).getConnection()
         entry.threadId = rawOf(conn).threadId ?? null
-        if (entry.cancelRequested) throw new Error('Query cancelled.')
+        if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         await streamMysqlExport(rawOf(conn), plan.batches[0]!, plan.params, writer)
         const result = await writer.close()
         // Leaves `running` before the connection re-enters the pool (see query()).
@@ -404,7 +405,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         await writer.close().catch(() => {})
         // May hold half-read results; drop it rather than reuse.
         conn?.destroy()
-        throw isInterrupted(error) || (error as Error).message === 'Query cancelled.' ? new Error('Query cancelled.') : error
+        throw isInterrupted(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
       } finally {
         running.delete(entry)
       }

@@ -1,4 +1,5 @@
 import type { ConnectionProfile, Engine, EngineFlavor, SslMode } from './electron'
+import { t } from './i18n'
 
 const DEFAULT_PORTS: Partial<Record<Engine, string>> = {
   postgresql: '5432',
@@ -43,11 +44,11 @@ export function profileFromConnectionUrl(value: string, current: ConnectionProfi
   try {
     url = new URL(value.trim())
   } catch {
-    throw new Error('Enter a valid database URL.')
+    throw new Error(t('config.invalidUrl'))
   }
   const target = scheme(url.protocol)
-  if (!target) throw new Error('Supported URL schemes: postgresql, postgres, mysql, mariadb, sqlserver, and mssql.')
-  if (!url.hostname) throw new Error('The database URL must include a host.')
+  if (!target) throw new Error(t('config.supportedUrlSchemes'))
+  if (!url.hostname) throw new Error(t('config.urlNeedsHost'))
 
   const engine = target.engine
   const database = decoded(url.pathname.replace(/^\//, ''))

@@ -1,6 +1,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
+import { t } from '../i18n'
 
 export type PromptConfirmDetail = { value: string }
 
@@ -16,7 +17,7 @@ export class PromptDialog extends LitElement {
   detail = ''
 
   @property()
-  confirmLabel = 'OK'
+  confirmLabel = t('common.ok')
 
   @property()
   placeholder = ''
@@ -60,7 +61,7 @@ export class PromptDialog extends LitElement {
             }}
           />
           <div class="actions">
-            <button class="secondary" @click=${this._cancel}>Cancel</button>
+            <button class="secondary" @click=${this._cancel}>${t('common.cancel')}</button>
             <button class="primary" @click=${this._confirm}>${this.confirmLabel}</button>
           </div>
         </div>

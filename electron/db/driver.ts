@@ -30,13 +30,14 @@ export type Driver = {
   disconnect(): Promise<void>
   /** Executes one self-contained, stateless SQL run in `childDb` when provided,
    * otherwise in the active database. Connection-scoped state is not preserved
-   * between calls; transactions must begin and finish in this call. `sort`
-   * injects an ORDER BY only for a single SELECT, with engine-correct quoting. */
+   * between calls; transactions must begin and finish in this call. `filter`
+   * and `sort` inject outer WHERE/ORDER BY clauses only for one SELECT. */
   query(
     sql: string,
     params?: unknown[],
     childDb?: string | null,
     sort?: QuerySort | null,
+    filter?: string | null,
     executionId?: string,
   ): Promise<QueryResult>
   /** Runs statements in a single transaction on one connection, committing only
@@ -65,6 +66,7 @@ export type Driver = {
     params: unknown[]
     childDb: string | null
     sort: QuerySort | null
+    filter?: string | null
     filePath: string
     format: ExportFormat
     executionId?: string

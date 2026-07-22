@@ -196,7 +196,7 @@ describe('sqlite driver: cancel', () => {
     const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
     expect(await driver.connect()).toBe('SQLite 3.0.0')
 
-    const running = driver.query('select 1', [], null, null, 'slow-query')
+    const running = driver.query('select 1', [], null, null, null, 'slow-query')
     running.catch(() => {}) // asserted below; keep the rejection from going unhandled mid-cancel
     expect(await driver.cancel?.('other-query')).toEqual({ running: 0, cancelled: 0 })
     expect(spawned[0]?.killed).toBe(false)
@@ -235,8 +235,8 @@ describe('sqlite driver: cancel', () => {
     const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
     await driver.connect()
 
-    const first = driver.query('select 1', [], null, null, 'first')
-    const queued = driver.query('select 2', [], null, null, 'queued')
+    const first = driver.query('select 1', [], null, null, null, 'first')
+    const queued = driver.query('select 2', [], null, null, null, 'queued')
     first.catch(() => {})
     queued.catch(() => {})
 
@@ -256,8 +256,8 @@ describe('sqlite driver: cancel', () => {
     const driver = createSqliteDriver(sqliteProfile(':memory:'), spawn)
     await driver.connect()
 
-    const active = driver.query('select 1', [], null, null, 'active')
-    const queued = driver.query('select 2', [], null, null, 'queued')
+    const active = driver.query('select 1', [], null, null, null, 'active')
+    const queued = driver.query('select 2', [], null, null, null, 'queued')
     active.catch(() => {})
 
     expect(await driver.cancel?.('queued')).toEqual({ running: 1, cancelled: 1 })
@@ -311,6 +311,21 @@ describe('sqlite driver: query', () => {
       [2, 9],
       [1, 2],
     ])
+  })
+
+  it('injects a result condition before sorting', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table t(a, active)')
+    await driver.query('insert into t values (1, 1), (3, 1), (2, 0)')
+
+    const result = await driver.query(
+      'select a, active from t where a > 0 order by a',
+      [],
+      null,
+      { columnIndex: 0, direction: 'desc' },
+      'active = 1',
+    )
+    expect(result.rows).toEqual([[3, 1], [1, 1]])
   })
 
   it('replaces an existing ORDER BY when sorting, keeping the LIMIT after it', async () => {

@@ -1,6 +1,7 @@
 import type { ConnectionProfile, TestSshResult } from '../../src/electron'
 import { dialog } from 'electron'
 import { openSshTunnel } from './sshTunnel'
+import { t } from '../../src/i18n'
 
 // A tunnel exposes a local TCP port that forwards to the real database host.
 // Future transports (SOCKS/HTTP proxies) share this shape, so a driver just
@@ -32,10 +33,10 @@ const usesTunnel = (profile: ConnectionProfile) => profile.engine !== 'sqlite' &
 // any handshake is in flight, so the user can take their time verifying.
 const approveFirstUse = async (hostId: string, fingerprint: string) => (await dialog.showMessageBox({
   type: 'warning',
-  title: 'Verify SSH host key',
-  message: `Trust this SSH host key for ${hostId}?`,
-  detail: `Fingerprint: ${fingerprint}\n\nVerify this fingerprint with the server administrator. Trusting an unverified key can expose the database connection to interception.`,
-  buttons: ['Cancel', 'Trust Host Key'],
+  title: t('ssh.verifyHostKey'),
+  message: t('ssh.trustHostPrompt', { host: hostId }),
+  detail: t('ssh.fingerprintDetail', { fingerprint }),
+  buttons: [t('common.cancel'), t('ssh.trustHostKey')],
   defaultId: 0,
   cancelId: 0,
   noLink: true,
@@ -56,7 +57,7 @@ export async function resolveEndpoint(
     try {
       tunnel = await openSshTunnel(profile.ssh!, host, port, onTunnelError, approveFirstUse)
     } catch (error) {
-      throw new Error(`SSH tunnel failed: ${(error as Error).message}`, { cause: error })
+      throw new Error(t('ssh.tunnelFailed', { error: (error as Error).message }), { cause: error })
     }
     return { host: '127.0.0.1', port: tunnel.localPort, tunnel }
   }
@@ -67,7 +68,7 @@ export async function resolveEndpoint(
 // Stateless probe for the form's "Test SSH" button: open the tunnel, then
 // immediately tear it down.
 export async function testSshTunnel(profile: ConnectionProfile): Promise<TestSshResult> {
-  if (!usesTunnel(profile)) return { success: false, error: 'SSH is not enabled', tookMs: 0 }
+  if (!usesTunnel(profile)) return { success: false, error: t('ssh.notEnabled'), tookMs: 0 }
 
   const { host, port } = remoteTarget(profile)
   const started = performance.now()

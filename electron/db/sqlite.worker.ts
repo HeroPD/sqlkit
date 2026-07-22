@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { exportQuery, inspectTable, listColumns, listTables, openDatabase, queryDatabase, runBatch, runDdl, serverVersion } from './sqlite-engine'
 import type { SqliteRequest, SqliteRequestType, SqliteResponse, SqliteResultByRequest } from './sqlite-protocol'
+import { t } from '../../src/i18n'
 
 // Electron utilityProcess entry: owns one synchronous SQLite handle and answers
 // requests over parentPort. Running here (not the main process) means a heavy
@@ -19,7 +20,7 @@ const parentPort = (process as unknown as { parentPort: ParentPort }).parentPort
 let db: DatabaseSync | null = null
 
 const requireDb = (): DatabaseSync => {
-  if (!db) throw new Error('Not connected')
+  if (!db) throw new Error(t('connection.notConnected'))
   return db
 }
 

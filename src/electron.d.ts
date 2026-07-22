@@ -290,6 +290,9 @@ export type FileSaveResult =
 export type FileDeleteResult = { success: true } | { success: false; canceled?: boolean; error?: string }
 
 export type SqlkitApi = {
+  /** OS clipboard access lives in the trusted process so packaged sandboxed renderers work reliably. */
+  readClipboardText: () => Promise<string>
+  writeClipboardText: (text: string) => Promise<void>
   openWorkspace: () => Promise<WorkspaceResult>
   openWorkspacePath: (path: string) => Promise<WorkspaceResult>
   closeWorkspace: () => Promise<void>
@@ -320,6 +323,7 @@ export type SqlkitApi = {
     sql: string,
     params?: unknown[],
     sort?: QuerySort | null,
+    filter?: string | null,
     executionId?: string,
   ) => Promise<QueryResponse>
   /** Runs statements in one transaction on a single connection: all commit or
@@ -342,6 +346,7 @@ export type SqlkitApi = {
     sql: string,
     params: unknown[] | undefined,
     sort: QuerySort | null,
+    filter: string | null,
     format: ExportFormat,
     suggestedName: string,
     executionId?: string,

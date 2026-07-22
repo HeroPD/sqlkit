@@ -45,6 +45,7 @@ import { quoteStyleFor } from '../dialect'
 import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 import { softHighlightStyle } from '../codemirror/highlight'
+import { t } from '../i18n'
 
 const FORMAT_LANGUAGE = {
   postgres: 'postgresql',
@@ -584,7 +585,7 @@ export class SqlEditor extends LitElement {
       })
       .catch((error: unknown) => {
         this.dispatchEvent(new CustomEvent('editor-notice', {
-          detail: { title: 'Could not format SQL', detail: (error as Error).message },
+          detail: { title: t('sql.formatFailed'), detail: (error as Error).message },
           bubbles: true,
           composed: true,
         }))

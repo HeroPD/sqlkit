@@ -310,7 +310,7 @@ describeDb('postgres driver (integration)', () => {
   it('cancels an in-flight query from an out-of-band connection', async () => {
     const driver = await connectDriver()
     try {
-      const running = driver.query('select pg_sleep(30)', [], null, null, 'slow-query')
+      const running = driver.query('select pg_sleep(30)', [], null, null, null, 'slow-query')
       // Attach the rejection expectation before cancelling so the reject has a
       // handler the instant it fires (no transient unhandled rejection).
       const cancelled = expect(running).rejects.toThrow('Query cancelled.')

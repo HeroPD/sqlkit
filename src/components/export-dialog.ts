@@ -2,6 +2,7 @@ import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
 import type { ExportFormat } from '../result-export'
+import { formatInteger, rowWord, t } from '../i18n'
 
 export type { ExportFormat }
 // `stream` requests a full re-run streamed to disk (past the buffered rows);
@@ -55,14 +56,18 @@ export class ExportDialog extends LitElement {
     const streaming = offerStream && this._streamFull
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
-        <div class="panel" role="dialog" aria-label="Export results">
-          <h4>Export Results</h4>
+        <div class="panel" role="dialog" aria-label=${t('export.title')}>
+          <h4>${t('export.title')}</h4>
           <p class="muted small">
-            ${this.total} row${this.total === 1 ? '' : 's'} received${this.truncated ? ' (the query returned more; the result was capped)' : ''}.
+            ${t('export.received', {
+              count: formatInteger(this.total),
+              rows: rowWord(this.total),
+              capped: this.truncated ? t('export.capped') : '',
+            })}
           </p>
           <div class="field">
-            <span class="label">Format</span>
-            <div class="formats" role="radiogroup" aria-label="Format">
+            <span class="label">${t('export.format')}</span>
+            <div class="formats" role="radiogroup" aria-label=${t('export.format')}>
               ${FORMATS.map(
                 (format) => html`
                   <button
@@ -81,18 +86,18 @@ export class ExportDialog extends LitElement {
             ? html`
                 <label class="field stream-toggle">
                   <input type="checkbox" .checked=${this._streamFull} @change=${this._onStreamToggle} />
-                  <span class="muted small">Export the full result — re-runs the query and streams every row to the file.</span>
+                  <span class="muted small">${t('export.fullResult')}</span>
                 </label>
               `
             : ''}
           <div class="field">
-            <label class="label" for="rows">Rows</label>
+            <label class="label" for="rows">${t('export.rows')}</label>
             <input id="rows" type="number" min="1" max=${this.total} .value=${String(this.total)} ?disabled=${streaming} />
-            <span class="muted small">${streaming ? 'all rows' : `of ${this.total}`}</span>
+            <span class="muted small">${streaming ? t('export.allRows') : t('export.ofRows', { count: formatInteger(this.total) })}</span>
           </div>
           <div class="actions">
-            <button class="secondary" @click=${this._cancel}>Cancel</button>
-            <button class="primary" @click=${this._confirm}>Export</button>
+            <button class="secondary" @click=${this._cancel}>${t('common.cancel')}</button>
+            <button class="primary" @click=${this._confirm}>${t('common.export')}</button>
           </div>
         </div>
       </div>

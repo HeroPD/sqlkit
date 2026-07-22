@@ -2,6 +2,7 @@ import type { ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile } from '../electron'
 import type { ConnectionsController } from './connections'
 import type { DialogsController } from './dialogs'
+import { t } from '../i18n'
 
 type Deps = {
   // Live connection statuses, read to resolve which child a profile targets.
@@ -9,17 +10,6 @@ type Deps = {
   dialogs: DialogsController
   activeDbId: () => string | null
 }
-
-const CONFIG_READ_ERROR =
-  'The file was left untouched, so your saved connections are still on disk. ' +
-  'Fix or restore .sqlkit/config.json and reopen the workspace — saving new connections now would overwrite it.'
-
-const UNENCRYPTED_SECRETS_WARNING =
-  'No OS key store (keychain) is available on this system, so connection passwords are saved unencrypted in ' +
-  "this workspace's .sqlkit/config.json. A .gitignore keeps that file out of version control — avoid syncing or sharing it."
-
-const WEAK_STORAGE_WARNING =
-  'Electron is using Linux basic_text storage because no supported keyring is available. Saved passwords are only weakly obfuscated, not protected by an OS keychain. Configure libsecret/KWallet or avoid saving credentials.'
 
 // Owns the workspace's saved connection profiles (.sqlkit/config.json): the
 // list, its load/persist/save round trips, profile lookups, and resolving the
@@ -97,15 +87,15 @@ export class ConfigController {
   // default child. A read error is surfaced; the on-disk file is left untouched.
   async load(): Promise<{ profileId: string | null; child: string | null }> {
     const { config, error, unencryptedSecrets, weakCredentialStorage } = await window.sqlkit.getWorkspaceConfig()
-    if (error) this.deps.dialogs.notice('Workspace config could not be read', `${error}\n\n${CONFIG_READ_ERROR}`)
+    if (error) this.deps.dialogs.notice(t('config.readFailed'), `${error}\n\n${t('config.readRecovery')}`)
     // Fires on open and after every save (via _loadConfig), so this one spot
     // covers the open-migration and persist() re-saves too; shown once a session.
     if (unencryptedSecrets && !this._warnedUnencrypted) {
       this._warnedUnencrypted = true
-      this.deps.dialogs.notice('Passwords stored unencrypted', UNENCRYPTED_SECRETS_WARNING)
+      this.deps.dialogs.notice(t('config.unencryptedTitle'), t('config.unencryptedDetail'))
     } else if (weakCredentialStorage && !this._warnedUnencrypted) {
       this._warnedUnencrypted = true
-      this.deps.dialogs.notice('Passwords use weak Linux storage', WEAK_STORAGE_WARNING)
+      this.deps.dialogs.notice(t('config.weakStorageTitle'), t('config.weakStorageDetail'))
     }
     this.connections = config.connections
     const restored =
@@ -122,8 +112,8 @@ export class ConfigController {
       connections: this._connections,
       activeDbId: this.deps.activeDbId(),
     }).then((result) => {
-      if (!result.success) this.deps.dialogs.notice('Workspace config could not be saved', result.error)
-    }).catch((error: unknown) => this.deps.dialogs.notice('Workspace config could not be saved', (error as Error).message))
+      if (!result.success) this.deps.dialogs.notice(t('config.saveFailed'), result.error)
+    }).catch((error: unknown) => this.deps.dialogs.notice(t('config.saveFailed'), (error as Error).message))
   }
 
   // Upserts a profile and writes the config; the caller re-reads via load() to

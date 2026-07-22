@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cellToTsv, cellsToTsv, createExportSerializer, formulaSafeText, rowToTsv, toDelimited, toJson } from './result-export'
+import { cellToTsv, cellsToTsv, createExportSerializer, formulaSafeText, parseClipboardTsv, rowToTsv, toDelimited, toJson } from './result-export'
 
 describe('cellToTsv', () => {
   it('returns plain values unchanged', () => {
@@ -121,6 +121,18 @@ describe('rowToTsv', () => {
 
   it('neutralizes a formula trigger in a string cell', () => {
     expect(rowToTsv(['=cmd', 2])).toBe("'=cmd\t2")
+  })
+})
+
+describe('parseClipboardTsv', () => {
+  it('parses a spreadsheet rectangle and ignores its final line break', () => {
+    expect(parseClipboardTsv('a\tb\r\nc\td\r\n')).toEqual([['a', 'b'], ['c', 'd']])
+  })
+
+  it('keeps quoted tabs, newlines, and doubled quotes inside one cell', () => {
+    expect(parseClipboardTsv('"a\tb"\t"line 1\nline 2"\t"say ""hi"""')).toEqual([
+      ['a\tb', 'line 1\nline 2', 'say "hi"'],
+    ])
   })
 })
 

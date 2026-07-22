@@ -1,6 +1,8 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
+  ipcMain,
   Menu,
   session,
   shell,
@@ -203,6 +205,11 @@ function createWindow() {
 }
 
 function registerIpc() {
+  ipcMain.handle('clipboard:read-text', () => clipboard.readText())
+  ipcMain.handle('clipboard:write-text', (_event, text: unknown) => {
+    if (typeof text !== 'string') throw new Error('Clipboard text must be a string')
+    clipboard.writeText(text)
+  })
   registerWorkspaceIpc({
     workspaceFor,
     setWorkspace: (contentsId, path) => workspacePaths.set(contentsId, path),

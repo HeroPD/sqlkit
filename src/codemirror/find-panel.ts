@@ -9,6 +9,7 @@ import {
   replaceNext,
   setSearchQuery,
 } from '@codemirror/search'
+import { t } from '../i18n'
 
 // VS Code's find widget, rebuilt as a CodeMirror search panel: a find input
 // with the case / whole-word / regex toggles inside it, an "N of M" match
@@ -38,7 +39,7 @@ export function createFindPanel(view: EditorView): Panel {
   dom.className = 'find-widget'
 
   // --- DOM ----------------------------------------------------------------
-  const toggleReplace = button('toggle-replace', 'chevron-right', 'Toggle Replace')
+  const toggleReplace = button('toggle-replace', 'chevron-right', t('find.toggleReplace'))
   toggleReplace.setAttribute('aria-expanded', 'false')
 
   const rows = document.createElement('div')
@@ -49,20 +50,20 @@ export function createFindPanel(view: EditorView): Panel {
   const findBox = document.createElement('div')
   findBox.className = 'find-input-box'
   const findInput = document.createElement('input')
-  findInput.placeholder = 'Find'
+  findInput.placeholder = t('find.find')
   findInput.value = initial.search
   findInput.setAttribute('main-field', 'true')
   findInput.spellcheck = false
-  const caseBtn = button('find-toggle', 'case-sensitive', 'Match Case')
-  const wordBtn = button('find-toggle', 'whole-word', 'Match Whole Word')
-  const regexBtn = button('find-toggle', 'regex', 'Use Regular Expression')
+  const caseBtn = button('find-toggle', 'case-sensitive', t('find.matchCase'))
+  const wordBtn = button('find-toggle', 'whole-word', t('find.matchWholeWord'))
+  const regexBtn = button('find-toggle', 'regex', t('find.useRegex'))
   findBox.append(findInput, caseBtn, wordBtn, regexBtn)
 
   const count = document.createElement('span')
   count.className = 'find-count'
-  const prevBtn = button('find-btn', 'arrow-up', 'Previous Match (⇧↵)')
-  const nextBtn = button('find-btn', 'arrow-down', 'Next Match (↵)')
-  const closeBtn = button('find-btn', 'close', 'Close (Esc)')
+  const prevBtn = button('find-btn', 'arrow-up', t('find.previousMatch', { shortcut: '⇧↵' }))
+  const nextBtn = button('find-btn', 'arrow-down', t('find.nextMatch', { shortcut: '↵' }))
+  const closeBtn = button('find-btn', 'close', t('find.close', { shortcut: 'Esc' }))
   findRow.append(findBox, count, prevBtn, nextBtn, closeBtn)
 
   const replaceRow = document.createElement('div')
@@ -70,12 +71,12 @@ export function createFindPanel(view: EditorView): Panel {
   const replaceBox = document.createElement('div')
   replaceBox.className = 'find-input-box'
   const replaceInput = document.createElement('input')
-  replaceInput.placeholder = 'Replace'
+  replaceInput.placeholder = t('find.replace')
   replaceInput.value = initial.replace
   replaceInput.spellcheck = false
   replaceBox.append(replaceInput)
-  const replaceBtn = button('find-btn', 'replace', 'Replace')
-  const replaceAllBtn = button('find-btn', 'replace-all', 'Replace All')
+  const replaceBtn = button('find-btn', 'replace', t('find.replace'))
+  const replaceAllBtn = button('find-btn', 'replace-all', t('find.replaceAll'))
   replaceRow.append(replaceBox, replaceBtn, replaceAllBtn)
 
   rows.append(findRow, replaceRow)
@@ -111,8 +112,8 @@ export function createFindPanel(view: EditorView): Panel {
       }
       none = total === 0
       text = none
-        ? 'No results'
-        : `${index || '?'} of ${total}${total >= MAX_COUNT ? '+' : ''}`
+        ? t('find.noResults')
+        : t('find.matchCount', { index: index || '?', total, capped: total >= MAX_COUNT ? '+' : '' })
     }
     count.textContent = text
     count.classList.toggle('no-results', none)

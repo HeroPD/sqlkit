@@ -53,7 +53,7 @@ export class HistoryView extends LitElement {
       ...(this.engine === 'postgresql' || this.engine === 'mysql'
         ? [{ id: 'explain-analyze', label: t('history.explainAnalyze') }]
         : []),
-      { id: 'copy-sql', label: t('history.copySql') },
+      { id: 'copy-sql', label: t('history.copySql'), separatorBefore: true },
     ]
     return html`
       <context-menu

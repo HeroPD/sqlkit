@@ -2,6 +2,7 @@ import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import type { QueryParameter } from '../query-parameters'
 import { controls, typography } from '../shared-styles'
+import { t } from '../i18n'
 
 export type ParametersConfirmDetail = { values: string[] }
 
@@ -28,16 +29,16 @@ export class ParameterDialog extends LitElement {
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <form class="panel" @submit=${this._confirm}>
-          <h4>Query parameters</h4>
-          <p class="muted small">Values are bound safely as text. Enter <code>NULL</code> for SQL NULL.</p>
+          <h4>${t('parameters.title')}</h4>
+          <p class="muted small">${t('parameters.help')}</p>
           <div class="fields">
             ${this.parameters.map((parameter) => html`
               <label><span>${parameter.label}</span><input type="text" autocomplete="off" spellcheck="false" /></label>
             `)}
           </div>
           <div class="actions">
-            <button type="button" class="secondary" @click=${this._cancel}>Cancel</button>
-            <button type="submit" class="primary">Run</button>
+            <button type="button" class="secondary" @click=${this._cancel}>${t('common.cancel')}</button>
+            <button type="submit" class="primary">${t('common.run')}</button>
           </div>
         </form>
       </div>

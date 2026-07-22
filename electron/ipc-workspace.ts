@@ -63,7 +63,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
 
   ipcMain.handle('workspace:open', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)
-    if (!window) return { success: false, error: 'Window not ready' }
+    if (!window) return { success: false, error: t('workspace.windowNotReady') }
     const result = await dialog.showOpenDialog(window, {
       properties: ['openDirectory', 'createDirectory'],
       title: t('workspace.openTitle'),
@@ -85,7 +85,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
       return { success: false, error: (error as Error).message }
     }
     if (!context.isAuthorizedRecentWorkspace(wsPath)) {
-      return { success: false, error: 'This workspace has not been authorized through the folder picker.' }
+      return { success: false, error: t('workspace.unauthorized') }
     }
     if (context.focusExistingWorkspace(wsPath, event.sender.id)) return { success: false, canceled: true }
     const opened = openWorkspace(wsPath)
@@ -154,7 +154,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     if ('error' in resolved) return { success: false, error: resolved.error }
     const action = externalOpenAction(resolved.path)
     if (action === 'reject') {
-      return { success: false, error: "For safety, SqlKit Studio won't open this file type in an external app. Open it from your file manager if you trust it." }
+      return { success: false, error: t('file.externalOpenBlocked') }
     }
     if (action === 'reveal') {
       shell.showItemInFolder(resolved.path)
@@ -170,11 +170,11 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     content = stringValue(content, 'File content', IPC_SQL_FILE_LIMIT)
     const workspace = context.workspaceFor(event.sender)
     const window = BrowserWindow.fromWebContents(event.sender)
-    if (!workspace || !window) return { success: false, error: 'No workspace open' }
+    if (!workspace || !window) return { success: false, error: t('file.noWorkspace') }
     const contextRoot = folder ? resolveContextRoot(workspace, folder) : null
     if (contextRoot) fsMkdir(contextRoot)
     const result = await dialog.showSaveDialog(window, {
-      title: 'Save Query',
+      title: t('workspace.saveQuery'),
       defaultPath: join(contextRoot ?? workspace, suggestedName || 'query.sql'),
       filters: [{ name: 'SQL', extensions: ['sql'] }],
     })
@@ -187,10 +187,10 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     suggestedName = stringValue(suggestedName, 'Suggested file name', 1_000)
     content = stringValue(content, 'Export content', IPC_FILE_LIMIT)
     const window = BrowserWindow.fromWebContents(event.sender)
-    if (!window) return { success: false, error: 'No window' }
+    if (!window) return { success: false, error: t('workspace.windowNotReady') }
     const extension = (suggestedName.split('.').pop() || 'csv').toLowerCase()
     const result = await dialog.showSaveDialog(window, {
-      title: 'Export Results',
+      title: t('workspace.exportResults'),
       defaultPath: join(app.getPath('downloads'), suggestedName || 'results.csv'),
       filters: [{ name: extension.toUpperCase(), extensions: [extension] }],
     })

@@ -1,6 +1,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { formatInteger, rowWord, t } from '../i18n'
 
 // One query run tracked as a task. Every run is recorded; the view only
 // surfaces the long ones. Runtime-only, capped, spanning every connection.
@@ -26,12 +27,12 @@ export const LONG_RUNNING_MS = 2000
 const summarize = (sql: string) => sql.replace(/\s+/g, ' ').trim().slice(0, 120)
 
 const formatDuration = (ms: number) => {
-  if (ms < 10_000) return `${(ms / 1000).toFixed(1)} s`
+  if (ms < 10_000) return t('tasks.durationShort', { seconds: (ms / 1000).toFixed(1) })
   const seconds = Math.round(ms / 1000)
-  return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  return seconds < 60
+    ? t('tasks.durationShort', { seconds })
+    : t('tasks.durationMinutes', { minutes: Math.floor(seconds / 60), seconds: seconds % 60 })
 }
-
-const STATUS_LABEL = { done: 'Done', error: 'Error', cancelled: 'Cancelled' } as const
 
 // The Tasks sidebar view: long-running queries across every connection —
 // running ones tick live and offer Stop (dispatches `task-stop`); finished
@@ -72,7 +73,7 @@ export class TasksView extends LitElement {
       <div class="list">
         ${visible.length
           ? visible.map((item) => this._renderItem(item))
-          : html`<p class="muted hint">No long-running queries. Runs over ${LONG_RUNNING_MS / 1000}s show up here.</p>`}
+          : html`<p class="muted hint">${t('tasks.empty', { seconds: LONG_RUNNING_MS / 1000 })}</p>`}
       </div>
     `
   }
@@ -82,8 +83,12 @@ export class TasksView extends LitElement {
     const duration = formatDuration(running ? this._now - item.startedAt : (item.durationMs ?? 0))
     const meta = [
       item.contextLabel,
-      item.status === 'running' ? `running · ${duration}` : `${STATUS_LABEL[item.status]} · ${duration}`,
-      !running && item.rowCount !== null ? `${item.rowCount} row${item.rowCount === 1 ? '' : 's'}` : '',
+      item.status === 'running'
+        ? `${t('tasks.running')} · ${duration}`
+        : `${t(item.status === 'done' ? 'tasks.done' : item.status === 'error' ? 'common.error' : 'tasks.cancelled')} · ${duration}`,
+      !running && item.rowCount !== null
+        ? t('tasks.rowCount', { count: formatInteger(item.rowCount), rows: rowWord(item.rowCount) })
+        : '',
     ]
       .filter(Boolean)
       .join(' · ')
@@ -97,7 +102,7 @@ export class TasksView extends LitElement {
           <span class="sql">${summarize(item.sql)}</span>
           ${running
             ? html`
-                <button class="stop" title="Stop this query" @click=${() => this._stop(item)}>
+                <button class="stop" title=${t('tasks.stopQuery')} @click=${() => this._stop(item)}>
                   <i class="codicon codicon-debug-stop" aria-hidden="true"></i>
                 </button>
               `

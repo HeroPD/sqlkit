@@ -9,7 +9,7 @@ import './context-menu'
 import './inspect-add-dialog'
 import type { AddObjectDetail, AddObjectKind } from './inspect-add-dialog'
 import type { MenuItem, MenuPickDetail } from './context-menu'
-import { TABLE_KIND_ICONS, TABLE_KIND_LABELS } from '../table-kinds'
+import { TABLE_KIND_ICONS, tableKindLabel } from '../table-kinds'
 import {
   buildInspectOperation,
   canDropInspectObject,
@@ -20,6 +20,7 @@ import {
   type InspectDropTarget,
   type InspectOperation,
 } from '../inspect-operations'
+import { t } from '../i18n'
 
 // A column property the user can edit inline (click). Nullable is edited via a
 // yes/no menu; primary key stays read-only. Capabilities come from the dialect.
@@ -420,7 +421,7 @@ export class TableInspect extends LitElement {
         ? 'function'
         : this.object.detail
       : this.table!.kind !== 'table'
-        ? TABLE_KIND_LABELS[this.table!.kind]
+        ? tableKindLabel(this.table!.kind)
         : ''
     return html`
       <div class="scroll">
@@ -451,13 +452,13 @@ export class TableInspect extends LitElement {
           ${badge ? html`<span class="kind">${badge}</span>` : ''}
           ${this.createTable
             ? html`<span class="head-spacer"></span>`
-            : html`<button class="refresh" title="Reload structure" aria-label="Reload structure" @click=${() => void this._load()}>
+            : html`<button class="refresh" title=${t('inspect.reload')} aria-label=${t('inspect.reload')} @click=${() => void this._load()}>
                 <i class="codicon codicon-refresh" aria-hidden="true"></i>
               </button>`}
           ${this.hasPendingChanges()
             ? html`
-                <button class="draft-action" @click=${this.discard}>Discard</button>
-                <button class="draft-action primary" @click=${() => this.save()}>Save</button>
+                <button class="draft-action" @click=${this.discard}>${t('common.discard')}</button>
+                <button class="draft-action primary" @click=${() => this.save()}>${t('common.save')}</button>
               `
             : ''}
         </div>
@@ -516,40 +517,40 @@ export class TableInspect extends LitElement {
   private _renderMenu() {
     const menu = this._menu
     if (!menu) return ''
-    const items: MenuItem[] = [{ id: 'copy-name', label: 'Copy Name' }]
-    if (menu.definition) items.push({ id: 'copy-definition', label: 'Copy Definition' })
+    const items: MenuItem[] = [{ id: 'copy-name', label: t('inspect.copyName') }]
+    if (menu.definition) items.push({ id: 'copy-definition', label: t('inspect.copyDefinition') })
     const dropTarget = menu.section ? this._dropTarget(menu.section) : null
     if (menu.operationIndex !== undefined) {
       const staged = this._operations[menu.operationIndex]
       // Add-family staged ops (index/trigger/FK/constraint/partition) reopen their
       // full dialog to edit; a staged rename only re-edits its target name.
       if (staged && staged.kind !== 'drop' && staged.kind !== 'rename') {
-        items.push({ id: 'edit-object', label: 'Edit' })
+        items.push({ id: 'edit-object', label: t('common.edit') })
       } else if (menu.section && this._canRenameSectionObject(menu.section, menu.operationIndex)) {
-        items.push({ id: 'rename-object', label: 'Rename' })
+        items.push({ id: 'rename-object', label: t('common.rename') })
       }
-      items.push({ id: 'remove-staged-operation', label: 'Remove Staged Change' })
+      items.push({ id: 'remove-staged-operation', label: t('inspect.removeStaged') })
     } else if (dropTarget && !menu.readonly) {
       if (menu.section && this._canRenameSectionObject(menu.section)) {
-        items.push({ id: 'rename-object', label: 'Rename' })
+        items.push({ id: 'rename-object', label: t('common.rename') })
       }
       const labels: Record<InspectDropTarget, string> = {
-        index: 'Drop Index',
-        trigger: 'Drop Trigger',
-        foreignKey: 'Drop Foreign Key',
-        constraint: 'Drop Constraint',
+        index: t('inspect.dropIndex'),
+        trigger: t('inspect.dropTrigger'),
+        foreignKey: t('inspect.dropForeignKey'),
+        constraint: t('inspect.dropConstraint'),
       }
       items.push({ id: 'drop-object', label: labels[dropTarget], danger: true })
     } else if (menu.col && this._isAddition(menu.col.name)) {
-      items.push({ id: 'remove-column', label: 'Remove Column' })
+      items.push({ id: 'remove-column', label: t('inspect.removeColumn') })
     } else if (menu.col && this._isDropped(menu.col.name)) {
-      items.push({ id: 'restore-column', label: 'Restore Column' })
+      items.push({ id: 'restore-column', label: t('inspect.restoreColumn') })
     } else {
       if (menu.col && menu.field && this._isEdited(menu.col.name, menu.field)) {
-        items.push({ id: 'reset-field', label: `Reset to ${this._resetLabel(menu.col, menu.field)}` })
+        items.push({ id: 'reset-field', label: t('inspect.resetTo', { value: this._resetLabel(menu.col, menu.field) }) })
       }
-      if (menu.col && this._edits.has(menu.col.name)) items.push({ id: 'reset-row', label: 'Reset Row' })
-      if (menu.col && this._canDropColumn()) items.push({ id: 'drop-column', label: 'Drop Column' })
+      if (menu.col && this._edits.has(menu.col.name)) items.push({ id: 'reset-row', label: t('inspect.resetRow') })
+      if (menu.col && this._canDropColumn()) items.push({ id: 'drop-column', label: t('inspect.dropColumn') })
     }
     return html`
       <context-menu
@@ -565,8 +566,8 @@ export class TableInspect extends LitElement {
   // Label the reset item with the value the cell will snap back to, quoting the
   // empty case and clipping anything long enough to blow out the menu width.
   private _resetLabel(col: InspectColumn, field: EditField | 'nullable'): string {
-    const original = field === 'nullable' ? (col.nullable ? 'yes' : 'no') : this._fieldOriginal(col, field)
-    if (original === '') return '(empty)'
+    const original = field === 'nullable' ? t(col.nullable ? 'common.yes' : 'common.no') : this._fieldOriginal(col, field)
+    if (original === '') return t('common.empty')
     return original.length > 32 ? `${original.slice(0, 32)}…` : original
   }
 
@@ -949,7 +950,7 @@ export class TableInspect extends LitElement {
     }
     const column = this._gridRows()[row]
     if (!column) return ''
-    if (field === 'nullable') return this._fieldNullable(column) ? 'yes' : 'no'
+    if (field === 'nullable') return t(this._fieldNullable(column) ? 'common.yes' : 'common.no')
     return this._fieldText(column, field as EditField)
   }
 
@@ -994,11 +995,11 @@ export class TableInspect extends LitElement {
   // leaving it silently inert.
   private _lockedTip(field: EditField | 'nullable'): string | null {
     if (this.object) return null
-    if (this.engine === 'sqlite' && field !== 'name') return 'SQLite requires a table rebuild to change this'
+    if (this.engine === 'sqlite' && field !== 'name') return t('inspect.lockedSqlite')
     if (this.engine === 'mysql' && field !== 'name' && field !== 'default') {
-      return 'MySQL requires a full MODIFY COLUMN to change this'
+      return t('inspect.lockedMysql')
     }
-    if (this.engine === 'sqlserver' && field === 'default') return 'SQL Server defaults are named constraints — edit them there'
+    if (this.engine === 'sqlserver' && field === 'default') return t('inspect.lockedSqlServerDefault')
     return null
   }
 
@@ -1392,7 +1393,7 @@ export class TableInspect extends LitElement {
     if (!this.createTable && !edits.length && !additions.length && !drops.length && !this._operations.length) return
     const duplicate = this._duplicateName(edits, additions, drops)
     if (duplicate !== null) {
-      this._saveError = `Duplicate column name "${duplicate}" — rename one before saving.`
+      this._saveError = t('inspect.duplicateColumn', { column: duplicate })
       return
     }
     const effectiveColumns = new Set(this._effectiveColumnNames())
@@ -1407,7 +1408,7 @@ export class TableInspect extends LitElement {
             ? operation.spec.columns ?? []
             : []
         const missing = localColumns.find((column) => !effectiveColumns.has(column))
-        if (missing) throw new Error(`Staged ${operation.kind} references removed column "${missing}"`)
+        if (missing) throw new Error(t('inspect.stagedMissingColumn', { kind: operation.kind, column: missing }))
         if (!this.createTable || (operation.kind !== 'constraint' && operation.kind !== 'foreignKey')) {
           buildInspectOperation(table, operation, this.engine)
         }
@@ -1415,7 +1416,7 @@ export class TableInspect extends LitElement {
       if (this.createTable) {
         const unsupported = this._operations.find((operation) =>
           operation.kind !== 'constraint' && operation.kind !== 'foreignKey' && operation.kind !== 'index' && operation.kind !== 'trigger')
-        if (unsupported) throw new Error(`Cannot ${unsupported.kind} while creating a table`)
+        if (unsupported) throw new Error(t('inspect.unsupportedCreateOperation', { kind: unsupported.kind }))
         buildCreateTable(
           table,
           additions,
@@ -1545,29 +1546,45 @@ export class TableInspect extends LitElement {
     const addable = this._sectionAddKind(title) !== null
     const blurbs: Record<string, string> = {
       Indexes: addable
-        ? 'No indexes yet — add one with + to speed up lookups and enforce uniqueness.'
-        : 'No indexes on this table.',
+        ? t('inspect.noIndexesAdd')
+        : t('inspect.noIndexes'),
       Triggers: addable
-        ? 'No triggers yet — add one with + to run logic automatically on insert, update, or delete.'
-        : 'No triggers on this table.',
-      Partitions: 'No partitions defined.',
+        ? t('inspect.noTriggersAdd')
+        : t('inspect.noTriggers'),
+      Partitions: t('inspect.noPartitions'),
       'Foreign Keys': addable
-        ? 'No foreign keys yet — add one with + to link a column to another table.'
-        : 'No foreign keys — this table references no others.',
+        ? t('inspect.noForeignKeysAdd')
+        : t('inspect.noForeignKeys'),
       Constraints: addable
-        ? 'No constraints yet — add a + CHECK or UNIQUE rule the data must satisfy.'
-        : 'No check or unique constraints.',
-      Rules: 'No rewrite rules.',
-      Policies: 'No row-level security policies.',
+        ? t('inspect.noConstraintsAdd')
+        : t('inspect.noConstraints'),
+      Rules: t('inspect.noRules'),
+      Policies: t('inspect.noPolicies'),
     }
-    return blurbs[title] ?? `No ${title.toLowerCase()} yet.`
+    return blurbs[title] ?? t('inspect.noSection', { section: this._sectionLabel(title).toLocaleLowerCase() })
+  }
+
+  private _sectionLabel(title: string): string {
+    const known = {
+      Indexes: 'inspect.sectionIndexes',
+      Triggers: 'inspect.sectionTriggers',
+      Partitions: 'inspect.sectionPartitions',
+      'Foreign Keys': 'inspect.sectionForeignKeys',
+      Constraints: 'inspect.sectionConstraints',
+      Rules: 'inspect.sectionRules',
+      Policies: 'inspect.sectionPolicies',
+      Definition: 'inspect.sectionDefinition',
+      Values: 'inspect.sectionValues',
+      Storage: 'inspect.sectionStorage',
+    } as const
+    return title in known ? t(known[title as keyof typeof known]) : title
   }
 
   private _renderBody() {
     const state = this._state
     if (state.phase === 'loading') {
       return html`<p class="muted hint">
-        <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> Loading structure…
+        <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> ${t('inspect.loading')}
       </p>`
     }
     if (state.phase === 'error') return html`<pre class="error">${state.error}</pre>`
@@ -1579,14 +1596,14 @@ export class TableInspect extends LitElement {
       ${sections.map(
         (section, grid) => html`
           <h4>
-            ${section.title} <span class="count">${section.rows.length}</span>
+            ${this._sectionLabel(section.title)} <span class="count">${section.rows.length}</span>
             ${this._sectionAddKind(section.title)
               ? html`
                   <button
                     class="add-btn"
                     type="button"
-                    title="Add ${section.title}"
-                    aria-label="Add ${section.title}"
+                    title=${t('inspect.addSection', { section: this._sectionLabel(section.title) })}
+                    aria-label=${t('inspect.addSection', { section: this._sectionLabel(section.title) })}
                     @click=${() => { this._editOperationIndex = null; this._addDialog = this._sectionAddKind(section.title) }}
                   >
                     <i class="codicon codicon-add" aria-hidden="true"></i>
@@ -1658,8 +1675,8 @@ export class TableInspect extends LitElement {
                       ${stagedIndex >= 0
                         ? html`<button
                             class="remove-staged"
-                            title="Remove staged change"
-                            aria-label="Remove staged change"
+                            title=${t('inspect.removeStaged')}
+                            aria-label=${t('inspect.removeStaged')}
                             @pointerdown=${(event: PointerEvent) => event.stopPropagation()}
                             @click=${() => this._commitDraft(
                               this._edits,
@@ -1683,8 +1700,8 @@ export class TableInspect extends LitElement {
         : this.object
           ? columns.length
             ? ''
-            : html`<p class="muted hint">Nothing to show.</p>`
-          : html`<p class="muted hint">No constraints, indexes, or triggers.</p>`}
+            : html`<p class="muted hint">${t('inspect.nothing')}</p>`
+          : html`<p class="muted hint">${t('inspect.noObjects')}</p>`}
     `
   }
 
@@ -1693,10 +1710,10 @@ export class TableInspect extends LitElement {
     const additions = this._additionColumns()
     return html`
       <h4>
-        ${this.object ? 'Attributes' : 'Columns'} <span class="count">${columns.length + additions.length}</span>
+        ${t(this.object ? 'inspect.sectionAttributes' : 'inspect.sectionColumns')} <span class="count">${columns.length + additions.length}</span>
         ${this._canAddColumn()
           ? html`
-              <button class="add-btn" type="button" title="Add column" aria-label="Add column" @click=${this._addColumn}>
+              <button class="add-btn" type="button" title=${t('inspect.addColumn')} aria-label=${t('inspect.addColumn')} @click=${this._addColumn}>
                 <i class="codicon codicon-add" aria-hidden="true"></i>
               </button>
             `
@@ -1721,11 +1738,11 @@ export class TableInspect extends LitElement {
         <thead>
           <tr>
             <th></th>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Nullable</th>
-            <th>Default</th>
-            ${hasComments ? html`<th>Comment</th>` : ''}
+            <th>${t('inspect.columnName')}</th>
+            <th>${t('inspect.columnType')}</th>
+            <th>${t('inspect.nullable')}</th>
+            <th>${t('inspect.default')}</th>
+            ${hasComments ? html`<th>${t('inspect.comment')}</th>` : ''}
           </tr>
         </thead>
         <tbody>
@@ -1763,8 +1780,8 @@ export class TableInspect extends LitElement {
                 <button
                   class="remove-btn"
                   type="button"
-                  title="Remove column"
-                  aria-label="Remove column"
+                  title=${t('inspect.removeColumn')}
+                  aria-label=${t('inspect.removeColumn')}
                   @click=${() => this._removeAddition(column.name)}
                 >
                   <i class="codicon codicon-close" aria-hidden="true"></i>
@@ -1775,8 +1792,8 @@ export class TableInspect extends LitElement {
                   <button
                     class="restore-btn"
                     type="button"
-                    title="Restore column"
-                    aria-label="Restore column"
+                    title=${t('inspect.restoreColumn')}
+                    aria-label=${t('inspect.restoreColumn')}
                     @click=${() => this._resetRow(column)}
                   >
                     <i class="codicon codicon-discard" aria-hidden="true"></i>
@@ -1785,10 +1802,10 @@ export class TableInspect extends LitElement {
               : primaryKey || foreignKey
                 ? html`<span class="key-icons">
                     ${primaryKey
-                      ? html`<i class="codicon codicon-key pk" aria-hidden="true" title="Primary key"></i>`
+                      ? html`<i class="codicon codicon-key pk" aria-hidden="true" title=${t('inspect.primaryKeyLabel')}></i>`
                       : ''}
                     ${foreignKey
-                      ? html`<i class="codicon codicon-key fk" aria-hidden="true" title="Foreign key"></i>`
+                      ? html`<i class="codicon codicon-key fk" aria-hidden="true" title=${t('inspect.foreignKeyLabel')}></i>`
                       : ''}
                   </span>`
                 : ''}
@@ -1812,8 +1829,8 @@ export class TableInspect extends LitElement {
       ? html`
           <button
             class="choices-btn"
-            title=${field === 'dataType' ? 'Choose type' : 'Choose default'}
-            aria-label=${field === 'dataType' ? 'Choose type' : 'Choose default'}
+            title=${t(field === 'dataType' ? 'inspect.chooseType' : 'inspect.chooseDefault')}
+            aria-label=${t(field === 'dataType' ? 'inspect.chooseType' : 'inspect.chooseDefault')}
             @mousedown=${(event: MouseEvent) => (field === 'dataType' ? this._openTypeMenu(event, col) : this._openDefaultMenu(event, col))}
             @click=${(event: MouseEvent) => {
               event.preventDefault()
@@ -1871,13 +1888,13 @@ export class TableInspect extends LitElement {
     const classes = `muted${this._isEdited(col.name, 'nullable') ? ' edited' : ''}${editable ? ' editable has-choices nullable-cell' : ''}${selected}`
     return html`
       <td data-field="nullable" class=${classes} title=${tip ?? ''}>
-        <span class="cell-text">${this._fieldNullable(col) ? 'yes' : 'no'}</span>${editable
+        <span class="cell-text">${t(this._fieldNullable(col) ? 'common.yes' : 'common.no')}</span>${editable
           ? html`
               <button
                 class="choices-btn"
                 tabindex="-1"
-                title="Choose nullability"
-                aria-label="Choose nullability"
+                title=${t('inspect.chooseNullability')}
+                aria-label=${t('inspect.chooseNullability')}
                 @mousedown=${(event: MouseEvent) => {
                   event.preventDefault()
                   event.stopPropagation()
@@ -1908,8 +1925,8 @@ export class TableInspect extends LitElement {
   private _nullableItems(col: InspectColumn): MenuItem[] {
     const current = this._fieldNullable(col)
     return [
-      { id: 'yes', label: 'yes', checked: current },
-      { id: 'no', label: 'no', checked: !current },
+      { id: 'yes', label: t('common.yes'), checked: current },
+      { id: 'no', label: t('common.no'), checked: !current },
     ]
   }
 

@@ -2,15 +2,18 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, scrollbars, typography } from '../shared-styles'
 import { isMac } from '../platform'
-import type { QueryResult, QuerySort } from '../electron'
+import type { Engine, QueryResult, QuerySort } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { MAX_FETCH_ROWS } from '../result-limits'
-import { cellToTsv, cellsToTsv, rowToTsv, toDelimited, toJson, type ExportFormat } from '../result-export'
+import { cellToTsv, cellsToTsv, parseClipboardTsv, toDelimited, toJson, type ExportFormat } from '../result-export'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
+import { isFilterableQuery } from '../sql-filter'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './export-dialog'
 import type { ExportConfirmDetail } from './export-dialog'
+import './sql-expression-editor'
+import type { SqlExpressionEditor } from './sql-expression-editor'
 import { formatInteger, rowWord, t } from '../i18n'
 
 /** What the results panel is currently showing. */
@@ -18,7 +21,7 @@ export type QueryRun =
   | { phase: 'idle' }
   | { phase: 'running'; executionId: string; profileId: string; note?: string }
   | { phase: 'done'; result: QueryResult; sql?: string; params?: unknown[] }
-  | { phase: 'error'; error: string }
+  | { phase: 'error'; error: string; sql?: string; params?: unknown[] }
 
 export type CellCoord = { row: number; col: number }
 
@@ -153,6 +156,14 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   sort: QuerySort | null = null
 
+  /** The condition injected into the current result query, without WHERE. */
+  @property({ attribute: false })
+  filter: string | null = null
+
+  /** Dialect used by filter highlighting, completion, and identifier quoting. */
+  @property()
+  engine: Engine = 'postgresql'
+
   /** Persisted per-tab column widths (col index → px), adopted when a result
    * loads; the grid emits `resize-columns` to write dragged widths back. */
   @property({ attribute: false })
@@ -182,6 +193,11 @@ export class ResultsPanel extends LitElement {
 
   @state()
   private _record: { ref: RowRef; col: number } | null = null
+
+  @state() private _filterOpen = false
+  @state() private _filterDraft = ''
+  private _filterFocusPending = false
+  private _filterColumns: string[] = []
 
   /** Selected cell rectangle in display-row space: anchor (r0,c0) → focus (r1,c1).
    * Rows are display indices (result rows and staged rows share one numbering),
@@ -267,6 +283,7 @@ export class ResultsPanel extends LitElement {
   }
 
   protected willUpdate(changed: PropertyValues) {
+    if (changed.has('filter')) this._filterDraft = this.filter ?? ''
     if (changed.has('drafts')) {
       // Select a just-added draft once it lands in the property.
       if (this._pendingSelectDraft !== null) {
@@ -286,6 +303,7 @@ export class ResultsPanel extends LitElement {
     this._lastKey = key
     this._resultSetIndex = this.run.phase === 'done' ? Math.max(0, (this.run.result.resultSets?.length ?? 1) - 1) : 0
     const shown = this._shownResult()
+    if (shown) this._filterColumns = shown.columns
     // Adopt this tab's persisted widths (empty for a new result shape, which
     // then auto-measures). Local overrides drive rendering; drags write back.
     this._widthOverrides = new Map(this.columnWidths)
@@ -345,6 +363,13 @@ export class ResultsPanel extends LitElement {
       if (record) {
         this._recordFocusPending = false
         record.focus()
+      }
+    }
+    if (this._filterFocusPending) {
+      const editor = this.shadowRoot?.querySelector<SqlExpressionEditor>('.filter-input')
+      if (editor) {
+        this._filterFocusPending = false
+        editor.focusEditor()
       }
     }
     this._measureRowHeight()
@@ -467,7 +492,10 @@ export class ResultsPanel extends LitElement {
   // untouched draft cells read as null.
   private _rowValuesAt(ref: RowRef): unknown[] {
     if (this.run.phase !== 'done') return []
-    if (ref.kind === 'result') return this._shownResult()?.rows[ref.row] ?? []
+    if (ref.kind === 'result') {
+      const columns = this._shownResult()?.columns.length ?? 0
+      return Array.from({ length: columns }, (_, col) => this._recordValue(ref, col))
+    }
     return (this.drafts[ref.index]?.cells ?? []).map((cell) => (isSqlNull(cell) ? null : cell))
   }
 
@@ -501,8 +529,8 @@ export class ResultsPanel extends LitElement {
     ))) {
       this.dispatchEvent(new CustomEvent('grid-notice', {
         detail: {
-          title: 'Cannot duplicate these rows',
-          detail: 'A selected row contains binary, structured, or truncated values that would not round-trip through the editor. Insert it with explicit SQL instead.',
+          title: t('results.cannotDuplicateTitle'),
+          detail: t('results.cannotDuplicateDetail'),
         },
         bubbles: true,
         composed: true,
@@ -608,6 +636,42 @@ export class ResultsPanel extends LitElement {
     this.dispatchEvent(new CustomEvent('toggle-collapse', { bubbles: true, composed: true }))
   }
 
+  private _toggleFilter = () => {
+    this._filterOpen = !this._filterOpen
+    if (this._filterOpen) {
+      this._filterDraft = this.filter ?? ''
+      this._filterFocusPending = true
+    }
+  }
+
+  private _applyFilter = (event: Event) => {
+    event.preventDefault()
+    const condition = this._filterDraft.trim()
+    if (condition === (this.filter ?? '')) return
+    this.dispatchEvent(new CustomEvent<{ condition: string | null }>('filter-condition', {
+      detail: { condition: condition || null },
+      bubbles: true,
+      composed: true,
+    }))
+  }
+
+  private _clearFilter = () => {
+    this._filterDraft = ''
+    if (this.filter !== null) {
+      this.dispatchEvent(new CustomEvent<{ condition: null }>('filter-condition', {
+        detail: { condition: null },
+        bubbles: true,
+        composed: true,
+      }))
+    }
+  }
+
+  private _closeFilter = (event: Event) => {
+    event.preventDefault()
+    this._filterDraft = this.filter ?? ''
+    this._filterOpen = false
+  }
+
   render() {
     const result = this._shownResult()
     const exportable = !!result?.columns.length
@@ -615,6 +679,8 @@ export class ResultsPanel extends LitElement {
     const pendingCount = this.drafts.length + this.edits.size
     const showWriteTools = exportable && canEditResult && (this.rowEditable || pendingCount > 0)
     const canToggleRecord = exportable && (this._record !== null || (this._sel ? this._refAt(this._sel.r1) !== null : false))
+    const runSql = this.run.phase === 'done' || this.run.phase === 'error' ? this.run.sql : undefined
+    const canFilter = !!runSql && isFilterableQuery(runSql)
     const selected = this.rowEditable && canEditResult ? this._selectedRefs() : { results: [], drafts: [] }
     const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
@@ -636,15 +702,15 @@ export class ResultsPanel extends LitElement {
           : ''}
         ${showWriteTools
           ? html`
-              <div class="toolbar" aria-label="Result edit actions">
+              <div class="toolbar" aria-label=${t('results.editActions')}>
                 ${this.rowEditable && canEditResult
                   ? html`
-                      <button class="head-action" title=${t('results.addRow')} aria-label=${t('results.addRow')} @click=${this._addRow}>
+                      <button class="head-action" data-tooltip=${t('results.addRow')} aria-label=${t('results.addRow')} @click=${this._addRow}>
                         <i class="codicon codicon-add" aria-hidden="true"></i>
                       </button>
                       <button
                         class="head-action danger"
-                        title=${t('results.deleteRows')}
+                        data-tooltip=${t('results.deleteRows')}
                         aria-label=${t('results.deleteRows')}
                         ?disabled=${!hasDeletable}
                         @click=${() => this._deleteSelection()}
@@ -653,7 +719,7 @@ export class ResultsPanel extends LitElement {
                       </button>
                       <button
                         class="head-action"
-                        title=${`Duplicate selected rows (${isMac ? '⌘D' : 'Ctrl+D'})`}
+                        data-tooltip=${t('results.duplicateRowsShortcut', { shortcut: isMac ? '⌘D' : 'Ctrl+D' })}
                         aria-label=${t('results.duplicateRows')}
                         ?disabled=${selected.results.length === 0 || !!result?.truncated}
                         @click=${this._duplicateSelection}
@@ -664,7 +730,11 @@ export class ResultsPanel extends LitElement {
                   : ''}
                 <button
                   class="head-action"
-                  title=${`Save ${pendingCount} pending change${pendingCount === 1 ? '' : 's'} (${isMac ? '⌘S' : 'Ctrl+S'})`}
+                  data-tooltip=${t('results.savePending', {
+                    count: pendingCount,
+                    changes: t(pendingCount === 1 ? 'results.pendingChange' : 'results.pendingChanges'),
+                    shortcut: isMac ? '⌘S' : 'Ctrl+S',
+                  })}
                   aria-label=${t('results.saveChanges')}
                   ?disabled=${pendingCount === 0}
                   @click=${this._saveRows}
@@ -673,7 +743,7 @@ export class ResultsPanel extends LitElement {
                 </button>
                 <button
                   class="head-action"
-                  title="Discard all changes (Esc Esc)"
+                  data-tooltip=${t('results.discardAllShortcut', { shortcut: 'Esc Esc' })}
                   aria-label=${t('results.discardChanges')}
                   ?disabled=${pendingCount === 0}
                   @click=${this._discardChanges}
@@ -683,12 +753,28 @@ export class ResultsPanel extends LitElement {
               </div>
             `
           : ''}
+        ${canFilter
+          ? html`
+              <button
+                class="head-action ${this.filter !== null || this._filterOpen ? 'active' : ''}"
+                data-tooltip=${t('results.filter')}
+                aria-label=${t('results.filter')}
+                aria-expanded=${this._filterOpen}
+                @click=${this._toggleFilter}
+              >
+                <i class="codicon codicon-filter" aria-hidden="true"></i>
+              </button>
+            `
+          : ''}
         ${exportable
           ? html`
-              <div class="toolbar view-toolbar" aria-label="Result view actions">
+              <div class="toolbar view-toolbar" aria-label=${t('results.viewActions')}>
                 <button
                   class="head-action"
-                  title=${`${this._record ? t('results.gridView') : t('results.listView')} (Tab)`}
+                  data-tooltip=${t('results.viewShortcut', {
+                    view: this._record ? t('results.gridView') : t('results.listView'),
+                    shortcut: 'Tab',
+                  })}
                   aria-label=${this._record ? t('results.gridView') : t('results.listView')}
                   ?disabled=${!canToggleRecord}
                   @click=${this._toggleRecordView}
@@ -703,7 +789,7 @@ export class ResultsPanel extends LitElement {
           ? html`
               <button
                 class="head-action"
-                title=${t('results.export')}
+                data-tooltip=${t('results.export')}
                 aria-label=${t('results.export')}
                 @click=${() => (this._exportOpen = true)}
               >
@@ -713,7 +799,7 @@ export class ResultsPanel extends LitElement {
           : ''}
         <button
           class="head-action"
-          title=${this.collapsed ? t('results.expand') : t('results.collapse')}
+          data-tooltip=${this.collapsed ? t('results.expand') : t('results.collapse')}
           aria-label=${this.collapsed ? t('results.expand') : t('results.collapse')}
           aria-expanded=${!this.collapsed}
           @click=${this._toggleCollapse}
@@ -721,6 +807,46 @@ export class ResultsPanel extends LitElement {
           <i class="codicon codicon-chevron-${this.collapsed ? 'up' : 'down'}" aria-hidden="true"></i>
         </button>
       </div>
+      ${this._filterOpen && canFilter && !this.collapsed
+        ? html`
+            <div class="filter-bar">
+              <i class="codicon codicon-filter" aria-hidden="true"></i>
+              <sql-expression-editor
+                class="filter-input"
+                aria-label=${t('results.filter')}
+                .value=${this._filterDraft}
+                .engine=${this.engine}
+                .columns=${result?.columns ?? this._filterColumns}
+                .compact=${true}
+                .submitOnEnter=${true}
+                .placeholderText=${t('results.filterPlaceholder')}
+                @expression-change=${(event: CustomEvent<{ value: string }>) => (this._filterDraft = event.detail.value)}
+                @expression-submit=${this._applyFilter}
+                @expression-cancel=${this._closeFilter}
+              ></sql-expression-editor>
+              <button
+                class="filter-action filter-apply"
+                type="button"
+                data-tooltip=${t('results.applyFilter')}
+                aria-label=${t('results.applyFilter')}
+                ?disabled=${!this._filterDraft.trim() || this._filterDraft.trim() === (this.filter ?? '')}
+                @click=${this._applyFilter}
+              >
+                <i class="codicon codicon-check" aria-hidden="true"></i>
+              </button>
+              <button
+                class="filter-action filter-clear"
+                type="button"
+                data-tooltip=${t('results.clearFilter')}
+                aria-label=${t('results.clearFilter')}
+                ?disabled=${!this._filterDraft && this.filter === null}
+                @click=${this._clearFilter}
+              >
+                <i class="codicon codicon-close" aria-hidden="true"></i>
+              </button>
+            </div>
+          `
+        : ''}
       <div class="body" @scroll=${this._onScroll}>${this._renderBody()}</div>
       ${this._renderMenu()}
       ${this._exportOpen && this.run.phase === 'done'
@@ -793,11 +919,29 @@ export class ResultsPanel extends LitElement {
     const dataRow = cell.closest('tr')?.getAttribute('data-row')
     const row = cell.tagName === 'TH' || dataRow === null || dataRow === undefined ? -1 : Number(dataRow)
     const col = cell.cellIndex - 1
-    if (row >= 0 && col >= 0) {
+    if (row >= 0 && col < 0) {
+      this._selectRowsForCopy(row)
+    } else if (row >= 0) {
       const display = this._displayIndexOfRef({ kind: 'result', row })
       if (!this._isSelectedDisplay(display, col)) this._sel = { r0: display, c0: col, r1: display, c1: col }
     }
     this._menu = { x: event.clientX, y: event.clientY, row, col }
+  }
+
+  private _selectRowsForCopy(row: number) {
+    const lastCol = (this._shownResult()?.columns.length ?? 0) - 1
+    if (lastCol < 0) return
+    const display = this._displayIndexOfRef({ kind: 'result', row })
+    const selection = this._sel
+    const selectedStart = selection ? Math.min(selection.r0, selection.r1) : display
+    const selectedEnd = selection ? Math.max(selection.r0, selection.r1) : display
+    const insideSelection = display >= selectedStart && display <= selectedEnd
+    this._sel = {
+      r0: insideSelection ? selectedStart : display,
+      c0: 0,
+      r1: insideSelection ? selectedEnd : display,
+      c1: lastCol,
+    }
   }
 
   private _renderMenu() {
@@ -806,22 +950,28 @@ export class ResultsPanel extends LitElement {
     const result = this._shownResult()
     if (!result) return ''
     const canEdit = this.editable && this._canEditShownResult() && menu.row >= 0 && menu.col >= 0
+    const selectedRowCount = this._sel ? Math.abs(this._sel.r1 - this._sel.r0) + 1 : 1
     const items: MenuItem[] = [
-      ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'view-record', label: 'View Record' }] : []),
+      ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'view-record', label: t('results.viewRecord'), shortcut: 'Tab' }] : []),
       ...(canEdit
         ? [
-            { id: 'edit-cell', label: 'Edit…' },
-            { id: 'set-null', label: 'Set NULL' },
-            { id: 'set-empty', label: 'Set Empty String' },
+            { id: 'edit-cell', label: t('results.editCell'), shortcut: 'Enter' },
+            { id: 'paste-cell', label: t('results.paste'), shortcut: isMac ? '⌘V' : 'Ctrl+V' },
+            { id: 'set-null', label: t('results.setNull') },
+            { id: 'set-empty', label: t('results.setEmptyString') },
           ]
         : []),
-      ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'copy-cell', label: 'Copy Cell' }] : []),
-      ...(menu.row >= 0 ? [{ id: 'copy-row', label: 'Copy Row' }] : []),
-      ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: 'Copy Column Name' }] : []),
-      { id: 'copy-csv', label: 'Copy All as CSV' },
-      { id: 'copy-tsv', label: 'Copy All as TSV' },
-      { id: 'copy-json', label: 'Copy All as JSON' },
-      { id: 'export', label: 'Export…' },
+      ...(menu.row >= 0 && menu.col >= 0
+        ? [{ id: 'copy-cell', label: t('results.copyCell'), shortcut: isMac ? '⌘C' : 'Ctrl+C', separatorBefore: canEdit }]
+        : []),
+      ...(menu.row >= 0
+        ? [{ id: 'copy-row', label: t(selectedRowCount > 1 ? 'results.copySelectedRows' : 'results.copyRow') }]
+        : []),
+      ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: t('results.copyColumnName') }] : []),
+      { id: 'copy-csv', label: t('results.copyAllCsv'), separatorBefore: true },
+      { id: 'copy-tsv', label: t('results.copyAllTsv') },
+      { id: 'copy-json', label: t('results.copyAllJson') },
+      { id: 'export', label: t('results.export'), separatorBefore: true },
     ]
     return html`
       <context-menu
@@ -835,9 +985,12 @@ export class ResultsPanel extends LitElement {
   }
 
   private async _onMenuPick(action: string, result: QueryResult, at: { row: number; col: number }) {
-    const copy = (text: string) => void navigator.clipboard.writeText(text)
-    if (action === 'copy-cell') copy(cellToTsv(result.rows[at.row]?.[at.col]))
-    if (action === 'copy-row') copy(rowToTsv(result.rows[at.row] ?? []))
+    const copy = (text: string) => void window.sqlkit.writeClipboardText(text)
+    if (action === 'copy-cell') copy(cellToTsv(this._recordValue({ kind: 'result', row: at.row }, at.col)))
+    if (action === 'copy-row') {
+      this._selectRowsForCopy(at.row)
+      this._copySelection()
+    }
     if (action === 'copy-column-name') copy(cellToTsv(result.columns[at.col] ?? ''))
     // Copy-all / export cover every buffered row, not just what's loaded on screen.
     if (action === 'copy-csv') copy(toDelimited(result.columns, await this._allRows(result), ','))
@@ -848,6 +1001,7 @@ export class ResultsPanel extends LitElement {
     // Edit opens the inline editor on the clicked cell; if it's inside a
     // multi-cell selection, the committed value fills the whole selection.
     if (action === 'edit-cell' && at.row >= 0 && at.col >= 0) this._beginEdit({ kind: 'result', row: at.row }, at.col, null)
+    if (action === 'paste-cell') this._pasteText(await window.sqlkit.readClipboardText())
     // Fills the whole selection (the right-click reduced it to the clicked
     // cell when it was outside), same as a committed edit would.
     if (action === 'set-null') this._setSelectionNull()
@@ -858,12 +1012,14 @@ export class ResultsPanel extends LitElement {
     const record = this._record
     if (!record || this.run.phase !== 'done') return ''
     const columns = this._shownResult()?.columns ?? []
-    const rowLabel = record.ref.kind === 'result' ? `Row #${record.ref.row + 1}` : `New row #${record.ref.index + 1}`
+    const rowLabel = t(record.ref.kind === 'result' ? 'results.rowLabel' : 'results.newRowLabel', {
+      index: (record.ref.kind === 'result' ? record.ref.row : record.ref.index) + 1,
+    })
     return html`
       <section
         class="record-view"
         role="region"
-        aria-label="Record view"
+        aria-label=${t('results.recordView')}
         tabindex="0"
         style="--record-column-w: ${measureRecordColumnWidth(columns)}px"
         @keydown=${this._onRecordKeydown}
@@ -1138,7 +1294,44 @@ export class ResultsPanel extends LitElement {
     }
     // cellsToTsv applies full TSV field escaping: an embedded tab/newline is
     // quoted (stays one cell) and a formula-leading cell is neutralized.
-    void navigator.clipboard.writeText(cellsToTsv(selected))
+    void window.sqlkit.writeClipboardText(cellsToTsv(selected))
+  }
+
+  private _onGridPaste = (event: ClipboardEvent) => {
+    if ((event.target as HTMLElement).closest('.cell-edit')) return
+    const text = event.clipboardData?.getData('text/plain')
+    if (text !== undefined && this._pasteText(text)) event.preventDefault()
+  }
+
+  private _pasteText(text: string): boolean {
+    const selection = this._sel
+    const result = this._shownResult()
+    if (!selection || this.run.phase !== 'done' || !result) return false
+    const matrix = parseClipboardTsv(text)
+    const { order } = this._display()
+    const startRow = Math.max(0, Math.min(selection.r0, selection.r1))
+    const startCol = Math.max(0, Math.min(selection.c0, selection.c1))
+    const values: Array<{ ref: RowRef; col: number; value: string }> = []
+
+    if (matrix.length === 1 && matrix[0]?.length === 1) {
+      const value = matrix[0]?.[0] ?? ''
+      for (const target of this._editTargets({ ref: order[startRow]!, col: startCol, sel: selection })) {
+        if (target.ref.kind === 'draft' || (this.editable && this._canEditShownResult())) values.push({ ...target, value })
+      }
+    } else {
+      for (let rowOffset = 0; rowOffset < matrix.length; rowOffset += 1) {
+        const ref = order[startRow + rowOffset]
+        if (!ref || (ref.kind === 'result' && (!this.editable || !this._canEditShownResult()))) continue
+        for (let colOffset = 0; colOffset < (matrix[rowOffset]?.length ?? 0); colOffset += 1) {
+          const col = startCol + colOffset
+          if (col >= result.columns.length) break
+          values.push({ ref, col, value: matrix[rowOffset]?.[colOffset] ?? '' })
+        }
+      }
+    }
+    if (!values.length) return false
+    this._commitValues(values)
+    return true
   }
 
   private _onGridKeydown = (event: KeyboardEvent) => {
@@ -1277,10 +1470,14 @@ export class ResultsPanel extends LitElement {
   // Bundles every changed cell of a fill into one event so the owner stages them
   // in a single undoable step.
   private _commitFill(targets: Array<{ ref: RowRef; col: number }>, value: CellInput) {
+    this._commitValues(targets.map((target) => ({ ...target, value })))
+  }
+
+  private _commitValues(targets: Array<{ ref: RowRef; col: number; value: CellInput }>) {
     const edits: Array<{ row: number; col: number; value: CellInput }> = []
     const clears: Array<{ row: number; col: number }> = []
     const draftCells: Array<{ index: number; col: number; value: CellInput }> = []
-    for (const { ref, col } of targets) {
+    for (const { ref, col, value } of targets) {
       const change = this._classifyEdit(ref, col, value)
       if (!change) continue
       if (change.event === 'draft-edit') draftCells.push(change.detail as { index: number; col: number; value: CellInput })
@@ -1442,6 +1639,7 @@ export class ResultsPanel extends LitElement {
         @pointerdown=${this._onCellPointerDown}
         @dblclick=${this._onCellDblClick}
         @keydown=${this._onGridKeydown}
+        @paste=${this._onGridPaste}
       >
         <colgroup>
           <col style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px" />
@@ -1509,15 +1707,15 @@ export class ResultsPanel extends LitElement {
     if (!sortable) {
       return html`<th><div class="th-inner"><span class="th-name" title=${column}>${column}</span></div>${grip}</th>`
     }
-    const next = dir === 'asc' ? 'descending' : dir === 'desc' ? 'unsorted' : 'ascending'
+    const next = t(dir === 'asc' ? 'results.descending' : dir === 'desc' ? 'results.unsorted' : 'results.ascending')
     return html`
       <th class=${dir ? 'sorted' : ''}>
         <div class="th-inner">
           <span class="th-name" title=${column}>${column}</span>
           <button
             class="th-sort ${dir ? 'active' : ''}"
-            title=${`Sort ${column} (${next})`}
-            aria-label=${`Sort ${column} ${next}`}
+            title=${t('results.sortTitle', { column, direction: next })}
+            aria-label=${t('results.sortColumn', { column, direction: next })}
             @click=${() => this._sortBy(col, dir)}
           >
             <i class="codicon codicon-${dir === 'desc' ? 'arrow-down' : 'arrow-up'}" aria-hidden="true"></i>
@@ -1608,7 +1806,7 @@ export class ResultsPanel extends LitElement {
     return html`
       <tr class="draft" data-draft=${index}>
         <td class="num draft-num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">
-          <button class="draft-remove" title="Discard new row" aria-label="Discard new row" @click=${() => this._removeDraft([index])}>
+          <button class="draft-remove" title=${t('results.discardNewRow')} aria-label=${t('results.discardNewRow')} @click=${() => this._removeDraft([index])}>
             <i class="codicon codicon-close" aria-hidden="true"></i>
           </button>
         </td>
@@ -1671,6 +1869,7 @@ export class ResultsPanel extends LitElement {
       }
 
       .head-action {
+        position: relative;
         display: inline-flex;
         flex-shrink: 0;
         padding: 3px;
@@ -1679,6 +1878,54 @@ export class ResultsPanel extends LitElement {
         border: none;
         border-radius: 4px;
         cursor: pointer;
+      }
+
+      .head-action[data-tooltip]::after,
+      .filter-action[data-tooltip]::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        top: calc(100% + 7px);
+        left: 50%;
+        z-index: 20;
+        padding: 5px 7px;
+        color: var(--text);
+        background: var(--input-bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+        font-family: var(--ui-font);
+        font-size: var(--font-size-sm);
+        font-weight: 400;
+        letter-spacing: normal;
+        line-height: 1.25;
+        text-transform: none;
+        white-space: nowrap;
+        pointer-events: none;
+        opacity: 0;
+        visibility: hidden;
+        transform: translate(-50%, -2px);
+        transition: opacity 80ms ease, visibility 0s linear 80ms, transform 80ms ease;
+      }
+
+      .head-action[data-tooltip]:hover::after,
+      .head-action[data-tooltip]:focus-visible::after,
+      .filter-action[data-tooltip]:hover::after,
+      .filter-action[data-tooltip]:focus-visible::after {
+        opacity: 1;
+        visibility: visible;
+        transform: translate(-50%, 0);
+        transition-delay: 400ms;
+      }
+
+      .head > .head-action[data-tooltip]::after {
+        right: 0;
+        left: auto;
+        transform: translateY(-2px);
+      }
+
+      .head > .head-action[data-tooltip]:hover::after,
+      .head > .head-action[data-tooltip]:focus-visible::after {
+        transform: translateY(0);
       }
 
       .head-action:hover:not(:disabled) {
@@ -1712,6 +1959,55 @@ export class ResultsPanel extends LitElement {
         text-transform: none;
         letter-spacing: normal;
         color: var(--text-3);
+      }
+
+      .filter-bar {
+        height: 34px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 8px 0 12px;
+        background: var(--header-bg);
+        border-bottom: 1px solid var(--border-subtle);
+        color: var(--text-3);
+      }
+
+      .filter-input {
+        flex: 1;
+        min-width: 0;
+        height: 24px;
+      }
+
+      .filter-apply,
+      .filter-clear {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        flex-shrink: 0;
+        padding: 0;
+        color: var(--btn-secondary-fg);
+        background: var(--btn-secondary-bg);
+        border: none;
+        border-radius: 3px;
+        font-family: var(--ui-font);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        --codicon-size: 14px;
+      }
+
+      .filter-apply:not(:disabled):hover,
+      .filter-clear:not(:disabled):hover {
+        background: var(--btn-secondary-hover);
+      }
+
+      .filter-apply:disabled,
+      .filter-clear:disabled {
+        opacity: 0.45;
+        cursor: default;
       }
 
       /* Timing at a glance: green under 500 ms, orange under 2 s, red above. */

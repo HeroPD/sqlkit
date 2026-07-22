@@ -94,7 +94,7 @@ describe('QueriesController.execute', () => {
     settle({ success: true, result })
     await done
 
-    expect(runQuery).toHaveBeenCalledWith('p1', 'analytics', 'SELECT 1', undefined, undefined, 'exec1')
+    expect(runQuery).toHaveBeenCalledWith('p1', 'analytics', 'SELECT 1', undefined, undefined, undefined, 'exec1')
   })
 
   it('forwards bound query parameters and retains them with the result', async () => {
@@ -105,7 +105,7 @@ describe('QueriesController.execute', () => {
     settle({ success: true, result })
     await done
 
-    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', ['42', null], undefined, 'exec1')
+    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', ['42', null], undefined, undefined, 'exec1')
     expect(controller.runFor('t1')).toMatchObject({ phase: 'done', params: ['42', null] })
   })
 
@@ -117,7 +117,7 @@ describe('QueriesController.execute', () => {
     settle({ success: true, result })
     await done
 
-    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', undefined, { columnIndex: 0, direction: 'desc' }, 'exec1')
+    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', undefined, { columnIndex: 0, direction: 'desc' }, undefined, 'exec1')
     expect(controller.sortFor('t1')).toEqual({ columnIndex: 0, direction: 'desc' })
   })
 
@@ -131,6 +131,18 @@ describe('QueriesController.execute', () => {
     await done
 
     expect(controller.sortFor('t1')).toBeNull()
+  })
+
+  it('forwards and tracks a result filter per tab', async () => {
+    const { settle, runQuery } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute({ ...runArgs, filter: 'n > 10' })
+    settle({ success: true, result })
+    await done
+
+    expect(runQuery).toHaveBeenCalledWith('p1', null, 'SELECT 1', undefined, undefined, 'n > 10', 'exec1')
+    expect(controller.filterFor('t1')).toBe('n > 10')
   })
 
   it('drops a result that resolves after a workspace switch (reset)', async () => {
@@ -157,7 +169,7 @@ describe('QueriesController.execute', () => {
 
     await controller.execute(runArgs)
 
-    expect(controller.runFor('t1')).toEqual({ phase: 'error', error: 'channel closed' })
+    expect(controller.runFor('t1')).toEqual({ phase: 'error', error: 'channel closed', sql: 'SELECT 1', params: undefined })
     expect(controller.tasks[0]?.status).toBe('error')
   })
 })

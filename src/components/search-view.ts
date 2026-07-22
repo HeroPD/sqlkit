@@ -2,6 +2,7 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
 import type { FileInfo } from '../electron'
+import { formatInteger, t } from '../i18n'
 
 export type SearchOpenDetail = { file: FileInfo; line: number }
 
@@ -53,7 +54,7 @@ export class SearchView extends LitElement {
       <div class="search-box">
         <input
           type="text"
-          placeholder="Search .sql files"
+          placeholder=${t('search.placeholder')}
           spellcheck="false"
           .value=${this._query}
           @input=${this._onInput}
@@ -65,14 +66,18 @@ export class SearchView extends LitElement {
 
   private _renderResults() {
     if (!this._query.trim()) {
-      return html`<p class="muted hint">Matches in the context's .sql files show here.</p>`
+      return html`<p class="muted hint">${t('search.startHint')}</p>`
     }
-    if (!this._results.length) return html`<p class="muted hint">No results.</p>`
+    if (!this._results.length) return html`<p class="muted hint">${t('search.noResults')}</p>`
     const files = this._results.length
     return html`
       <p class="muted hint summary">
-        ${this._total}${this._capped ? '+' : ''} result${this._total === 1 ? '' : 's'} in ${files}
-        file${files === 1 ? '' : 's'}
+        ${t('search.summary', {
+          count: `${formatInteger(this._total)}${this._capped ? '+' : ''}`,
+          matches: t(this._total === 1 ? 'search.match' : 'search.matches'),
+          fileCount: formatInteger(files),
+          files: t(files === 1 ? 'search.file' : 'search.files'),
+        })}
       </p>
       ${this._results.map(
         (group) => html`

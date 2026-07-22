@@ -5,6 +5,7 @@ import type { DraftRow } from '../result-editing'
 import type { CellInput } from '../sql-write'
 import type { HistoryItem } from '../components/history-view'
 import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
+import { t } from '../i18n'
 
 // Keep the most recent runs per context (not globally), so a busy context can't
 // evict another context's history — the history view is filtered per context.
@@ -82,6 +83,9 @@ export class QueriesController implements ReactiveController {
   /** The column sort the result grid injected, per tab; absent when unsorted. */
   sorts = new Map<string, QuerySort>()
 
+  /** The condition the result grid injected, per tab; absent when unfiltered. */
+  filters = new Map<string, string>()
+
   /** User-dragged column widths per tab (col index → px), tagged with the columns
    * they were set against so a differently-shaped result re-measures. */
   columnWidths = new Map<string, { columns: string[]; widths: Map<number, number> }>()
@@ -127,6 +131,10 @@ export class QueriesController implements ReactiveController {
     return (tabId ? this.sorts.get(tabId) : undefined) ?? null
   }
 
+  filterFor(tabId: string | null): string | null {
+    return (tabId ? this.filters.get(tabId) : undefined) ?? null
+  }
+
   /** The tab's dragged column widths, but only when they were set against these
    * same columns — a new result of a different shape falls back to auto-measure. */
   columnWidthsFor(tabId: string | null, columns: string[]): ReadonlyMap<number, number> {
@@ -163,7 +171,7 @@ export class QueriesController implements ReactiveController {
       if (tabId === protectedTabId || entry.phase !== 'done' || this.hasStaged(tabId)) continue
       total -= retainedResultBytes(entry.result)
       this.closeResultSessions(entry.result)
-      next.set(tabId, { phase: 'error', error: 'This result was released to keep SqlKit Studio memory usage bounded. Run the query again to reload it.' })
+      next.set(tabId, { phase: 'error', error: t('results.released') })
     }
     this.runs = next
   }
@@ -385,8 +393,8 @@ export class QueriesController implements ReactiveController {
   }
 
   /** Runs the SQL on an already-connected profile and records the outcome.
-   * `sort` re-runs with an injected ORDER BY (built engine-side); absent clears
-   * any previous sort so a fresh run starts unsorted. */
+   * Filter/sort clauses are built engine-side; absent values clear the previous
+   * grid additions so a fresh editor run starts from its own SQL. */
   async execute(args: {
     tabId: string
     profile: ConnectionProfile
@@ -395,12 +403,15 @@ export class QueriesController implements ReactiveController {
     sql: string
     params?: unknown[]
     sort?: QuerySort | null
+    filter?: string | null
     executionId?: string
   }) {
-    const { tabId, profile, childDb, contextKey, sql, params, sort } = args
+    const { tabId, profile, childDb, contextKey, sql, params, sort, filter } = args
     const executionId = args.executionId ?? crypto.randomUUID()
     if (sort) this.sorts.set(tabId, sort)
     else this.sorts.delete(tabId)
+    if (filter) this.filters.set(tabId, filter)
+    else this.filters.delete(tabId)
     const gen = this.generation
     // A new query supersedes the tab's old buffered result.
     this.closeRunSession(this.runs.get(tabId))
@@ -421,7 +432,7 @@ export class QueriesController implements ReactiveController {
 
     let response: QueryResponse
     try {
-      response = await window.sqlkit.runQuery(profile.id, childDb, sql, params, sort, executionId)
+      response = await window.sqlkit.runQuery(profile.id, childDb, sql, params, sort, filter, executionId)
     } catch (error) {
       // A rejected IPC (channel error, main-side throw) would otherwise leave
       // the run and its task stuck on 'running' forever.
@@ -447,7 +458,7 @@ export class QueriesController implements ReactiveController {
     this.realignStaged(tabId, response.success ? response.result.columns.length : null)
     this.setRun(
       tabId,
-      response.success ? { phase: 'done', result: response.result, sql, params } : { phase: 'error', error: response.error },
+      response.success ? { phase: 'done', result: response.result, sql, params } : { phase: 'error', error: response.error, sql, params },
     )
     this.finishTask(task.id, response, task.startedAt)
     this.history = capHistoryPerContext(
@@ -631,6 +642,7 @@ export class QueriesController implements ReactiveController {
     this.drafts.delete(tabId)
     this.edits.delete(tabId)
     this.sorts.delete(tabId)
+    this.filters.delete(tabId)
     this.columnWidths.delete(tabId)
     this.stagedHistory.delete(tabId)
   }
@@ -652,6 +664,11 @@ export class QueriesController implements ReactiveController {
     if (sort) {
       this.sorts.delete(oldId)
       this.sorts.set(newId, sort)
+    }
+    const filter = this.filters.get(oldId)
+    if (filter) {
+      this.filters.delete(oldId)
+      this.filters.set(newId, filter)
     }
     const widths = this.columnWidths.get(oldId)
     if (widths) {
@@ -687,6 +704,9 @@ export class QueriesController implements ReactiveController {
     for (const id of [...this.sorts.keys()]) {
       if (!this.tabExists(id)) this.sorts.delete(id)
     }
+    for (const id of [...this.filters.keys()]) {
+      if (!this.tabExists(id)) this.filters.delete(id)
+    }
     for (const id of [...this.columnWidths.keys()]) {
       if (!this.tabExists(id)) this.columnWidths.delete(id)
     }
@@ -705,6 +725,7 @@ export class QueriesController implements ReactiveController {
     this.drafts = new Map()
     this.edits = new Map()
     this.sorts = new Map()
+    this.filters = new Map()
     this.columnWidths = new Map()
     this.stagedHistory = new Map()
     this.history = []

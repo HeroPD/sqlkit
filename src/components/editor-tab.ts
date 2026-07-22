@@ -1,5 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
+import { t } from '../i18n'
 
 // One tab in the editor tab bar. Dispatches `tab-select` on click and
 // `tab-close` from the × button, both with { tabId }; the workbench owns the
@@ -32,7 +33,7 @@ export class EditorTab extends LitElement {
   render() {
     return html`
       <span class="label">${this.name}</span>
-      <span class="close" title="Close" @click=${this._onClose}>&times;</span>
+      <span class="close" title=${t('common.close')} @click=${this._onClose}>&times;</span>
     `
   }
 

@@ -1,5 +1,6 @@
 import type { ColumnRef, Engine, InspectColumn, TableRef } from './electron'
 import { dialectFor, type Dialect } from './dialect'
+import { t } from './i18n'
 
 // A single-quoted SQL string literal (doubling embedded quotes). Column DDL runs
 // param-free, so the review preview is exactly what executes.
@@ -112,7 +113,10 @@ const comparisonPredicate = (
   const identifier = dialect.quoteIdent(key.name)
   if (key.value === null || key.value === undefined) return `${identifier} IS NULL`
   if (!supportsOptimisticComparison(engine, key.columnMeta)) {
-    throw new Error(`Column ${key.name} (${key.columnMeta?.dataType ?? 'unknown type'}) cannot be compared safely for an optimistic write.`)
+    throw new Error(t('write.unsafeComparison', {
+      column: key.name,
+      dataType: key.columnMeta?.dataType ?? t('write.unknownType'),
+    }))
   }
   const parameter = bind(exactGuardValue(engine, key))
   if (engine === 'postgresql') return `${identifier} IS NOT DISTINCT FROM ${parameter}`
@@ -135,7 +139,7 @@ const comparisonPredicate = (
 // keep their existing values. Quoting and placeholder style come from the
 // engine's dialect, so backtick/bracket engines stay correct.
 export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: unknown[]; expectedRows: number } {
-  if (spec.edits.length === 0) throw new Error('Cannot build an UPDATE without edits')
+  if (spec.edits.length === 0) throw new Error(t('write.updateNeedsEdits'))
   const dialect = dialectFor(spec.engine)
 
   const params: unknown[] = []
@@ -144,7 +148,7 @@ export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: 
     return dialect.placeholder(params.length)
   }
   const keyCondition = (pks: RowKey) => {
-    if (pks.length === 0) throw new Error('Cannot build an UPDATE without a primary key')
+    if (pks.length === 0) throw new Error(t('write.updateNeedsPrimaryKey'))
     return pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind)).join(' AND ')
   }
 
@@ -154,7 +158,7 @@ export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: 
     try {
       return `${typeof value}:${JSON.stringify(value)}`
     } catch {
-      throw new Error('Cannot build an UPDATE for an unserializable primary key value')
+      throw new Error(t('write.updateInvalidPrimaryKey'))
     }
   }
   const rowKey = (edit: BatchUpdateEdit) => JSON.stringify(edit.pks.map((pk) => [pk.name, keyValue(pk.value)]))
@@ -199,7 +203,7 @@ const comparableKey = (value: unknown): string => {
   try {
     return `${typeof value}:${JSON.stringify(value)}`
   } catch {
-    throw new Error('Cannot group an unserializable row key')
+    throw new Error(t('write.invalidRowKey'))
   }
 }
 
@@ -220,11 +224,11 @@ export function buildBatchUpdates(spec: BatchUpdateSpec): Array<ReturnType<typeo
       pending.push(...group)
       continue
     }
-    if (!pending.length) throw new Error('One edited row requires more bind parameters than this database supports.')
+    if (!pending.length) throw new Error(t('write.editedRowTooWide'))
     result.push(buildBatchUpdate({ ...spec, edits: pending }))
     pending = [...group]
     if (buildBatchUpdate({ ...spec, edits: pending }).params.length > parameterLimit(spec.engine)) {
-      throw new Error('One edited row requires more bind parameters than this database supports.')
+      throw new Error(t('write.editedRowTooWide'))
     }
   }
   if (pending.length) result.push(buildBatchUpdate({ ...spec, edits: pending }))
@@ -271,15 +275,15 @@ export type BulkInsertSpec = {
 // batch never exceeds the backend's parameter ceiling or SQL Server's 1,000-row
 // VALUES limit; runBatch executes every returned statement atomically.
 export function buildInsertBatches(spec: BulkInsertSpec): Array<ReturnType<typeof buildInsert>> {
-  if (!spec.columns.length) throw new Error('Choose at least one column to import')
-  if (!spec.values.length) throw new Error('The CSV does not contain any data rows')
+  if (!spec.columns.length) throw new Error(t('write.chooseImportColumn'))
+  if (!spec.values.length) throw new Error(t('write.noImportRows'))
   const invalidRow = spec.values.findIndex((row) => row.length !== spec.columns.length)
-  if (invalidRow >= 0) throw new Error(`Import row ${invalidRow + 1} does not match the selected columns`)
+  if (invalidRow >= 0) throw new Error(t('write.importRowMismatch', { row: invalidRow + 1 }))
 
   const dialect = dialectFor(spec.engine)
   const maxParams = Math.min(parameterLimit(spec.engine), 10_000)
   const rowsPerStatement = Math.min(1_000, Math.floor(maxParams / spec.columns.length))
-  if (rowsPerStatement < 1) throw new Error('One imported row has more columns than this database supports')
+  if (rowsPerStatement < 1) throw new Error(t('write.importRowTooWide'))
   const columns = spec.columns.map((column) => dialect.quoteIdent(column.name)).join(', ')
   const statements: Array<ReturnType<typeof buildInsert>> = []
 
@@ -367,10 +371,10 @@ export const PG_INDEX_METHODS = ['btree', 'hash', 'gin', 'gist', 'spgist', 'brin
 export function buildCreateIndex(table: TableRef, spec: IndexSpec, engine: Engine): string {
   const dialect = dialectFor(engine)
   const name = spec.name.trim()
-  if (!name) throw new Error('Index name is required')
-  if (!spec.columns.length) throw new Error('An index needs at least one column')
+  if (!name) throw new Error(t('write.indexNameRequired'))
+  if (!spec.columns.length) throw new Error(t('write.indexNeedsColumn'))
   const method = spec.method?.trim() ?? ''
-  if (method && !(PG_INDEX_METHODS as readonly string[]).includes(method)) throw new Error(`Unknown index method: ${method}`)
+  if (method && !(PG_INDEX_METHODS as readonly string[]).includes(method)) throw new Error(t('write.unknownIndexMethod', { method }))
   const using = engine === 'postgresql' && method && method !== 'btree' ? ` USING ${method}` : ''
   const columns = spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')
   return `CREATE ${spec.unique ? 'UNIQUE ' : ''}INDEX ${dialect.quoteIdent(name)} ON ${quoteQualified(table, dialect)}${using} (${columns})`
@@ -417,21 +421,21 @@ export function buildCreateTrigger(table: TableRef, spec: TriggerSpec, engine: E
   const dialect = dialectFor(engine)
   const caps = triggerCapabilities(engine)
   const name = spec.name.trim()
-  if (!name) throw new Error('Trigger name is required')
-  if (!spec.events.length) throw new Error('A trigger needs at least one event')
-  if (!caps.timings.includes(spec.timing)) throw new Error(`${spec.timing} triggers are not supported on this engine`)
-  if (!caps.multiEvent && spec.events.length > 1) throw new Error('This engine allows one event per trigger')
-  if (!caps.levels.includes(spec.level)) throw new Error(`FOR EACH ${spec.level} is not supported on this engine`)
+  if (!name) throw new Error(t('write.triggerNameRequired'))
+  if (!spec.events.length) throw new Error(t('write.triggerNeedsEvent'))
+  if (!caps.timings.includes(spec.timing)) throw new Error(t('write.triggerTimingUnsupported', { timing: spec.timing }))
+  if (!caps.multiEvent && spec.events.length > 1) throw new Error(t('write.triggerSingleEvent'))
+  if (!caps.levels.includes(spec.level)) throw new Error(t('write.triggerLevelUnsupported', { level: spec.level }))
   const qualified = quoteQualified(table, dialect)
   const events = spec.events.join(engine === 'sqlserver' ? ', ' : ' OR ')
   if (engine === 'postgresql') {
     const fn = spec.functionName?.trim() ?? ''
-    if (!fn) throw new Error('A PostgreSQL trigger executes an existing function — name one')
+    if (!fn) throw new Error(t('write.pgTriggerNeedsFunction'))
     const call = fn.includes('(') ? fn : `${fn}()`
     return `CREATE TRIGGER ${dialect.quoteIdent(name)}\n${spec.timing} ${events} ON ${qualified}\nFOR EACH ${spec.level} EXECUTE FUNCTION ${call}`
   }
   const body = spec.body?.trim() ?? ''
-  if (!body) throw new Error('Trigger body is required')
+  if (!body) throw new Error(t('write.triggerBodyRequired'))
   if (engine === 'sqlserver') {
     return `CREATE TRIGGER ${dialect.quoteIdent(name)} ON ${qualified}\n${spec.timing} ${events}\nAS\nBEGIN\n${terminated(body)}\nEND`
   }
@@ -451,18 +455,18 @@ export function buildAddPartition(table: TableRef, spec: PartitionSpec, engine: 
   const dialect = dialectFor(engine)
   const name = spec.name.trim()
   const bounds = spec.bounds.trim().replace(/^for\s+values\s+/i, '')
-  if (!name) throw new Error('Partition name is required')
+  if (!name) throw new Error(t('write.partitionNameRequired'))
   if (engine === 'postgresql') {
     const child = quoteQualified({ schema: table.schema, name, kind: 'table' }, dialect)
     if (/^default$/i.test(bounds)) return `CREATE TABLE ${child} PARTITION OF ${quoteQualified(table, dialect)} DEFAULT`
-    if (!bounds) throw new Error('Partition bounds are required (e.g. FROM (…) TO (…), IN (…), or DEFAULT)')
+    if (!bounds) throw new Error(t('write.pgPartitionBoundsRequired'))
     return `CREATE TABLE ${child} PARTITION OF ${quoteQualified(table, dialect)} FOR VALUES ${bounds}`
   }
   if (engine === 'mysql') {
-    if (!bounds) throw new Error('Partition bounds are required (e.g. VALUES LESS THAN (…))')
+    if (!bounds) throw new Error(t('write.mysqlPartitionBoundsRequired'))
     return `ALTER TABLE ${quoteQualified(table, dialect)} ADD PARTITION (PARTITION ${dialect.quoteIdent(name)} ${bounds})`
   }
-  throw new Error('Adding partitions is not supported on this engine')
+  throw new Error(t('write.partitionUnsupported'))
 }
 
 // Adding FKs / CHECK / UNIQUE via ALTER works on the three server engines;
@@ -497,11 +501,11 @@ export const buildCreateForeignKeyDefinition = (spec: ForeignKeySpec, engine: En
   const dialect = dialectFor(engine)
   const name = spec.name.trim()
   const refTable = spec.refTable.trim()
-  if (!name) throw new Error('Constraint name is required')
-  if (!spec.columns.length) throw new Error('A foreign key needs at least one column')
-  if (!refTable) throw new Error('A referenced table is required')
-  if (!spec.refColumns.length) throw new Error('At least one referenced column is required')
-  if (spec.columns.length !== spec.refColumns.length) throw new Error('Local and referenced columns must match in count')
+  if (!name) throw new Error(t('write.constraintNameRequired'))
+  if (!spec.columns.length) throw new Error(t('write.foreignKeyNeedsColumn'))
+  if (!refTable) throw new Error(t('write.referencedTableRequired'))
+  if (!spec.refColumns.length) throw new Error(t('write.referencedColumnRequired'))
+  if (spec.columns.length !== spec.refColumns.length) throw new Error(t('write.foreignKeyColumnCount'))
   const columns = spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')
   const refColumns = spec.refColumns.map((column) => dialect.quoteIdent(column.trim())).join(', ')
   const actions = foreignKeyActions(engine)
@@ -513,7 +517,7 @@ export const buildCreateForeignKeyDefinition = (spec: ForeignKeySpec, engine: En
 }
 
 export function buildAddForeignKey(table: TableRef, spec: ForeignKeySpec, engine: Engine): string {
-  if (!canAddConstraint(engine)) throw new Error('SQLite cannot add a foreign key to an existing table — recreate the table instead')
+  if (!canAddConstraint(engine)) throw new Error(t('write.sqliteForeignKeyUnsupported'))
   return `ALTER TABLE ${quoteQualified(table, dialectFor(engine))} ADD ${buildCreateForeignKeyDefinition(spec, engine)}`
 }
 
@@ -529,19 +533,19 @@ export type ConstraintSpec = {
 export const buildCreateConstraintDefinition = (spec: ConstraintSpec, engine: Engine): string => {
   const dialect = dialectFor(engine)
   const name = spec.name.trim()
-  if (!name) throw new Error('Constraint name is required')
+  if (!name) throw new Error(t('write.constraintNameRequired'))
   const head = `CONSTRAINT ${dialect.quoteIdent(name)}`
   if (spec.type === 'CHECK') {
     const expression = spec.expression?.trim() ?? ''
-    if (!expression) throw new Error('A CHECK constraint needs a boolean expression')
+    if (!expression) throw new Error(t('write.checkExpressionRequired'))
     return `${head} CHECK (${expression})`
   }
-  if (!spec.columns?.length) throw new Error(`A ${spec.type} constraint needs at least one column`)
+  if (!spec.columns?.length) throw new Error(t('write.constraintNeedsColumn', { type: spec.type }))
   return `${head} ${spec.type} (${spec.columns.map((column) => dialect.quoteIdent(column)).join(', ')})`
 }
 
 export function buildAddConstraint(table: TableRef, spec: ConstraintSpec, engine: Engine): string {
-  if (!canAddConstraint(engine)) throw new Error('SQLite cannot add this constraint to an existing table — recreate the table, or use a unique index')
+  if (!canAddConstraint(engine)) throw new Error(t('write.sqliteConstraintUnsupported'))
   return `ALTER TABLE ${quoteQualified(table, dialectFor(engine))} ADD ${buildCreateConstraintDefinition(spec, engine)}`
 }
 
@@ -549,8 +553,8 @@ const createColumnDefinition = (column: ColumnAdd, engine: Engine): string => {
   const dialect = dialectFor(engine)
   const name = column.name.trim()
   const dataType = column.dataType.trim()
-  if (!name) throw new Error('Column name is required')
-  if (!dataType) throw new Error(`Column "${name}" needs a data type`)
+  if (!name) throw new Error(t('write.columnNameRequired'))
+  if (!dataType) throw new Error(t('write.columnTypeRequired', { column: name }))
   let sql = `${dialect.quoteIdent(name)} ${dataType}`
   if (column.default !== null && column.default !== '') sql += ` DEFAULT ${column.default}`
   if (!column.nullable) sql += ' NOT NULL'
@@ -568,10 +572,10 @@ export function buildCreateTable(
   engine: Engine,
 ): string[] {
   const name = table.name.trim()
-  if (!name) throw new Error('Table name is required')
-  if (!columns.length) throw new Error('A table needs at least one column')
+  if (!name) throw new Error(t('write.tableNameRequired'))
+  if (!columns.length) throw new Error(t('write.tableNeedsColumn'))
   if (constraints.filter((constraint) => constraint.type === 'PRIMARY KEY').length > 1) {
-    throw new Error('A table can have only one primary key')
+    throw new Error(t('write.singlePrimaryKey'))
   }
   const dialect = dialectFor(engine)
   const definitions = [
@@ -614,7 +618,7 @@ export function buildColumnAlter(table: TableRef, edits: ColumnAlter[], engine: 
     const dataType = caps.dataType && edit.dataType !== undefined && edit.dataType !== edit.original.dataType ? edit.dataType : undefined
     const nullable = caps.nullable && edit.nullable !== undefined && edit.nullable !== edit.original.nullable ? edit.nullable : undefined
     if (edit.original.generated && (dataType !== undefined || nullable !== undefined)) {
-      throw new Error(`Cannot alter the type or nullability of generated column ${edit.original.name}`)
+      throw new Error(t('write.generatedColumnAlter', { column: edit.original.name }))
     }
     if (engine === 'sqlserver') {
       // T-SQL restates the full definition in one ALTER COLUMN; a custom collation
@@ -697,7 +701,7 @@ function orderColumnRenames(pairs: Array<{ from: string; to: string }>): Array<{
 }
 
 export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: unknown[]; expectedRows: number } {
-  if (spec.rows.length === 0) throw new Error('Cannot build a DELETE without rows')
+  if (spec.rows.length === 0) throw new Error(t('write.deleteNeedsRows'))
   const dialect = dialectFor(spec.engine)
   const params: unknown[] = []
   const bind = (value: unknown) => {
@@ -705,7 +709,7 @@ export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: un
     return dialect.placeholder(params.length)
   }
   const condition = (pks: RowKey) => {
-    if (pks.length === 0) throw new Error('Cannot build a DELETE without a primary key')
+    if (pks.length === 0) throw new Error(t('write.deleteNeedsPrimaryKey'))
     return pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind)).join(' AND ')
   }
   const where = spec.rows.map((pks) => `(${condition(pks)})`).join(' OR ')
@@ -721,7 +725,7 @@ export function buildDeleteRowBatches(spec: DeleteRowsSpec): Array<ReturnType<ty
       pending.push(row)
       continue
     }
-    if (!pending.length) throw new Error('One deleted row requires more bind parameters than this database supports.')
+    if (!pending.length) throw new Error(t('write.deletedRowTooWide'))
     result.push(buildDeleteRows({ ...spec, rows: pending }))
     pending = [row]
   }

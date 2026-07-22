@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { ConnectionStatus, SqlkitApi } from '../src/electron'
 
 const api: SqlkitApi = {
+  readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
+  writeClipboardText: (text) => ipcRenderer.invoke('clipboard:write-text', text),
   openWorkspace: () => ipcRenderer.invoke('workspace:open'),
   openWorkspacePath: (path) => ipcRenderer.invoke('workspace:open-path', path),
   closeWorkspace: () => ipcRenderer.invoke('workspace:close'),
@@ -25,13 +27,13 @@ const api: SqlkitApi = {
     ipcRenderer.on('db:status', handler)
     return () => ipcRenderer.off('db:status', handler)
   },
-  runQuery: (profileId, childDb, sql, params, sort, executionId) =>
-    ipcRenderer.invoke('db:query', profileId, childDb, sql, params, sort, executionId),
+  runQuery: (profileId, childDb, sql, params, sort, filter, executionId) =>
+    ipcRenderer.invoke('db:query', profileId, childDb, sql, params, sort, filter, executionId),
   runBatch: (profileId, childDb, statements) => ipcRenderer.invoke('db:run-batch', profileId, childDb, statements),
   runDdl: (profileId, childDb, statements) => ipcRenderer.invoke('db:run-ddl', profileId, childDb, statements),
   fetchRows: (sessionId, offset, limit) => ipcRenderer.invoke('db:fetch-rows', sessionId, offset, limit),
-  exportQuery: (profileId, childDb, sql, params, sort, format, suggestedName, executionId) =>
-    ipcRenderer.invoke('db:export-query', profileId, childDb, sql, params, sort, format, suggestedName, executionId),
+  exportQuery: (profileId, childDb, sql, params, sort, filter, format, suggestedName, executionId) =>
+    ipcRenderer.invoke('db:export-query', profileId, childDb, sql, params, sort, filter, format, suggestedName, executionId),
   closeSession: (sessionId) => ipcRenderer.invoke('db:close-session', sessionId),
   cancelQuery: (profileId, executionId) => ipcRenderer.invoke('db:cancel', profileId, executionId),
   createDatabase: (profileId, name) => ipcRenderer.invoke('db:create-database', profileId, name),

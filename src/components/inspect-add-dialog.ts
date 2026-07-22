@@ -14,18 +14,23 @@ import {
   type TriggerEvent,
   type TriggerSpec,
 } from '../sql-write'
+import { t } from '../i18n'
 
 export type AddObjectKind = 'index' | 'trigger' | 'partition' | 'foreignKey' | 'constraint'
 export type AddObjectDetail = { operation: InspectOperation }
 
 const TRIGGER_EVENTS: TriggerEvent[] = ['INSERT', 'UPDATE', 'DELETE']
-const KIND_TITLES: Record<AddObjectKind, string> = {
-  index: 'index',
-  trigger: 'trigger',
-  partition: 'partition',
-  foreignKey: 'foreign key',
-  constraint: 'constraint',
-}
+const kindTitle = (kind: AddObjectKind) => t(
+  kind === 'index'
+    ? 'inspect.index'
+    : kind === 'trigger'
+      ? 'inspect.trigger'
+      : kind === 'partition'
+        ? 'inspect.partition'
+        : kind === 'foreignKey'
+          ? 'inspect.foreignKey'
+          : 'inspect.constraint',
+)
 
 // Modal form that builds one schema-add statement for the inspected table. Field
 // rows mirror db-config-form; the statement still goes through the workbench
@@ -130,7 +135,10 @@ export class InspectAddDialog extends LitElement {
   }
 
   render() {
-    const title = `${this.operation ? 'Edit' : 'Add'} ${KIND_TITLES[this.kind]} · ${this.table?.name ?? ''}`
+    const title = t(this.operation ? 'inspect.editTitle' : 'inspect.addTitle', {
+      kind: kindTitle(this.kind),
+      table: this.table?.name ?? '',
+    })
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <div class="panel" role="dialog" aria-label=${title}>
@@ -138,8 +146,8 @@ export class InspectAddDialog extends LitElement {
           ${this._fields()}
           ${this._error ? html`<p class="error" role="alert">${this._error}</p>` : ''}
           <div class="actions">
-            <button class="secondary" @click=${this._cancel}>Cancel</button>
-            <button class="primary" @click=${this._create}>${this.operation ? 'Save' : 'Create'}</button>
+            <button class="secondary" @click=${this._cancel}>${t('common.cancel')}</button>
+            <button class="primary" @click=${this._create}>${t(this.operation ? 'common.save' : 'common.create')}</button>
           </div>
         </div>
       </div>
@@ -180,10 +188,10 @@ export class InspectAddDialog extends LitElement {
     const actions = foreignKeyActions(this.engine)
     const refColumns = this._referenceColumnItems()
     return html`
-      ${this._field('Name', this._nameInput(`fk_${this.table?.name ?? ''}`))}
-      ${this._field('Columns', this._columnChecks(this._fkColumns, (column) => this._toggleFkColumn(column)), 'Local columns, in reference order.')}
+      ${this._field(t('inspect.name'), this._nameInput(`fk_${this.table?.name ?? ''}`))}
+      ${this._field(t('inspect.columns'), this._columnChecks(this._fkColumns, (column) => this._toggleFkColumn(column)), t('inspect.localColumnsHelp'))}
       ${this._field(
-        'References',
+        t('inspect.references'),
         html`<picker-input
           placeholder="schema.table"
           .value=${this._refTable}
@@ -193,10 +201,10 @@ export class InspectAddDialog extends LitElement {
             this._refColumns = ''
           }}
         ></picker-input>`,
-        'Referenced table.',
+        t('inspect.referencedTableHelp'),
       )}
       ${this._field(
-        'Ref columns',
+        t('inspect.refColumns'),
         html`<picker-input
           placeholder="id"
           .value=${this._refColumns}
@@ -204,10 +212,10 @@ export class InspectAddDialog extends LitElement {
           multiple
           @value-change=${(event: CustomEvent<{ value: string }>) => (this._refColumns = event.detail.value)}
         ></picker-input>`,
-        'Comma-separated; must match the local column count.',
+        t('inspect.refColumnsHelp'),
       )}
-      ${this._field('On delete', this._actionSelect(this._onDelete, actions, (value) => (this._onDelete = value)))}
-      ${this._field('On update', this._actionSelect(this._onUpdate, actions, (value) => (this._onUpdate = value)))}
+      ${this._field(t('inspect.onDelete'), this._actionSelect(this._onDelete, actions, (value) => (this._onDelete = value)))}
+      ${this._field(t('inspect.onUpdate'), this._actionSelect(this._onUpdate, actions, (value) => (this._onUpdate = value)))}
     `
   }
 
@@ -226,9 +234,9 @@ export class InspectAddDialog extends LitElement {
         ? `uq_${this.table?.name ?? ''}`
         : `chk_${this.table?.name ?? ''}`
     return html`
-      ${this._field('Name', this._nameInput(defaultName))}
+      ${this._field(t('inspect.name'), this._nameInput(defaultName))}
       ${this._field(
-        'Type',
+        t('inspect.type'),
         html`
           <select @change=${(e: Event) => (this._constraintType = (e.target as HTMLSelectElement).value as typeof this._constraintType)}>
             <option value="CHECK" ?selected=${this._constraintType === 'CHECK'}>CHECK</option>
@@ -239,28 +247,28 @@ export class InspectAddDialog extends LitElement {
       )}
       ${this._constraintType === 'CHECK'
         ? this._field(
-            'Expression',
+            t('inspect.expression'),
             html`<sql-expression-editor
               .value=${this._checkExpression}
               .engine=${this.engine}
               .columns=${this.columns}
               @expression-change=${(event: CustomEvent<{ value: string }>) => (this._checkExpression = event.detail.value)}
             ></sql-expression-editor>`,
-            'A boolean expression each row must satisfy.',
+            t('inspect.checkHelp'),
           )
         : this._field(
-            'Columns',
+            t('inspect.columns'),
             this._columnChecks(this._uniqueColumns, (column) => this._toggleUniqueColumn(column)),
-            this._constraintType === 'PRIMARY KEY' ? 'Columns that uniquely identify each row.' : 'Rows must be unique across these columns.',
+            this._constraintType === 'PRIMARY KEY' ? t('inspect.primaryKeyHelp') : t('inspect.uniqueHelp'),
           )}
     `
   }
 
   private _indexFields() {
     return html`
-      ${this._field('Name', this._nameInput(`idx_${this.table?.name ?? ''}`))}
+      ${this._field(t('inspect.name'), this._nameInput(`idx_${this.table?.name ?? ''}`))}
       ${this._field(
-        'Columns',
+        t('inspect.columns'),
         html`
           <div class="checks">
             ${this.columns.map(
@@ -277,20 +285,20 @@ export class InspectAddDialog extends LitElement {
             )}
           </div>
         `,
-        'Key order follows the table column order.',
+        t('inspect.indexOrderHelp'),
       )}
       ${this._field(
         '',
         html`
           <label class="toggle">
             <input type="checkbox" .checked=${this._unique} @change=${(e: Event) => (this._unique = (e.target as HTMLInputElement).checked)} />
-            <span>Unique</span>
+            <span>${t('inspect.unique')}</span>
           </label>
         `,
       )}
       ${this.engine === 'postgresql'
         ? this._field(
-            'Method',
+            t('inspect.method'),
             html`
               <select @change=${(e: Event) => (this._method = (e.target as HTMLSelectElement).value)}>
                 ${PG_INDEX_METHODS.map((method) => html`<option value=${method} ?selected=${this._method === method}>${method}</option>`)}
@@ -306,9 +314,9 @@ export class InspectAddDialog extends LitElement {
     const timing = this._timing ?? caps.timings[0]!
     const level = this._level ?? caps.levels[0]!
     return html`
-      ${this._field('Name', this._nameInput(`trg_${this.table?.name ?? ''}`))}
+      ${this._field(t('inspect.name'), this._nameInput(`trg_${this.table?.name ?? ''}`))}
       ${this._field(
-        'Timing',
+        t('inspect.timing'),
         html`
           <select @change=${(e: Event) => (this._timing = (e.target as HTMLSelectElement).value as TriggerSpec['timing'])}>
             ${caps.timings.map((option) => html`<option value=${option} ?selected=${timing === option}>${option}</option>`)}
@@ -316,7 +324,7 @@ export class InspectAddDialog extends LitElement {
         `,
       )}
       ${this._field(
-        caps.multiEvent ? 'Events' : 'Event',
+        t(caps.multiEvent ? 'inspect.events' : 'inspect.event'),
         caps.multiEvent
           ? html`
               <div class="checks row">
@@ -338,7 +346,7 @@ export class InspectAddDialog extends LitElement {
       )}
       ${caps.levels.length > 1
         ? this._field(
-            'For each',
+            t('inspect.forEach'),
             html`
               <select @change=${(e: Event) => (this._level = (e.target as HTMLSelectElement).value as TriggerSpec['level'])}>
                 ${caps.levels.map((option) => html`<option value=${option} ?selected=${level === option}>${option}</option>`)}
@@ -348,17 +356,17 @@ export class InspectAddDialog extends LitElement {
         : ''}
       ${caps.usesFunction
         ? this._field(
-            'Function',
+            t('inspect.function'),
             html`<picker-input
               placeholder="schema.function_name"
               .value=${this._functionName}
               .items=${this._functionItems()}
               @value-change=${(event: CustomEvent<{ value: string }>) => (this._functionName = event.detail.value)}
             ></picker-input>`,
-            'Existing trigger function to EXECUTE; () is added if omitted.',
+            t('inspect.triggerFunctionHelp'),
           )
         : this._field(
-            'Body',
+            t('inspect.body'),
             html`
               <textarea
                 rows="5"
@@ -368,7 +376,7 @@ export class InspectAddDialog extends LitElement {
                 @input=${(e: Event) => (this._body = (e.target as HTMLTextAreaElement).value)}
               ></textarea>
             `,
-            'Statements only — they are wrapped in BEGIN … END for you.',
+            t('inspect.triggerBodyHelp'),
           )}
     `
   }
@@ -376,9 +384,9 @@ export class InspectAddDialog extends LitElement {
   private _partitionFields() {
     const pg = this.engine === 'postgresql'
     return html`
-      ${this._field('Name', this._nameInput(`${this.table?.name ?? ''}_p1`))}
+      ${this._field(t('inspect.name'), this._nameInput(`${this.table?.name ?? ''}_p1`))}
       ${this._field(
-        'Bounds',
+        t('inspect.bounds'),
         html`
           <input
             type="text"
@@ -389,7 +397,7 @@ export class InspectAddDialog extends LitElement {
             @input=${(e: Event) => (this._bounds = (e.target as HTMLInputElement).value)}
           />
         `,
-        pg ? `Also IN (…), WITH (MODULUS m, REMAINDER r), or DEFAULT.` : `Also VALUES IN (…) for LIST partitioning.`,
+        pg ? t('inspect.pgBoundsHelp') : t('inspect.mysqlBoundsHelp'),
       )}
     `
   }

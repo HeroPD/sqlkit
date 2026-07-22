@@ -1,7 +1,9 @@
 import { dialectFor } from '../../src/dialect'
 import type { Engine, QuerySort } from '../../src/electron'
+import { applyFilterCondition, isFilterableQuery } from '../../src/sql-filter'
 import { maskSql, type SqlModeFlags } from '../../src/sql-mask'
 import { isReorderableQuery } from '../../src/sql-order'
+import { t } from '../../src/i18n'
 
 export { maskSql }
 
@@ -119,7 +121,7 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
     } else if (closes) {
       sawControl = true
       if (depth === 0) {
-        throw new Error('No transaction is active in this query run. Run BEGIN and COMMIT/ROLLBACK together in one selection.')
+        throw new Error(t('query.transactionNotActive'))
       }
       depth -= 1
     }
@@ -129,7 +131,7 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
   // session reset at release rolls back anything it truly leaks.
   const managesTrancount = engine === 'sqlserver' && /@@trancount/i.test(script.masked)
   if (sawControl && depth !== 0 && !managesTrancount) {
-    throw new Error('Transactions must begin and commit or roll back in the same query run; pooled connections cannot preserve them across runs.')
+    throw new Error(t('query.transactionSameRun'))
   }
   return sawControl
 }
@@ -144,7 +146,7 @@ export function splitSqlServerBatches(sql: string): string[] {
     const batch = sql.slice(start, match.index).trim()
     const repeat = match[1] === undefined ? 1 : Number(match[1])
     if (!Number.isSafeInteger(repeat) || repeat < 1 || repeat > 1_000) {
-      throw new Error('SQL Server GO repeat count must be between 1 and 1,000.')
+      throw new Error(t('query.goRepeatRange'))
     }
     if (batch) for (let index = 0; index < repeat; index += 1) batches.push(batch)
     start = match.index + match[0].length
@@ -241,21 +243,27 @@ export function prepareSqlRun(args: {
   sql: string
   params?: unknown[]
   sort?: QuerySort | null
+  filter?: string | null
   /** MySQL: the session's masking-relevant sql_mode flags, read at connect. */
   sqlMode?: SqlModeFlags
 }): SqlRunPlan {
   const params = args.params ?? []
   let sql = args.engine === 'mysql' ? preprocessMysqlDelimiters(args.sql, args.sqlMode) : args.sql
 
+  if (args.filter) {
+    if (!isFilterableQuery(sql, args.engine, args.sqlMode)) throw new Error(t('filter.singleSelect'))
+    sql = applyFilterCondition(sql, args.filter, args.engine, args.sqlMode)
+  }
+
   if (args.sort) {
-    if (!isReorderableQuery(sql)) throw new Error('Sorting is only supported for a single SELECT statement.')
+    if (!isReorderableQuery(sql)) throw new Error(t('query.sortSingleSelect'))
     sql = dialectFor(args.engine).applyOrderBy(sql, args.sort)
   }
 
   assertSelfContainedTransaction(sql, args.engine, args.sqlMode)
   const batches = args.engine === 'sqlserver' ? splitSqlServerBatches(sql) : [sql]
   if (params.length && batches.length > 1) {
-    throw new Error('Parameters cannot be used with a multi-batch SQL Server script.')
+    throw new Error(t('query.parametersSingleBatch'))
   }
   return { batches, params }
 }

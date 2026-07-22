@@ -56,6 +56,7 @@ const expressionTheme = EditorView.theme(
       border: '1px solid var(--border)',
     },
     '.cm-tooltip-autocomplete > ul': { fontFamily: 'var(--mono-font)', fontSize: 'var(--font-size)' },
+    '.cm-completionIcon': { display: 'none' },
     '.cm-tooltip-autocomplete > ul > li[aria-selected]': {
       color: 'var(--list-selection-fg)',
       backgroundColor: 'var(--list-selection)',
@@ -75,11 +76,24 @@ export class SqlExpressionEditor extends LitElement {
   @property({ attribute: false })
   columns: string[] = []
 
+  @property({ type: Boolean, reflect: true })
+  compact = false
+
+  @property({ type: Boolean })
+  submitOnEnter = false
+
+  @property()
+  placeholderText = 'age >= 0'
+
   private _view: EditorView | null = null
   private _syncing = false
 
   render() {
     return html`<div class="host"></div>`
+  }
+
+  focusEditor() {
+    this._view?.focus()
   }
 
   protected firstUpdated() {
@@ -93,13 +107,34 @@ export class SqlExpressionEditor extends LitElement {
           history(),
           bracketMatching(),
           closeBrackets(),
-          keymap.of([...closeBracketsKeymap, ...completionKeymap, ...defaultKeymap, ...historyKeymap]),
+          keymap.of([
+            ...completionKeymap,
+            {
+              key: 'Enter',
+              run: () => {
+                if (!this.submitOnEnter) return false
+                this.dispatchEvent(new CustomEvent('expression-submit', { bubbles: true, composed: true }))
+                return true
+              },
+            },
+            {
+              key: 'Escape',
+              run: () => {
+                if (!this.compact) return false
+                this.dispatchEvent(new CustomEvent('expression-cancel', { bubbles: true, composed: true }))
+                return true
+              },
+            },
+            ...closeBracketsKeymap,
+            ...defaultKeymap,
+            ...historyKeymap,
+          ]),
           configCompartment.of(this._configuration()),
           expressionTheme,
           oneDarkTheme,
           syntaxHighlighting(softHighlightStyle),
           EditorView.lineWrapping,
-          placeholder('age >= 0'),
+          placeholder(this.placeholderText),
           EditorView.updateListener.of((update) => {
             if (!update.docChanged) return
             this._syncing = true
@@ -159,6 +194,24 @@ export class SqlExpressionEditor extends LitElement {
 
     :host(:focus-within) {
       border-color: var(--input-focus-border);
+    }
+
+    :host([compact]) {
+      min-width: 0;
+      overflow: visible;
+      border-radius: 3px;
+    }
+
+    :host([compact]) .host .cm-editor {
+      height: 22px;
+    }
+
+    :host([compact]) .host .cm-scroller {
+      overflow: hidden;
+    }
+
+    :host([compact]) .host .cm-content {
+      padding: 1px 0;
     }
   `
 }

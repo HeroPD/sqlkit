@@ -360,7 +360,7 @@ describeDb('mssql driver (integration)', () => {
   it('cancels an in-flight query in-band', async () => {
     const driver = await connectDriver()
     try {
-      const running = driver.query("waitfor delay '00:00:30'", [], null, null, 'slow-query')
+      const running = driver.query("waitfor delay '00:00:30'", [], null, null, null, 'slow-query')
       const cancelled = expect(running).rejects.toThrow('Query cancelled.')
       await new Promise((resolve) => setTimeout(resolve, 400))
       expect(await driver.cancel?.('other-query')).toEqual({ running: 0, cancelled: 0 })

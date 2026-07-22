@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { t } from '../../src/i18n'
 
 type Metadata = { type?: { name?: string }; precision?: number; scale?: number }
 type ParserResult = { value: unknown; offset: number }
@@ -100,7 +101,7 @@ export function installLosslessTediousParsers() {
   if (parser[PATCHED]) return
   const helpers = require('tedious/lib/token/helpers.js') as Helpers
   if (typeof parser.readValue !== 'function' || typeof helpers.NotEnoughDataError !== 'function') {
-    throw new Error('The installed Tedious version is incompatible with SqlKit Studio lossless value decoding.')
+    throw new Error(t('connection.tediousIncompatible'))
   }
   const original = parser.readValue.bind(parser)
   parser.readValue = (buffer, offset, metadata, options) => {

@@ -81,4 +81,5 @@ export function boundedRow(row: unknown[], usedBytes: number): { row: unknown[];
 }
 
 // Shared rows-affected-gate message for runBatch implementations.
-export const BATCH_ZERO_ROWS = 'A change affected no rows; the row may have been modified or removed.'
+export const BATCH_ZERO_ROWS = t('editing.noRowsAffected')
+import { t } from '../../src/i18n'

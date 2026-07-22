@@ -1,5 +1,6 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { PromptConfirmDetail } from '../components/prompt-dialog'
+import { t } from '../i18n'
 
 type ConfirmConfig = { message: string; detail: string; confirmLabel: string; action: () => void }
 type PromptConfig = {
@@ -70,7 +71,7 @@ export class DialogsController implements ReactiveController {
 
   // Error notice via the confirm dialog, with only an acknowledge action.
   notice(message: string, detail: string) {
-    this.confirm = { message, detail, confirmLabel: 'OK', action: () => {} }
+    this.confirm = { message, detail, confirmLabel: t('common.ok'), action: () => {} }
   }
 
   acceptConfirm = () => {

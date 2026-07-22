@@ -1,6 +1,7 @@
 import { LitElement, type PropertyValues, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { t } from '../i18n'
 
 // Renders a bound parameter in SQL-ish form for review only; execution still
 // uses the original parameterized query.
@@ -85,7 +86,7 @@ export class ReviewQueryDialog extends LitElement {
   params: unknown[] = []
 
   @property()
-  confirmLabel = 'Run'
+  confirmLabel = t('common.run')
 
   @property()
   warning = ''
@@ -121,18 +122,18 @@ export class ReviewQueryDialog extends LitElement {
     const preview = previewSql(this.sql, this.params)
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
-        <div class="panel" role="dialog" aria-label="Review query">
-          <h4>Review query</h4>
+        <div class="panel" role="dialog" aria-label=${t('review.title')}>
+          <h4>${t('review.title')}</h4>
           ${this.warning ? html`<p class="warning" role="alert">${this.warning}</p>` : ''}
           <pre class="sql"><code>${sqlPreviewParts(preview).map((part) =>
             part.kind ? html`<span class=${part.kind}>${part.text}</span>` : part.text,
           )}</code></pre>
           ${this._error ? html`<p class="error" role="alert">${this._error}</p>` : ''}
           <div class="actions">
-            <button class="secondary" ?disabled=${this._applying} @click=${this._cancel}>Cancel</button>
+            <button class="secondary" ?disabled=${this._applying} @click=${this._cancel}>${t('common.cancel')}</button>
             <button class="primary" ?disabled=${this._applying} @click=${this._confirm}>
               ${this._applying
-                ? html`<i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> Applying…`
+                ? html`<i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> ${t('common.applying')}`
                 : this.confirmLabel}
             </button>
           </div>

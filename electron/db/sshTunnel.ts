@@ -4,6 +4,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import type { SshConfig } from '../../src/electron'
+import { t } from '../../src/i18n'
 import type { Tunnel } from './transport'
 import { hasPinnedHostKey, hostKeyFingerprint, knownHostsPath, makeHostVerifier, trustHostKey, unknownHostKeyMessage } from './knownHosts'
 
@@ -20,21 +21,21 @@ function buildConnectConfig(ssh: SshConfig): ConnectConfig {
     keepaliveInterval: 30_000,
   }
 
-  if (!config.host) throw new Error('SSH host is required')
-  if (!config.username) throw new Error('SSH username is required')
+  if (!config.host) throw new Error(t('ssh.hostRequired'))
+  if (!config.username) throw new Error(t('ssh.usernameRequired'))
 
   if (ssh.authType === 'key') {
     const keyPath = expandHome(ssh.keyPath.trim())
-    if (!keyPath) throw new Error('SSH private key path is required')
+    if (!keyPath) throw new Error(t('ssh.keyPathRequired'))
     try {
-      if (fs.statSync(keyPath).size > 1024 * 1024) throw new Error('private key file exceeds 1 MB')
+      if (fs.statSync(keyPath).size > 1024 * 1024) throw new Error(t('ssh.keyTooLarge'))
       config.privateKey = fs.readFileSync(keyPath)
     } catch (error) {
       throw new Error(`Failed to read SSH key at ${keyPath}: ${(error as Error).message}`, { cause: error })
     }
     if (ssh.passphrase) config.passphrase = ssh.passphrase
   } else {
-    if (!ssh.password) throw new Error('SSH password is required')
+    if (!ssh.password) throw new Error(t('ssh.passwordRequired'))
     config.password = ssh.password
   }
 

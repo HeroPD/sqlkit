@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { join } from 'node:path'
 import type { ConnectionProfile } from '../src/electron'
+import { t } from '../src/i18n'
 import { testConnection, type ConnectionManager } from './db/manager'
 import { MAX_FETCH_ROWS } from './db/result-sessions'
 import { testSshTunnel } from './db/transport'
@@ -70,15 +71,16 @@ export function registerDbIpc(context: DbIpcContext) {
   ipcMain.handle('db:statuses', (event) => existingManager(event)?.statuses() ?? [])
   ipcMain.handle(
     'db:query',
-    (event, profileId: unknown, childDb: unknown, sql: unknown, params?: unknown, sort?: unknown, executionId?: unknown) => {
+    (event, profileId: unknown, childDb: unknown, sql: unknown, params?: unknown, sort?: unknown, filter?: unknown, executionId?: unknown) => {
       try {
-        const payload = queryPayload(sql, params, sort, executionId)
+        const payload = queryPayload(sql, params, sort, filter, executionId)
         return manager(event).query(
           stringValue(profileId, 'Profile id', 200),
           childDb === null ? null : stringValue(childDb, 'Database name', 2_000),
           payload.sql,
           payload.params,
           payload.sort,
+          payload.filter,
           payload.executionId,
         )
       } catch (error) {
@@ -113,13 +115,13 @@ export function registerDbIpc(context: DbIpcContext) {
       stringValue(sessionId, 'Session id', 200),
       nonNegativeInteger(offset, 'Row offset', Number.MAX_SAFE_INTEGER),
       nonNegativeInteger(limit, 'Row limit', MAX_FETCH_ROWS),
-    ) ?? { success: false as const, error: 'No active session' })
+    ) ?? { success: false as const, error: t('connection.noActiveSession') })
   ipcMain.handle('db:close-session', (event, sessionId: unknown) =>
     existingManager(event)?.closeSession(stringValue(sessionId, 'Session id', 200)))
-  ipcMain.handle('db:export-query', async (event, profileId: unknown, childDb: unknown, sql: unknown, params: unknown, sort: unknown, format: unknown, suggestedName: unknown, executionId?: unknown) => {
+  ipcMain.handle('db:export-query', async (event, profileId: unknown, childDb: unknown, sql: unknown, params: unknown, sort: unknown, filter: unknown, format: unknown, suggestedName: unknown, executionId?: unknown) => {
     let parsed
     try {
-      const payload = queryPayload(sql, params, sort, executionId)
+      const payload = queryPayload(sql, params, sort, filter, executionId)
       parsed = {
         profileId: stringValue(profileId, 'Profile id', 200),
         childDb: childDb === null ? null : stringValue(childDb, 'Database name', 2_000),
@@ -132,16 +134,16 @@ export function registerDbIpc(context: DbIpcContext) {
       return { success: false as const, error: (error as Error).message }
     }
     const window = BrowserWindow.fromWebContents(event.sender)
-    if (!window) return { success: false as const, error: 'No window' }
+    if (!window) return { success: false as const, error: t('workspace.windowNotReady') }
     const activeManager = existingManager(event)
-    if (!activeManager) return { success: false as const, error: 'Not connected' }
+    if (!activeManager) return { success: false as const, error: t('connection.notConnected') }
     const result = await dialog.showSaveDialog(window, {
-      title: 'Export Results',
+      title: t('workspace.exportResults'),
       defaultPath: join(app.getPath('downloads'), parsed.name || `results.${parsed.format}`),
       filters: [{ name: parsed.format.toUpperCase(), extensions: [parsed.format] }],
     })
     if (result.canceled || !result.filePath) return { success: false as const, canceled: true }
-    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.params, parsed.sort ?? null, result.filePath, parsed.format, parsed.executionId)
+    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.params, parsed.sort ?? null, parsed.filter ?? null, result.filePath, parsed.format, parsed.executionId)
   })
   ipcMain.handle('db:cancel', (event, profileId: unknown, executionId?: unknown) =>
     manager(event).cancelQuery(
@@ -178,12 +180,12 @@ export function registerDbIpc(context: DbIpcContext) {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return null
     const result = await dialog.showOpenDialog(window, {
-      title: 'Choose SQLite Database',
-      buttonLabel: 'Choose',
+      title: t('workspace.chooseSqlite'),
+      buttonLabel: t('workspace.choose'),
       properties: ['openFile', 'showHiddenFiles'],
       filters: [
-        { name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3', 'db3'] },
-        { name: 'All Files', extensions: ['*'] },
+        { name: t('workspace.sqliteDatabase'), extensions: ['db', 'sqlite', 'sqlite3', 'db3'] },
+        { name: t('workspace.allFiles'), extensions: ['*'] },
       ],
     })
     return result.canceled ? null : result.filePaths[0]

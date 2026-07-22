@@ -1,7 +1,14 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, query, state } from 'lit/decorators.js'
 
-export type MenuItem = { id: string; label: string; danger?: boolean; checked?: boolean }
+export type MenuItem = {
+  id: string
+  label: string
+  danger?: boolean
+  checked?: boolean
+  shortcut?: string
+  separatorBefore?: boolean
+}
 export type MenuPickDetail = { id: string }
 
 // Floating right-click menu, shared by the file tree, table list, and
@@ -40,6 +47,7 @@ export class ContextMenu extends LitElement {
   }
 
   render() {
+    const hasChecks = this.items.some((item) => item.checked !== undefined)
     return html`
       <div
         class="backdrop"
@@ -49,9 +57,10 @@ export class ContextMenu extends LitElement {
           this._close()
         }}
       ></div>
-      <div class="menu" style="left: ${this._left}px; top: ${this._top}px" role="menu">
+      <div class="menu ${hasChecks ? 'has-checks' : ''}" style="left: ${this._left}px; top: ${this._top}px" role="menu">
         ${this.items.map(
           (item) => html`
+            ${item.separatorBefore ? html`<div class="separator" role="separator"></div>` : ''}
             <button
               class="menu-item ${item.danger ? 'danger' : ''}"
               role="menuitem"
@@ -59,7 +68,9 @@ export class ContextMenu extends LitElement {
               @mousedown=${(e: Event) => e.preventDefault()}
               @click=${() => this._pick(item)}
             >
-              ${item.checked === undefined ? '' : html`<span class="check">${item.checked ? '✓' : ''}</span>`}${item.label}
+              ${hasChecks ? html`<span class="check" aria-hidden="true">${item.checked ? '✓' : ''}</span>` : ''}
+              <span class="label">${item.label}</span>
+              ${item.shortcut ? html`<kbd>${item.shortcut}</kbd>` : ''}
             </button>
           `,
         )}
@@ -118,43 +129,103 @@ export class ContextMenu extends LitElement {
     .menu {
       position: fixed;
       z-index: 91;
-      min-width: 160px;
+      min-width: 196px;
+      max-width: min(320px, calc(100vw - 8px));
       max-height: calc(100vh - 8px);
       overflow-y: auto;
-      padding: 4px;
+      padding: 5px;
       display: flex;
       flex-direction: column;
-      background: var(--sidebar-bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      background: color-mix(in srgb, var(--input-bg) 94%, var(--text) 6%);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      box-shadow:
+        0 12px 32px rgba(0, 0, 0, 0.34),
+        0 2px 8px rgba(0, 0, 0, 0.22);
+      font-family: var(--ui-font);
+      animation: menu-in 80ms ease-out;
     }
 
     .check {
-      display: inline-block;
       width: 14px;
       color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      text-align: center;
     }
 
     .menu-item {
-      display: block;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 18px;
       width: 100%;
-      padding: 5px 10px;
+      min-height: 28px;
+      padding: 4px 8px;
       border: none;
-      border-radius: 3px;
+      border-radius: 5px;
       background: transparent;
       color: var(--text);
-      font-size: var(--font-size);
+      font: inherit;
+      font-size: 13px;
+      line-height: 20px;
       text-align: left;
       cursor: pointer;
     }
 
-    .menu-item:hover {
-      background: var(--list-hover);
+    .has-checks .menu-item {
+      grid-template-columns: 14px minmax(0, 1fr) auto;
+      column-gap: 8px;
     }
 
-    .menu-item.danger:hover {
-      background: color-mix(in srgb, var(--status-dot-error) 22%, transparent);
+    .label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    kbd {
+      color: var(--text-3);
+      font: 11px/1 var(--ui-font);
+      white-space: nowrap;
+    }
+
+    .separator {
+      height: 1px;
+      margin: 4px 7px;
+      flex-shrink: 0;
+      background: var(--border-subtle);
+    }
+
+    .menu-item:hover,
+    .menu-item:focus-visible {
+      color: var(--list-selection-fg);
+      background: var(--list-selection);
+      outline: none;
+    }
+
+    .menu-item.danger {
+      color: color-mix(in srgb, var(--status-dot-error) 82%, var(--text));
+    }
+
+    .menu-item.danger:hover,
+    .menu-item.danger:focus-visible {
+      color: var(--list-selection-fg);
+      background: color-mix(in srgb, var(--status-dot-error) 32%, var(--list-hover));
+    }
+
+    @keyframes menu-in {
+      from {
+        opacity: 0;
+        transform: translateY(-2px) scale(0.99);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .menu {
+        animation: none;
+      }
     }
   `
 }

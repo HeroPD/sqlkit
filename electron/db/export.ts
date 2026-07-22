@@ -1,6 +1,7 @@
 import { createWriteStream, type WriteStream } from 'node:fs'
 import { once } from 'node:events'
 import { createExportSerializer, type ExportFormat, type ExportSerializer } from '../../src/result-export'
+import { t } from '../../src/i18n'
 
 // Writes a streamed result to disk with real backpressure: each chunk of rows is
 // serialized and written, and when the OS buffer fills the driver's `rows()`
@@ -43,7 +44,7 @@ export function openExportWriter(filePath: string, format: ExportFormat): Export
       serializer = createExportSerializer(names, format)
     },
     async rows(chunk) {
-      if (!serializer) throw new Error('Export columns were not provided before rows.')
+      if (!serializer) throw new Error(t('export.columnsMissing'))
       await ensureHeader()
       let buffer = ''
       for (const row of chunk) {

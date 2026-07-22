@@ -245,8 +245,40 @@ describe('WorkbenchScreen result sorting', () => {
 
     workbench._onSortColumn(new CustomEvent('sort-column', { detail: { columnIndex: 0, direction: 'asc' } }))
 
-    expect(runSql).toHaveBeenCalledWith('select id from accounts', { columnIndex: 0, direction: 'asc' }, undefined)
+    expect(runSql).toHaveBeenCalledWith('select id from accounts', { columnIndex: 0, direction: 'asc' }, undefined, null)
     expect(workbench._dialogs.confirm).toBeNull()
+  })
+
+  it('re-runs the base SQL with a condition while preserving sort and params', () => {
+    const screen = new WorkbenchScreen()
+    const runSql = vi.fn()
+    const workbench = screen as never as {
+      _ctx: { activeTabId: string | null }
+      _queries: {
+        runFor(tabId: string | null): unknown
+        sortFor(tabId: string | null): { columnIndex: number; direction: 'asc' | 'desc' } | null
+      }
+      _runSql: typeof runSql
+      _onFilterCondition(event: Event): void
+    }
+    workbench._ctx.activeTabId = 'tab-a'
+    workbench._queries.runFor = () => ({
+      phase: 'done',
+      sql: 'select id from accounts',
+      params: ['bound'],
+      result: { columns: ['id'], rows: [[1]], rowCount: 1, durationMs: 1 },
+    })
+    workbench._queries.sortFor = () => ({ columnIndex: 0, direction: 'desc' })
+    workbench._runSql = runSql
+
+    workbench._onFilterCondition(new CustomEvent('filter-condition', { detail: { condition: 'id > 10' } }))
+
+    expect(runSql).toHaveBeenCalledWith(
+      'select id from accounts',
+      { columnIndex: 0, direction: 'desc' },
+      ['bound'],
+      'id > 10',
+    )
   })
 })
 
@@ -404,6 +436,19 @@ describe('WorkbenchScreen result refresh shortcuts', () => {
     expect(ctrl.defaultPrevented).toBe(true)
     expect(meta.defaultPrevented).toBe(true)
     expect(forceReload.defaultPrevented).toBe(false)
+  })
+
+  it('leaves Cmd/Ctrl+Enter to the focused SQL editor', () => {
+    const workbench = setup()
+    const ctrl = keydown({ key: 'Enter', ctrlKey: true })
+    const meta = keydown({ key: 'Enter', metaKey: true })
+
+    workbench._onGlobalKeydown(ctrl)
+    workbench._onGlobalKeydown(meta)
+
+    expect(ctrl.defaultPrevented).toBe(false)
+    expect(meta.defaultPrevented).toBe(false)
+    expect(workbench._refreshResults).not.toHaveBeenCalled()
   })
 })
 
