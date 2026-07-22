@@ -7,6 +7,7 @@ import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { MAX_FETCH_ROWS } from '../result-limits'
 import { cellToTsv, cellsToTsv, parseClipboardTsv, toDelimited, toJson, type ExportFormat } from '../result-export'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
+import { uuidv4, uuidv7 } from '../uuid'
 import { isFilterableQuery } from '../sql-filter'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -152,6 +153,11 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   edits: ReadonlyMap<string, CellInput> = new Map()
 
+  /** Result rows (data indices) staged for deletion; shown struck-through red
+   * until the DELETE runs on save. */
+  @property({ attribute: false })
+  pendingDeletes: ReadonlySet<number> = new Set()
+
   /** The grid-injected column sort, so the header shows the active direction. */
   @property({ attribute: false })
   sort: QuerySort | null = null
@@ -182,9 +188,10 @@ export class ResultsPanel extends LitElement {
 
   /** Cell the context menu was opened on: row/col index into the result
    * (col -1 on the # column, row -1 on the header row). `sortOnly` is set when
-   * a left-click on a header opened a sort-only menu (no copy/export items). */
+   * a left-click on a header opened a sort-only menu (no copy/export items).
+   * `draftIndex` marks a right-click on a staged new row (its own edit menu). */
   @state()
-  private _menu: { x: number; y: number; row: number; col: number; sortOnly?: boolean } | null = null
+  private _menu: { x: number; y: number; row: number; col: number; sortOnly?: boolean; draftIndex?: number } | null = null
 
   @state()
   private _exportOpen = false
@@ -244,6 +251,8 @@ export class ResultsPanel extends LitElement {
   private _displayCache: { rows: unknown; drafts: unknown; order: RowRef[]; resultToDisplay: number[]; draftToDisplay: number[] } | null = null
   // A freshly-added draft to select once it arrives via the drafts property.
   private _pendingSelectDraft: number | null = null
+  // Result rows to reselect after a mixed delete drops the drafts between them.
+  private _pendingSelectResults: { rows: number[]; c0: number; c1: number } | null = null
   // First of a double-Esc: a second consecutive Escape discards staged changes.
   private _escArmed = false
   // Refocus the grid after a toolbar action so keyboard work keeps flowing.
@@ -294,6 +303,15 @@ export class ResultsPanel extends LitElement {
         this._focusGridPending = true
       }
       if (this._record?.ref.kind === 'draft' && !this.drafts[this._record.ref.index]) this._record = null
+      // After a mixed delete, re-anchor the selection on the surviving result
+      // rows — their display indices shifted when the drafts were dropped.
+      if (this._pendingSelectResults) {
+        const { rows, c0, c1 } = this._pendingSelectResults
+        this._pendingSelectResults = null
+        const { resultToDisplay } = this._display()
+        const displays = rows.map((row) => resultToDisplay[row]).filter((display): display is number => display !== undefined)
+        if (displays.length) this._sel = { r0: Math.min(...displays), c0, r1: Math.max(...displays), c1 }
+      }
       // Keep the selection within the grid if drafts were removed.
       const len = this._display().order.length
       if (this._sel && (this._sel.r1 >= len || this._sel.r0 >= len)) this._sel = null
@@ -593,7 +611,7 @@ export class ResultsPanel extends LitElement {
   }
 
   private _hasPending() {
-    return this.drafts.length > 0 || this.edits.size > 0
+    return this.drafts.length > 0 || this.edits.size > 0 || this.pendingDeletes.size > 0
   }
 
   // Throws away every staged edit and new row (no DB write to undo).
@@ -609,12 +627,26 @@ export class ResultsPanel extends LitElement {
     this.dispatchEvent(new CustomEvent('draft-remove', { detail: { indexes }, bubbles: true, composed: true }))
   }
 
-  // Delete acts on the unified selection: result rows go through the DELETE
-  // review; staged draft rows are just discarded (nothing to confirm).
+  // Delete acts on the unified selection: result rows are staged for deletion
+  // (marked red, run on save); staged draft rows are just discarded outright.
+  // If every selected result row is already staged, the action unstages them.
   private _deleteSelection() {
     const { results, drafts } = this._selectedRefs()
-    if (results.length) this.dispatchEvent(new CustomEvent('delete-rows', { detail: { rows: results }, bubbles: true, composed: true }))
-    this._removeDraft(drafts)
+    if (results.length) {
+      const remove = results.every((row) => this.pendingDeletes.has(row))
+      this.dispatchEvent(new CustomEvent('stage-delete', { detail: { rows: results, remove }, bubbles: true, composed: true }))
+    }
+    if (drafts.length) {
+      // Dropping drafts reflows display indices; a selection kept in display
+      // coordinates would slide onto the rows below. Reselect the surviving
+      // result rows once the shrunk drafts land (or clear a draft-only one).
+      if (results.length && this._sel) {
+        this._pendingSelectResults = { rows: results, c0: Math.min(this._sel.c0, this._sel.c1), c1: Math.max(this._sel.c0, this._sel.c1) }
+      } else {
+        this._sel = null
+      }
+      this._removeDraft(drafts)
+    }
   }
 
   // Result-row data indices and draft array indices covered by the selection.
@@ -677,7 +709,7 @@ export class ResultsPanel extends LitElement {
     const result = this._shownResult()
     const exportable = !!result?.columns.length
     const canEditResult = this._canEditShownResult()
-    const pendingCount = this.drafts.length + this.edits.size
+    const pendingCount = this.drafts.length + this.edits.size + this.pendingDeletes.size
     const showWriteTools = exportable && canEditResult && (this.rowEditable || pendingCount > 0)
     const canToggleRecord = exportable && (this._record !== null || (this._sel ? this._refAt(this._sel.r1) !== null : false))
     const runSql = this.run.phase === 'done' || this.run.phase === 'error' ? this.run.sql : undefined
@@ -754,34 +786,38 @@ export class ResultsPanel extends LitElement {
               </div>
             `
           : ''}
-        ${canFilter
-          ? html`
-              <button
-                class="head-action ${this.filter !== null || this._filterOpen ? 'active' : ''}"
-                data-tooltip=${t('results.filter')}
-                aria-label=${t('results.filter')}
-                aria-expanded=${this._filterOpen}
-                @click=${this._toggleFilter}
-              >
-                <i class="icon icon-filter" aria-hidden="true"></i>
-              </button>
-            `
-          : ''}
-        ${exportable
+        ${canFilter || exportable
           ? html`
               <div class="toolbar view-toolbar" aria-label=${t('results.viewActions')}>
-                <button
-                  class="head-action"
-                  data-tooltip=${t('results.viewShortcut', {
-                    view: this._record ? t('results.gridView') : t('results.listView'),
-                    shortcut: 'Tab',
-                  })}
-                  aria-label=${this._record ? t('results.gridView') : t('results.listView')}
-                  ?disabled=${!canToggleRecord}
-                  @click=${this._toggleRecordView}
-                >
-                  <i class="icon icon-${this._record ? 'table' : 'list-selection'}" aria-hidden="true"></i>
-                </button>
+                ${canFilter
+                  ? html`
+                      <button
+                        class="head-action ${this.filter !== null || this._filterOpen ? 'active' : ''}"
+                        data-tooltip=${t('results.filter')}
+                        aria-label=${t('results.filter')}
+                        aria-expanded=${this._filterOpen}
+                        @click=${this._toggleFilter}
+                      >
+                        <i class="icon icon-filter" aria-hidden="true"></i>
+                      </button>
+                    `
+                  : ''}
+                ${exportable
+                  ? html`
+                      <button
+                        class="head-action"
+                        data-tooltip=${t('results.viewShortcut', {
+                          view: this._record ? t('results.gridView') : t('results.listView'),
+                          shortcut: 'Tab',
+                        })}
+                        aria-label=${this._record ? t('results.gridView') : t('results.listView')}
+                        ?disabled=${!canToggleRecord}
+                        @click=${this._toggleRecordView}
+                      >
+                        <i class="icon icon-${this._record ? 'table' : 'list'}" aria-hidden="true"></i>
+                      </button>
+                    `
+                  : ''}
               </div>
             `
           : ''}
@@ -914,12 +950,20 @@ export class ResultsPanel extends LitElement {
     if (this.run.phase !== 'done') return
     const cell = (event.target as HTMLElement).closest<HTMLTableCellElement>('td, th')
     if (!cell) return
-    // Draft rows aren't part of the result; no copy/edit menu for them.
-    if (cell.closest('tr')?.hasAttribute('data-draft')) return
     event.preventDefault()
+    const col = cell.cellIndex - 1
+    // Staged new rows get their own cell-edit menu (edit/null/default/uuid).
+    const draftAttr = cell.closest('tr')?.getAttribute('data-draft')
+    if (draftAttr !== null && draftAttr !== undefined) {
+      const index = Number(draftAttr)
+      const display = this._displayIndexOfRef({ kind: 'draft', index })
+      if (col < 0) this._sel = { r0: display, c0: 0, r1: display, c1: Math.max(0, (this._shownResult()?.columns.length ?? 1) - 1) }
+      else if (!this._isSelectedDisplay(display, col)) this._sel = { r0: display, c0: col, r1: display, c1: col }
+      this._menu = { x: event.clientX, y: event.clientY, row: -1, col, draftIndex: index }
+      return
+    }
     const dataRow = cell.closest('tr')?.getAttribute('data-row')
     const row = cell.tagName === 'TH' || dataRow === null || dataRow === undefined ? -1 : Number(dataRow)
-    const col = cell.cellIndex - 1
     if (row >= 0 && col < 0) {
       this._selectRowsForCopy(row)
     } else if (row >= 0) {
@@ -950,7 +994,11 @@ export class ResultsPanel extends LitElement {
     if (!menu || this.run.phase !== 'done') return ''
     const result = this._shownResult()
     if (!result) return ''
+    if (menu.draftIndex !== undefined) return this._renderDraftMenu(menu)
     const canEdit = this.editable && this._canEditShownResult() && menu.row >= 0 && menu.col >= 0
+    const canDeleteRows = this.rowEditable && this._canEditShownResult() && menu.row >= 0
+    const deletingRows = canDeleteRows ? this._selectedRefs().results : []
+    const allDeleting = deletingRows.length > 0 && deletingRows.every((row) => this.pendingDeletes.has(row))
     const selectedRowCount = this._sel ? Math.abs(this._sel.r1 - this._sel.r0) + 1 : 1
     // Header right-click (no row): DBeaver-style explicit sort, with a check on
     // the active direction. The trailing copy items get a separator to divide them.
@@ -1002,6 +1050,16 @@ export class ResultsPanel extends LitElement {
       { id: 'copy-tsv', label: t('results.copyAllTsv') },
       { id: 'copy-json', label: t('results.copyAllJson') },
       { id: 'export', label: t('results.export'), separatorBefore: true },
+      ...(canDeleteRows
+        ? [
+            {
+              id: 'delete-row',
+              label: allDeleting ? t('results.undoDelete') : t(selectedRowCount > 1 ? 'results.deleteRowsMenu' : 'results.deleteRow'),
+              danger: !allDeleting,
+              separatorBefore: true,
+            },
+          ]
+        : []),
     ]
     return html`
       <context-menu
@@ -1039,6 +1097,85 @@ export class ResultsPanel extends LitElement {
     // cell when it was outside), same as a committed edit would.
     if (action === 'set-null') this._setSelectionNull()
     if (action === 'set-empty') this._setSelectionEmpty()
+    // Deletes the selected result rows through the owner's DELETE review.
+    if (action === 'delete-row') this._deleteSelection()
+  }
+
+  // Right-click menu for a staged new row: cell edits plus the value generators
+  // (NULL, DB default, UUID). Draft cells are always editable, so no canEdit gate.
+  private _renderDraftMenu(menu: { x: number; y: number; col: number; draftIndex?: number }) {
+    const index = menu.draftIndex ?? 0
+    const draftCount = this._selectedRefs().drafts.length
+    const deleteItem: MenuItem = {
+      id: 'delete-row',
+      label: t(draftCount > 1 ? 'results.deleteRowsMenu' : 'results.deleteRow'),
+      danger: true,
+      separatorBefore: true,
+    }
+    const items: MenuItem[] =
+      menu.col < 0
+        ? [{ id: 'copy-row', label: t('results.copyRow') }, deleteItem]
+        : [
+            { id: 'edit-cell', label: t('results.editCell'), shortcut: 'Enter' },
+            { id: 'paste-cell', label: t('results.paste'), shortcut: isMac ? '⌘V' : 'Ctrl+V' },
+            { id: 'set-null', label: t('results.setNull') },
+            { id: 'set-empty', label: t('results.setEmptyString') },
+            { id: 'use-default', label: t('results.useDefault') },
+            { id: 'uuid-v4', label: t('results.generateUuidV4'), separatorBefore: true },
+            { id: 'uuid-v7', label: t('results.generateUuidV7') },
+            { id: 'copy-cell', label: t('results.copyCell'), shortcut: isMac ? '⌘C' : 'Ctrl+C', separatorBefore: true },
+            { id: 'copy-row', label: t('results.copyRow') },
+            deleteItem,
+          ]
+    return html`
+      <context-menu
+        .x=${menu.x}
+        .y=${menu.y}
+        .items=${items}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => void this._onDraftMenuPick(e.detail.id, index, menu.col)}
+        @menu-close=${() => (this._menu = null)}
+      ></context-menu>
+    `
+  }
+
+  private async _onDraftMenuPick(action: string, index: number, col: number) {
+    const ref: RowRef = { kind: 'draft', index }
+    if (action === 'edit-cell' && col >= 0) this._beginEdit(ref, col, null)
+    if (action === 'paste-cell') this._pasteText(await window.sqlkit.readClipboardText())
+    if (action === 'set-null') this._setSelectionNull()
+    if (action === 'set-empty') this._setSelectionEmpty()
+    if (action === 'use-default') this._setSelectionDefault()
+    if (action === 'uuid-v4') this._fillSelectionUuid(4)
+    if (action === 'uuid-v7') this._fillSelectionUuid(7)
+    if (action === 'copy-cell' && col >= 0) void window.sqlkit.writeClipboardText(cellToTsv(this._recordValue(ref, col)))
+    if (action === 'copy-row') {
+      void window.sqlkit.writeClipboardText(this._rowValuesAt(ref).map((value) => cellToTsv(value)).join('\t'))
+    }
+    // Delete follows the unified selection: drafts are discarded (no DB write),
+    // and any result rows selected alongside are staged for deletion.
+    if (action === 'delete-row') {
+      const { results, drafts } = this._selectedRefs()
+      if (results.length || drafts.length) this._deleteSelection()
+      else this._removeDraft([index])
+    }
+  }
+
+  // Resets the selected draft cells to null — omitted from the INSERT so the
+  // column's DB default applies (serial/identity PKs, DEFAULT gen_random_uuid, …).
+  private _setSelectionDefault = () => {
+    const targets = this._draftTargets()
+    if (targets.length) this._commitValues(targets.map((target) => ({ ...target, value: null })))
+  }
+
+  // Fills each selected draft cell with its own freshly generated UUID.
+  private _fillSelectionUuid = (version: 4 | 7) => {
+    const targets = this._draftTargets()
+    if (targets.length) this._commitValues(targets.map((target) => ({ ...target, value: version === 7 ? uuidv7() : uuidv4() })))
+  }
+
+  // Draft cells of the live selection — the generators only apply to new rows.
+  private _draftTargets(): Array<{ ref: RowRef; col: number }> {
+    return this._selectedCellTargets().filter((target) => target.ref.kind === 'draft' && target.col >= 0)
   }
 
   private _renderRecordView() {
@@ -1483,13 +1620,15 @@ export class ResultsPanel extends LitElement {
 
   // What a value does to one cell: stage a draft cell, stage/clear a result edit,
   // or nothing when it matches the current value.
-  private _classifyEdit(ref: RowRef, col: number, value: CellInput): { event: string; detail: Record<string, unknown> } | null {
+  private _classifyEdit(ref: RowRef, col: number, value: CellInput | null): { event: string; detail: Record<string, unknown> } | null {
     if (ref.kind === 'draft') {
-      const current = this.drafts[ref.index]?.cells[col]
-      return current !== null && current !== undefined && sameInput(value, current)
-        ? null
-        : { event: 'draft-edit', detail: { index: ref.index, col, value } }
+      // null = "use default" (column omitted from INSERT); distinct from SQL NULL.
+      const current = this.drafts[ref.index]?.cells[col] ?? null
+      const unchanged = value === null || current === null ? value === current : sameInput(value, current)
+      return unchanged ? null : { event: 'draft-edit', detail: { index: ref.index, col, value } }
     }
+    // A bare-null "use default" has no meaning for an existing result row.
+    if (value === null) return null
     if (this.run.phase !== 'done') return null
     const original = this._shownResult()?.rows[ref.row]?.[col]
     const originalInput: CellInput = original === null || original === undefined ? SQL_NULL : formatCell(original)
@@ -1506,14 +1645,14 @@ export class ResultsPanel extends LitElement {
     this._commitValues(targets.map((target) => ({ ...target, value })))
   }
 
-  private _commitValues(targets: Array<{ ref: RowRef; col: number; value: CellInput }>) {
+  private _commitValues(targets: Array<{ ref: RowRef; col: number; value: CellInput | null }>) {
     const edits: Array<{ row: number; col: number; value: CellInput }> = []
     const clears: Array<{ row: number; col: number }> = []
-    const draftCells: Array<{ index: number; col: number; value: CellInput }> = []
+    const draftCells: Array<{ index: number; col: number; value: CellInput | null }> = []
     for (const { ref, col, value } of targets) {
       const change = this._classifyEdit(ref, col, value)
       if (!change) continue
-      if (change.event === 'draft-edit') draftCells.push(change.detail as { index: number; col: number; value: CellInput })
+      if (change.event === 'draft-edit') draftCells.push(change.detail as { index: number; col: number; value: CellInput | null })
       else if (change.event === 'cell-edit-clear') clears.push(change.detail as { row: number; col: number })
       else edits.push(change.detail as { row: number; col: number; value: CellInput })
     }
@@ -1687,7 +1826,7 @@ export class ResultsPanel extends LitElement {
             const display = resultToDisplay[absRow] ?? 0
             const editing = this._editing?.ref.kind === 'result' && this._editing.ref.row === absRow ? this._editing : null
             return html`
-              <tr data-row=${absRow} class=${absRow % 2 ? 'alt' : ''}>
+              <tr data-row=${absRow} class="${absRow % 2 ? 'alt' : ''} ${this.pendingDeletes.has(absRow) ? 'deleting' : ''}">
                 <td class="num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">${absRow + 1}</td>
                 ${row.map((cell, col) => {
                   const sel = this._isSelectedDisplay(display, col) ? 'selected' : ''
@@ -1869,7 +2008,7 @@ export class ResultsPanel extends LitElement {
               <input class="cell-edit" .value=${initial} @keydown=${this._onEditKeydown} @blur=${this._onEditBlur} />
             </td>`
           }
-          if (value === null) return html`<td class=${sel}></td>`
+          if (value === null) return html`<td class=${sel}><span class="default">${t('results.default')}</span></td>`
           if (isSqlNull(value)) return html`<td class=${sel}><span class="null">NULL</span></td>`
           if (value === '') return html`<td class=${sel}></td>`
           return html`<td class=${sel} title=${value}>${value}</td>`
@@ -2281,8 +2420,10 @@ export class ResultsPanel extends LitElement {
         pointer-events: none;
       }
 
-      /* Hover highlights the single cell under the pointer, not the whole row. */
-      tbody tr:not(.spacer) td:not(.num):not(.selected):not(.draft-sel):hover {
+      /* Hover highlights the single cell under the pointer, not the whole row.
+         The exclusions sit in :where() so this stays the weakest hover — the
+         staged-state hovers (dirty, draft, deleting) all outrank it. */
+      tbody tr:where(:not(.spacer)) td:where(:not(.num):not(.selected):not(.draft-sel)):hover {
         background: color-mix(in srgb, var(--accent) 10%, transparent);
       }
 
@@ -2300,6 +2441,28 @@ export class ResultsPanel extends LitElement {
       .null {
         color: var(--text-3);
         font-style: italic;
+      }
+
+      /* A result row staged for deletion — tinted red until the DELETE runs on
+         save. Matches the zebra rule's specificity (tbody tr.x td) and is
+         declared after it, so the red also covers .alt rows. */
+      tbody tr.deleting td {
+        background: var(--staged-delete-bg);
+        color: var(--staged-delete-fg);
+      }
+
+      tbody tr.deleting td:not(.num):not(.selected):hover {
+        background: var(--staged-delete-hover-bg);
+      }
+
+      /* A draft cell left to the DB's own default (omitted from the INSERT);
+         distinct from an explicit NULL. */
+      .default {
+        color: var(--text-3);
+        font-style: italic;
+        opacity: 0.65;
+        text-transform: lowercase;
+        font-variant: small-caps;
       }
 
       /* Inline cell editor: fills the cell so editing feels in-place. */
@@ -2340,6 +2503,14 @@ export class ResultsPanel extends LitElement {
         color: var(--staged-edit-fg);
       }
 
+      /* Selection inside a row staged for deletion stays in the red family
+         (declared after dirty.selected — the delete outranks a skipped edit). */
+      tbody tr.deleting td.selected,
+      tbody tr.deleting:hover td.selected {
+        background: var(--staged-delete-selection-bg);
+        color: var(--staged-delete-fg);
+      }
+
       /* Focus replaces selection while the inline editor is open. */
       tbody tr td.selected:has(.cell-edit),
       tbody tr:hover td.selected:has(.cell-edit) {
@@ -2351,14 +2522,14 @@ export class ResultsPanel extends LitElement {
         background: var(--staged-edit-bg);
       }
 
-      /* Unsaved new rows: a low-contrast insert tint until saved. The hover rule
-         below sits after the generic cell hover so it wins at equal specificity. */
+      /* Unsaved new rows: a low-contrast insert tint until saved. Hover covers
+         just the cell under the pointer, like the generic cell hover. */
       tbody tr.draft td {
         background: var(--staged-add-bg);
         color: var(--staged-add-fg);
       }
 
-      tbody tr.draft:hover td:not(.num) {
+      tbody tr.draft td:not(.num):not(.draft-sel):hover {
         background: var(--staged-add-hover-bg);
       }
 

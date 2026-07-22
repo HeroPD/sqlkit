@@ -51,6 +51,7 @@ function make() {
   let activeTab: SqlTabState | null = tab('tab-a', 'select id, name from accounts')
   let drafts: Array<{ after: number; cells: Array<string | null> }> = []
   let edits: Array<{ row: number; col: number; value: string }> = []
+  let deletes: number[] = []
   const dialogs = new DialogsController({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
   const runSql = vi.fn(() => Promise.resolve())
   const dropDrafts = vi.fn((_tabId: string, indexes: number[]) => {
@@ -59,6 +60,9 @@ function make() {
   })
   const clearEdits = vi.fn(() => {
     edits = []
+  })
+  const clearDeletions = vi.fn(() => {
+    deletes = []
   })
   const clearStagedHistory = vi.fn()
   const ctrl = new ResultEditingController({
@@ -75,6 +79,8 @@ function make() {
     dropDrafts,
     edits: () => edits,
     clearEdits,
+    deletes: () => deletes,
+    clearDeletions,
     clearStagedHistory,
   })
   return {
@@ -83,11 +89,13 @@ function make() {
     runSql,
     dropDrafts,
     clearEdits,
+    clearDeletions,
     clearStagedHistory,
     setActiveChild: (next: string | null) => (activeChildDb = next),
     setActiveTab: (next: SqlTabState | null) => (activeTab = next),
     setDrafts: (next: Array<{ after: number; cells: Array<string | null> }>) => (drafts = next),
     setEdits: (next: Array<{ row: number; col: number; value: string }>) => (edits = next),
+    setDeletes: (next: number[]) => (deletes = next),
   }
 }
 
@@ -160,6 +168,36 @@ describe('ResultEditingController', () => {
     // A committed batch invalidates undo history so ⌘Z can't restore saved rows.
     expect(clearStagedHistory).toHaveBeenCalledWith('tab-a')
     expect(runSql).toHaveBeenCalledOnce()
+  })
+
+  it('runs a staged row deletion as part of the save batch and clears it on commit', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
+    const { ctrl, dialogs, clearDeletions, setDeletes } = make()
+
+    setDeletes([0])
+    ctrl.saveChanges()
+
+    expect(dialogs.review?.sql).toContain('DELETE FROM "public"."accounts"')
+    await dialogs.review!.run()
+
+    expect(runBatch).toHaveBeenCalledWith('p1', 'db_a', [expect.objectContaining({ sql: expect.stringContaining('DELETE') })])
+    expect(clearDeletions).toHaveBeenCalledWith('tab-a')
+  })
+
+  it('skips a deleted row’s edits and orders UPDATE, INSERT, then DELETE in one batch', () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
+    const { ctrl, dialogs, setEdits, setDeletes } = make()
+
+    // Row 0 is both edited and marked for deletion — the edit is dropped.
+    setEdits([{ row: 0, col: 1, value: 'Grace' }])
+    setDeletes([0])
+    ctrl.saveChanges()
+
+    // No UPDATE (its only edit targeted the deleted row); just the DELETE.
+    expect(dialogs.review?.sql).not.toContain('UPDATE')
+    expect(dialogs.review?.sql).toContain('DELETE FROM "public"."accounts"')
   })
 
   it('rolls the whole batch back and keeps every change when one statement fails', async () => {

@@ -52,6 +52,7 @@ const retainedResultBytes = (result: QueryResult): number => {
 // Shared empty edits map, so a tab with no pending edits returns a stable
 // reference (no spurious re-renders).
 const NO_EDITS: ReadonlyMap<string, CellInput> = new Map()
+const NO_DELETES: ReadonlySet<number> = new Set()
 
 // Same stable-empty trick for column widths.
 const NO_WIDTHS: ReadonlyMap<number, number> = new Map()
@@ -63,7 +64,8 @@ const sameColumns = (a: string[], b: string[]) => a.length === b.length && a.eve
 const MAX_STAGED_HISTORY = 100
 
 // A point-in-time capture of everything staged on a tab, for undo/redo.
-type StagedSnapshot = { drafts: DraftRow[]; edits: Map<string, CellInput> }
+// `deletes` holds result-row data indices marked for deletion (run on save).
+type StagedSnapshot = { drafts: DraftRow[]; edits: Map<string, CellInput>; deletes: number[] }
 
 // Owns everything a query run produces: the per-tab results (switching tabs
 // brings a tab's result back), the cross-connection task list with its live
@@ -79,6 +81,9 @@ export class QueriesController implements ReactiveController {
 
   /** Unsaved cell edits per tab: inner key "row:col" → new value string. */
   edits = new Map<string, Map<string, CellInput>>()
+
+  /** Result rows staged for deletion per tab (data indices); the DELETE runs on save. */
+  deletions = new Map<string, ReadonlySet<number>>()
 
   /** The column sort the result grid injected, per tab; absent when unsorted. */
   sorts = new Map<string, QuerySort>()
@@ -189,12 +194,12 @@ export class QueriesController implements ReactiveController {
     const rows = [...this.stagedDrafts(tabId)]
     const at = index === undefined ? rows.length : Math.max(0, Math.min(index, rows.length))
     rows.splice(at, 0, { after, cells: Array<CellInput | null>(columnCount).fill(null) })
-    this.commitStaged(tabId, { drafts: rows, edits: this.stagedEdits(tabId) })
+    this.commitStaged(tabId, { drafts: rows, edits: this.stagedEdits(tabId), deletes: this.stagedDeletes(tabId) })
   }
 
   addDrafts(tabId: string, drafts: DraftRow[]) {
     if (!drafts.length) return
-    this.commitStaged(tabId, { drafts: [...this.stagedDrafts(tabId), ...drafts], edits: this.stagedEdits(tabId) })
+    this.commitStaged(tabId, { drafts: [...this.stagedDrafts(tabId), ...drafts], edits: this.stagedEdits(tabId), deletes: this.stagedDeletes(tabId) })
   }
 
   setDraftCell(tabId: string, index: number, col: number, value: CellInput) {
@@ -203,7 +208,7 @@ export class QueriesController implements ReactiveController {
     const nextCells = [...rows[index].cells]
     nextCells[col] = value
     const nextRows = rows.map((row, i) => (i === index ? { ...row, cells: nextCells } : row))
-    this.commitStaged(tabId, { drafts: nextRows, edits: this.stagedEdits(tabId) })
+    this.commitStaged(tabId, { drafts: nextRows, edits: this.stagedEdits(tabId), deletes: this.stagedDeletes(tabId) })
   }
 
   removeDraft(tabId: string, index: number) {
@@ -216,7 +221,7 @@ export class QueriesController implements ReactiveController {
     if (!rows || !indexes.length) return
     const drop = new Set(indexes)
     const remaining = rows.filter((_, i) => !drop.has(i))
-    this.commitStaged(tabId, { drafts: remaining, edits: this.stagedEdits(tabId) })
+    this.commitStaged(tabId, { drafts: remaining, edits: this.stagedEdits(tabId), deletes: this.stagedDeletes(tabId) })
   }
 
   // --- pending cell edits ---------------------------------------------------
@@ -239,7 +244,7 @@ export class QueriesController implements ReactiveController {
   setEdit(tabId: string, row: number, col: number, value: CellInput) {
     const inner = new Map(this.stagedEdits(tabId))
     inner.set(`${row}:${col}`, value)
-    this.commitStaged(tabId, { drafts: this.stagedDrafts(tabId), edits: inner })
+    this.commitStaged(tabId, { drafts: this.stagedDrafts(tabId), edits: inner, deletes: this.stagedDeletes(tabId) })
   }
 
   clearEdit(tabId: string, row: number, col: number) {
@@ -247,7 +252,7 @@ export class QueriesController implements ReactiveController {
     if (!inner?.has(`${row}:${col}`)) return
     const nextInner = new Map(inner)
     nextInner.delete(`${row}:${col}`)
-    this.commitStaged(tabId, { drafts: this.stagedDrafts(tabId), edits: nextInner })
+    this.commitStaged(tabId, { drafts: this.stagedDrafts(tabId), edits: nextInner, deletes: this.stagedDeletes(tabId) })
   }
 
   // Applies a whole multi-cell fill in one undoable step: result-cell edits and
@@ -257,7 +262,7 @@ export class QueriesController implements ReactiveController {
     changes: {
       edits: Array<{ row: number; col: number; value: CellInput }>
       clears: Array<{ row: number; col: number }>
-      draftCells: Array<{ index: number; col: number; value: CellInput }>
+      draftCells: Array<{ index: number; col: number; value: CellInput | null }>
     },
   ) {
     const inner = new Map(this.stagedEdits(tabId))
@@ -271,7 +276,7 @@ export class QueriesController implements ReactiveController {
         if (row && col >= 0 && col < row.cells.length) row.cells[col] = value
       }
     }
-    this.commitStaged(tabId, { drafts, edits: inner })
+    this.commitStaged(tabId, { drafts, edits: inner, deletes: this.stagedDeletes(tabId) })
   }
 
   // Bulk-clears the tab's cell edits without an undo step — a commit point
@@ -287,7 +292,42 @@ export class QueriesController implements ReactiveController {
 
   /** Discards all staged changes (new rows and cell edits) for a tab — undoable. */
   clearStaged(tabId: string) {
-    this.commitStaged(tabId, { drafts: [], edits: new Map() })
+    this.commitStaged(tabId, { drafts: [], edits: new Map(), deletes: [] })
+  }
+
+  // --- pending row deletions ------------------------------------------------
+
+  /** Result rows (data indices) staged for deletion; empty when none. */
+  pendingDeletesFor(tabId: string | null): ReadonlySet<number> {
+    return (tabId ? this.deletions.get(tabId) : undefined) ?? NO_DELETES
+  }
+
+  /** Row deletes staged as a flat list, for building the DELETE. */
+  deletesList(tabId: string | null): number[] {
+    return [...this.pendingDeletesFor(tabId)]
+  }
+
+  // Adds the given result rows to (or, with remove, out of) the tab's staged
+  // deletions — one undoable step. Explicit intent, not a per-row toggle, so a
+  // selection overlapping already-staged rows never silently unstages them.
+  stagePendingDeletes(tabId: string, rows: number[], remove = false) {
+    if (!rows.length) return
+    const next = new Set(this.stagedDeletes(tabId))
+    for (const row of rows) {
+      if (remove) next.delete(row)
+      else next.add(row)
+    }
+    this.commitStaged(tabId, { drafts: this.stagedDrafts(tabId), edits: this.stagedEdits(tabId), deletes: [...next] })
+  }
+
+  // Bulk-clears staged deletions without an undo step — a commit point, like clearEdits.
+  clearDeletions(tabId: string) {
+    this.resetStagedHistory(tabId)
+    if (!this.deletions.has(tabId)) return
+    const next = new Map(this.deletions)
+    next.delete(tabId)
+    this.deletions = next
+    this.host.requestUpdate()
   }
 
   // --- staged-edit undo/redo ------------------------------------------------
@@ -298,6 +338,10 @@ export class QueriesController implements ReactiveController {
 
   private stagedEdits(tabId: string): Map<string, CellInput> {
     return this.edits.get(tabId) ?? new Map<string, CellInput>()
+  }
+
+  private stagedDeletes(tabId: string): number[] {
+    return [...(this.deletions.get(tabId) ?? [])]
   }
 
   // Writes a tab's staged state into the top-level maps, dropping empty entries
@@ -311,18 +355,25 @@ export class QueriesController implements ReactiveController {
     if (snap.edits.size) edits.set(tabId, snap.edits)
     else edits.delete(tabId)
     this.edits = edits
+    const deletions = new Map(this.deletions)
+    if (snap.deletes.length) deletions.set(tabId, new Set(snap.deletes))
+    else deletions.delete(tabId)
+    this.deletions = deletions
   }
 
   private stagedEqual(a: StagedSnapshot, b: StagedSnapshot): boolean {
     if (a.edits.size !== b.edits.size) return false
     for (const [key, value] of a.edits) if (b.edits.get(key) !== value) return false
+    if (a.deletes.length !== b.deletes.length) return false
+    const bDeletes = new Set(b.deletes)
+    for (const row of a.deletes) if (!bDeletes.has(row)) return false
     return JSON.stringify(a.drafts) === JSON.stringify(b.drafts)
   }
 
   // The single funnel every staging mutation goes through: writes the new state,
   // records it on the tab's undo stack (dropping the redo branch and no-op steps).
   private commitStaged(tabId: string, next: StagedSnapshot) {
-    const before = { drafts: this.stagedDrafts(tabId), edits: this.stagedEdits(tabId) }
+    const before = { drafts: this.stagedDrafts(tabId), edits: this.stagedEdits(tabId), deletes: this.stagedDeletes(tabId) }
     if (this.stagedEqual(before, next)) return
     this.writeStaged(tabId, next)
     const hist = this.stagedHistory.get(tabId) ?? { stack: [before], index: 0 }
@@ -363,11 +414,15 @@ export class QueriesController implements ReactiveController {
 
   hasStaged(tabId: string | null): boolean {
     if (!tabId) return false
-    return (this.drafts.get(tabId)?.length ?? 0) > 0 || (this.edits.get(tabId)?.size ?? 0) > 0
+    return (this.drafts.get(tabId)?.length ?? 0) > 0 || (this.edits.get(tabId)?.size ?? 0) > 0 || (this.deletions.get(tabId)?.size ?? 0) > 0
   }
 
   hasAnyStaged(): boolean {
-    return [...this.drafts.values()].some((rows) => rows.length > 0) || [...this.edits.values()].some((edits) => edits.size > 0)
+    return (
+      [...this.drafts.values()].some((rows) => rows.length > 0) ||
+      [...this.edits.values()].some((edits) => edits.size > 0) ||
+      [...this.deletions.values()].some((rows) => rows.size > 0)
+    )
   }
 
   // A run that changes the result's shape (or errors) invalidates staged rows and
@@ -381,8 +436,9 @@ export class QueriesController implements ReactiveController {
       next.delete(tabId)
       this.drafts = next
     }
-    // Cell edits are row-index keyed, so any rerun invalidates them and their
-    // undo history — clearEdits resets both, even when the edits map is empty.
+    // Cell edits and row deletions are row-index keyed, so any rerun invalidates
+    // them and their undo history — both reset even when already empty.
+    this.clearDeletions(tabId)
     this.clearEdits(tabId)
   }
 

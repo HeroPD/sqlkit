@@ -262,6 +262,8 @@ export class WorkbenchScreen extends LitElement {
     dropDrafts: (tabId, indexes) => this._queries.dropDrafts(tabId, indexes),
     edits: () => this._queries.editsList(this._ctx.activeTabId),
     clearEdits: (tabId) => this._queries.clearEdits(tabId),
+    deletes: () => this._queries.deletesList(this._ctx.activeTabId),
+    clearDeletions: (tabId) => this._queries.clearDeletions(tabId),
     clearStagedHistory: (tabId) => this._queries.clearStagedHistory(tabId),
   })
 
@@ -1085,6 +1087,7 @@ export class WorkbenchScreen extends LitElement {
             .collapsed=${this._layout.panelCollapsed}
             .drafts=${this._queries.draftsFor(this._ctx.activeTabId)}
             .edits=${this._queries.editsFor(this._ctx.activeTabId)}
+            .pendingDeletes=${this._queries.pendingDeletesFor(this._ctx.activeTabId)}
             .sort=${this._queries.sortFor(this._ctx.activeTabId)}
             .filter=${this._queries.filterFor(this._ctx.activeTabId)}
             .columnWidths=${this._resultColumnWidths()}
@@ -1097,7 +1100,7 @@ export class WorkbenchScreen extends LitElement {
             @cells-fill=${this._onCellsFill}
             @add-row=${this._onAddRow}
             @duplicate-rows=${this._onDuplicateRows}
-            @delete-rows=${this._onDeleteRows}
+            @stage-delete=${this._onStageDelete}
             @draft-edit=${this._onDraftEdit}
             @grid-notice=${this._onGridNotice}
             @draft-remove=${this._onDraftRemove}
@@ -1489,7 +1492,7 @@ export class WorkbenchScreen extends LitElement {
       event as CustomEvent<{
         edits: Array<{ row: number; col: number; value: CellInput }>
         clears: Array<{ row: number; col: number }>
-        draftCells: Array<{ index: number; col: number; value: CellInput }>
+        draftCells: Array<{ index: number; col: number; value: CellInput | null }>
       }>
     ).detail
     if (this._ctx.activeTabId) this._queries.applyFill(this._ctx.activeTabId, detail)
@@ -1620,9 +1623,10 @@ export class WorkbenchScreen extends LitElement {
     void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, condition)
   }
 
-  private _onDeleteRows(event: Event) {
-    const { rows } = (event as CustomEvent<{ rows: number[] }>).detail
-    this._resultEditing.deleteRows(rows)
+  private _onStageDelete(event: Event) {
+    if (this._stagingFrozen()) return
+    const { rows, remove } = (event as CustomEvent<{ rows: number[]; remove?: boolean }>).detail
+    if (this._ctx.activeTabId) this._queries.stagePendingDeletes(this._ctx.activeTabId, rows, remove)
   }
 
   // Stop from the Tasks view: targets the task's own connection, which may

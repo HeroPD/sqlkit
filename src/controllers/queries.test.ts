@@ -287,6 +287,31 @@ describe('QueriesController drafts', () => {
     ])
   })
 
+  it('stages row deletions additively — an overlapping re-stage never unstages', () => {
+    const controller = new QueriesController(host(), () => true)
+
+    controller.stagePendingDeletes('t1', [0])
+    // Row 0 is still selected when the user stages row 1 too; both stay staged.
+    controller.stagePendingDeletes('t1', [0, 1])
+    expect([...controller.pendingDeletesFor('t1')].sort()).toEqual([0, 1])
+
+    // Explicit remove unstages (the "Undo Delete" path).
+    controller.stagePendingDeletes('t1', [0, 1], true)
+    expect(controller.pendingDeletesFor('t1').size).toBe(0)
+    expect(controller.deletions.has('t1')).toBe(false)
+  })
+
+  it('keeps staged row deletions when a draft is dropped in the same gesture', () => {
+    const controller = new QueriesController(host(), () => true)
+
+    controller.addDraft('t1', 2)
+    controller.stagePendingDeletes('t1', [0]) // stage a result row
+    controller.dropDrafts('t1', [0]) // discard the draft alongside it
+
+    expect([...controller.pendingDeletesFor('t1')]).toEqual([0])
+    expect(controller.draftsFor('t1')).toEqual([])
+  })
+
   it('clears a tab\'s drafts when a run returns a different column count', async () => {
     const { settle } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)

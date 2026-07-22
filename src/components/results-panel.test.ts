@@ -882,21 +882,59 @@ describe('results-panel DBeaver-style editing', () => {
     el.remove()
   })
 
-  it('delete on a mixed selection deletes result rows and discards drafts', async () => {
+  it('delete on a mixed selection stages result rows and discards drafts', async () => {
     const el = await mountGrid(2)
     el.drafts = [{ after: 0, cells: [null, null] }]
     await el.updateComplete
-    const deleteRows = vi.fn()
+    const stageDelete = vi.fn()
     const draftRemove = vi.fn()
-    el.addEventListener('delete-rows', deleteRows)
+    el.addEventListener('stage-delete', stageDelete)
     el.addEventListener('draft-remove', draftRemove)
 
     key(el, { key: 'ArrowDown', shiftKey: true }) // result row 0 + the draft
     await el.updateComplete
     el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Delete selected rows"]')!.click()
 
-    expect((deleteRows.mock.calls[0]![0] as CustomEvent).detail).toEqual({ rows: [0] })
+    // Result rows are staged for deletion (run on save), not deleted immediately.
+    expect((stageDelete.mock.calls[0]![0] as CustomEvent).detail).toEqual({ rows: [0], remove: false })
     expect((draftRemove.mock.calls[0]![0] as CustomEvent).detail).toEqual({ indexes: [0] })
+    el.remove()
+  })
+
+  it('reselects only the surviving result rows after a mixed delete drops drafts', async () => {
+    const el = await mountGrid(4)
+    // 3 duplicated rows anchored under result row 0.
+    el.drafts = [
+      { after: 0, cells: ['x', 'y'] },
+      { after: 0, cells: ['x', 'y'] },
+      { after: 0, cells: ['x', 'y'] },
+    ]
+    await el.updateComplete
+
+    // Select result row 0 + the 3 drafts (display rows 0-3).
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Delete selected rows"]')!.click()
+
+    // The owner stages row 0 and drops the drafts.
+    el.pendingDeletes = new Set([0])
+    el.drafts = []
+    await el.updateComplete
+
+    // Only result row 0 stays selected — the selection must not slide onto rows 1-3.
+    expect(el.shadowRoot!.querySelector('tr[data-row="0"] td.selected')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('tr[data-row="1"] td.selected')).toBeNull()
+    expect(el.shadowRoot!.querySelector('tr[data-row="3"] td.selected')).toBeNull()
+    el.remove()
+  })
+
+  it('renders a result row staged for deletion with the deleting style', async () => {
+    const el = await mountGrid(2)
+    el.pendingDeletes = new Set([0])
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('tr[data-row="0"]')!.classList.contains('deleting')).toBe(true)
     el.remove()
   })
 })
