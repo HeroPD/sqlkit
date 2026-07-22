@@ -397,6 +397,55 @@ describe('results-panel draft rows', () => {
     el.remove()
   })
 
+  it('offers explicit sort directions from a column header context menu', async () => {
+    const el = document.createElement('results-panel')
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT a, b FROM t',
+      result: { columns: ['a', 'b'], rows: [['a0', 'b0']], rowCount: 1, durationMs: 1 },
+    }
+    document.body.append(el)
+    await el.updateComplete
+    const sorted = vi.fn()
+    el.addEventListener('sort-column', (e) => {
+      sorted((e as CustomEvent<{ columnIndex: number; direction: string | null }>).detail)
+    })
+
+    const header = el.shadowRoot!.querySelectorAll<HTMLTableCellElement>('thead th:not(.num)')[1]!
+    header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+
+    const menu = el.shadowRoot!.querySelector('context-menu')!
+    expect(menu.items.map((i) => i.id).slice(0, 3)).toEqual(['sort-asc', 'sort-desc', 'sort-clear'])
+    menu.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'sort-desc' } }))
+    expect(sorted).toHaveBeenCalledWith({ columnIndex: 1, direction: 'desc' })
+    el.remove()
+  })
+
+  it('opens a sort-only menu when a header sort button is left-clicked', async () => {
+    const el = document.createElement('results-panel')
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT a, b FROM t',
+      result: { columns: ['a', 'b'], rows: [['a0', 'b0']], rowCount: 1, durationMs: 1 },
+    }
+    document.body.append(el)
+    await el.updateComplete
+    const sorted = vi.fn()
+    el.addEventListener('sort-column', (e) => {
+      sorted((e as CustomEvent<{ columnIndex: number; direction: string | null }>).detail)
+    })
+
+    el.shadowRoot!.querySelectorAll<HTMLButtonElement>('thead th:not(.num) .th-sort')[0]!.click()
+    await el.updateComplete
+
+    const menu = el.shadowRoot!.querySelector('context-menu')!
+    expect(menu.items.map((i) => i.id)).toEqual(['sort-asc', 'sort-desc', 'sort-clear'])
+    menu.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'sort-asc' } }))
+    expect(sorted).toHaveBeenCalledWith({ columnIndex: 0, direction: 'asc' })
+    el.remove()
+  })
+
   it('refuses to duplicate rows with structured values and disables it for truncated results', async () => {
     const el = document.createElement('results-panel')
     el.editable = true

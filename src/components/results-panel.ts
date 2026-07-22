@@ -181,9 +181,10 @@ export class ResultsPanel extends LitElement {
   private _editing: { ref: RowRef; col: number; seed: string | null; sel: { r0: number; c0: number; r1: number; c1: number } | null } | null = null
 
   /** Cell the context menu was opened on: row/col index into the result
-   * (col -1 on the # column, row -1 on the header row). */
+   * (col -1 on the # column, row -1 on the header row). `sortOnly` is set when
+   * a left-click on a header opened a sort-only menu (no copy/export items). */
   @state()
-  private _menu: { x: number; y: number; row: number; col: number } | null = null
+  private _menu: { x: number; y: number; row: number; col: number; sortOnly?: boolean } | null = null
 
   @state()
   private _exportOpen = false
@@ -951,7 +952,36 @@ export class ResultsPanel extends LitElement {
     if (!result) return ''
     const canEdit = this.editable && this._canEditShownResult() && menu.row >= 0 && menu.col >= 0
     const selectedRowCount = this._sel ? Math.abs(this._sel.r1 - this._sel.r0) + 1 : 1
+    // Header right-click (no row): DBeaver-style explicit sort, with a check on
+    // the active direction. The trailing copy items get a separator to divide them.
+    const sortItems: MenuItem[] = []
+    if (menu.row < 0 && menu.col >= 0) {
+      const { sortable, current } = this._sortState(result)
+      if (sortable) {
+        const dir = current?.columnIndex === menu.col ? current.direction : null
+        sortItems.push(
+          { id: 'sort-asc', label: t('results.sortAscending'), checked: dir === 'asc' },
+          { id: 'sort-desc', label: t('results.sortDescending'), checked: dir === 'desc' },
+          { id: 'sort-clear', label: t('results.clearSort'), checked: false },
+        )
+      }
+    }
+    // A left-click sort menu shows only the sort actions; if the column can't be
+    // sorted there's nothing to show, so skip the menu entirely.
+    if (menu.sortOnly) {
+      if (!sortItems.length) return ''
+      return html`
+        <context-menu
+          .x=${menu.x}
+          .y=${menu.y}
+          .items=${sortItems}
+          @menu-pick=${(e: CustomEvent<MenuPickDetail>) => void this._onMenuPick(e.detail.id, result, menu)}
+          @menu-close=${() => (this._menu = null)}
+        ></context-menu>
+      `
+    }
     const items: MenuItem[] = [
+      ...sortItems,
       ...(menu.row >= 0 && menu.col >= 0 ? [{ id: 'view-record', label: t('results.viewRecord'), shortcut: 'Tab' }] : []),
       ...(canEdit
         ? [
@@ -967,7 +997,7 @@ export class ResultsPanel extends LitElement {
       ...(menu.row >= 0
         ? [{ id: 'copy-row', label: t(selectedRowCount > 1 ? 'results.copySelectedRows' : 'results.copyRow') }]
         : []),
-      ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: t('results.copyColumnName') }] : []),
+      ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: t('results.copyColumnName'), separatorBefore: sortItems.length > 0 }] : []),
       { id: 'copy-csv', label: t('results.copyAllCsv'), separatorBefore: true },
       { id: 'copy-tsv', label: t('results.copyAllTsv') },
       { id: 'copy-json', label: t('results.copyAllJson') },
@@ -992,6 +1022,9 @@ export class ResultsPanel extends LitElement {
       this._copySelection()
     }
     if (action === 'copy-column-name') copy(cellToTsv(result.columns[at.col] ?? ''))
+    if (action === 'sort-asc') this._setSort(at.col, 'asc')
+    if (action === 'sort-desc') this._setSort(at.col, 'desc')
+    if (action === 'sort-clear') this._setSort(at.col, null)
     // Copy-all / export cover every buffered row, not just what's loaded on screen.
     if (action === 'copy-csv') copy(toDelimited(result.columns, await this._allRows(result), ','))
     if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
@@ -1585,12 +1618,7 @@ export class ResultsPanel extends LitElement {
     // Header sort buttons re-run the query with a driver-built ORDER BY (only
     // when it's a single read statement). The active direction comes from the
     // grid-injected sort, falling back to the query's own ORDER BY before any click.
-    const sortable = !!run.sql && isReorderableQuery(run.sql)
-    let current: QuerySort | null = sortable ? this.sort : null
-    if (!current && sortable && run.sql) {
-      const parsed = activeSort(run.sql, result.columns)
-      if (parsed) current = { columnIndex: parsed.index, direction: parsed.dir }
-    }
+    const { sortable, current } = this._sortState(result)
     // Measured widths, with any column the user dragged swapped in (reuse the
     // cached array unchanged in the common no-override case).
     const measured = this._columnWidths(result)
@@ -1695,7 +1723,8 @@ export class ResultsPanel extends LitElement {
   }
 
   // A column header with an optional sort button. The button shows the active
-  // direction when this column is sorted; clicking it cycles asc → desc → unsorted.
+  // direction when this column is sorted; clicking it opens a sort-only menu
+  // (Ascending / Descending / Clear). Sorting is also in the right-click menu.
   private _renderHeader(column: string, col: number, sortable: boolean, dir: SortDir | null) {
     // A thin grip on the header's right edge, dragged to resize the column;
     // double-click restores the measured width.
@@ -1716,7 +1745,7 @@ export class ResultsPanel extends LitElement {
             class="th-sort ${dir ? 'active' : ''}"
             title=${t('results.sortTitle', { column, direction: next })}
             aria-label=${t('results.sortColumn', { column, direction: next })}
-            @click=${() => this._sortBy(col, dir)}
+            @click=${(event: MouseEvent) => this._openSortMenu(event, col)}
           >
             <i class="codicon codicon-${dir === 'desc' ? 'arrow-down' : 'arrow-up'}" aria-hidden="true"></i>
           </button>
@@ -1791,11 +1820,32 @@ export class ResultsPanel extends LitElement {
     )
   }
 
-  // Cycles the column's sort and asks the owner to rewrite + re-run the query.
-  private _sortBy(col: number, dir: SortDir | null) {
+  // Whether the query can be re-sorted, and its active single-column sort: the
+  // grid-injected sort, else the query's own ORDER BY parsed from the SQL.
+  private _sortState(result: QueryResult): { sortable: boolean; current: QuerySort | null } {
+    const sql = this.run.phase === 'done' ? this.run.sql : undefined
+    const sortable = !!sql && isReorderableQuery(sql)
+    let current: QuerySort | null = sortable ? this.sort : null
+    if (!current && sortable && sql) {
+      const parsed = activeSort(sql, result.columns)
+      if (parsed) current = { columnIndex: parsed.index, direction: parsed.dir }
+    }
+    return { sortable, current }
+  }
+
+  // Left-click a header: open a sort-only menu anchored under the sort button.
+  private _openSortMenu(event: MouseEvent, col: number) {
     if (this.run.phase !== 'done') return
     if (this._shownResult()?.columns[col] === undefined) return
-    const direction: SortDir | null = dir === 'asc' ? 'desc' : dir === 'desc' ? null : 'asc'
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    this._menu = { x: rect.left, y: rect.bottom + 2, row: -1, col, sortOnly: true }
+  }
+
+  // Sets an explicit sort direction (or clears it) for the context-menu picks,
+  // then asks the owner to rewrite + re-run the query.
+  private _setSort(col: number, direction: SortDir | null) {
+    if (this.run.phase !== 'done') return
+    if (this._shownResult()?.columns[col] === undefined) return
     this.dispatchEvent(new CustomEvent<SortColumnDetail>('sort-column', { detail: { columnIndex: col, direction }, bubbles: true, composed: true }))
   }
 
