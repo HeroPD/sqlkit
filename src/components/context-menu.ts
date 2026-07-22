@@ -133,17 +133,16 @@ export class ContextMenu extends LitElement {
       max-width: min(320px, calc(100vw - 8px));
       max-height: calc(100vh - 8px);
       overflow-y: auto;
-      padding: 5px;
+      padding: 4px;
       display: flex;
       flex-direction: column;
       background: color-mix(in srgb, var(--input-bg) 94%, var(--text) 6%);
       border: 1px solid var(--border-subtle);
-      border-radius: 8px;
+      border-radius: 10px;
       box-shadow:
-        0 12px 32px rgba(0, 0, 0, 0.34),
-        0 2px 8px rgba(0, 0, 0, 0.22);
+        0 8px 24px rgba(0, 0, 0, 0.28),
+        0 1px 3px rgba(0, 0, 0, 0.2);
       font-family: var(--ui-font);
-      animation: menu-in 80ms ease-out;
     }
 
     .check {
@@ -160,10 +159,10 @@ export class ContextMenu extends LitElement {
       align-items: center;
       column-gap: 18px;
       width: 100%;
-      min-height: 28px;
-      padding: 4px 8px;
+      min-height: 26px;
+      padding: 3px 8px;
       border: none;
-      border-radius: 5px;
+      border-radius: 6px;
       background: transparent;
       color: var(--text);
       font: inherit;
@@ -187,21 +186,23 @@ export class ContextMenu extends LitElement {
 
     kbd {
       color: var(--text-3);
-      font: 11px/1 var(--ui-font);
+      font: var(--font-size-sm) / 1 var(--ui-font);
       white-space: nowrap;
     }
 
+    /* Full-bleed hairline across the panel, past the container padding.
+       --border (not -subtle): the menu surface is lighter than the app bg. */
     .separator {
       height: 1px;
-      margin: 4px 7px;
+      margin: 4px -4px;
       flex-shrink: 0;
-      background: var(--border-subtle);
+      background: var(--border);
     }
 
+    /* Neutral text-tinted overlay so the highlight tracks any theme, light or dark. */
     .menu-item:hover,
     .menu-item:focus-visible {
-      color: var(--list-selection-fg);
-      background: var(--list-selection);
+      background: color-mix(in srgb, var(--text) 9%, transparent);
       outline: none;
     }
 
@@ -211,21 +212,7 @@ export class ContextMenu extends LitElement {
 
     .menu-item.danger:hover,
     .menu-item.danger:focus-visible {
-      color: var(--list-selection-fg);
-      background: color-mix(in srgb, var(--status-dot-error) 32%, var(--list-hover));
-    }
-
-    @keyframes menu-in {
-      from {
-        opacity: 0;
-        transform: translateY(-2px) scale(0.99);
-      }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      .menu {
-        animation: none;
-      }
+      background: color-mix(in srgb, var(--status-dot-error) 16%, transparent);
     }
   `
 }
