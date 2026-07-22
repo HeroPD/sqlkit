@@ -21,6 +21,7 @@ import { registerWorkspaceIpc } from './ipc-workspace'
 import { readGlobalConfig, readTheme, writeTheme } from './workspace'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+app.setName(t('app.name'))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
 const smokeTest = process.argv.includes('--smoke-test')
 const devParentPid = Number(process.env.SQLKIT_DEV_PARENT_PID)
@@ -250,7 +251,9 @@ function buildAppMenu() {
   const selectTheme = (theme: ThemeId) => {
     writeTheme(theme)
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('app:menu', `theme:${theme}`)
-    buildAppMenu()
+    // Electron updates sibling radio items itself. Rebuilding the native menu
+    // inside its click callback can release the pointer into the renderer and
+    // leave the window covered by a native text selection.
   }
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' } as MenuItemConstructorOptions] : []),

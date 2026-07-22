@@ -150,7 +150,7 @@ export class CommandPalette extends LitElement {
     if (entry.header) {
       return html`
         <div class="row group" role="presentation">
-          <i class="codicon ${entry.icon ?? 'codicon-circle-small'}" aria-hidden="true"></i>
+          ${entry.icon ? html`<i class="codicon ${entry.icon}" aria-hidden="true"></i>` : nothing}
           <span class="label">${this._highlight(entry.label)}</span>
           ${entry.detail ? html`<span class="detail">${entry.detail}</span>` : ''}
         </div>
@@ -164,7 +164,7 @@ export class CommandPalette extends LitElement {
         @click=${() => this._pick(entry)}
         @mousemove=${() => this._setActive(index)}
       >
-        <i class="codicon ${entry.icon ?? 'codicon-circle-small'}" aria-hidden="true"></i>
+        ${entry.icon ? html`<i class="codicon ${entry.icon}" aria-hidden="true"></i>` : nothing}
         <span class="label">${this._highlight(entry.label)}</span>
         ${entry.detail ? html`<span class="detail">${entry.detail}</span>` : ''}
         ${entry.keybind ? html`<span class="keybind">${entry.keybind}</span>` : ''}

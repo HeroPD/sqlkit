@@ -30,7 +30,6 @@ function setup(opts: Opts = {}) {
     openFile: vi.fn(),
     openTable: vi.fn(),
     setActiveDb: vi.fn(),
-    showView: vi.fn(),
     newQuery: vi.fn(),
     runActiveTab: vi.fn(),
     saveActiveTab: vi.fn(),
@@ -52,8 +51,8 @@ function setup(opts: Opts = {}) {
   const ctrl = new CommandPaletteController(host(), {
     live: live as unknown as ConnectionsController,
     commands: [
-      { id: 'new-query', label: 'New Query', icon: 'i' },
-      { id: 'toggle-sidebar', label: 'Toggle Sidebar', icon: 'i' },
+      { id: 'new-query', label: 'New Query' },
+      { id: 'toggle-sidebar', label: 'Toggle Sidebar' },
     ],
     files: () => opts.files ?? [],
     connections: () => opts.connections ?? [],
@@ -87,6 +86,7 @@ describe('CommandPaletteController entries', () => {
     const { ctrl } = setup()
     ctrl.open('commands')
     expect(ctrl.entries().map((e) => e.id)).toEqual(['new-query', 'toggle-sidebar'])
+    expect(ctrl.entries().every((entry) => entry.icon === undefined)).toBe(true)
   })
 
   it('lists files and the in-use context tables in quick mode', () => {
@@ -116,12 +116,6 @@ describe('CommandPaletteController pick dispatch', () => {
     ctrl.onPick(pick('commands', 'new-query'))
     expect(actions.newQuery).toHaveBeenCalledOnce()
     expect(ctrl.mode).toBeNull()
-  })
-
-  it('routes show-* commands to showView', () => {
-    const { ctrl, actions } = setup()
-    ctrl.onPick(pick('commands', 'show-explorer'))
-    expect(actions.showView).toHaveBeenCalledWith('explorer')
   })
 
   it('quick-open command re-opens the palette in quick mode', () => {

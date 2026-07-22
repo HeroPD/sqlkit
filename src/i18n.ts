@@ -216,7 +216,6 @@ const enUS = {
   'parameters.help': 'Values are bound safely as text. Enter NULL for SQL NULL.',
   'review.title': 'Review query',
   'sql.formatFailed': 'Could not format SQL',
-  'workbench.showView': 'Show {view}',
   'workbench.newTableTab': 'New Table · create',
   'workbench.infoTab': '{name} · info',
   'workbench.connectingTo': 'Connecting to {name}…',

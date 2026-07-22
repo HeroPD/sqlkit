@@ -103,21 +103,20 @@ const childFolderSegment = (name: string) => {
 }
 
 // Commands offered by the ⌘⇧P palette; ids are dispatched to _runCommand.
-const COMMANDS: ReadonlyArray<{ id: string; label: string; icon: string; keybind?: string }> = [
-  { id: 'new-query', label: t('action.newQuery'), icon: 'codicon-new-file', keybind: mod('N') },
-  { id: 'new-window', label: t('action.newWindow'), icon: 'codicon-window', keybind: `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}N` },
-  { id: 'run-query', label: t('action.runQuery'), icon: 'codicon-play', keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
-  { id: 'save-file', label: t('action.saveFile'), icon: 'codicon-save', keybind: mod('S') },
-  { id: 'format-sql', label: t('action.formatSql'), icon: 'codicon-symbol-keyword', keybind: isMac ? '⇧⌥F' : 'Shift+Alt+F' },
-  { id: 'quick-open', label: t('action.quickOpen'), icon: 'codicon-file-code', keybind: mod('P') },
-  { id: 'switch-database', label: t('action.switchDatabase'), icon: 'codicon-database', keybind: mod('K') },
-  { id: 'add-database', label: t('action.addDatabase'), icon: 'codicon-add' },
-  { id: 'disconnect-all', label: t('action.disconnectAll'), icon: 'codicon-debug-disconnect' },
-  { id: 'refresh-files', label: t('action.refreshFiles'), icon: 'codicon-sync' },
-  { id: 'toggle-sidebar', label: t('action.toggleSidebar'), icon: 'codicon-layout-sidebar-left', keybind: mod('B') },
-  { id: 'toggle-results-panel', label: t('action.toggleResults'), icon: 'codicon-layout-panel', keybind: mod('J') },
-  ...VIEWS.map((view) => ({ id: `show-${view.id}`, label: t('workbench.showView', { view: view.title }), icon: view.icon })),
-  { id: 'close-workspace', label: t('action.closeWorkspace'), icon: 'codicon-folder-opened' },
+const COMMANDS: ReadonlyArray<{ id: string; label: string; keybind?: string }> = [
+  { id: 'new-query', label: t('action.newQuery'), keybind: mod('N') },
+  { id: 'new-window', label: t('action.newWindow'), keybind: `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}N` },
+  { id: 'run-query', label: t('action.runQuery'), keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
+  { id: 'save-file', label: t('action.saveFile'), keybind: mod('S') },
+  { id: 'format-sql', label: t('action.formatSql'), keybind: isMac ? '⇧⌥F' : 'Shift+Alt+F' },
+  { id: 'quick-open', label: t('action.quickOpen'), keybind: mod('P') },
+  { id: 'switch-database', label: t('action.switchDatabase'), keybind: mod('K') },
+  { id: 'add-database', label: t('action.addDatabase') },
+  { id: 'disconnect-all', label: t('action.disconnectAll') },
+  { id: 'refresh-files', label: t('action.refreshFiles') },
+  { id: 'toggle-sidebar', label: t('action.toggleSidebar'), keybind: mod('B') },
+  { id: 'toggle-results-panel', label: t('action.toggleResults'), keybind: mod('J') },
+  { id: 'close-workspace', label: t('action.closeWorkspace') },
 ]
 
 // Workbench shell and orchestrator: owns the tab model, the in-use database
@@ -192,9 +191,6 @@ export class WorkbenchScreen extends LitElement {
     openFile: (file) => void this._fileOps.openFile(file),
     openTable: (key) => this._openTableFromPalette(key),
     setActiveDb: (profileId, childDb) => this._setActiveDb(profileId, childDb),
-    showView: (viewId) => {
-      this._activeView = viewId as ViewId
-    },
     newQuery: () => this._ctx.newQuery(),
     runActiveTab: () => {
       const tab = this._ctx.activeSqlTab()

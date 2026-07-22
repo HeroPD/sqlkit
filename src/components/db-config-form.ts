@@ -25,6 +25,7 @@ const DEFAULT_PORTS: Partial<Record<Engine, string>> = {
   mysql: '3306',
   sqlserver: '1433',
 }
+const SAVED_SECRET_MASK = '••••••••'
 
 type TestState =
   | { phase: 'idle' }
@@ -368,6 +369,9 @@ export class DbConfigForm extends LitElement {
       <input
         type=${type}
         .value=${ssh[key]}
+        placeholder=${type === 'password' && (key === 'password' ? ssh.passwordSaved : ssh.passphraseSaved)
+          ? SAVED_SECRET_MASK
+          : ''}
         @input=${(e: Event) => {
           const value = (e.target as HTMLInputElement).value
           const targetChanged = key === 'host' || key === 'port' || key === 'username' || key === 'keyPath'
@@ -409,6 +413,7 @@ export class DbConfigForm extends LitElement {
       <input
         type=${type}
         .value=${draft[key]}
+        placeholder=${type === 'password' && draft.passwordSaved ? SAVED_SECRET_MASK : ''}
         @input=${(e: Event) => {
           const value = (e.target as HTMLInputElement).value
           const targetChanged = key === 'host' || key === 'port' || key === 'username'

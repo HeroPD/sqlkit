@@ -1,5 +1,6 @@
 {
   "name": "sqlkit-studio",
+  "productName": "SqlKit Studio",
   "private": true,
   "version": "0.1.0",
   "description": "SqlKit Studio multi-database desktop workbench",

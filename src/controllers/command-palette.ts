@@ -16,7 +16,6 @@ type Deps = {
   openFile: (file: FileInfo) => void
   openTable: (key: string) => void
   setActiveDb: (profileId: string, childDb?: string | null) => void
-  showView: (viewId: string) => void
   newQuery: () => void
   runActiveTab: () => void
   saveActiveTab: () => void
@@ -201,10 +200,6 @@ export class CommandPaletteController implements ReactiveController {
   }
 
   private runCommand(id: string) {
-    if (id.startsWith('show-')) {
-      this.deps.showView(id.slice('show-'.length))
-      return
-    }
     switch (id) {
       case 'new-query':
         this.deps.newQuery()

@@ -61,6 +61,32 @@ describe('DbConfigForm draft editing', () => {
     internals(form)._patch({ port: '5433' })
     expect(internals(form)._test).toEqual({ phase: 'idle' })
   })
+
+  it('shows dots for saved secrets without putting the mask into the profile', async () => {
+    const { form } = setup({
+      passwordSaved: true,
+      ssh: {
+        enabled: true,
+        host: 'bastion',
+        port: '22',
+        username: 'deploy',
+        authType: 'password',
+        keyPath: '',
+        password: '',
+        passwordSaved: true,
+        passphrase: '',
+      },
+    })
+    document.body.appendChild(form)
+    await form.updateComplete
+
+    const passwordInputs = [...form.shadowRoot!.querySelectorAll<HTMLInputElement>('input[type="password"]')]
+    expect(passwordInputs).toHaveLength(2)
+    expect(passwordInputs.every((input) => input.placeholder === '••••••••' && input.value === '')).toBe(true)
+    expect(form.profile?.password).toBe('')
+    expect(form.profile?.ssh?.password).toBe('')
+    form.remove()
+  })
 })
 
 describe('DbConfigForm engine switch port carry', () => {
