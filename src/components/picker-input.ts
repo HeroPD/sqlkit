@@ -167,14 +167,13 @@ export class PickerInput extends LitElement {
       text-align: left;
     }
 
-    /* Pointer hover stays neutral; .active (keyboard-tracked) keeps the accent. */
     button:hover {
       background: color-mix(in srgb, var(--text) 9%, transparent);
     }
 
+    /* Keyboard-tracked row: a notch above hover, matching the command palette. */
     button.active {
-      color: var(--list-selection-fg);
-      background: var(--list-selection);
+      background: color-mix(in srgb, var(--text) 12%, transparent);
     }
 
     .detail {

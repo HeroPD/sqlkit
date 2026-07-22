@@ -252,17 +252,26 @@ export class CommandPalette extends LitElement {
         overflow: hidden;
       }
 
+      /* Flush divider under the input; no focus ring — the input owns focus
+         the whole time the palette is open, so a ring is pure noise. */
       input {
+        height: 34px;
         border-radius: 0;
         border-left: none;
         border-right: none;
         border-top: none;
+        border-bottom-color: var(--border);
+      }
+
+      input:focus {
+        border-color: var(--border);
+        box-shadow: none;
       }
 
       .list {
         max-height: 320px;
         overflow-y: auto;
-        padding: 4px 0;
+        padding: 4px;
         overscroll-behavior: none;
         overflow-anchor: none;
       }
@@ -271,20 +280,21 @@ export class CommandPalette extends LitElement {
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 5px 12px;
+        min-height: 26px;
+        padding: 3px 8px;
+        border-radius: 6px;
         cursor: pointer;
         color: var(--text);
-        font-size: var(--font-size);
         white-space: nowrap;
       }
 
+      /* Tracked row: a notch above the menus' 9% hover so Enter's target reads. */
       .row.active {
-        background: var(--list-selection);
-        color: var(--list-selection-fg);
+        background: color-mix(in srgb, var(--text) 12%, transparent);
       }
 
       .row.indent {
-        padding-left: 30px;
+        padding-left: 26px;
       }
 
       .row.group {
@@ -302,11 +312,6 @@ export class CommandPalette extends LitElement {
         color: var(--text-2);
       }
 
-      .row.active .icon,
-      .row.active .detail {
-        color: var(--list-selection-fg);
-      }
-
       .label {
         overflow: hidden;
         text-overflow: ellipsis;
@@ -316,11 +321,6 @@ export class CommandPalette extends LitElement {
         background: transparent;
         color: var(--accent);
         font-weight: 700;
-      }
-
-      .row.active .label mark {
-        color: var(--list-selection-fg);
-        text-decoration: underline;
       }
 
       .detail {
@@ -340,7 +340,6 @@ export class CommandPalette extends LitElement {
 
       .empty {
         padding: 10px 12px;
-        font-size: var(--font-size);
       }
     `,
   ]
