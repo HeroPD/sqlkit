@@ -71,7 +71,7 @@ export class CommandPaletteController implements ReactiveController {
       const files = this.deps
         .files()
         .filter((file) => file.type === 'file')
-        .map((file) => ({ id: `file:${file.relativePath}`, label: file.name, detail: file.relativePath, icon: 'codicon-file-code' }))
+        .map((file) => ({ id: `file:${file.relativePath}`, label: file.name, detail: file.relativePath, icon: 'icon-file-code' }))
 
       // Tables of the in-use context only — ⌘P must not mix databases;
       // switching context is ⌘K's job.
@@ -82,7 +82,7 @@ export class CommandPaletteController implements ReactiveController {
               id: `table:${tableKey(context.id, table)}`,
               label: table.name,
               detail: table.schema ?? '',
-              icon: 'codicon-table',
+              icon: 'icon-table',
             }))
           : []
 
@@ -104,14 +104,14 @@ export class CommandPaletteController implements ReactiveController {
               id: `hdr:${connection.id}`,
               label: connection.name,
               detail: `${connection.engine} · ${t('palette.connected')}`,
-              icon: 'codicon-database',
+              icon: 'icon-database',
               header: true,
             },
             ...children.map((child) => ({
               id: `child:${connection.id}:${child.name}`,
               label: child.name,
               detail: this.deps.activeDbId() === connection.id && this.deps.activeChildDb() === child.name ? t('palette.inUse') : '',
-              icon: 'codicon-symbol-namespace',
+              icon: 'icon-package',
               indent: true,
             })),
           ]
@@ -137,7 +137,7 @@ export class CommandPaletteController implements ReactiveController {
             id: `db:${connection.id}`,
             label: connection.name,
             detail: parts.join(' · '),
-            icon: phase === 'connecting' ? 'codicon-loading codicon-modifier-spin' : 'codicon-database',
+            icon: phase === 'connecting' ? 'icon-loader-circle icon-modifier-spin' : 'icon-database',
           },
         ]
       })

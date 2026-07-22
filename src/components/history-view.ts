@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { icons, controls, scrollbars, typography } from '../shared-styles'
 import type { Engine } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -140,7 +140,7 @@ export class HistoryView extends LitElement {
   static styles = [
     typography,
     controls,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {

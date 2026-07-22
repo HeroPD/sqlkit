@@ -1,6 +1,7 @@
-/* Registers the codicon @font-face globally; the .codicon classes are also
-   composed into shadow roots via the `codicons` module in shared-styles.ts. */
-@import './codicons/codicon.css';
+/* Registers the Lucide icon @font-face and .icon classes globally; the same
+   classes are composed into shadow roots via the `icons` module in
+   shared-styles.ts. */
+@import './icons/lucide.css';
 @import '@fontsource-variable/ibm-plex-sans/wght.css';
 @import '@fontsource-variable/ibm-plex-sans/wght-italic.css';
 @import '@fontsource-variable/jetbrains-mono/wght.css';

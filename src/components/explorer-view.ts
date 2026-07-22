@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, scrollbars, typography } from '../shared-styles'
+import { icons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
 import { TABLE_KIND_ICONS, tableKindLabel } from '../table-kinds'
@@ -17,7 +17,7 @@ export const tableKey = (profileId: string, table: TableRef) => `${profileId}:${
 export const tableLabel = (table: TableRef) => (table.schema ? `${table.schema}.${table.name}` : table.name)
 
 const objectIcon = (label: 'Functions' | 'Types', object: DbObject) =>
-  label === 'Functions' ? 'codicon-symbol-method' : object.detail === 'enum' ? 'codicon-symbol-enum' : 'codicon-symbol-structure'
+  label === 'Functions' ? 'icon-square-function' : object.detail === 'enum' ? 'icon-list' : 'icon-boxes'
 
 export type TableSelectDetail = { key: string }
 export type ObjectInspectDetail = { object: DbObject; objectKind: DbObjectKind }
@@ -161,7 +161,7 @@ export class ExplorerView extends LitElement {
     return html`
       <div class="x-section ${filesCollapsed ? 'collapsed' : ''}" style=${filesStyle}>
         <button class="section-head-row" @click=${() => this._patchLayout({ filesCollapsed: !filesCollapsed })}>
-          <i class="codicon codicon-chevron-right chevron ${filesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
+          <i class="icon icon-chevron-right chevron ${filesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
           <span>${t('explorer.files')}</span>
           ${this.contextName ? html`<span class="section-detail">${this.contextName}</span>` : ''}
         </button>
@@ -197,7 +197,7 @@ export class ExplorerView extends LitElement {
       >
         <div class="section-head">
           <button class="section-head-row" @click=${() => this._patchLayout({ tablesCollapsed: !tablesCollapsed })}>
-            <i class="codicon codicon-chevron-right chevron ${tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
+            <i class="icon icon-chevron-right chevron ${tablesCollapsed ? '' : 'expanded'}" aria-hidden="true"></i>
             <span>${t('explorer.tables')}</span>
           </button>
           ${this.tables !== null
@@ -208,7 +208,7 @@ export class ExplorerView extends LitElement {
                   aria-label=${t('explorer.refreshMetadata')}
                   @click=${this._refresh}
                 >
-                  <i class="codicon codicon-refresh" aria-hidden="true"></i>
+                  <i class="icon icon-refresh-cw" aria-hidden="true"></i>
                 </button>
               `
             : ''}
@@ -352,7 +352,7 @@ export class ExplorerView extends LitElement {
               @click=${() => this._toggleSchema(groupKey)}
               @contextmenu=${(event: MouseEvent) => this._onTablesMenu(event, schema)}
             >
-              <i class="codicon codicon-chevron-right chevron ${collapsed ? '' : 'expanded'}" aria-hidden="true"></i>
+              <i class="icon icon-chevron-right chevron ${collapsed ? '' : 'expanded'}" aria-hidden="true"></i>
               <span>${schema}</span>
               <span class="schema-count">${tables.length}</span>
             </button>
@@ -387,7 +387,7 @@ export class ExplorerView extends LitElement {
     const expanded = this._tree.expandedObjectGroups.has(key)
     return html`
       <button class="object-group ${nested ? 'nested' : ''}" @click=${() => this._toggleObjectGroup(key)}>
-        <i class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}" aria-hidden="true"></i>
+        <i class="icon icon-chevron-right chevron ${expanded ? 'expanded' : ''}" aria-hidden="true"></i>
         <span>${t(label === 'Functions' ? 'explorer.functions' : 'explorer.types')}</span>
         <span class="schema-count">${items.length}</span>
       </button>
@@ -407,7 +407,7 @@ export class ExplorerView extends LitElement {
                   this._menu = { kind: 'object', x: event.clientX, y: event.clientY, object: item, objectKind }
                 }}
               >
-                <i class="codicon ${objectIcon(label, item)}" aria-hidden="true"></i>
+                <i class="icon ${objectIcon(label, item)}" aria-hidden="true"></i>
                 <span class="object-name">${item.name}</span>
               </div>
             `
@@ -469,12 +469,12 @@ export class ExplorerView extends LitElement {
         @contextmenu=${(event: MouseEvent) => this._onTableMenu(event, table)}
       >
         <i
-          class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}"
+          class="icon icon-chevron-right chevron ${expanded ? 'expanded' : ''}"
           aria-hidden="true"
           @click=${(event: Event) => this._toggleTable(event, key)}
           @dblclick=${(event: Event) => event.stopPropagation()}
         ></i>
-        <i class="codicon ${TABLE_KIND_ICONS[table.kind] ?? 'codicon-table'}" aria-hidden="true"></i>
+        <i class="icon ${TABLE_KIND_ICONS[table.kind] ?? 'icon-table'}" aria-hidden="true"></i>
         <span>${table.name}</span>
       </div>
       ${expanded ? this._renderColumns(table, nested) : ''}
@@ -492,7 +492,7 @@ export class ExplorerView extends LitElement {
           title="${column.name} · ${column.dataType}${column.nullable ? '' : ` · ${t('explorer.notNull')}`}${column.foreignKey ? ` · ${t('explorer.foreignKey')}` : ''}"
         >
           <i
-            class="codicon ${column.primaryKey || column.foreignKey ? 'codicon-key' : 'codicon-symbol-field'} ${column.primaryKey ? 'pk' : column.foreignKey ? 'fk' : ''}"
+            class="icon ${column.primaryKey || column.foreignKey ? 'icon-key' : 'icon-rectangle-ellipsis'} ${column.primaryKey ? 'pk' : column.foreignKey ? 'fk' : ''}"
             aria-hidden="true"
           ></i>
           <span class="col-name">${column.name}</span>
@@ -586,7 +586,7 @@ export class ExplorerView extends LitElement {
 
   static styles = [
     typography,
-    codicons,
+    icons,
     // The scroll containers in this root include the <file-tree> host itself;
     // its scrollbar is styled from here, not from its own stylesheet.
     scrollbars,
@@ -691,7 +691,7 @@ export class ExplorerView extends LitElement {
         background: transparent;
         color: var(--text-2);
         cursor: pointer;
-        --codicon-size: 14px;
+        --icon-size: 14px;
       }
 
       .head-action:hover {
@@ -866,7 +866,7 @@ export class ExplorerView extends LitElement {
         background: var(--list-hover);
       }
 
-      .object-row .codicon {
+      .object-row .icon {
         flex-shrink: 0;
         color: var(--text-3);
       }
@@ -885,23 +885,23 @@ export class ExplorerView extends LitElement {
         color: var(--text-2);
         white-space: nowrap;
         user-select: none;
-        --codicon-size: 13px;
+        --icon-size: 13px;
       }
 
       .ecol-row.nested {
         padding-left: 42px;
       }
 
-      .ecol-row .codicon {
+      .ecol-row .icon {
         flex-shrink: 0;
         color: var(--text-3);
       }
 
-      .ecol-row .codicon.pk {
+      .ecol-row .icon.pk {
         color: var(--status-dot-warning);
       }
 
-      .ecol-row .codicon.fk {
+      .ecol-row .icon.fk {
         color: var(--accent);
       }
 
@@ -930,13 +930,13 @@ export class ExplorerView extends LitElement {
         color: var(--list-selection-fg);
       }
 
-      .etable-row .codicon {
+      .etable-row .icon {
         font-size: 14px;
         flex-shrink: 0;
         color: var(--text-2);
       }
 
-      .etable-row.selected .codicon {
+      .etable-row.selected .icon {
         color: var(--list-selection-fg);
       }
 

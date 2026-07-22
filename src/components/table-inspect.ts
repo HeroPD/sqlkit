@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, scrollbars, typography } from '../shared-styles'
+import { icons, scrollbars, typography } from '../shared-styles'
 import type { ColumnRef, DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
 import { cellsToTsv } from '../result-export'
@@ -411,11 +411,11 @@ export class TableInspect extends LitElement {
     const label = target.schema ? `${target.schema}.${target.name}` : target.name
     const icon = this.object
       ? this.objectKind === 'function'
-        ? 'codicon-symbol-method'
+        ? 'icon-square-function'
         : this.object.detail === 'enum'
-          ? 'codicon-symbol-enum'
-          : 'codicon-symbol-structure'
-      : (TABLE_KIND_ICONS[this.table!.kind] ?? 'codicon-table')
+          ? 'icon-list'
+          : 'icon-boxes'
+      : (TABLE_KIND_ICONS[this.table!.kind] ?? 'icon-table')
     const badge = this.object
       ? this.objectKind === 'function'
         ? 'function'
@@ -426,7 +426,7 @@ export class TableInspect extends LitElement {
     return html`
       <div class="scroll">
         <div class="head">
-          <i class="codicon ${icon}" aria-hidden="true"></i>
+          <i class="icon ${icon}" aria-hidden="true"></i>
           <h3 class=${this.createTable ? 'create-table-name' : ''} @click=${() => {
             if (this.createTable) this._tableNameEditing = true
           }}>
@@ -453,7 +453,7 @@ export class TableInspect extends LitElement {
           ${this.createTable
             ? html`<span class="head-spacer"></span>`
             : html`<button class="refresh" title=${t('inspect.reload')} aria-label=${t('inspect.reload')} @click=${() => void this._load()}>
-                <i class="codicon codicon-refresh" aria-hidden="true"></i>
+                <i class="icon icon-refresh-cw" aria-hidden="true"></i>
               </button>`}
           ${this.hasPendingChanges()
             ? html`
@@ -1584,7 +1584,7 @@ export class TableInspect extends LitElement {
     const state = this._state
     if (state.phase === 'loading') {
       return html`<p class="muted hint">
-        <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> ${t('inspect.loading')}
+        <i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i> ${t('inspect.loading')}
       </p>`
     }
     if (state.phase === 'error') return html`<pre class="error">${state.error}</pre>`
@@ -1606,7 +1606,7 @@ export class TableInspect extends LitElement {
                     aria-label=${t('inspect.addSection', { section: this._sectionLabel(section.title) })}
                     @click=${() => { this._editOperationIndex = null; this._addDialog = this._sectionAddKind(section.title) }}
                   >
-                    <i class="codicon codicon-add" aria-hidden="true"></i>
+                    <i class="icon icon-plus" aria-hidden="true"></i>
                   </button>
                 `
               : ''}
@@ -1682,7 +1682,7 @@ export class TableInspect extends LitElement {
                               this._edits,
                               this._operations.filter((_, operationIndex) => operationIndex !== stagedIndex),
                             )}
-                          ><i class="codicon codicon-close" aria-hidden="true"></i></button>`
+                          ><i class="icon icon-x" aria-hidden="true"></i></button>`
                         : ''}
                     </td>
                     <td data-field="definition" class="mono def${this._isSelected(grid, index, 1) ? ' selected' : ''}" title=${row.definition}>
@@ -1714,7 +1714,7 @@ export class TableInspect extends LitElement {
         ${this._canAddColumn()
           ? html`
               <button class="add-btn" type="button" title=${t('inspect.addColumn')} aria-label=${t('inspect.addColumn')} @click=${this._addColumn}>
-                <i class="codicon codicon-add" aria-hidden="true"></i>
+                <i class="icon icon-plus" aria-hidden="true"></i>
               </button>
             `
           : ''}
@@ -1784,7 +1784,7 @@ export class TableInspect extends LitElement {
                   aria-label=${t('inspect.removeColumn')}
                   @click=${() => this._removeAddition(column.name)}
                 >
-                  <i class="codicon codicon-close" aria-hidden="true"></i>
+                  <i class="icon icon-x" aria-hidden="true"></i>
                 </button>
               `
             : dropped
@@ -1796,16 +1796,16 @@ export class TableInspect extends LitElement {
                     aria-label=${t('inspect.restoreColumn')}
                     @click=${() => this._resetRow(column)}
                   >
-                    <i class="codicon codicon-discard" aria-hidden="true"></i>
+                    <i class="icon icon-undo-2" aria-hidden="true"></i>
                   </button>
                 `
               : primaryKey || foreignKey
                 ? html`<span class="key-icons">
                     ${primaryKey
-                      ? html`<i class="codicon codicon-key pk" aria-hidden="true" title=${t('inspect.primaryKeyLabel')}></i>`
+                      ? html`<i class="icon icon-key pk" aria-hidden="true" title=${t('inspect.primaryKeyLabel')}></i>`
                       : ''}
                     ${foreignKey
-                      ? html`<i class="codicon codicon-key fk" aria-hidden="true" title=${t('inspect.foreignKeyLabel')}></i>`
+                      ? html`<i class="icon icon-key fk" aria-hidden="true" title=${t('inspect.foreignKeyLabel')}></i>`
                       : ''}
                   </span>`
                 : ''}
@@ -1837,7 +1837,7 @@ export class TableInspect extends LitElement {
               event.stopPropagation()
             }}
           >
-            <i class="codicon codicon-chevron-down" aria-hidden="true"></i>
+            <i class="icon icon-chevron-down" aria-hidden="true"></i>
           </button>
         `
       : ''
@@ -1901,7 +1901,7 @@ export class TableInspect extends LitElement {
                   this._openNullablePicker((event.currentTarget as HTMLElement).closest('td')!, col)
                 }}
               >
-                <i class="codicon codicon-chevron-down" aria-hidden="true"></i>
+                <i class="icon icon-chevron-down" aria-hidden="true"></i>
               </button>
             `
           : ''}
@@ -2056,7 +2056,7 @@ export class TableInspect extends LitElement {
 
   static styles = [
     typography,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -2185,7 +2185,7 @@ export class TableInspect extends LitElement {
         line-height: 1;
       }
 
-      .add-btn .codicon {
+      .add-btn .icon {
         font-size: 11px;
         margin: 1px 0 0 1px;
         -webkit-text-stroke: 0.6px currentColor;
@@ -2424,7 +2424,7 @@ export class TableInspect extends LitElement {
         background: transparent;
         color: var(--text-3);
         cursor: pointer;
-        --codicon-size: 12px;
+        --icon-size: 12px;
       }
 
       td.has-choices:hover .choices-btn {
@@ -2474,7 +2474,7 @@ export class TableInspect extends LitElement {
         border: none;
         border-radius: 3px;
         cursor: pointer;
-        --codicon-size: 12px;
+        --icon-size: 12px;
       }
 
       .remove-btn:hover {

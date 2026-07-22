@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { icons, controls, scrollbars, typography } from '../shared-styles'
 import type { FileInfo } from '../electron'
 import { formatInteger, t } from '../i18n'
 
@@ -82,7 +82,7 @@ export class SearchView extends LitElement {
       ${this._results.map(
         (group) => html`
           <div class="file-row" title=${group.file.relativePath}>
-            <i class="codicon codicon-file-code" aria-hidden="true"></i>
+            <i class="icon icon-file-code" aria-hidden="true"></i>
             <span class="fname">${group.file.name}</span>
             <span class="count">${group.matches.length}</span>
           </div>
@@ -164,7 +164,7 @@ export class SearchView extends LitElement {
   static styles = [
     typography,
     controls,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -206,10 +206,10 @@ export class SearchView extends LitElement {
         color: var(--text);
         white-space: nowrap;
         user-select: none;
-        --codicon-size: 14px;
+        --icon-size: 14px;
       }
 
-      .file-row .codicon {
+      .file-row .icon {
         flex-shrink: 0;
         color: var(--text-2);
       }

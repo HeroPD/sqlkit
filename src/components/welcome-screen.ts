@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { codicons, controls, typography } from '../shared-styles'
+import { icons, controls, typography } from '../shared-styles'
 import type { RecentWorkspace } from '../electron'
 import { t } from '../i18n'
 
@@ -16,7 +16,7 @@ export class WelcomeScreen extends LitElement {
     return html`
       <div class="inner">
         <div class="brand">
-          <i class="codicon codicon-database logo" aria-hidden="true"></i>
+          <i class="icon icon-database logo" aria-hidden="true"></i>
           <h1>${t('app.name')}</h1>
           <p class="muted">${t('app.tagline')}</p>
         </div>
@@ -58,7 +58,7 @@ export class WelcomeScreen extends LitElement {
   static styles = [
     typography,
     controls,
-    codicons,
+    icons,
     css`
       :host {
         align-items: center;
@@ -80,7 +80,7 @@ export class WelcomeScreen extends LitElement {
         text-align: center;
       }
 
-      .codicon.logo {
+      .icon.logo {
         font-size: 56px;
         color: var(--accent);
         margin-bottom: 4px;

@@ -142,7 +142,7 @@ describe('TableInspect column editing', () => {
     await view.updateComplete
 
     const icon = view.shadowRoot!.querySelector<HTMLElement>('.icon-cell .fk')
-    expect(icon?.classList.contains('codicon-key')).toBe(true)
+    expect(icon?.classList.contains('icon-key')).toBe(true)
     expect(icon?.title).toBe('Foreign key')
     expect(view.shadowRoot!.querySelector('.icon-cell .pk')).toBeTruthy()
     view.remove()

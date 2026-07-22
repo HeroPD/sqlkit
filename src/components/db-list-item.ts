@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { codicons } from '../shared-styles'
+import { icons } from '../shared-styles'
 import type { ConnectionPhase, Engine, EngineFlavor } from '../electron'
 import './engine-badge'
 import { t } from '../i18n'
@@ -64,8 +64,8 @@ export class DbListItem extends LitElement {
         @click=${this._onToggleConnection}
       >
         ${this.status === 'connecting'
-          ? html`<i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i>`
-          : html`<i class="codicon ${live ? 'codicon-debug-disconnect' : 'codicon-plug'}" aria-hidden="true"></i>`}
+          ? html`<i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i>`
+          : html`<i class="icon ${live ? 'icon-unplug' : 'icon-plug'}" aria-hidden="true"></i>`}
       </button>
     `
   }
@@ -88,7 +88,7 @@ export class DbListItem extends LitElement {
   }
 
   static styles = [
-    codicons,
+    icons,
     css`
       :host {
         display: flex;
@@ -194,7 +194,7 @@ export class DbListItem extends LitElement {
         color: var(--text);
       }
 
-      .action .codicon {
+      .action .icon {
         font-size: 14px;
       }
     `,

@@ -25,7 +25,7 @@ const button = (classes: string, icon: string, title: string) => {
   el.className = classes
   el.title = title
   el.setAttribute('aria-label', title)
-  el.innerHTML = `<i class="codicon codicon-${icon}" aria-hidden="true"></i>`
+  el.innerHTML = `<i class="icon icon-${icon}" aria-hidden="true"></i>`
   return el
 }
 
@@ -147,7 +147,7 @@ export function createFindPanel(view: EditorView): Panel {
   toggleReplace.addEventListener('click', () => {
     const on = dom.classList.toggle('replace-on')
     toggleReplace.setAttribute('aria-expanded', String(on))
-    toggleReplace.innerHTML = `<i class="codicon codicon-chevron-${on ? 'down' : 'right'}" aria-hidden="true"></i>`
+    toggleReplace.innerHTML = `<i class="icon icon-chevron-${on ? 'down' : 'right'}" aria-hidden="true"></i>`
     if (on) replaceInput.focus()
   })
 

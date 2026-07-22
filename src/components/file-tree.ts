@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, scrollbars, typography } from '../shared-styles'
+import { icons, scrollbars, typography } from '../shared-styles'
 import type { FileInfo } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -31,11 +31,11 @@ const parentOf = (relativePath: string) => relativePath.split('/').slice(0, -1).
 // editor, the rest → system default app).
 const fileIcon = (name: string) => {
   const ext = name.toLowerCase().split('.').pop() ?? ''
-  if (ext === 'sql') return 'codicon-file-code'
-  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'mp4', 'mov'].includes(ext)) return 'codicon-file-media'
-  if (['zip', 'gz', 'tar', '7z'].includes(ext)) return 'codicon-file-zip'
-  if (ext === 'pdf') return 'codicon-file-pdf'
-  return 'codicon-file'
+  if (ext === 'sql') return 'icon-file-code'
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'mp4', 'mov'].includes(ext)) return 'icon-file-image'
+  if (['zip', 'gz', 'tar', '7z'].includes(ext)) return 'icon-file-archive'
+  if (ext === 'pdf') return 'icon-file-text'
+  return 'icon-file'
 }
 
 function buildTree(files: FileInfo[]): FileNode {
@@ -162,10 +162,10 @@ export class FileTree extends LitElement {
         @contextmenu=${(e: MouseEvent) => this._onRowMenu(e, node)}
       >
         <i
-          class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''} ${isFolder ? '' : 'hidden'}"
+          class="icon icon-chevron-right chevron ${expanded ? 'expanded' : ''} ${isFolder ? '' : 'hidden'}"
           aria-hidden="true"
         ></i>
-        <i class="codicon ${isFolder ? 'codicon-folder' : fileIcon(node.name)}" aria-hidden="true"></i>
+        <i class="icon ${isFolder ? 'icon-folder' : fileIcon(node.name)}" aria-hidden="true"></i>
         <span class="name">${node.name}</span>
       </div>
     `
@@ -174,8 +174,8 @@ export class FileTree extends LitElement {
   private _renderEditRow(depth: number, initial: string) {
     return html`
       <div class="row edit-row" style="padding-left: ${10 + depth * 12}px">
-        <i class="codicon codicon-chevron-right chevron hidden" aria-hidden="true"></i>
-        <i class="codicon codicon-file-code" aria-hidden="true"></i>
+        <i class="icon icon-chevron-right chevron hidden" aria-hidden="true"></i>
+        <i class="icon icon-file-code" aria-hidden="true"></i>
         <input
           type="text"
           .value=${initial}
@@ -321,7 +321,7 @@ export class FileTree extends LitElement {
 
   static styles = [
     typography,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -364,13 +364,13 @@ export class FileTree extends LitElement {
         color: var(--list-selection-fg);
       }
 
-      .row .codicon {
+      .row .icon {
         font-size: 14px;
         flex-shrink: 0;
         color: var(--text-2);
       }
 
-      .row.active .codicon {
+      .row.active .icon {
         color: var(--list-selection-fg);
       }
 

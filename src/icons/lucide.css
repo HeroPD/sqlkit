@@ -1,0 +1,90 @@
+/* Lucide 1.25.0 (ISC) icon font — subset of the glyphs the app uses.
+   Markup: <i class="icon icon-NAME">; NAME is Lucide's own icon name. Add an
+   icon by adding its ::before rule (codepoint from lucide-static/font). */
+
+@font-face {
+  font-family: 'lucide';
+  font-style: normal;
+  font-weight: 400;
+  src: url('./lucide.woff2') format('woff2');
+}
+
+.icon {
+  font-family: 'lucide' !important;
+  font-size: var(--icon-size, 16px);
+  font-style: normal;
+  font-weight: normal;
+  line-height: 1;
+  display: inline-block;
+  vertical-align: text-bottom;
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@keyframes icon-spin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.icon-modifier-spin {
+  animation: icon-spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-modifier-spin {
+    animation-duration: 3s;
+  }
+}
+
+.icon-plus::before { content: "\e13d"; }
+.icon-arrow-down::before { content: "\e042"; }
+.icon-arrow-up::before { content: "\e04a"; }
+.icon-case-sensitive::before { content: "\e3d9"; }
+.icon-check::before { content: "\e06c"; }
+.icon-list-checks::before { content: "\e1d0"; }
+.icon-chevron-down::before { content: "\e06d"; }
+.icon-chevron-left::before { content: "\e06e"; }
+.icon-chevron-right::before { content: "\e06f"; }
+.icon-chevron-up::before { content: "\e070"; }
+.icon-list-x::before { content: "\e240"; }
+.icon-x::before { content: "\e1b2"; }
+.icon-copy::before { content: "\e09e"; }
+.icon-database::before { content: "\e0ad"; }
+.icon-unplug::before { content: "\e45d"; }
+.icon-square::before { content: "\e167"; }
+.icon-undo-2::before { content: "\e2a1"; }
+.icon-download::before { content: "\e0b2"; }
+.icon-eye::before { content: "\e0ba"; }
+.icon-file::before { content: "\e0c0"; }
+.icon-file-code::before { content: "\e0c3"; }
+.icon-file-image::before { content: "\e31c"; }
+.icon-file-text::before { content: "\e0cc"; }
+.icon-file-archive::before { content: "\e30d"; }
+.icon-files::before { content: "\e0cf"; }
+.icon-filter::before { content: "\e0dc"; }
+.icon-folder::before { content: "\e0d7"; }
+.icon-history::before { content: "\e1f5"; }
+.icon-key::before { content: "\e0fd"; }
+.icon-layers::before { content: "\e529"; }
+.icon-link::before { content: "\e102"; }
+.icon-list::before { content: "\e106"; }
+.icon-loader-circle::before { content: "\e10a"; }
+.icon-plug::before { content: "\e37f"; }
+.icon-refresh-cw::before { content: "\e145"; }
+.icon-regex::before { content: "\e1fc"; }
+.icon-minus::before { content: "\e11c"; }
+.icon-replace::before { content: "\e3db"; }
+.icon-replace-all::before { content: "\e3dc"; }
+.icon-save::before { content: "\e14d"; }
+.icon-search::before { content: "\e151"; }
+.icon-server::before { content: "\e153"; }
+.icon-whole-word::before { content: "\e3df"; }
+.icon-rectangle-ellipsis::before { content: "\e21f"; }
+.icon-square-function::before { content: "\e22d"; }
+.icon-package::before { content: "\e129"; }
+.icon-boxes::before { content: "\e2d0"; }
+.icon-table::before { content: "\e17d"; }

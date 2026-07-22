@@ -1,22 +1,12 @@
 import { css, unsafeCSS } from 'lit'
-import codiconCss from './codicons/codicon.css?inline'
+import iconCss from './icons/lucide.css?inline'
 
-// The codicon icon classes (.codicon-files etc.), for use inside shadow
-// roots. The @font-face itself only registers at document level (imported in
-// index.css); this module carries the per-icon class rules.
-//
-// The vendored base rule pins 16px through a `font:` shorthand at (0,2,0)
-// specificity, which silently beats simple component selectors. Sizing
-// therefore goes through --codicon-size, set on any ancestor (it inherits) —
-// no specificity contest needed.
-export const codicons = [
-  unsafeCSS(codiconCss),
-  css`
-    .codicon[class*='codicon-'] {
-      font-size: var(--codicon-size, 16px);
-    }
-  `,
-]
+// The Lucide icon classes (.icon, .icon-files etc.), for use inside shadow
+// roots. The @font-face registers at document level (imported in index.css);
+// the 'lucide' family is then usable everywhere, so this module just carries
+// the class rules. Sizing follows font-size, driven by --icon-size set on any
+// ancestor (it inherits) — see the `.icon` base rule in lucide.css.
+export const icons = [unsafeCSS(iconCss)]
 
 // App-wide scrollbar standard (matches the reference app): thin, transparent
 // track, rounded thumb inset by a 2px transparent border. Document-level

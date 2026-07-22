@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { icons, controls, scrollbars, typography } from '../shared-styles'
 import type { ConnectionProfile, ConnectionStatus } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
@@ -39,7 +39,7 @@ export class DatabasesView extends LitElement {
           : html`<p class="muted hint">${t('view.databases.empty')}</p>`}
       </div>
       <button class="link add" @click=${this._onAdd}>
-        <i class="codicon codicon-add" aria-hidden="true"></i>
+        <i class="icon icon-plus" aria-hidden="true"></i>
         <span>${t('action.addDatabase')}</span>
       </button>
       ${this._renderMenu()} ${this._renderChildMenu()}
@@ -155,7 +155,7 @@ export class DatabasesView extends LitElement {
               title=${child.name}
               @contextmenu=${(event: MouseEvent) => this._onChildMenu(event, profileId, child.name, child.inUse)}
             >
-              <i class="codicon codicon-symbol-namespace" aria-hidden="true"></i>
+              <i class="icon icon-package" aria-hidden="true"></i>
               <span class="child-name">${child.name}</span>
               ${child.inUse ? html`<span class="child-tag">${t('database.active')}</span>` : ''}
             </div>
@@ -172,7 +172,7 @@ export class DatabasesView extends LitElement {
   static styles = [
     typography,
     controls,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -222,7 +222,7 @@ export class DatabasesView extends LitElement {
         text-overflow: ellipsis;
       }
 
-      .child-row .codicon {
+      .child-row .icon {
         font-size: 13px;
         flex-shrink: 0;
       }
@@ -246,7 +246,7 @@ export class DatabasesView extends LitElement {
         flex-shrink: 0;
       }
 
-      .add .codicon {
+      .add .icon {
         font-size: 14px;
       }
     `,

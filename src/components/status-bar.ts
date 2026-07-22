@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { codicons } from '../shared-styles'
+import { icons } from '../shared-styles'
 import { t } from '../i18n'
 
 // The workbench footer: workspace name, the in-use database context, and a
@@ -33,7 +33,7 @@ export class StatusBar extends LitElement {
       <footer class=${this.connectedCount ? 'connected' : ''}>
         <span>${this.workspaceName || t('app.name')}</span>
         ${this.contextName
-          ? html`<span><i class="codicon codicon-database" aria-hidden="true"></i> ${this.contextName}</span>`
+          ? html`<span><i class="icon icon-database" aria-hidden="true"></i> ${this.contextName}</span>`
           : ''}
         <span class="spacer"></span>
         <span>${summary}</span>
@@ -42,7 +42,7 @@ export class StatusBar extends LitElement {
   }
 
   static styles = [
-    codicons,
+    icons,
     css`
       :host {
         display: block;
@@ -56,7 +56,7 @@ export class StatusBar extends LitElement {
         gap: 10px;
         padding: 0 10px;
         font-size: var(--font-size-sm);
-        --codicon-size: var(--font-size-sm);
+        --icon-size: var(--font-size-sm);
         color: var(--status-bar-fg);
         background: var(--status-bar-disconnected);
       }
@@ -65,7 +65,7 @@ export class StatusBar extends LitElement {
         background: var(--status-bar-bg);
       }
 
-      .codicon {
+      .icon {
         vertical-align: -1px;
       }
 

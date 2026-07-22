@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, scrollbars, typography } from '../shared-styles'
+import { icons, scrollbars, typography } from '../shared-styles'
 import { isMac } from '../platform'
 import type { Engine, QueryResult, QuerySort } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
@@ -707,7 +707,7 @@ export class ResultsPanel extends LitElement {
                 ${this.rowEditable && canEditResult
                   ? html`
                       <button class="head-action" data-tooltip=${t('results.addRow')} aria-label=${t('results.addRow')} @click=${this._addRow}>
-                        <i class="codicon codicon-add" aria-hidden="true"></i>
+                        <i class="icon icon-plus" aria-hidden="true"></i>
                       </button>
                       <button
                         class="head-action danger"
@@ -716,7 +716,7 @@ export class ResultsPanel extends LitElement {
                         ?disabled=${!hasDeletable}
                         @click=${() => this._deleteSelection()}
                       >
-                        <i class="codicon codicon-remove" aria-hidden="true"></i>
+                        <i class="icon icon-minus" aria-hidden="true"></i>
                       </button>
                       <button
                         class="head-action"
@@ -725,7 +725,7 @@ export class ResultsPanel extends LitElement {
                         ?disabled=${selected.results.length === 0 || !!result?.truncated}
                         @click=${this._duplicateSelection}
                       >
-                        <i class="codicon codicon-copy" aria-hidden="true"></i>
+                        <i class="icon icon-copy" aria-hidden="true"></i>
                       </button>
                     `
                   : ''}
@@ -740,7 +740,7 @@ export class ResultsPanel extends LitElement {
                   ?disabled=${pendingCount === 0}
                   @click=${this._saveRows}
                 >
-                  <i class="codicon codicon-save" aria-hidden="true"></i>
+                  <i class="icon icon-save" aria-hidden="true"></i>
                 </button>
                 <button
                   class="head-action"
@@ -749,7 +749,7 @@ export class ResultsPanel extends LitElement {
                   ?disabled=${pendingCount === 0}
                   @click=${this._discardChanges}
                 >
-                  <i class="codicon codicon-discard" aria-hidden="true"></i>
+                  <i class="icon icon-undo-2" aria-hidden="true"></i>
                 </button>
               </div>
             `
@@ -763,7 +763,7 @@ export class ResultsPanel extends LitElement {
                 aria-expanded=${this._filterOpen}
                 @click=${this._toggleFilter}
               >
-                <i class="codicon codicon-filter" aria-hidden="true"></i>
+                <i class="icon icon-filter" aria-hidden="true"></i>
               </button>
             `
           : ''}
@@ -780,7 +780,7 @@ export class ResultsPanel extends LitElement {
                   ?disabled=${!canToggleRecord}
                   @click=${this._toggleRecordView}
                 >
-                  <i class="codicon codicon-${this._record ? 'table' : 'list-selection'}" aria-hidden="true"></i>
+                  <i class="icon icon-${this._record ? 'table' : 'list-selection'}" aria-hidden="true"></i>
                 </button>
               </div>
             `
@@ -794,7 +794,7 @@ export class ResultsPanel extends LitElement {
                 aria-label=${t('results.export')}
                 @click=${() => (this._exportOpen = true)}
               >
-                <i class="codicon codicon-download" aria-hidden="true"></i>
+                <i class="icon icon-download" aria-hidden="true"></i>
               </button>
             `
           : ''}
@@ -805,13 +805,13 @@ export class ResultsPanel extends LitElement {
           aria-expanded=${!this.collapsed}
           @click=${this._toggleCollapse}
         >
-          <i class="codicon codicon-chevron-${this.collapsed ? 'up' : 'down'}" aria-hidden="true"></i>
+          <i class="icon icon-chevron-${this.collapsed ? 'up' : 'down'}" aria-hidden="true"></i>
         </button>
       </div>
       ${this._filterOpen && canFilter && !this.collapsed
         ? html`
             <div class="filter-bar">
-              <i class="codicon codicon-filter" aria-hidden="true"></i>
+              <i class="icon icon-filter" aria-hidden="true"></i>
               <sql-expression-editor
                 class="filter-input"
                 aria-label=${t('results.filter')}
@@ -833,7 +833,7 @@ export class ResultsPanel extends LitElement {
                 ?disabled=${!this._filterDraft.trim() || this._filterDraft.trim() === (this.filter ?? '')}
                 @click=${this._applyFilter}
               >
-                <i class="codicon codicon-check" aria-hidden="true"></i>
+                <i class="icon icon-check" aria-hidden="true"></i>
               </button>
               <button
                 class="filter-action filter-clear"
@@ -843,7 +843,7 @@ export class ResultsPanel extends LitElement {
                 ?disabled=${!this._filterDraft && this.filter === null}
                 @click=${this._clearFilter}
               >
-                <i class="codicon codicon-close" aria-hidden="true"></i>
+                <i class="icon icon-x" aria-hidden="true"></i>
               </button>
             </div>
           `
@@ -1597,7 +1597,7 @@ export class ResultsPanel extends LitElement {
       const cancellable = !run.note && this.canCancel
       return html`
         <p class="hint">
-          <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i>
+          <i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i>
           ${run.note ?? t('results.running')}
           ${cancellable ? html`<button class="stop" @click=${this._cancel}>${t('common.stop')}</button>` : ''}
         </p>
@@ -1747,7 +1747,7 @@ export class ResultsPanel extends LitElement {
             aria-label=${t('results.sortColumn', { column, direction: next })}
             @click=${(event: MouseEvent) => this._openSortMenu(event, col)}
           >
-            <i class="codicon codicon-${dir === 'desc' ? 'arrow-down' : 'arrow-up'}" aria-hidden="true"></i>
+            <i class="icon icon-${dir === 'desc' ? 'arrow-down' : 'arrow-up'}" aria-hidden="true"></i>
           </button>
         </div>
         ${grip}
@@ -1857,7 +1857,7 @@ export class ResultsPanel extends LitElement {
       <tr class="draft" data-draft=${index}>
         <td class="num draft-num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">
           <button class="draft-remove" title=${t('results.discardNewRow')} aria-label=${t('results.discardNewRow')} @click=${() => this._removeDraft([index])}>
-            <i class="codicon codicon-close" aria-hidden="true"></i>
+            <i class="icon icon-x" aria-hidden="true"></i>
           </button>
         </td>
         ${Array.from({ length: columnCount }, (_, col) => {
@@ -1890,7 +1890,7 @@ export class ResultsPanel extends LitElement {
 
   static styles = [
     typography,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -2046,7 +2046,7 @@ export class ResultsPanel extends LitElement {
         font-family: var(--ui-font);
         font-size: var(--font-size-sm);
         cursor: pointer;
-        --codicon-size: 14px;
+        --icon-size: 14px;
       }
 
       .filter-apply:not(:disabled):hover,
@@ -2200,7 +2200,7 @@ export class ResultsPanel extends LitElement {
         border-radius: 3px;
         cursor: pointer;
         opacity: 0;
-        --codicon-size: 12px;
+        --icon-size: 12px;
       }
 
       th:hover .th-sort,
@@ -2393,7 +2393,7 @@ export class ResultsPanel extends LitElement {
         background: transparent;
         border: none;
         cursor: pointer;
-        --codicon-size: 12px;
+        --icon-size: 12px;
       }
 
       .draft-remove:hover {

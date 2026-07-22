@@ -1,6 +1,6 @@
 import { LitElement, type PropertyValues, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { icons, controls, scrollbars, typography } from '../shared-styles'
 import { t } from '../i18n'
 
 // Renders a bound parameter in SQL-ish form for review only; execution still
@@ -133,7 +133,7 @@ export class ReviewQueryDialog extends LitElement {
             <button class="secondary" ?disabled=${this._applying} @click=${this._cancel}>${t('common.cancel')}</button>
             <button class="primary" ?disabled=${this._applying} @click=${this._confirm}>
               ${this._applying
-                ? html`<i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> ${t('common.applying')}`
+                ? html`<i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i> ${t('common.applying')}`
                 : this.confirmLabel}
             </button>
           </div>
@@ -181,7 +181,7 @@ export class ReviewQueryDialog extends LitElement {
     typography,
     controls,
     scrollbars,
-    codicons,
+    icons,
     css`
       :host {
         display: contents;
@@ -280,8 +280,8 @@ export class ReviewQueryDialog extends LitElement {
         cursor: not-allowed;
       }
 
-      .codicon-modifier-spin {
-        --codicon-size: 13px;
+      .icon-modifier-spin {
+        --icon-size: 13px;
       }
     `,
   ]

@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { icons, controls, scrollbars, typography } from '../shared-styles'
 import { t } from '../i18n'
 
 export type PaletteMode = 'commands' | 'quick' | 'databases'
@@ -11,7 +11,7 @@ export type PaletteEntry = {
   id: string
   label: string
   detail?: string
-  /** Codicon name, e.g. 'codicon-database'. */
+  /** Lucide icon class, e.g. 'icon-database'. */
   icon?: string
   keybind?: string
   /**
@@ -150,7 +150,7 @@ export class CommandPalette extends LitElement {
     if (entry.header) {
       return html`
         <div class="row group" role="presentation">
-          ${entry.icon ? html`<i class="codicon ${entry.icon}" aria-hidden="true"></i>` : nothing}
+          ${entry.icon ? html`<i class="icon ${entry.icon}" aria-hidden="true"></i>` : nothing}
           <span class="label">${this._highlight(entry.label)}</span>
           ${entry.detail ? html`<span class="detail">${entry.detail}</span>` : ''}
         </div>
@@ -164,7 +164,7 @@ export class CommandPalette extends LitElement {
         @click=${() => this._pick(entry)}
         @mousemove=${() => this._setActive(index)}
       >
-        ${entry.icon ? html`<i class="codicon ${entry.icon}" aria-hidden="true"></i>` : nothing}
+        ${entry.icon ? html`<i class="icon ${entry.icon}" aria-hidden="true"></i>` : nothing}
         <span class="label">${this._highlight(entry.label)}</span>
         ${entry.detail ? html`<span class="detail">${entry.detail}</span>` : ''}
         ${entry.keybind ? html`<span class="keybind">${entry.keybind}</span>` : ''}
@@ -233,7 +233,7 @@ export class CommandPalette extends LitElement {
   static styles = [
     typography,
     controls,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -306,13 +306,13 @@ export class CommandPalette extends LitElement {
         font-weight: 600;
       }
 
-      .row .codicon {
+      .row .icon {
         font-size: 14px;
         flex-shrink: 0;
         color: var(--text-2);
       }
 
-      .row.active .codicon,
+      .row.active .icon,
       .row.active .detail {
         color: var(--list-selection-fg);
       }

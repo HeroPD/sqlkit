@@ -1,7 +1,9 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { keyed } from 'lit/directives/keyed.js'
-import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { unsafeHTML } from 'lit/directives/unsafe-html.js'
+import { icons, controls, scrollbars, typography } from '../shared-styles'
+import { ACTIVITY_ICONS } from '../icons/activity-icons'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
 import { FilesController } from '../controllers/files'
@@ -60,13 +62,15 @@ import { bindParameterValues, queryParameters, type QueryParameter } from '../qu
 import type { ParametersConfirmDetail } from './parameter-dialog'
 import { t } from '../i18n'
 
+// icon markup lives in ACTIVITY_ICONS (inline SVG, keyed by id) — see the
+// activity-bar render and `.activity-bar svg` styles.
 const VIEWS = [
-  { id: 'explorer', title: t('view.explorer'), icon: 'codicon-files', hint: t('view.explorer.empty') },
-  { id: 'search', title: t('view.search'), icon: 'codicon-search', hint: t('view.search.empty') },
-  { id: 'databases', title: t('view.databases'), icon: 'codicon-database', hint: t('view.databases.empty') },
-  { id: 'history', title: t('view.history'), icon: 'codicon-history', hint: t('view.history.empty') },
-  { id: 'tasks', title: t('view.tasks'), icon: 'codicon-checklist', hint: t('view.tasks.empty') },
-  { id: 'server', title: t('view.server'), icon: 'codicon-server', hint: t('view.server.empty') },
+  { id: 'explorer', title: t('view.explorer'), hint: t('view.explorer.empty') },
+  { id: 'search', title: t('view.search'), hint: t('view.search.empty') },
+  { id: 'databases', title: t('view.databases'), hint: t('view.databases.empty') },
+  { id: 'history', title: t('view.history'), hint: t('view.history.empty') },
+  { id: 'tasks', title: t('view.tasks'), hint: t('view.tasks.empty') },
+  { id: 'server', title: t('view.server'), hint: t('view.server.empty') },
 ] as const
 
 
@@ -752,7 +756,7 @@ export class WorkbenchScreen extends LitElement {
                 .active=${view.id === this._activeView}
                 .badge=${view.id === 'tasks' ? this._queries.longRunningCount() : 0}
               >
-                <i class="codicon ${view.icon}" aria-hidden="true"></i>
+                ${unsafeHTML(ACTIVITY_ICONS[view.id])}
               </activity-button>
             `,
           )}
@@ -895,7 +899,7 @@ export class WorkbenchScreen extends LitElement {
           ?disabled=${!count}
           @click=${this._onHistoryClear}
         >
-          <i class="codicon codicon-clear-all" aria-hidden="true"></i>
+          <i class="icon icon-list-x" aria-hidden="true"></i>
         </button>
       `
     }
@@ -909,7 +913,7 @@ export class WorkbenchScreen extends LitElement {
           ?disabled=${!finished}
           @click=${this._onTasksClear}
         >
-          <i class="codicon codicon-clear-all" aria-hidden="true"></i>
+          <i class="icon icon-list-x" aria-hidden="true"></i>
         </button>
       `
     }
@@ -1685,7 +1689,7 @@ export class WorkbenchScreen extends LitElement {
   static styles = [
     typography,
     controls,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -1710,8 +1714,12 @@ export class WorkbenchScreen extends LitElement {
         border-right: 1px solid var(--border);
       }
 
-      .activity-bar .codicon {
-        font-size: 24px;
+      /* Activity-bar icons are inline SVG (not the icon font) so stroke-width
+         is a live knob — nudge this value to lighten/darken them. */
+      .activity-bar svg {
+        width: 24px;
+        height: 24px;
+        stroke-width: 1.5;
       }
 
       .sidebar {
@@ -1800,7 +1808,7 @@ export class WorkbenchScreen extends LitElement {
         cursor: default;
       }
 
-      .title-action .codicon {
+      .title-action .icon {
         font-size: 14px;
       }
 

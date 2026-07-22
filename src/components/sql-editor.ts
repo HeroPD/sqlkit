@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { codicons, scrollbars } from '../shared-styles'
+import { icons, scrollbars } from '../shared-styles'
 
 import { Compartment, EditorSelection, EditorState } from '@codemirror/state'
 import {
@@ -828,7 +828,7 @@ export class SqlEditor extends LitElement {
   }
 
   static styles = [
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -861,7 +861,7 @@ export class SqlEditor extends LitElement {
         background: transparent;
         color: var(--text-2);
         cursor: pointer;
-        --codicon-size: 14px;
+        --icon-size: 14px;
       }
 
       .toggle-replace:hover {
@@ -931,7 +931,7 @@ export class SqlEditor extends LitElement {
         background: transparent;
         color: var(--text-2);
         cursor: pointer;
-        --codicon-size: 14px;
+        --icon-size: 14px;
       }
 
       .find-toggle:hover {
@@ -971,7 +971,7 @@ export class SqlEditor extends LitElement {
         background: transparent;
         color: var(--text);
         cursor: pointer;
-        --codicon-size: 14px;
+        --icon-size: 14px;
       }
 
       .find-btn:hover:not(:disabled) {

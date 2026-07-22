@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement } from 'lit/decorators.js'
-import { codicons, controls, typography } from '../shared-styles'
+import { icons, controls, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
 import { t } from '../i18n'
 
@@ -28,7 +28,7 @@ const ACTIONS: { action: EmptyAction; label: string; kbd?: string }[] = [
 export class EditorEmpty extends LitElement {
   render() {
     return html`
-      <div class="mark"><i class="codicon codicon-database" aria-hidden="true"></i></div>
+      <div class="mark"><i class="icon icon-database" aria-hidden="true"></i></div>
       <h2>${t('app.name')}</h2>
       <p>${t('empty.noEditor')}</p>
       <div class="actions">
@@ -51,7 +51,7 @@ export class EditorEmpty extends LitElement {
   static styles = [
     typography,
     controls,
-    codicons,
+    icons,
     css`
       :host {
         display: block;
@@ -74,7 +74,7 @@ export class EditorEmpty extends LitElement {
         color: var(--accent);
       }
 
-      .mark .codicon {
+      .mark .icon {
         font-size: 26px;
       }
 

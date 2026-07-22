@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, controls, scrollbars, typography } from '../shared-styles'
+import { icons, controls, scrollbars, typography } from '../shared-styles'
 import { formatInteger, rowWord, t } from '../i18n'
 
 // One query run tracked as a task. Every run is recorded; the view only
@@ -97,13 +97,13 @@ export class TasksView extends LitElement {
       <div class="item ${item.status}" title=${item.sql}>
         <div class="row">
           ${running
-            ? html`<i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i>`
+            ? html`<i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i>`
             : ''}
           <span class="sql">${summarize(item.sql)}</span>
           ${running
             ? html`
                 <button class="stop" title=${t('tasks.stopQuery')} @click=${() => this._stop(item)}>
-                  <i class="codicon codicon-debug-stop" aria-hidden="true"></i>
+                  <i class="icon icon-square" aria-hidden="true"></i>
                 </button>
               `
             : ''}
@@ -126,7 +126,7 @@ export class TasksView extends LitElement {
   static styles = [
     typography,
     controls,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {
@@ -180,7 +180,7 @@ export class TasksView extends LitElement {
         min-width: 0;
       }
 
-      .row .codicon-loading {
+      .row .icon-loader-circle {
         flex-shrink: 0;
         color: var(--accent);
       }

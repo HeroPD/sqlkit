@@ -1,11 +1,11 @@
 import { LitElement, css, html, svg, type TemplateResult } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { codicons } from '../shared-styles'
+import { icons } from '../shared-styles'
 import type { Engine, EngineFlavor } from '../electron'
 
 // A rounded square in the engine's brand color carrying its white logo
 // (simple-icons, 24×24 viewBox). Engines without a bundled logo fall back to
-// the database codicon on the same brand square, so every engine renders
+// the database icon on the same brand square, so every engine renders
 // consistently. Size with --engine-badge-size from the outside.
 const BRAND: Record<Engine | EngineFlavor, string> = {
   postgresql: '#336791',
@@ -108,13 +108,13 @@ export class EngineBadge extends LitElement {
       <span class="badge" style="background: ${brand ?? 'var(--accent)'}" title=${key}>
         ${logo
         ? html`<svg viewBox="0 0 24 24" role="img" aria-label=${key}>${logo}</svg>`
-        : html`<i class="codicon codicon-database" aria-hidden="true"></i>`}
+        : html`<i class="icon icon-database" aria-hidden="true"></i>`}
       </span>
     `
   }
 
   static styles = [
-    codicons,
+    icons,
     css`
       :host {
         display: inline-flex;
@@ -128,7 +128,7 @@ export class EngineBadge extends LitElement {
         width: var(--engine-badge-size, 22px);
         height: var(--engine-badge-size, 22px);
         border-radius: 4px;
-        --codicon-size: calc(var(--engine-badge-size, 22px) * 0.64);
+        --icon-size: calc(var(--engine-badge-size, 22px) * 0.64);
         color: #ffffff;
       }
 

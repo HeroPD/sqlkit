@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { codicons, scrollbars, typography } from '../shared-styles'
+import { icons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import type { InspectSection } from '../electron'
 import { t, type MessageKey } from '../i18n'
@@ -65,7 +65,7 @@ export class ServerView extends LitElement {
     }
     if (state.phase === 'loading') {
       return html`<p class="muted hint">
-        <i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i> ${t('server.loading')}
+        <i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i> ${t('server.loading')}
       </p>`
     }
     if (state.phase === 'error') return html`<p class="muted hint error">${state.error}</p>`
@@ -82,7 +82,7 @@ export class ServerView extends LitElement {
     const sectionKey = SECTION_KEYS[section.title]
     return html`
       <button class="group" @click=${() => this._toggle(section.title)}>
-        <i class="codicon codicon-chevron-right chevron ${expanded ? 'expanded' : ''}" aria-hidden="true"></i>
+        <i class="icon icon-chevron-right chevron ${expanded ? 'expanded' : ''}" aria-hidden="true"></i>
         <span>${sectionKey ? t(sectionKey) : section.title}</span>
         <span class="count">${section.rows.length}</span>
       </button>
@@ -107,7 +107,7 @@ export class ServerView extends LitElement {
 
   static styles = [
     typography,
-    codicons,
+    icons,
     scrollbars,
     css`
       :host {

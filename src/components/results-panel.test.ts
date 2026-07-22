@@ -209,7 +209,7 @@ describe('results-panel collapse toggle', () => {
 
     const button = collapseButton(el)
     expect(button.getAttribute('aria-expanded')).toBe('true')
-    expect(button.querySelector('.codicon-chevron-down')).toBeTruthy()
+    expect(button.querySelector('.icon-chevron-down')).toBeTruthy()
 
     button.click()
     expect(toggled).toHaveBeenCalledOnce()
@@ -219,7 +219,7 @@ describe('results-panel collapse toggle', () => {
     await el.updateComplete
     const flipped = collapseButton(el)
     expect(flipped.getAttribute('aria-expanded')).toBe('false')
-    expect(flipped.querySelector('.codicon-chevron-up')).toBeTruthy()
+    expect(flipped.querySelector('.icon-chevron-up')).toBeTruthy()
     el.remove()
   })
 
@@ -812,8 +812,8 @@ describe('results-panel DBeaver-style editing', () => {
     expect(editor.placeholderText).not.toMatch(/^WHERE/i)
     expect(editor.columns).toEqual(['a', 'b'])
     expect(editor.engine).toBe('postgresql')
-    expect(el.shadowRoot!.querySelector('.filter-apply .codicon-check')).toBeTruthy()
-    expect(el.shadowRoot!.querySelector('.filter-clear .codicon-close')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.filter-apply .icon-check')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.filter-clear .icon-x')).toBeTruthy()
 
     editor.dispatchEvent(new CustomEvent('expression-change', {
       detail: { value: "a = 'a1'" },

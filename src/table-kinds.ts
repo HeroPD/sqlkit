@@ -1,12 +1,12 @@
 import type { TableKind } from './electron'
 import { t, type MessageKey } from './i18n'
 
-/** Explorer/inspect icon per relation kind (bundled codicon classes). */
+/** Explorer/inspect icon per relation kind (bundled icon classes). */
 export const TABLE_KIND_ICONS: Record<TableKind, string> = {
-  table: 'codicon-table',
-  view: 'codicon-eye',
-  matview: 'codicon-layers',
-  foreign: 'codicon-link',
+  table: 'icon-table',
+  view: 'icon-eye',
+  matview: 'icon-layers',
+  foreign: 'icon-link',
 }
 
 const TABLE_KIND_MESSAGE_KEYS: Record<TableKind, MessageKey> = {
