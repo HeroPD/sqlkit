@@ -134,65 +134,58 @@ const comparisonPredicate = (
   return `${identifier} = ${parameter}`
 }
 
-// Builds one atomic UPDATE for multiple cells. Each target column gets a CASE
-// expression keyed by the row's primary key; rows/columns outside the selection
-// keep their existing values. Quoting and placeholder style come from the
-// engine's dialect, so backtick/bracket engines stay correct.
-export function buildBatchUpdate(spec: BatchUpdateSpec): { sql: string; params: unknown[]; expectedRows: number } {
-  if (spec.edits.length === 0) throw new Error(t('write.updateNeedsEdits'))
-  const dialect = dialectFor(spec.engine)
+// One row's consolidated staged changes: the SET assignments plus an optimistic
+// guard per edited column (only save if the cell still holds the displayed value).
+type RowUpdate = {
+  pks: RowKey
+  assignments: Array<{ column: string; columnMeta: ColumnRef | undefined; value: CellInput }>
+  guards: Array<{ name: string; value: unknown; columnMeta?: ColumnRef }>
+}
 
+function consolidateRowUpdates(spec: BatchUpdateSpec): RowUpdate[] {
+  const byRow = new Map<string, RowUpdate>()
+  for (const edit of spec.edits) {
+    if (edit.pks.length === 0) throw new Error(t('write.updateNeedsPrimaryKey'))
+    const key = JSON.stringify(edit.pks.map((pk) => [pk.name, comparableKey(pk.value)]))
+    let row = byRow.get(key)
+    if (!row) byRow.set(key, (row = { pks: edit.pks, assignments: [], guards: [] }))
+    const assignment = row.assignments.find((entry) => entry.column === edit.column)
+    if (assignment) assignment.value = edit.value
+    else row.assignments.push({ column: edit.column, columnMeta: edit.columnMeta, value: edit.value })
+    // The guard keeps the first staged original: later re-edits of the same cell
+    // must still compare against what the grid displayed before any edit.
+    if ('originalValue' in edit && !row.guards.some((guard) => guard.name === edit.column)) {
+      row.guards.push({ name: edit.column, value: edit.originalValue, columnMeta: edit.columnMeta })
+    }
+  }
+  return [...byRow.values()]
+}
+
+// Rows assigning identical values to identical columns can share one UPDATE.
+const assignmentSignature = (row: RowUpdate) =>
+  JSON.stringify(
+    [...row.assignments]
+      .sort((a, b) => (a.column < b.column ? -1 : 1))
+      .map((entry) => [entry.column, isSqlNull(entry.value) ? null : entry.value, isSqlNull(entry.value)]),
+  )
+
+// A plain UPDATE for rows sharing one assignment set: `SET col = ?` with each
+// row's PK + optimistic guards OR'd in the WHERE. Atomicity across statements
+// comes from runBatch's transaction, so no CASE packing is needed.
+function buildUpdateStatement(spec: BatchUpdateSpec, rows: RowUpdate[]): { sql: string; params: unknown[]; expectedRows: number } {
+  const dialect = dialectFor(spec.engine)
   const params: unknown[] = []
   const bind = (value: unknown) => {
     params.push(value)
     return dialect.placeholder(params.length)
   }
-  const keyCondition = (pks: RowKey) => {
-    if (pks.length === 0) throw new Error(t('write.updateNeedsPrimaryKey'))
-    return pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind)).join(' AND ')
-  }
-
-  const keyValue = (value: unknown) => {
-    if (typeof value === 'bigint') return `bigint:${value.toString()}`
-    if (value instanceof Uint8Array) return `bytes:${Array.from(value).join(',')}`
-    try {
-      return `${typeof value}:${JSON.stringify(value)}`
-    } catch {
-      throw new Error(t('write.updateInvalidPrimaryKey'))
-    }
-  }
-  const rowKey = (edit: BatchUpdateEdit) => JSON.stringify(edit.pks.map((pk) => [pk.name, keyValue(pk.value)]))
-  const byRow = new Map<string, BatchUpdateEdit[]>()
-  for (const edit of spec.edits) byRow.set(rowKey(edit), [...(byRow.get(rowKey(edit)) ?? []), edit])
-  const rowCondition = (edits: BatchUpdateEdit[]) => {
-    const predicates = [keyCondition(edits[0]!.pks)]
-    const seen = new Set<string>()
-    for (const edit of edits) {
-      if (!('originalValue' in edit) || seen.has(edit.column)) continue
-      seen.add(edit.column)
-      predicates.push(comparisonPredicate(spec.engine, dialect, {
-        name: edit.column,
-        value: edit.originalValue,
-        columnMeta: edit.columnMeta,
-      }, bind))
-    }
-    return predicates.join(' AND ')
-  }
-
-  const byColumn = new Map<string, string[]>()
-  for (const edit of spec.edits) {
-    const cases = byColumn.get(edit.column) ?? []
-    cases.push(`WHEN ${rowCondition(byRow.get(rowKey(edit))!)} THEN ${bind(coerceValue(edit.value, edit.columnMeta, spec.engine))}`)
-    byColumn.set(edit.column, cases)
-  }
-
-  const set = [...byColumn.entries()]
-    .map(([column, cases]) => `       ${dialect.quoteIdent(column)} = CASE\n         ${cases.join('\n         ')}\n         ELSE ${dialect.quoteIdent(column)}\n       END`)
-    .join(',\n')
-  const where = [...byRow.values()].map((edits) => `(${rowCondition(edits)})`).join(' OR ')
-  const uniqueRows = byRow.size
-
-  return { sql: `UPDATE ${quoteQualified(spec.table, dialect)}\n   SET\n${set}\n WHERE ${where}`, params, expectedRows: uniqueRows }
+  const set = rows[0]!.assignments
+    .map((entry) => `${dialect.quoteIdent(entry.column)} = ${bind(coerceValue(entry.value, entry.columnMeta, spec.engine))}`)
+    .join(',\n       ')
+  const condition = (row: RowUpdate) =>
+    [...row.pks, ...row.guards].map((key) => comparisonPredicate(spec.engine, dialect, key, bind)).join(' AND ')
+  const where = rows.length === 1 ? condition(rows[0]!) : rows.map((row) => `(${condition(row)})`).join('\n    OR ')
+  return { sql: `UPDATE ${quoteQualified(spec.table, dialect)}\n   SET ${set}\n WHERE ${where}`, params, expectedRows: rows.length }
 }
 
 const parameterLimit = (engine: Engine) => engine === 'sqlserver' ? 2_000 : engine === 'sqlite' ? 900 : 60_000
@@ -207,31 +200,35 @@ const comparableKey = (value: unknown): string => {
   }
 }
 
-/** Splits a large staged update at row boundaries so no statement exceeds the
- * backend's bind-parameter ceiling. The driver still executes every statement
- * in one transaction, preserving all-or-nothing save semantics. */
-export function buildBatchUpdates(spec: BatchUpdateSpec): Array<ReturnType<typeof buildBatchUpdate>> {
-  const groups = new Map<string, BatchUpdateEdit[]>()
-  for (const edit of spec.edits) {
-    const key = JSON.stringify(edit.pks.map((pk) => [pk.name, comparableKey(pk.value)]))
-    groups.set(key, [...(groups.get(key) ?? []), edit])
+/** Builds the UPDATEs for a staged edit batch: one statement per distinct
+ * assignment set (rows edited to the same values share it), split at row
+ * boundaries so none exceeds the backend's bind-parameter ceiling. The driver
+ * executes every statement in one transaction, keeping the save all-or-nothing. */
+export function buildBatchUpdates(spec: BatchUpdateSpec): Array<ReturnType<typeof buildUpdateStatement>> {
+  if (spec.edits.length === 0) throw new Error(t('write.updateNeedsEdits'))
+  const groups = new Map<string, RowUpdate[]>()
+  for (const row of consolidateRowUpdates(spec)) {
+    const key = assignmentSignature(row)
+    groups.set(key, [...(groups.get(key) ?? []), row])
   }
-  const result: Array<ReturnType<typeof buildBatchUpdate>> = []
-  let pending: BatchUpdateEdit[] = []
+  const result: Array<ReturnType<typeof buildUpdateStatement>> = []
   for (const group of groups.values()) {
-    const candidate = buildBatchUpdate({ ...spec, edits: [...pending, ...group] })
-    if (candidate.params.length <= parameterLimit(spec.engine)) {
-      pending.push(...group)
-      continue
+    let pending: RowUpdate[] = []
+    for (const row of group) {
+      const candidate = buildUpdateStatement(spec, [...pending, row])
+      if (candidate.params.length <= parameterLimit(spec.engine)) {
+        pending.push(row)
+        continue
+      }
+      if (!pending.length) throw new Error(t('write.editedRowTooWide'))
+      result.push(buildUpdateStatement(spec, pending))
+      pending = [row]
+      if (buildUpdateStatement(spec, pending).params.length > parameterLimit(spec.engine)) {
+        throw new Error(t('write.editedRowTooWide'))
+      }
     }
-    if (!pending.length) throw new Error(t('write.editedRowTooWide'))
-    result.push(buildBatchUpdate({ ...spec, edits: pending }))
-    pending = [...group]
-    if (buildBatchUpdate({ ...spec, edits: pending }).params.length > parameterLimit(spec.engine)) {
-      throw new Error(t('write.editedRowTooWide'))
-    }
+    if (pending.length) result.push(buildUpdateStatement(spec, pending))
   }
-  if (pending.length) result.push(buildBatchUpdate({ ...spec, edits: pending }))
   return result
 }
 
@@ -241,12 +238,14 @@ export function buildInsertDefault(table: TableRef, dialect: Dialect): { sql: st
   return { sql: `INSERT INTO ${quoteQualified(table, dialect)} ${allDefaults}`, params: [], expectedRows: 1 }
 }
 
+export type InsertColumn = { name: string; columnMeta: ColumnRef | undefined }
+
 export type InsertSpec = {
   table: TableRef
   /** Only the columns the user filled in; untouched columns are omitted so the
    * table's own DEFAULT applies — the one portable way to express defaults
    * (SQLite rejects the DEFAULT keyword inside a VALUES list). */
-  columns: { name: string; columnMeta: ColumnRef | undefined }[]
+  columns: InsertColumn[]
   /** Raw editor values aligned to `columns`, coerced per column. */
   values: CellInput[]
   engine: Engine
@@ -266,7 +265,7 @@ export function buildInsert(spec: InsertSpec): { sql: string; params: unknown[];
 
 export type BulkInsertSpec = {
   table: TableRef
-  columns: ColumnRef[]
+  columns: InsertColumn[]
   values: CellInput[][]
   engine: Engine
 }
@@ -292,7 +291,7 @@ export function buildInsertBatches(spec: BulkInsertSpec): Array<ReturnType<typeo
     const params: unknown[] = []
     const tuples = rows.map((row) => {
       const placeholders = row.map((value, index) => {
-        params.push(coerceValue(value, spec.columns[index], spec.engine))
+        params.push(coerceValue(value, spec.columns[index]?.columnMeta, spec.engine))
         return dialect.placeholder(params.length)
       })
       return `(${placeholders.join(', ')})`
@@ -302,6 +301,32 @@ export function buildInsertBatches(spec: BulkInsertSpec): Array<ReturnType<typeo
       params,
       expectedRows: rows.length,
     })
+  }
+  return statements
+}
+
+/** Builds the INSERTs for staged draft rows: rows that filled the same column
+ * set share one multi-row VALUES statement (in first-appearance order), while
+ * fully-untouched rows keep their own DEFAULT VALUES insert. */
+export function buildDraftInserts(
+  table: TableRef,
+  rows: Array<{ columns: InsertColumn[]; values: CellInput[] }>,
+  engine: Engine,
+): Array<ReturnType<typeof buildInsert>> {
+  const groups = new Map<string, { columns: InsertColumn[]; values: CellInput[][] }>()
+  for (const row of rows) {
+    const key = JSON.stringify(row.columns.map((column) => column.name))
+    const group = groups.get(key)
+    if (group) group.values.push(row.values)
+    else groups.set(key, { columns: row.columns, values: [row.values] })
+  }
+  const statements: Array<ReturnType<typeof buildInsert>> = []
+  for (const group of groups.values()) {
+    if (!group.columns.length) {
+      for (const values of group.values) statements.push(buildInsert({ table, columns: [], values, engine }))
+    } else {
+      statements.push(...buildInsertBatches({ table, columns: group.columns, values: group.values, engine }))
+    }
   }
   return statements
 }

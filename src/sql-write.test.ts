@@ -6,7 +6,6 @@ import {
   buildAddConstraint,
   buildAddForeignKey,
   buildAddPartition,
-  buildBatchUpdate,
   buildBatchUpdates,
   buildColumnAdd,
   buildColumnAlter,
@@ -16,6 +15,7 @@ import {
   buildCreateTrigger,
   buildDeleteRows,
   buildDeleteRowBatches,
+  buildDraftInserts,
   buildInsert,
   buildInsertBatches,
   buildInsertDefault,
@@ -89,27 +89,53 @@ describe('coerceValue', () => {
   })
 })
 
-describe('buildBatchUpdate', () => {
-  it('builds one Postgres UPDATE for multiple selected cells', () => {
-    const { sql, params } = buildBatchUpdate({
+describe('buildBatchUpdates', () => {
+  it('builds a plain multi-column UPDATE per edited row', () => {
+    const statements = buildBatchUpdates({
       table: users,
       edits: [
         { column: 'name', columnMeta: col({ name: 'name' }), value: 'Ada', pks: [{ name: 'id', value: 1 }] },
-        { column: 'name', columnMeta: col({ name: 'name' }), value: 'Ada', pks: [{ name: 'id', value: 2 }] },
+        { column: 'name', columnMeta: col({ name: 'name' }), value: 'Bab', pks: [{ name: 'id', value: 2 }] },
         { column: 'qty', columnMeta: col({ name: 'qty', dataType: 'integer' }), value: '7', pks: [{ name: 'id', value: 1 }] },
       ],
       engine: 'postgresql',
     })
 
-    expect(sql).toContain('UPDATE "public"."users"')
-    expect(sql).toContain('"name" = CASE')
-    expect(sql).toContain('"qty" = CASE')
-    expect(sql).toContain('WHERE ("id" IS NOT DISTINCT FROM $7) OR ("id" IS NOT DISTINCT FROM $8)')
-    expect(params).toEqual([1, 'Ada', 2, 'Ada', 1, 7, 1, 2])
+    expect(statements).toEqual([
+      {
+        sql: 'UPDATE "public"."users"\n   SET "name" = $1,\n       "qty" = $2\n WHERE "id" IS NOT DISTINCT FROM $3',
+        params: ['Ada', 7, 1],
+        expectedRows: 1,
+      },
+      {
+        sql: 'UPDATE "public"."users"\n   SET "name" = $1\n WHERE "id" IS NOT DISTINCT FROM $2',
+        params: ['Bab', 2],
+        expectedRows: 1,
+      },
+    ])
+  })
+
+  it('merges rows assigned identical values into one UPDATE with OR-ed row guards', () => {
+    const statements = buildBatchUpdates({
+      table: users,
+      edits: [
+        { column: 'name', columnMeta: col({ name: 'name' }), value: 'Ada', pks: [{ name: 'id', value: 1 }] },
+        { column: 'name', columnMeta: col({ name: 'name' }), value: 'Ada', pks: [{ name: 'id', value: 2 }] },
+      ],
+      engine: 'postgresql',
+    })
+
+    expect(statements).toEqual([
+      {
+        sql: 'UPDATE "public"."users"\n   SET "name" = $1\n WHERE ("id" IS NOT DISTINCT FROM $2)\n    OR ("id" IS NOT DISTINCT FROM $3)',
+        params: ['Ada', 1, 2],
+        expectedRows: 2,
+      },
+    ])
   })
 
   it('uses SQLite placeholders and keeps an explicit NULL distinct from empty text', () => {
-    const { sql, params } = buildBatchUpdate({
+    const [built] = buildBatchUpdates({
       table: { schema: null, name: 'notes', kind: 'table' },
       edits: [
         {
@@ -122,14 +148,12 @@ describe('buildBatchUpdate', () => {
       engine: 'sqlite',
     })
 
-    expect(sql).toContain('UPDATE "notes"')
-    expect(sql).toContain('WHEN "id" COLLATE BINARY IS ? THEN ?')
-    expect(sql).toContain('WHERE ("id" COLLATE BINARY IS ?)')
-    expect(params).toEqual([7, null, 7])
+    expect(built?.sql).toBe('UPDATE "notes"\n   SET "body" = ?\n WHERE "id" COLLATE BINARY IS ?')
+    expect(built?.params).toEqual([null, 7])
   })
 
   it('guards edited values optimistically and requires every target row to match', () => {
-    const built = buildBatchUpdate({
+    const statements = buildBatchUpdates({
       table: users,
       edits: [
         { column: 'name', columnMeta: col({ name: 'name' }), value: 'new', originalValue: 'old', pks: [{ name: 'id', value: 1 }] },
@@ -137,15 +161,15 @@ describe('buildBatchUpdate', () => {
       ],
       engine: 'postgresql',
     })
-    expect(built.sql).toContain('AND "name" IS NOT DISTINCT FROM $2')
-    expect(built.sql).toContain('"name" IS NULL')
-    expect(built.expectedRows).toBe(2)
+    expect(statements[0]?.sql).toContain('AND "name" IS NOT DISTINCT FROM $3')
+    expect(statements[1]?.sql).toContain('"name" IS NULL')
+    expect(statements.every((statement) => statement.expectedRows === 1)).toBe(true)
   })
 
   it('throws without edits or primary keys', () => {
-    expect(() => buildBatchUpdate({ table: users, edits: [], engine: 'postgresql' })).toThrow()
+    expect(() => buildBatchUpdates({ table: users, edits: [], engine: 'postgresql' })).toThrow()
     expect(() =>
-      buildBatchUpdate({
+      buildBatchUpdates({
         table: users,
         edits: [{ column: 'name', columnMeta: col({}), value: 'x', pks: [] }],
         engine: 'postgresql',
@@ -219,8 +243,8 @@ describe('buildInsert', () => {
 
 describe('buildInsertBatches', () => {
   const columns = [
-    col({ name: 'id', dataType: 'integer', nullable: false }),
-    col({ name: 'name', dataType: 'text' }),
+    { name: 'id', columnMeta: col({ name: 'id', dataType: 'integer', nullable: false }) },
+    { name: 'name', columnMeta: col({ name: 'name', dataType: 'text' }) },
   ]
 
   it('builds a parameterized multi-row insert and coerces values', () => {
@@ -245,6 +269,44 @@ describe('buildInsertBatches', () => {
   it('validates selected columns and row width', () => {
     expect(() => buildInsertBatches({ table: users, columns: [], values: [['1']], engine: 'mysql' })).toThrow(/column/i)
     expect(() => buildInsertBatches({ table: users, columns, values: [['1']], engine: 'mysql' })).toThrow(/row 1/i)
+  })
+})
+
+describe('buildDraftInserts', () => {
+  const idName = [
+    { name: 'id', columnMeta: col({ name: 'id', dataType: 'integer', nullable: false }) },
+    { name: 'name', columnMeta: col({ name: 'name', dataType: 'text' }) },
+  ]
+
+  it('merges same-shape rows into one multi-row INSERT, keeping other shapes separate', () => {
+    const statements = buildDraftInserts(
+      users,
+      [
+        { columns: idName, values: ['1', 'Ada'] },
+        { columns: [idName[1]!], values: ['Solo'] },
+        { columns: idName, values: ['2', 'Bab'] },
+        { columns: [], values: [] },
+      ],
+      'postgresql',
+    )
+
+    expect(statements).toEqual([
+      {
+        sql: 'INSERT INTO "public"."users" ("id", "name")\nVALUES ($1, $2),\n       ($3, $4)',
+        params: [1, 'Ada', 2, 'Bab'],
+        expectedRows: 2,
+      },
+      { sql: 'INSERT INTO "public"."users" ("name")\nVALUES ($1)', params: ['Solo'], expectedRows: 1 },
+      { sql: 'INSERT INTO "public"."users" DEFAULT VALUES', params: [], expectedRows: 1 },
+    ])
+  })
+
+  it('gives each fully-untouched row its own DEFAULT VALUES insert', () => {
+    const statements = buildDraftInserts(users, [{ columns: [], values: [] }, { columns: [], values: [] }], 'mysql')
+    expect(statements.map((statement) => statement.sql)).toEqual([
+      'INSERT INTO `public`.`users` () VALUES ()',
+      'INSERT INTO `public`.`users` () VALUES ()',
+    ])
   })
 })
 
@@ -282,17 +344,17 @@ describe('buildDeleteRows', () => {
   })
 
   it('splits SQL Server writes below its parameter ceiling', () => {
-    const edits = Array.from({ length: 700 }, (_, index) => ({
+    const edits = Array.from({ length: 1_500 }, (_, index) => ({
       column: 'name',
       columnMeta: col({ name: 'name', dataType: 'varchar(255)' }),
-      value: `new-${index}`,
+      value: 'same',
       originalValue: `old-${index}`,
       pks: [{ name: 'id', value: index }],
     }))
     const updates = buildBatchUpdates({ table: users, edits, engine: 'sqlserver' })
     expect(updates.length).toBeGreaterThan(1)
     expect(updates.every((statement) => statement.params.length <= 2_000)).toBe(true)
-    expect(updates.reduce((total, statement) => total + statement.expectedRows, 0)).toBe(700)
+    expect(updates.reduce((total, statement) => total + statement.expectedRows, 0)).toBe(1_500)
 
     const deletes = buildDeleteRowBatches({
       table: users,

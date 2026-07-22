@@ -1310,7 +1310,12 @@ export class WorkbenchScreen extends LitElement {
   private async _runCsvImport(state: CsvImportState, detail: ImportConfirmDetail): Promise<string | null> {
     let statements
     try {
-      statements = buildInsertBatches({ table: state.table, columns: detail.columns, values: detail.rows, engine: state.engine })
+      statements = buildInsertBatches({
+        table: state.table,
+        columns: detail.columns.map((column) => ({ name: column.name, columnMeta: column })),
+        values: detail.rows,
+        engine: state.engine,
+      })
     } catch (error) {
       return (error as Error).message
     }

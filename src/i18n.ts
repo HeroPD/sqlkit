@@ -537,7 +537,6 @@ const enUS = {
   'write.unknownType': 'unknown type',
   'write.updateNeedsEdits': 'Cannot build an UPDATE without edits',
   'write.updateNeedsPrimaryKey': 'Cannot build an UPDATE without a primary key',
-  'write.updateInvalidPrimaryKey': 'Cannot build an UPDATE for an unserializable primary key value',
   'write.invalidRowKey': 'Cannot group an unserializable row key',
   'write.editedRowTooWide': 'One edited row requires more bind parameters than this database supports.',
   'write.chooseImportColumn': 'Choose at least one column to import',

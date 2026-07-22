@@ -3,7 +3,7 @@ import type { QueryRun } from '../components/results-panel'
 import type { SqlTabState } from './contexts'
 import type { DialogsController } from './dialogs'
 import type { BatchResult, BatchStatement, ColumnRef, ConnectionProfile, TableRef } from '../electron'
-import { buildBatchUpdates, buildDeleteRowBatches, buildInsert, type CellInput } from '../sql-write'
+import { buildBatchUpdates, buildDeleteRowBatches, buildDraftInserts, type CellInput } from '../sql-write'
 import { previewSql } from '../components/review-query-dialog'
 import {
   buildInsertRows,
@@ -60,9 +60,9 @@ export class ResultEditingController {
     return this.deps.edits().length > 0 || this.deps.drafts().length > 0 || this.deps.deletes().length > 0
   }
 
-  // Commits every staged change together: one batch UPDATE for the edited cells,
-  // one INSERT per new row, and one DELETE for the rows marked for deletion —
-  // all shown in the review dialog before running.
+  // Commits every staged change together: plain UPDATEs for the edited cells,
+  // grouped INSERTs for new rows, and one DELETE for the rows marked for
+  // deletion — all shown in the review dialog before running.
   saveChanges() {
     const profile = this.activeProfileForWrite()
     if (!profile) return
@@ -86,9 +86,7 @@ export class ResultEditingController {
     if (drafts.length) {
       const built = buildInsertRows(input, drafts)
       if (!built.ok) return this.notice(built.issue)
-      for (const row of built.value.rows) {
-        statements.push(buildInsert({ table: built.value.table, columns: row.columns, values: row.values, engine: profile.engine }))
-      }
+      statements.push(...buildDraftInserts(built.value.table, built.value.rows, profile.engine))
     }
 
     if (deletes.length) {
