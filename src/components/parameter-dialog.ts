@@ -1,7 +1,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 import type { QueryParameter } from '../query-parameters'
-import { controls, typography } from '../shared-styles'
+import { controls, overlay, typography } from '../shared-styles'
 import { t } from '../i18n'
 
 export type ParametersConfirmDetail = { values: string[] }
@@ -67,10 +67,9 @@ export class ParameterDialog extends LitElement {
     }))
   }
 
-  static styles = [typography, controls, css`
+  static styles = [typography, controls, overlay, css`
     :host { display: contents; }
-    .backdrop { position: fixed; inset: 0; z-index: 100; background: rgba(0, 0, 0, 0.35); display: flex; align-items: center; justify-content: center; }
-    .panel { width: min(440px, calc(100vw - 80px)); max-height: calc(100vh - 80px); overflow: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45); }
+    .panel { width: min(440px, calc(100vw - 80px)); max-height: calc(100vh - 80px); overflow: auto; padding: 18px 20px; gap: 8px; }
     code { color: var(--text); }
     .fields { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
     label { display: grid; grid-template-columns: 72px 1fr; align-items: center; gap: 10px; }

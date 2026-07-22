@@ -136,7 +136,7 @@ export class ContextMenu extends LitElement {
       padding: 4px;
       display: flex;
       flex-direction: column;
-      background: color-mix(in srgb, var(--input-bg) 94%, var(--text) 6%);
+      background: var(--overlay-bg);
       border: 1px solid var(--border-subtle);
       border-radius: 10px;
       box-shadow:

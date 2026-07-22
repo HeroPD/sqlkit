@@ -105,6 +105,9 @@
   --list-hover: #1a2030;
   --list-selection: #123a5c;
   --list-selection-fg: #ffffff;
+  /* Elevated overlay surface (context menus, dialogs, palette); resolves per
+     theme since every theme overrides the inputs on :root. */
+  --overlay-bg: color-mix(in srgb, var(--input-bg) 94%, var(--text) 6%);
   --scrollbar-thumb: rgba(121, 121, 121, 0.4);
   --scrollbar-thumb-hover: rgba(100, 100, 100, 0.7);
   --resize-hover: var(--accent);

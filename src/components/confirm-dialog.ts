@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { controls, typography } from '../shared-styles'
+import { controls, overlay, typography } from '../shared-styles'
 import { t } from '../i18n'
 
 // In-app confirmation modal (native dialogs would clash with the app's
@@ -63,31 +63,16 @@ export class ConfirmDialog extends LitElement {
   static styles = [
     typography,
     controls,
+    overlay,
     css`
       :host {
         display: contents;
       }
 
-      .backdrop {
-        position: fixed;
-        inset: 0;
-        z-index: 100;
-        background: rgba(0, 0, 0, 0.35);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-
       .panel {
         width: min(380px, calc(100vw - 80px));
         padding: 18px 20px;
-        display: flex;
-        flex-direction: column;
         gap: 6px;
-        background: var(--sidebar-bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
       }
 
       .actions {

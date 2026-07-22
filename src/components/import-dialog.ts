@@ -3,7 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import type { ColumnRef, InspectColumn, TableRef } from '../electron'
 import { csvShapeError, parseCsv } from '../csv-import'
 import { SQL_NULL, type CellInput } from '../sql-write'
-import { controls, scrollbars, typography } from '../shared-styles'
+import { controls, overlay, scrollbars, typography } from '../shared-styles'
 import { formatInteger, rowWord, t } from '../i18n'
 
 export type ImportConfirmDetail = { columns: ColumnRef[]; rows: CellInput[][] }
@@ -279,10 +279,10 @@ export class ImportDialog extends LitElement {
     typography,
     controls,
     scrollbars,
+    overlay,
     css`
       :host { display: contents; }
-      .backdrop { position: fixed; inset: 0; z-index: 100; background: rgba(0, 0, 0, 0.35); display: flex; align-items: center; justify-content: center; }
-      .panel { width: min(760px, calc(100vw - 64px)); max-height: calc(100vh - 64px); padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; overflow: hidden; background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45); }
+      .panel { width: min(760px, calc(100vw - 64px)); max-height: calc(100vh - 64px); padding: 18px 20px; gap: 12px; overflow: hidden; }
       .toolbar, .options, .footer, .actions { display: flex; align-items: center; gap: 10px; }
       .toolbar { justify-content: space-between; }
       .file { display: inline-flex; align-items: center; width: min(360px, 55%); height: var(--control-h); padding: 0 14px; overflow: hidden; color: var(--btn-secondary-fg); white-space: nowrap; text-overflow: ellipsis; background: var(--btn-secondary-bg); border-radius: 3px; cursor: pointer; }

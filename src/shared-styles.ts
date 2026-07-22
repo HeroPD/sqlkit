@@ -97,6 +97,43 @@ export const typography = css`
   }
 `
 
+// App-wide overlay standard: the dimmed backdrop and floating panel every
+// modal composes. The surface matches context-menu (elevated bg, subtle
+// border, 10px radius, soft shadow); content text runs at 13px like the menus
+// and result grid, with .small staying at --font-size-sm. Dialogs add only
+// layout (width, padding, gap, overflow) on top.
+export const overlay = css`
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .panel {
+    display: flex;
+    flex-direction: column;
+    font-size: 13px;
+    background: var(--overlay-bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.28),
+      0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+
+  .panel :is(p, input, select, button) {
+    font-size: 13px;
+  }
+
+  .panel .small {
+    font-size: var(--font-size-sm);
+  }
+`
+
 // App-wide control standard: every input, select, and button looks the same.
 // Buttons come in three variants — `primary` (accent fill), `secondary`
 // (subtle fill), and `link` (borderless accent text, used in lists/sidebars).

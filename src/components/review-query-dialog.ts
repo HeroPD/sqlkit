@@ -1,6 +1,6 @@
 import { LitElement, type PropertyValues, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { icons, controls, scrollbars, typography } from '../shared-styles'
+import { controls, icons, overlay, scrollbars, typography } from '../shared-styles'
 import { t } from '../i18n'
 
 // Renders a bound parameter in SQL-ish form for review only; execution still
@@ -182,32 +182,17 @@ export class ReviewQueryDialog extends LitElement {
     controls,
     scrollbars,
     icons,
+    overlay,
     css`
       :host {
         display: contents;
-      }
-
-      .backdrop {
-        position: fixed;
-        inset: 0;
-        z-index: 100;
-        background: rgba(0, 0, 0, 0.35);
-        display: flex;
-        align-items: center;
-        justify-content: center;
       }
 
       .panel {
         width: min(560px, calc(100vw - 80px));
         max-height: min(680px, calc(100vh - 80px));
         padding: 18px 20px;
-        display: flex;
-        flex-direction: column;
         gap: 8px;
-        background: var(--sidebar-bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
       }
 
       .sql {

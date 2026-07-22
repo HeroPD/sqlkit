@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { icons, controls, scrollbars, typography } from '../shared-styles'
+import { controls, icons, overlay, scrollbars, typography } from '../shared-styles'
 import { t } from '../i18n'
 
 export type PaletteMode = 'commands' | 'quick' | 'databases'
@@ -235,30 +235,20 @@ export class CommandPalette extends LitElement {
     controls,
     icons,
     scrollbars,
+    overlay,
     css`
       :host {
         display: contents;
       }
 
+      /* Palette docks near the top instead of centering like other overlays. */
       .backdrop {
-        position: fixed;
-        inset: 0;
-        z-index: 100;
-        background: rgba(0, 0, 0, 0.35);
-        display: flex;
-        justify-content: center;
         align-items: flex-start;
       }
 
       .panel {
         width: min(560px, calc(100vw - 80px));
         margin-top: 64px;
-        display: flex;
-        flex-direction: column;
-        background: var(--sidebar-bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
         overflow: hidden;
       }
 

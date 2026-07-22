@@ -142,11 +142,13 @@ export class PickerInput extends LitElement {
       width: max(100%, 260px);
       max-height: 220px;
       overflow-y: auto;
-      padding: 2px;
-      background: var(--sidebar-bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+      padding: 4px;
+      background: var(--overlay-bg);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      box-shadow:
+        0 8px 24px rgba(0, 0, 0, 0.28),
+        0 1px 3px rgba(0, 0, 0, 0.2);
     }
 
     button {
@@ -160,13 +162,17 @@ export class PickerInput extends LitElement {
       color: var(--text);
       background: transparent;
       border: 0;
-      border-radius: 2px;
+      border-radius: 4px;
       font-family: var(--mono-font);
       text-align: left;
     }
 
-    button.active,
+    /* Pointer hover stays neutral; .active (keyboard-tracked) keeps the accent. */
     button:hover {
+      background: color-mix(in srgb, var(--text) 9%, transparent);
+    }
+
+    button.active {
       color: var(--list-selection-fg);
       background: var(--list-selection);
     }

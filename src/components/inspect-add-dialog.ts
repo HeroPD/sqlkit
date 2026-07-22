@@ -1,6 +1,6 @@
 import { LitElement, type PropertyValues, css, html, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { controls, typography } from '../shared-styles'
+import { controls, overlay, typography } from '../shared-styles'
 import type { ColumnRef, DbObject, Engine, TableRef } from '../electron'
 import './sql-expression-editor'
 import './picker-input'
@@ -535,19 +535,10 @@ export class InspectAddDialog extends LitElement {
   static styles = [
     typography,
     controls,
+    overlay,
     css`
       :host {
         display: contents;
-      }
-
-      .backdrop {
-        position: fixed;
-        inset: 0;
-        z-index: 100;
-        background: rgba(0, 0, 0, 0.35);
-        display: flex;
-        align-items: center;
-        justify-content: center;
       }
 
       .panel {
@@ -555,13 +546,7 @@ export class InspectAddDialog extends LitElement {
         max-height: calc(100vh - 80px);
         overflow-y: auto;
         padding: 18px 20px;
-        display: flex;
-        flex-direction: column;
         gap: 10px;
-        background: var(--sidebar-bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
       }
 
       h4 {
