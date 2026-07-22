@@ -14,8 +14,8 @@ import { SchemaOpsController } from '../controllers/schema-ops'
 import { ConfigController } from '../controllers/config'
 import { FileOpsController } from '../controllers/file-ops'
 import { ContextsController, type EditorTabState } from '../controllers/contexts'
-import type { ConnectionProfile, FileInfo, MenuAction, TableRef } from '../electron'
-import type { CellInput } from '../sql-write'
+import type { ConnectionProfile, Engine, FileInfo, MenuAction, TableRef } from '../electron'
+import { buildInsertBatches, type CellInput } from '../sql-write'
 import './activity-button'
 import './command-palette'
 import './confirm-dialog'
@@ -29,6 +29,7 @@ import './editor-empty'
 import './editor-tab'
 import './explorer-view'
 import './history-view'
+import './import-dialog'
 import './tasks-view'
 import './server-view'
 import './results-panel'
@@ -53,6 +54,7 @@ import type { QuerySort } from '../electron'
 import { stripExplain } from '../sql-types'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
+import type { ImportColumn, ImportConfirmDetail } from './import-dialog'
 import { bindParameterValues, queryParameters, type QueryParameter } from '../query-parameters'
 import type { ParametersConfirmDetail } from './parameter-dialog'
 import { t } from '../i18n'
@@ -83,6 +85,14 @@ const contextKey = (profileId: string | null, childDb: string | null) =>
 
 const tableContextKey = (profileId: string, childDb: string | null, table: TableRef) =>
   `${profileId}:${childDb ?? ''}:${table.schema ?? ''}:${table.name}`
+
+type CsvImportState = {
+  table: TableRef
+  profileId: string
+  childDb: string | null
+  engine: Engine
+  columns: ImportColumn[]
+}
 
 // Child database names become folder segments (connection/child/file.sql);
 // strip anything that isn't a safe path character.
@@ -130,6 +140,9 @@ export class WorkbenchScreen extends LitElement {
 
   @state()
   private _parameterPrompt: { parameters: QueryParameter[]; resolve: (values: string[] | null) => void } | null = null
+
+  @state()
+  private _csvImport: CsvImportState | null = null
 
   private _lastActiveTabId: string | null = null
 
@@ -847,6 +860,7 @@ export class WorkbenchScreen extends LitElement {
             ></review-query-dialog>
           `
         : ''}
+      ${this._renderCsvImportDialog()}
       ${this._parameterPrompt
         ? html`
             <parameter-dialog
@@ -949,6 +963,7 @@ export class WorkbenchScreen extends LitElement {
           .awaitingDatabaseSelection=${!!live && hasChildSelection && selectedChild === null}
           .selectedTable=${this._ctx.selectedTable}
           .profileIds=${this._config.connections.map((connection) => connection.id)}
+          @table-import=${this._onTableImport}
         ></explorer-view>
       `
     }
@@ -1236,6 +1251,80 @@ export class WorkbenchScreen extends LitElement {
 
   private _onTableTruncate(event: Event) {
     this._schemaOps.truncateTable((event as CustomEvent<TableBrowseDetail>).detail.table)
+  }
+
+  private async _onTableImport(event: Event) {
+    const table = (event as CustomEvent<TableBrowseDetail>).detail.table
+    const profile = this._config.activeProfile()
+    if (!profile || table.kind !== 'table') return
+    const childDb = this._ctx.activeChildDb
+    const columnRefs = (this._live.columns[profile.id] ?? []).filter(
+      (column) => column.table === table.name && column.schema === table.schema,
+    )
+    if (!columnRefs.length) {
+      this._dialogs.notice('Could not import CSV', 'No column metadata is available for this table. Refresh Tables and try again.')
+      return
+    }
+    let result
+    try {
+      result = await window.sqlkit.inspectTable(profile.id, childDb, table)
+    } catch (error) {
+      this._dialogs.notice('Could not import CSV', (error as Error).message)
+      return
+    }
+    if (!result.success) {
+      this._dialogs.notice('Could not import CSV', result.error)
+      return
+    }
+    // The context may have changed while metadata was loading; never open a
+    // dialog that would write invisibly to the old database.
+    if (this._ctx.activeDbId !== profile.id || this._ctx.activeChildDb !== childDb) return
+    const inspected = new Map(result.inspection.columns.map((column) => [column.name, column]))
+    const columns: ImportColumn[] = columnRefs.map((column) => {
+      const detail = inspected.get(column.name)
+      return { column, generated: detail?.generated ?? false, identity: detail?.identity ?? null }
+    })
+    this._csvImport = {
+      table,
+      profileId: profile.id,
+      childDb,
+      engine: profile.engine,
+      columns,
+    }
+  }
+
+  private _renderCsvImportDialog() {
+    const state = this._csvImport
+    if (!state) return ''
+    return html`
+      <import-dialog
+        .table=${state.table}
+        .columns=${state.columns}
+        .run=${(detail: ImportConfirmDetail) => this._runCsvImport(state, detail)}
+        @dialog-cancel=${() => (this._csvImport = null)}
+        @dialog-done=${() => (this._csvImport = null)}
+      ></import-dialog>
+    `
+  }
+
+  private async _runCsvImport(state: CsvImportState, detail: ImportConfirmDetail): Promise<string | null> {
+    let statements
+    try {
+      statements = buildInsertBatches({ table: state.table, columns: detail.columns, values: detail.rows, engine: state.engine })
+    } catch (error) {
+      return (error as Error).message
+    }
+    if (statements.length > 1_000) {
+      return 'This import needs more than 1,000 atomic batches. Import fewer rows or map fewer columns.'
+    }
+    try {
+      const result = await window.sqlkit.runBatch(state.profileId, state.childDb, statements)
+      if (result.success) return null
+      const position = result.failedIndex === undefined ? '' : `Batch ${result.failedIndex + 1} of ${statements.length}: `
+      return `${position}${result.error} The import was rolled back; no rows were added.`
+    } catch (error) {
+      return (error as Error).message
+    }
   }
 
   private _onAlterColumns(event: Event) {

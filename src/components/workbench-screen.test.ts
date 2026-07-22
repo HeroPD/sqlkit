@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import type { ConnectionProfile } from '../electron'
+import type { ColumnRef, ConnectionProfile, TableRef } from '../electron'
 import { WorkbenchScreen } from './workbench-screen'
 
 const profile: ConnectionProfile = {
@@ -119,6 +119,79 @@ describe('WorkbenchScreen metadata refresh after writes', () => {
 
     expect(workbench._queries.execute).toHaveBeenCalledTimes(1)
     expect(workbench._queries.execute).toHaveBeenCalledWith(expect.objectContaining({ sql: 'select 1' }))
+  })
+})
+
+describe('WorkbenchScreen CSV import', () => {
+  const table: TableRef = { schema: 'public', name: 'users', kind: 'table' }
+  const columns: ColumnRef[] = [
+    { schema: 'public', table: 'users', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
+    { schema: 'public', table: 'users', name: 'name', dataType: 'text', nullable: true, primaryKey: false, foreignKey: false },
+  ]
+
+  it('loads detailed metadata and marks identity/generated columns for the dialog', async () => {
+    const inspectTable = vi.fn(() => Promise.resolve({
+      success: true as const,
+      inspection: {
+        columns: [
+          { name: 'id', dataType: 'integer', nullable: false, default: 'identity', primaryKey: true, comment: null, identity: 'always' as const },
+          { name: 'name', dataType: 'text', nullable: true, default: null, primaryKey: false, comment: null, generated: true },
+        ],
+        sections: [],
+      },
+    }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { inspectTable }
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { columns: Record<string, ColumnRef[]> }
+      _csvImport: { columns: Array<{ column: ColumnRef; generated: boolean; identity: string | null }> } | null
+      _onTableImport(event: Event): Promise<void>
+    }
+    workbench._config.connections = [profile]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._live.columns = { p1: columns }
+
+    await workbench._onTableImport(new CustomEvent('table-import', { detail: { table } }))
+
+    expect(inspectTable).toHaveBeenCalledWith('p1', 'db_a', table)
+    expect(workbench._csvImport?.columns).toEqual([
+      { column: columns[0], generated: false, identity: 'always' },
+      { column: columns[1], generated: true, identity: null },
+    ])
+  })
+
+  it('executes generated batches against the context captured when the dialog opened', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true as const }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
+    const workbench = new WorkbenchScreen() as never as {
+      _runCsvImport(state: unknown, detail: unknown): Promise<string | null>
+    }
+
+    const error = await workbench._runCsvImport(
+      { table, profileId: 'p1', childDb: 'analytics', engine: 'postgresql', columns },
+      { columns, rows: [['1', 'Ada'], ['2', 'Bob']] },
+    )
+
+    expect(error).toBeNull()
+    expect(runBatch).toHaveBeenCalledWith('p1', 'analytics', [expect.objectContaining({ expectedRows: 2 })])
+  })
+
+  it('keeps a failed import in the dialog with rollback context', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: false as const, failedIndex: 0, error: 'duplicate key' }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
+    const workbench = new WorkbenchScreen() as never as {
+      _runCsvImport(state: unknown, detail: unknown): Promise<string | null>
+    }
+
+    const error = await workbench._runCsvImport(
+      { table, profileId: 'p1', childDb: null, engine: 'postgresql', columns },
+      { columns, rows: [['1', 'Ada']] },
+    )
+
+    expect(error).toContain('duplicate key')
+    expect(error).toContain('rolled back')
   })
 })
 

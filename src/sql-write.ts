@@ -260,6 +260,48 @@ export function buildInsert(spec: InsertSpec): { sql: string; params: unknown[];
   return { sql: `INSERT INTO ${quoteQualified(spec.table, dialect)} (${columns})\nVALUES (${placeholders})`, params, expectedRows: 1 }
 }
 
+export type BulkInsertSpec = {
+  table: TableRef
+  columns: ColumnRef[]
+  values: CellInput[][]
+  engine: Engine
+}
+
+// Multi-row INSERTs keep large imports well below the IPC statement limit. A
+// batch never exceeds the backend's parameter ceiling or SQL Server's 1,000-row
+// VALUES limit; runBatch executes every returned statement atomically.
+export function buildInsertBatches(spec: BulkInsertSpec): Array<ReturnType<typeof buildInsert>> {
+  if (!spec.columns.length) throw new Error('Choose at least one column to import')
+  if (!spec.values.length) throw new Error('The CSV does not contain any data rows')
+  const invalidRow = spec.values.findIndex((row) => row.length !== spec.columns.length)
+  if (invalidRow >= 0) throw new Error(`Import row ${invalidRow + 1} does not match the selected columns`)
+
+  const dialect = dialectFor(spec.engine)
+  const maxParams = Math.min(parameterLimit(spec.engine), 10_000)
+  const rowsPerStatement = Math.min(1_000, Math.floor(maxParams / spec.columns.length))
+  if (rowsPerStatement < 1) throw new Error('One imported row has more columns than this database supports')
+  const columns = spec.columns.map((column) => dialect.quoteIdent(column.name)).join(', ')
+  const statements: Array<ReturnType<typeof buildInsert>> = []
+
+  for (let offset = 0; offset < spec.values.length; offset += rowsPerStatement) {
+    const rows = spec.values.slice(offset, offset + rowsPerStatement)
+    const params: unknown[] = []
+    const tuples = rows.map((row) => {
+      const placeholders = row.map((value, index) => {
+        params.push(coerceValue(value, spec.columns[index], spec.engine))
+        return dialect.placeholder(params.length)
+      })
+      return `(${placeholders.join(', ')})`
+    })
+    statements.push({
+      sql: `INSERT INTO ${quoteQualified(spec.table, dialect)} (${columns})\nVALUES ${tuples.join(',\n       ')}`,
+      params,
+      expectedRows: rows.length,
+    })
+  }
+  return statements
+}
+
 // One column's staged edits, diffed against the loaded structure. Only fields
 // that differ from `original` produce a statement; `original.name` is the old
 // name for RENAME and the target for the other alters.

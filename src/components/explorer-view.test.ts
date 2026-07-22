@@ -182,4 +182,15 @@ describe('ExplorerView context menu', () => {
 
     expect(writeText).toHaveBeenCalledWith('SELECT TOP (100) * FROM [sales].[order details];')
   })
+
+  it('dispatches a CSV import for the right-clicked table', () => {
+    const view = new ExplorerView()
+    const onImport = vi.fn()
+    const target = table('users', 'billing')
+    view.addEventListener('table-import', onImport)
+
+    internals(view)._onTableMenuPick('import', target)
+
+    expect((onImport.mock.calls[0]![0] as CustomEvent).detail).toEqual({ table: target })
+  })
 })

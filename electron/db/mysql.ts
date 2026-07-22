@@ -598,6 +598,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           foreignKey: !!row.fk,
           // extra reads "STORED GENERATED" / "VIRTUAL GENERATED" for a generated column.
           generated: /generated/i.test(row.extra),
+          identity: row.extra.includes('auto_increment') ? 'default' as const : undefined,
           comment: row.comment,
         })),
         sections: sections.filter((section) => section.rows.length),

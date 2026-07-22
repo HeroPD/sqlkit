@@ -253,6 +253,9 @@ export type InspectColumn = {
   collation?: string | null
   /** Server-generated/computed column; its physical definition cannot be altered directly. */
   generated?: boolean
+  /** Server-managed identity. `always` rejects explicit values; `default`
+   * permits them but normally generates a value when the column is omitted. */
+  identity?: 'always' | 'default'
 }
 
 /** One named-rows block of a table inspection (Indexes, Triggers, …).

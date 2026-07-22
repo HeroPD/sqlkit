@@ -28,6 +28,7 @@ type RollupWatcher = Rollup.RollupWatcher
 
 const require = createRequire(import.meta.url)
 const builtinExternals = [...new Set(['electron', ...builtinModules, ...builtinModules.map((name) => `node:${name}`)])]
+const shutdownSignals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP']
 
 export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin {
   let viteConfig: ResolvedConfig
@@ -51,6 +52,10 @@ export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin 
   function cleanup() {
     closing = true
 
+    for (const signal of shutdownSignals) {
+      process.removeListener(signal, cleanup)
+    }
+
     for (const watcher of watchers) {
       void watcher.close()
     }
@@ -69,6 +74,7 @@ export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin 
       stdio: 'inherit',
       env: {
         ...process.env,
+        SQLKIT_DEV_PARENT_PID: String(process.pid),
         VITE_DEV_SERVER_URL: devServerUrl,
       },
     })
@@ -156,6 +162,11 @@ export function vitePluginElectron(options: ElectronPluginOptions = {}): Plugin 
     },
     configureServer(server) {
       devServer = server
+
+      // Task runners may signal npm/Vite without signaling the Electron child.
+      for (const signal of shutdownSignals) {
+        process.prependOnceListener(signal, cleanup)
+      }
 
       server.httpServer?.once('listening', () => {
         startDev(server).catch((error: unknown) => {

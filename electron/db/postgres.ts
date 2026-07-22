@@ -680,6 +680,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
                           where fk.contype = 'f' and fk.conrelid = a.attrelid
                             and a.attnum = any(fk.conkey)) as foreign_key,
                   a.attgenerated as generated,
+                  a.attidentity as identity,
                   pg_catalog.col_description(a.attrelid, a.attnum) as comment
            from pg_catalog.pg_attribute a
            join pg_catalog.pg_class c on c.oid = a.attrelid
@@ -755,6 +756,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
             primary_key: boolean
             foreign_key: boolean
             generated: string | null
+            identity: string | null
             comment: string | null
           }) => ({
             name: row.name,
@@ -765,6 +767,11 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
             foreignKey: row.foreign_key,
             // attgenerated is '' for a normal column, 's'/'v' for a generated one.
             generated: !!row.generated,
+            identity: row.identity === 'a'
+              ? 'always' as const
+              : row.identity === 'd' || /^nextval\s*\(/i.test(row.default_expr ?? '')
+                ? 'default' as const
+                : undefined,
             comment: row.comment,
           }),
         ),

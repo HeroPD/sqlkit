@@ -246,6 +246,7 @@ export class ExplorerView extends LitElement {
       { id: 'create', label: 'Create Table…' },
       { id: 'browse', label: 'Browse Data' },
       { id: 'inspect', label: 'Inspect Table' },
+      ...(kind === 'table' ? [{ id: 'import', label: 'Import CSV…' }] : []),
       ...(kind === 'matview' ? [{ id: 'refresh-matview', label: 'Refresh Materialized View' }] : []),
       { id: 'copy-name', label: 'Copy Name' },
       { id: 'copy-select', label: 'Copy SELECT' },
@@ -270,6 +271,11 @@ export class ExplorerView extends LitElement {
     if (id === 'inspect') {
       this.dispatchEvent(
         new CustomEvent<TableBrowseDetail>('table-inspect', { detail: { table }, bubbles: true, composed: true }),
+      )
+    }
+    if (id === 'import') {
+      this.dispatchEvent(
+        new CustomEvent<TableBrowseDetail>('table-import', { detail: { table }, bubbles: true, composed: true }),
       )
     }
     if (id === 'refresh-matview') {

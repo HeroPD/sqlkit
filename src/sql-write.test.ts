@@ -17,6 +17,7 @@ import {
   buildDeleteRows,
   buildDeleteRowBatches,
   buildInsert,
+  buildInsertBatches,
   buildInsertDefault,
   canAddConstraint,
   coerceValue,
@@ -213,6 +214,37 @@ describe('buildInsert', () => {
       params: [],
       expectedRows: 1,
     })
+  })
+})
+
+describe('buildInsertBatches', () => {
+  const columns = [
+    col({ name: 'id', dataType: 'integer', nullable: false }),
+    col({ name: 'name', dataType: 'text' }),
+  ]
+
+  it('builds a parameterized multi-row insert and coerces values', () => {
+    expect(buildInsertBatches({ table: users, columns, values: [['1', 'Ada'], ['2', SQL_NULL]], engine: 'postgresql' })).toEqual([
+      {
+        sql: 'INSERT INTO "public"."users" ("id", "name")\nVALUES ($1, $2),\n       ($3, $4)',
+        params: [1, 'Ada', 2, null],
+        expectedRows: 2,
+      },
+    ])
+  })
+
+  it('splits at the SQLite parameter ceiling', () => {
+    const values = Array.from({ length: 451 }, (_, index) => [String(index), `name-${index}`])
+    const statements = buildInsertBatches({ table: users, columns, values, engine: 'sqlite' })
+    expect(statements).toHaveLength(2)
+    expect(statements[0]?.params).toHaveLength(900)
+    expect(statements[0]?.expectedRows).toBe(450)
+    expect(statements[1]?.expectedRows).toBe(1)
+  })
+
+  it('validates selected columns and row width', () => {
+    expect(() => buildInsertBatches({ table: users, columns: [], values: [['1']], engine: 'mysql' })).toThrow(/column/i)
+    expect(() => buildInsertBatches({ table: users, columns, values: [['1']], engine: 'mysql' })).toThrow(/row 1/i)
   })
 })
 

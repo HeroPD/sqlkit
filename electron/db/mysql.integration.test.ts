@@ -401,7 +401,7 @@ DELIMITER ;`)
     try {
       const inspection = await driver.inspectTable({ schema: null, name: 'books', kind: 'table' })
       expect(inspection.columns.map((column) => column.name)).toEqual(['id', 'author_id', 'title', 'published'])
-      expect(inspection.columns[0]).toMatchObject({ primaryKey: true, default: 'auto_increment' })
+      expect(inspection.columns[0]).toMatchObject({ primaryKey: true, default: 'auto_increment', identity: 'default' })
       expect(inspection.columns.find((column) => column.name === 'author_id')).toMatchObject({ foreignKey: true })
       const foreignKeys = inspection.sections.find((section) => section.title === 'Foreign Keys')
       expect(foreignKeys?.rows[0]?.definition).toMatch(/REFERENCES authors/i)

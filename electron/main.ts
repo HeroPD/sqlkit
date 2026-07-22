@@ -21,6 +21,14 @@ import { readGlobalConfig, readTheme, writeTheme } from './workspace'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
 const smokeTest = process.argv.includes('--smoke-test')
+const devParentPid = Number(process.env.SQLKIT_DEV_PARENT_PID)
+if (devServerUrl && Number.isInteger(devParentPid) && devParentPid > 0) {
+  const parentMonitor = setInterval(() => {
+    if (process.ppid === devParentPid) return
+    clearInterval(parentMonitor)
+    app.quit()
+  }, 250)
+}
 if (smokeTest) app.commandLine.appendSwitch('no-sandbox')
 const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
 const workspacePaths = new Map<number, string>()

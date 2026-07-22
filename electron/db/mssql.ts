@@ -690,6 +690,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           comment: null,
           collation: row.collation,
           generated: !!row.computed,
+          identity: row.identity ? 'always' as const : undefined,
         })),
         sections: sections.filter((section) => section.rows.length),
       }
