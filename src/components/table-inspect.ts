@@ -2201,7 +2201,7 @@ export class TableInspect extends LitElement {
       }
 
       .mono {
-        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-family: var(--mono-font);
       }
 
       .muted {
@@ -2379,7 +2379,7 @@ export class TableInspect extends LitElement {
 
       .error {
         margin: 10px 0;
-        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-family: var(--mono-font);
         font-size: 12px;
         color: var(--status-dot-error);
         white-space: pre-wrap;

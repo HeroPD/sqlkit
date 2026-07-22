@@ -66,7 +66,9 @@ const appTheme = EditorView.theme(
     },
 
     '.cm-scroller': {
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+      fontFamily: 'var(--mono-font)',
+      fontSize: 'var(--font-size)',
+      fontFeatureSettings: "'liga' 0, 'calt' 0",
       lineHeight: '1.5',
       overscrollBehavior: 'none',
     },
@@ -138,8 +140,9 @@ const appTheme = EditorView.theme(
       maxWidth: 'min(720px, 90vw)',
       overflowY: 'auto',
       listStyle: 'none',
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
-      fontSize: '13px',
+      fontFamily: 'var(--mono-font)',
+      fontSize: 'var(--font-size)',
+      fontFeatureSettings: "'liga' 0, 'calt' 0",
       lineHeight: '1.4',
     },
 

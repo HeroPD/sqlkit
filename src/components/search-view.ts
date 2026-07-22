@@ -246,7 +246,7 @@ export class SearchView extends LitElement {
         overflow: hidden;
         text-overflow: ellipsis;
         color: var(--text-2);
-        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-family: var(--mono-font);
         font-size: 12px;
       }
 

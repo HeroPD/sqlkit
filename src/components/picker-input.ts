@@ -122,7 +122,7 @@ export class PickerInput extends LitElement {
       border: 1px solid var(--border);
       border-radius: 4px;
       outline: none;
-      font-family: var(--font-mono);
+      font-family: var(--mono-font);
       font-size: var(--font-size);
     }
 
@@ -161,7 +161,7 @@ export class PickerInput extends LitElement {
       background: transparent;
       border: 0;
       border-radius: 2px;
-      font-family: var(--font-mono);
+      font-family: var(--mono-font);
       text-align: left;
     }
 

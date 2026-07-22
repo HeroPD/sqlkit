@@ -74,9 +74,12 @@ function measureColumnWidths(columns: string[], rows: unknown[][]): number[] {
   const ctx = document.createElement('canvas').getContext('2d')
   if (!ctx) return columns.map(() => 120)
 
-  // Mirrors the table CSS: 11px uppercase semibold UI headers, 12px mono cells.
-  const headerFont = `600 11px ${getComputedStyle(document.body).fontFamily}`
-  const bodyFont = "12px ui-monospace, 'SF Mono', Menlo, Consolas, monospace"
+  // Mirror the rendered typography so changing the shared type scale cannot
+  // make measured header labels narrower than their displayed text.
+  const bodyStyle = getComputedStyle(document.body)
+  const smallFontSize = getComputedStyle(document.documentElement).getPropertyValue('--font-size-sm').trim() || '12px'
+  const headerFont = `600 ${smallFontSize} ${bodyStyle.fontFamily}`
+  const bodyFont = `400 13px ${bodyStyle.fontFamily}`
   const MIN_WIDTH = 60
   const MAX_WIDTH = 320
   const PADDING = 22
@@ -106,7 +109,8 @@ function measureRecordColumnWidth(columns: string[]): number {
   const ctx = document.createElement('canvas').getContext('2d')
   const fallback = Math.max(...columns.map((column) => column.length), 1) * 7 + 28
   if (!ctx) return Math.min(360, Math.max(120, fallback))
-  ctx.font = `600 11px ${getComputedStyle(document.body).fontFamily}`
+  const bodyStyle = getComputedStyle(document.body)
+  ctx.font = `400 13px ${bodyStyle.fontFamily}`
   const width = Math.max(...columns.map((column) => ctx.measureText(column).width), 0) + 28
   return Math.min(360, Math.max(120, Math.ceil(width)))
 }
@@ -1758,7 +1762,7 @@ export class ResultsPanel extends LitElement {
       .error {
         margin: 0;
         padding: 10px 12px;
-        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-family: var(--mono-font);
         font-size: 12px;
         color: var(--status-dot-error);
         white-space: pre-wrap;
@@ -1769,8 +1773,9 @@ export class ResultsPanel extends LitElement {
       table {
         border-collapse: collapse;
         table-layout: fixed;
-        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-        font-size: 12px;
+        font-family: var(--ui-font);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
         /* Selection is cell-based (drag a rectangle); suppress native text
            selection, which spans whole rows. */
         user-select: none;
@@ -2067,6 +2072,9 @@ export class ResultsPanel extends LitElement {
         min-height: 0;
         flex-direction: column;
         overflow: auto;
+        font-family: var(--ui-font);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
       }
 
       .record-field {

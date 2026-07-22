@@ -1,6 +1,10 @@
 /* Registers the codicon @font-face globally; the .codicon classes are also
    composed into shadow roots via the `codicons` module in shared-styles.ts. */
 @import './codicons/codicon.css';
+@import '@fontsource-variable/ibm-plex-sans/wght.css';
+@import '@fontsource-variable/ibm-plex-sans/wght-italic.css';
+@import '@fontsource-variable/jetbrains-mono/wght.css';
+@import '@fontsource-variable/jetbrains-mono/wght-italic.css';
 
 /* ── Theme tokens (VS Code Dark+, ported from the SqlKit reference) ──────────
    Foreground/text tokens were originally pre-blended 20% toward their
@@ -10,13 +14,13 @@
 :root {
   color-scheme: dark;
 
-  --mono-font: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
-  --ui-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono-font: 'JetBrains Mono Variable', 'SF Mono', Menlo, Consolas, monospace;
+  --ui-font: 'IBM Plex Sans Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
-  /* Type scale — base 13px + small + two heading steps. Use these tokens
+  /* Type scale — base 14px + small + two heading steps. Use these tokens
      instead of hardcoding px so text, controls, and titles scale together. */
-  --font-size: 13px;      /* body, controls, list/tree rows */
-  --font-size-sm: 11px;   /* helpers, meta, tags, keybinds */
+  --font-size: 14px;      /* body, controls, list/tree rows */
+  --font-size-sm: 12px;   /* helpers, meta, tags, keybinds */
   --font-size-xl: 18px;   /* inline / empty-state headings */
   --font-size-2xl: 22px;  /* page & brand titles */
 
@@ -313,9 +317,6 @@ body {
   color: var(--text);
   font: var(--font-size) / 1.4 var(--ui-font);
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
 /* Document-level scrollbars. Shadow roots don't inherit these; components

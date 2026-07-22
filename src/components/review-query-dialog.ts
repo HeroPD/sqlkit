@@ -217,7 +217,8 @@ export class ReviewQueryDialog extends LitElement {
         overflow: auto;
         white-space: pre-wrap;
         word-break: break-word;
-        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-family: var(--mono-font);
+        font-feature-settings: 'liga' 0, 'calt' 0;
         font-size: 12px;
         line-height: 1.5;
         color: var(--text);

@@ -44,7 +44,7 @@ const expressionTheme = EditorView.theme(
       fontSize: 'var(--font-size)',
     },
     '&.cm-focused': { outline: 'none' },
-    '.cm-scroller': { fontFamily: 'var(--font-mono)', lineHeight: '1.45' },
+    '.cm-scroller': { fontFamily: 'var(--mono-font)', fontFeatureSettings: "'liga' 0, 'calt' 0", lineHeight: '1.45' },
     '.cm-content': { padding: '5px 0', caretColor: 'var(--input-fg)' },
     '.cm-line': { padding: '0 8px' },
     '.cm-placeholder': { color: 'var(--input-placeholder)', fontStyle: 'normal' },
@@ -55,7 +55,7 @@ const expressionTheme = EditorView.theme(
       backgroundColor: 'var(--sidebar-bg)',
       border: '1px solid var(--border)',
     },
-    '.cm-tooltip-autocomplete > ul': { fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size)' },
+    '.cm-tooltip-autocomplete > ul': { fontFamily: 'var(--mono-font)', fontSize: 'var(--font-size)' },
     '.cm-tooltip-autocomplete > ul > li[aria-selected]': {
       color: 'var(--list-selection-fg)',
       backgroundColor: 'var(--list-selection)',

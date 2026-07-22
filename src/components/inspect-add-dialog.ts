@@ -617,7 +617,7 @@ export class InspectAddDialog extends LitElement {
       }
 
       .mono {
-        font-family: var(--font-mono);
+        font-family: var(--mono-font);
       }
 
       textarea {
@@ -625,7 +625,7 @@ export class InspectAddDialog extends LitElement {
         box-sizing: border-box;
         resize: vertical;
         padding: 5px 8px;
-        font-family: var(--font-mono);
+        font-family: var(--mono-font);
         font-size: var(--font-size);
         color: var(--input-fg);
         background: var(--input-bg);

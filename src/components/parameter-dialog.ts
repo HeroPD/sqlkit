@@ -73,7 +73,7 @@ export class ParameterDialog extends LitElement {
     code { color: var(--text); }
     .fields { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
     label { display: grid; grid-template-columns: 72px 1fr; align-items: center; gap: 10px; }
-    label span { color: var(--text-2); font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+    label span { color: var(--text-2); font-family: var(--mono-font); }
     input { padding: 5px 8px; font: inherit; color: var(--input-fg); background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px; outline: none; }
     input:focus { border-color: var(--input-focus-border); }
     .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
