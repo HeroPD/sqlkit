@@ -14,6 +14,7 @@ import {
   exportFormat,
   nullableStringValue,
   nonNegativeInteger,
+  objectDdlReference,
   queryPayload,
   stringValue,
   tableReference,
@@ -171,6 +172,12 @@ export function registerDbIpc(context: DbIpcContext) {
       stringValue(profileId, 'Profile id', 200),
       databaseObject(object),
       databaseObjectKind(objectKind),
+      nullableStringValue(childDb, 'Database name', 2_000),
+    ))
+  ipcMain.handle('db:object-ddl', (event, profileId: unknown, childDb: unknown, ref: unknown) =>
+    manager(event).objectDdl(
+      stringValue(profileId, 'Profile id', 200),
+      objectDdlReference(ref),
       nullableStringValue(childDb, 'Database name', 2_000),
     ))
   ipcMain.handle('db:inspect-server', (event, profileId: unknown, childDb: unknown) =>

@@ -174,7 +174,9 @@ const appTheme = EditorView.theme(
   { dark: true },
 )
 
-export type RunQueryDetail = { sql: string }
+/** `line` is the 1-based document line the run text starts on, for mapping a
+ * driver-reported error line back to the editor. */
+export type RunQueryDetail = { sql: string; line: number }
 
 // One editor view serves every tab: tab switches swap immutable EditorStates
 // via setState() instead of tearing the view down and re-parsing, which also
@@ -443,7 +445,7 @@ export class SqlEditor extends LitElement {
   // Everything that captures `this` — rebound whenever a state lands in a view.
   private _handlerExtensions() {
     return [
-      runQuery((sql) => this._emitRun(sql)),
+      runQuery((query, view) => this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)),
       keymap.of([{ key: 'Shift-Alt-f', run: () => this.formatSql() }]),
       this._changeListener,
     ]
@@ -817,10 +819,10 @@ export class SqlEditor extends LitElement {
       .join('\0')
   }
 
-  private _emitRun(sql: string) {
+  private _emitRun(sql: string, line: number) {
     this.dispatchEvent(
       new CustomEvent<RunQueryDetail>('run-query', {
-        detail: { sql },
+        detail: { sql, line },
         bubbles: true,
         composed: true,
       }),

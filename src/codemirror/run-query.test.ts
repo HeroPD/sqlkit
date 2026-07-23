@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { EditorState } from '@codemirror/state'
 import { MSSQL, PostgreSQL, SQLite, sql, type SQLDialect } from '@codemirror/lang-sql'
 import { queryToRun } from './run-query'
+import { SQL_DIALECTS } from './dialects'
 
+// The app's postgres dialect: dollar-quoted bodies parse as plain SQL, so the
+// dollar-quote tests below exercise the span-based splitting, not the parser.
 const stateAt = (
   doc: string,
   cursor: number,
@@ -11,14 +14,14 @@ const stateAt = (
   EditorState.create({
     doc,
     selection: { anchor: options.anchor ?? cursor, head: cursor },
-    extensions: sql({ dialect: options.dialect ?? PostgreSQL }),
+    extensions: sql({ dialect: options.dialect ?? SQL_DIALECTS.postgres.dialect }),
   })
 
 /** Cursor placed where `|` appears in the doc. */
 const queryAtCaret = (docWithCaret: string, dialect?: SQLDialect) => {
   const cursor = docWithCaret.indexOf('|')
   const doc = docWithCaret.replace('|', '')
-  return queryToRun(stateAt(doc, cursor, { dialect }))
+  return queryToRun(stateAt(doc, cursor, { dialect }))?.sql ?? ''
 }
 
 describe('queryToRun', () => {
@@ -33,7 +36,7 @@ describe('queryToRun', () => {
   it('prefers the selection over the nearest statement', () => {
     const doc = 'SELECT 1;\nSELECT 2;'
     const state = stateAt(doc, doc.indexOf('SELECT 2'), { anchor: doc.length })
-    expect(queryToRun(state)).toBe('SELECT 2;')
+    expect(queryToRun(state)?.sql).toBe('SELECT 2;')
   })
 
   it('runs the trailing statement without a semicolon', () => {
@@ -140,6 +143,23 @@ describe('queryToRun', () => {
         'CREATE FUNCTION g() RETURNS int AS $fn$ SELECT 1; $fn$ LANGUAGE sql;',
       )
     })
+
+    it('keeps dollar-quote splitting when the dialect tokenizes them as strings', () => {
+      const doc = 'CREATE FUNCTION g() RETURNS int AS $fn$ SELECT 1;| $fn$ LANGUAGE sql;\nSELECT 2;'
+      expect(queryAtCaret(doc, PostgreSQL)).toBe(
+        'CREATE FUNCTION g() RETURNS int AS $fn$ SELECT 1; $fn$ LANGUAGE sql;',
+      )
+    })
+
+    it('runs the statement after a function whole, not merged into it', () => {
+      const doc = 'CREATE FUNCTION g() RETURNS int AS $fn$ SELECT 1; $fn$ LANGUAGE sql;\nSELECT |2;'
+      expect(queryAtCaret(doc)).toBe('SELECT 2;')
+    })
+
+    it('does not split inside an unterminated dollar-quote being typed', () => {
+      const doc = 'DO $$\nBEGIN\n  PERFORM 1;|\nEND'
+      expect(queryAtCaret(doc)).toBe('DO $$\nBEGIN\n  PERFORM 1;\nEND')
+    })
   })
 
   describe('blank-line separation', () => {
@@ -195,31 +215,31 @@ describe('queryToRun', () => {
     it('falls back to the nearest block when the selection is only whitespace', () => {
       const doc = 'SELECT 1;  \n  SELECT 2;'
       const state = stateAt(doc, 11, { anchor: 9 })
-      expect(queryToRun(state)).toBe('SELECT 1;')
+      expect(queryToRun(state)?.sql).toBe('SELECT 1;')
     })
 
     it('returns a partial statement when that is what is selected', () => {
       const doc = 'SELECT 1, 2 FROM t;'
       const state = stateAt(doc, 11, { anchor: 0 })
-      expect(queryToRun(state)).toBe('SELECT 1, 2')
+      expect(queryToRun(state)?.sql).toBe('SELECT 1, 2')
     })
 
     it('snaps a selection ending mid-identifier out to whole lines', () => {
       const doc = "SELECT * FROM accounts a\nJOIN companies c ON a.company_id = c.id\nwhere a.name = 'x'"
       const state = stateAt(doc, doc.indexOf('a.company_id') + 4, { anchor: 0 })
-      expect(queryToRun(state)).toBe('SELECT * FROM accounts a\nJOIN companies c ON a.company_id = c.id')
+      expect(queryToRun(state)?.sql).toBe('SELECT * FROM accounts a\nJOIN companies c ON a.company_id = c.id')
     })
 
     it('snaps a selection starting mid-keyword out to whole lines', () => {
       const doc = 'SELECT 1;\nSELECT 2 FROM t;'
       const state = stateAt(doc, doc.length, { anchor: doc.indexOf('ELECT 2') })
-      expect(queryToRun(state)).toBe('SELECT 2 FROM t;')
+      expect(queryToRun(state)?.sql).toBe('SELECT 2 FROM t;')
     })
 
     it('snaps a selection cutting a string literal out to whole lines', () => {
       const doc = "SELECT 'abc' FROM t;"
       const state = stateAt(doc, doc.indexOf('bc'), { anchor: 0 })
-      expect(queryToRun(state)).toBe("SELECT 'abc' FROM t;")
+      expect(queryToRun(state)?.sql).toBe("SELECT 'abc' FROM t;")
     })
   })
 })

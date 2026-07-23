@@ -10,6 +10,8 @@ import type {
   DdlResult,
   FetchRowsResult,
   InspectResult,
+  ObjectDdlRef,
+  ObjectDdlResult,
   ObjectsResult,
   QueryResponse,
   QuerySort,
@@ -23,6 +25,7 @@ import type { ExportFormat } from '../../src/result-export'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
 import { createDriver, type Driver } from './driver'
+import { queryErrorLine } from './error-line'
 import { ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
 
@@ -226,7 +229,16 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       // Typed here — same process as the drivers' throw — so the renderer never
       // has to pattern-match the human-readable message.
       const message = (error as Error).message
-      return { success: false, error: message, ...(message === t('query.cancelled') ? { cancelled: true } : {}) }
+      const cancelled = message === t('query.cancelled')
+      // Position mapping only holds when the submitted text was the raw sql;
+      // a grid sort/filter rewrite shifts every offset.
+      const errorLine = cancelled || sort || filter ? undefined : queryErrorLine(error, sql)
+      return {
+        success: false,
+        error: message,
+        ...(errorLine !== undefined ? { errorLine } : {}),
+        ...(cancelled ? { cancelled: true } : {}),
+      }
     }
   }
 
@@ -381,6 +393,17 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  async function objectDdl(profileId: string, ref: ObjectDdlRef, childDb: string | null = null): Promise<ObjectDdlResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.objectDdl) return { success: false, error: t('connection.engineUnsupported') }
+    try {
+      return { success: true, sql: await driver.objectDdl(ref, childDb) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
   async function inspectServer(profileId: string, childDb: string | null = null): Promise<ServerInfoResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
@@ -430,6 +453,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     listObjects,
     inspectTable,
     inspectObject,
+    objectDdl,
     inspectServer,
     setActiveChild,
     createDatabase,

@@ -663,6 +663,44 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       return { columns: [], sections: [{ title: 'Definition', rows }] }
     },
 
+    async objectDdl(ref, childDb = null) {
+      const pool = poolForQuery(childDb)
+      const schema = ref.schema ?? 'public'
+      const qualified = `${dialect.quoteIdent(schema)}.${dialect.quoteIdent(ref.name)}`
+
+      if (ref.kind === 'function') {
+        // pg_get_functiondef already emits a CREATE OR REPLACE FUNCTION, so it
+        // re-runs as-is; detail is the identity args that pick one overload.
+        const result = await pool.query<{ definition: string }>(
+          `select pg_catalog.pg_get_functiondef(p.oid) as definition
+           from pg_catalog.pg_proc p
+           join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+           where n.nspname = $1 and p.proname = $2
+             and pg_catalog.pg_get_function_identity_arguments(p.oid) = $3`,
+          [schema, ref.name, ref.detail ?? ''],
+        )
+        const definition = result.rows[0]?.definition
+        if (!definition) throw new Error(`Function ${ref.name}(${ref.detail ?? ''}) was not found.`)
+        return definition
+      }
+
+      // pg_get_viewdef returns only the SELECT body (with a trailing ;), so wrap it.
+      const result = await pool.query<{ definition: string | null }>(
+        `select pg_catalog.pg_get_viewdef(c.oid, true) as definition
+         from pg_catalog.pg_class c
+         join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = $1 and c.relname = $2`,
+        [schema, ref.name],
+      )
+      const body = result.rows[0]?.definition
+      if (!body) throw new Error(`View ${ref.name} was not found.`)
+      // Materialized views have no CREATE OR REPLACE, so drop-then-create.
+      if (ref.kind === 'matview') {
+        return `DROP MATERIALIZED VIEW IF EXISTS ${qualified};\n\nCREATE MATERIALIZED VIEW ${qualified} AS\n${body}`
+      }
+      return `CREATE OR REPLACE VIEW ${qualified} AS\n${body}`
+    },
+
     async inspectTable(table, childDb = null) {
       const pool = poolForQuery(childDb)
       const schema = table.schema ?? 'public'

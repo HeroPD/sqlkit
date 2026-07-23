@@ -22,7 +22,7 @@ export type QueryRun =
   | { phase: 'idle' }
   | { phase: 'running'; executionId: string; profileId: string; note?: string }
   | { phase: 'done'; result: QueryResult; sql?: string; params?: unknown[] }
-  | { phase: 'error'; error: string; sql?: string; params?: unknown[] }
+  | { phase: 'error'; error: string; sql?: string; params?: unknown[]; errorLine?: number }
 
 export type CellCoord = { row: number; col: number }
 
@@ -456,6 +456,10 @@ export class ResultsPanel extends LitElement {
 
   private _cancel() {
     this.dispatchEvent(new CustomEvent('cancel-query', { bubbles: true, composed: true }))
+  }
+
+  private _gotoErrorLine(line: number) {
+    this.dispatchEvent(new CustomEvent('goto-error-line', { detail: { line }, bubbles: true, composed: true }))
   }
 
   // --- display-row mapping (result rows + interleaved drafts) -----------------
@@ -1743,7 +1747,10 @@ export class ResultsPanel extends LitElement {
       `
     }
     if (run.phase === 'error') {
-      return html`<pre class="error">${run.error}</pre>`
+      const line = run.errorLine
+      return html`<pre class="error">${run.error}${line === undefined
+        ? ''
+        : html`\n<button class="error-line" @click=${() => this._gotoErrorLine(line)}>${t('results.errorAtLine', { line })}</button>`}</pre>`
     }
 
     const result = this._shownResult()!
@@ -2251,6 +2258,16 @@ export class ResultsPanel extends LitElement {
         font-size: 12px;
         color: var(--status-dot-error);
         white-space: pre-wrap;
+      }
+
+      .error-line {
+        padding: 0;
+        border: none;
+        background: none;
+        font: inherit;
+        color: var(--accent);
+        text-decoration: underline;
+        cursor: pointer;
       }
 
       /* Reference-style grid: fixed layout with measured colgroup widths,

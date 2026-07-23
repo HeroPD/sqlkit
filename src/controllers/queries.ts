@@ -461,6 +461,8 @@ export class QueriesController implements ReactiveController {
     sort?: QuerySort | null
     filter?: string | null
     executionId?: string
+    /** Editor line the SQL starts on; maps a driver error line back to the doc. */
+    baseLine?: number
   }) {
     const { tabId, profile, childDb, contextKey, sql, params, sort, filter } = args
     const executionId = args.executionId ?? crypto.randomUUID()
@@ -512,9 +514,15 @@ export class QueriesController implements ReactiveController {
     }
 
     this.realignStaged(tabId, response.success ? response.result.columns.length : null)
+    const errorLine =
+      !response.success && response.errorLine !== undefined && args.baseLine !== undefined
+        ? args.baseLine + response.errorLine - 1
+        : undefined
     this.setRun(
       tabId,
-      response.success ? { phase: 'done', result: response.result, sql, params } : { phase: 'error', error: response.error, sql, params },
+      response.success
+        ? { phase: 'done', result: response.result, sql, params }
+        : { phase: 'error', error: response.error, sql, params, ...(errorLine !== undefined ? { errorLine } : {}) },
     )
     this.finishTask(task.id, response, task.startedAt)
     this.history = capHistoryPerContext(

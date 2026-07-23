@@ -1129,9 +1129,11 @@ describe('TableInspect cell selection', () => {
     el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, composed: true, ...init }))
   const key = (view: TableInspect, init: KeyboardEventInit) =>
     view.shadowRoot!.querySelector<HTMLElement>('.columns-table')!.dispatchEvent(new KeyboardEvent('keydown', init))
+  // Attaches onto the live window.sqlkit, so call it after the component's setup
+  // (loaded/_load reassigns window.sqlkit).
   const stubClipboard = () => {
     const writeText = vi.fn(() => Promise.resolve())
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    ;(window as unknown as { sqlkit: Record<string, unknown> }).sqlkit.writeClipboardText = writeText
     return writeText
   }
   const twoCols = () => [inspectCol({ name: 'age' }), inspectCol({ name: 'nick', dataType: 'text', nullable: false })]
@@ -1172,15 +1174,42 @@ describe('TableInspect cell selection', () => {
   })
 
   it('copies the selected rectangle as TSV of the staged values', async () => {
-    const writeText = stubClipboard()
     const cols = twoCols()
     const view = await loaded('postgresql', cols)
+    const writeText = stubClipboard()
     internals(view)._commitText(cols[1]!, 'dataType', 'varchar(80)')
 
     press(cellOf(view, 0, 'name'))
     press(cellOf(view, 1, 'nullable'), { shiftKey: true })
     key(view, { key: 'c', metaKey: true })
     expect(writeText).toHaveBeenCalledWith('age\tinteger\tyes\nnick\tvarchar(80)\tno')
+    view.remove()
+  })
+
+  it('copies a single multi-line cell as raw text, without TSV quoting', async () => {
+    const body = "CREATE FUNCTION f() RETURNS void AS $$\nBEGIN\n  RAISE NOTICE 'hi \"q\"';\nEND;\n$$"
+    const inspectTable = vi.fn(() =>
+      Promise.resolve<InspectResult>({
+        success: true,
+        inspection: { columns: [inspectCol({ name: 'age' })], sections: [{ title: 'Constraints', rows: [{ name: 'f', definition: body }] }] },
+      }),
+    )
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+    const writeText = stubClipboard()
+
+    const defCell = view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"] tr[data-row="0"] td[data-field="definition"]')!
+    press(defCell)
+    view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"]')!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'c', metaKey: true }),
+    )
+    expect(writeText).toHaveBeenCalledWith(body)
     view.remove()
   })
 
@@ -1197,8 +1226,8 @@ describe('TableInspect cell selection', () => {
   })
 
   it('Enter edits the anchor cell; locked cells stay selectable and copyable', async () => {
-    const writeText = stubClipboard()
     const view = await loaded('sqlite')
+    const writeText = stubClipboard()
     const inner = internals(view)
 
     // SQLite can't alter an existing column's type — Enter must not open an editor…
@@ -1217,7 +1246,6 @@ describe('TableInspect cell selection', () => {
   })
 
   it('selects and copies section cells (indexes, constraints) too', async () => {
-    const writeText = stubClipboard()
     const rows = [
       { name: 'users_pkey', definition: 'PRIMARY KEY (id)' },
       { name: 'users_email_key', definition: 'UNIQUE (email)' },
@@ -1236,6 +1264,7 @@ describe('TableInspect cell selection', () => {
     document.body.append(view)
     await internals(view)._load()
     await view.updateComplete
+    const writeText = stubClipboard()
     const inner = internals(view)
 
     const nameCell = view.shadowRoot!.querySelector<HTMLElement>('table[data-grid="1"] tr[data-row="0"] td[data-field="name"]')!

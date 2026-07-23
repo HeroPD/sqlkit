@@ -4,7 +4,7 @@ import { icons, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
 import { TABLE_KIND_ICONS, tableKindLabel } from '../table-kinds'
-import type { ColumnRef, DbObject, DbObjectKind, DbObjects, Engine, FileInfo, TableRef } from '../electron'
+import type { ColumnRef, DbObject, DbObjectKind, DbObjects, Engine, FileInfo, ObjectDdlRef, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
 import './context-menu'
@@ -21,6 +21,7 @@ const objectIcon = (label: 'Functions' | 'Types', object: DbObject) =>
 
 export type TableSelectDetail = { key: string }
 export type ObjectInspectDetail = { object: DbObject; objectKind: DbObjectKind }
+export type ObjectEditDetail = { ref: ObjectDdlRef }
 export type TableBrowseDetail = { table: TableRef }
 export type TableCreateDetail = { schema: string | null }
 
@@ -247,6 +248,7 @@ export class ExplorerView extends LitElement {
       { id: 'create', label: t('explorer.createTable') },
       { id: 'browse', label: t('explorer.browseData'), separatorBefore: true },
       { id: 'inspect', label: t('explorer.inspectTable') },
+      ...(kind === 'view' || kind === 'matview' ? [{ id: 'edit', label: t('explorer.editSource') }] : []),
       ...(kind === 'table' ? [{ id: 'import', label: t('explorer.importCsv') }] : []),
       ...(kind === 'matview' ? [{ id: 'refresh-matview', label: t('explorer.refreshMaterializedView') }] : []),
       { id: 'copy-name', label: t('explorer.copyName'), separatorBefore: true },
@@ -283,6 +285,9 @@ export class ExplorerView extends LitElement {
       this.dispatchEvent(
         new CustomEvent<TableBrowseDetail>('matview-refresh', { detail: { table }, bubbles: true, composed: true }),
       )
+    }
+    if (id === 'edit' && (table.kind === 'view' || table.kind === 'matview')) {
+      this._editObject({ schema: table.schema, name: table.name, kind: table.kind, detail: null })
     }
     if (id === 'truncate') {
       this.dispatchEvent(
@@ -421,6 +426,7 @@ export class ExplorerView extends LitElement {
     if (!menu) return ''
     const items: MenuItem[] = [
       { id: 'inspect', label: t('explorer.inspect') },
+      ...(menu.objectKind === 'function' ? [{ id: 'edit', label: t('explorer.editSource') }] : []),
       { id: 'copy-name', label: t('explorer.copyName') },
     ]
     return html`
@@ -430,6 +436,9 @@ export class ExplorerView extends LitElement {
         .items=${items}
         @menu-pick=${(e: CustomEvent<MenuPickDetail>) => {
           if (e.detail.id === 'inspect') this._inspectObject(menu.object, menu.objectKind)
+          if (e.detail.id === 'edit') {
+            this._editObject({ schema: menu.object.schema, name: menu.object.name, kind: 'function', detail: menu.object.detail })
+          }
           if (e.detail.id === 'copy-name') {
             void navigator.clipboard.writeText(
               menu.object.schema ? `${menu.object.schema}.${menu.object.name}` : menu.object.name,
@@ -448,6 +457,12 @@ export class ExplorerView extends LitElement {
         bubbles: true,
         composed: true,
       }),
+    )
+  }
+
+  private _editObject(ref: ObjectDdlRef) {
+    this.dispatchEvent(
+      new CustomEvent<ObjectEditDetail>('object-edit', { detail: { ref }, bubbles: true, composed: true }),
     )
   }
 

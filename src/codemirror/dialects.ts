@@ -1,4 +1,4 @@
-import { MSSQL, MySQL, PostgreSQL, SQLite, type SQLDialect } from '@codemirror/lang-sql'
+import { MSSQL, MySQL, PostgreSQL, SQLite, SQLDialect } from '@codemirror/lang-sql'
 import { dialectFor } from '../dialect'
 import type { Engine } from '../electron'
 
@@ -112,7 +112,10 @@ export const KEYWORD_BOOSTS: Record<string, number> = {
 
 export const SQL_DIALECTS: Record<SqlDialectName, SqlDialectConfig> = {
   postgres: {
-    dialect: PostgreSQL,
+    dialect: SQLDialect.define({
+      ...PostgreSQL.spec, 
+      doubleDollarQuotedStrings: false
+    }),
     keywords: [...COMMON_KEYWORDS, 'LIMIT', 'OFFSET', 'ILIKE', 'RETURNING', 'NOW'],
     quoteIdent: dialectFor('postgresql').quoteIdent,
   },

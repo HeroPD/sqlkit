@@ -151,8 +151,9 @@ export type QueryResult = QueryResultSet & {
 }
 
 /** `cancelled` marks a run stopped by the user, so callers never have to
- * pattern-match the human-readable error text. */
-export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string; cancelled?: boolean }
+ * pattern-match the human-readable error text. `errorLine` is the 1-based line
+ * within the submitted SQL, when the engine reported a usable position. */
+export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string; cancelled?: boolean; errorLine?: number }
 
 /** One entry of the per-workspace query history (persisted in .sqlkit/history.json). */
 export type HistoryItem = {
@@ -239,6 +240,12 @@ export type DbObjects = { functions: DbObject[]; types: DbObject[] }
 export type DbObjectKind = 'function' | 'type'
 
 export type ObjectsResult = { success: true; objects: DbObjects } | { success: false; error: string }
+
+// Identifies a function or view whose re-runnable CREATE DDL the "Edit" flow
+// opens in a new editor tab. `detail` carries a function's identity args.
+export type ObjectDdlKind = 'function' | 'view' | 'matview'
+export type ObjectDdlRef = { schema: string | null; name: string; kind: ObjectDdlKind; detail: string | null }
+export type ObjectDdlResult = { success: true; sql: string } | { success: false; error: string }
 
 export type InspectColumn = {
   name: string
@@ -371,6 +378,8 @@ export type SqlkitApi = {
   /** Structure of one function/type: definition, values, attributes. Reuses
    * the table-inspection shape (columns for composites, sections for the rest). */
   inspectObject: (profileId: string, childDb: string | null, object: DbObject, objectKind: DbObjectKind) => Promise<InspectResult>
+  /** Re-runnable CREATE DDL for a function or view, for "Edit" → new SQL tab. */
+  getObjectDdl: (profileId: string, childDb: string | null, ref: ObjectDdlRef) => Promise<ObjectDdlResult>
   /** Server/cluster-scoped reference: extensions, roles, tablespaces, settings. */
   inspectServer: (profileId: string, childDb: string | null) => Promise<ServerInfoResult>
   pickSqliteFile: () => Promise<string | null>

@@ -1,4 +1,4 @@
-import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
+import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, ObjectDdlRef, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
 import type { ExportFormat } from '../src/result-export'
 
 const MAX_ID = 200
@@ -44,6 +44,20 @@ export function databaseObject(value: unknown): DbObject {
 export function databaseObjectKind(value: unknown): DbObjectKind {
   if (value !== 'function' && value !== 'type') throw new IpcValidationError('Database object kind is invalid')
   return value
+}
+
+export function objectDdlReference(value: unknown): ObjectDdlRef {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Object DDL reference is invalid')
+  const ref = value as Record<string, unknown>
+  if (ref.kind !== 'function' && ref.kind !== 'view' && ref.kind !== 'matview') {
+    throw new IpcValidationError('Object DDL kind is invalid')
+  }
+  return {
+    schema: nullableStringValue(ref.schema, 'Object schema', 2_000),
+    name: stringValue(ref.name, 'Object name', 2_000),
+    kind: ref.kind,
+    detail: nullableStringValue(ref.detail, 'Object detail', 20_000),
+  }
 }
 
 const optionalString = (value: unknown, label: string, max = MAX_TEXT) =>

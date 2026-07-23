@@ -552,6 +552,27 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { columns: [], sections: [{ title: 'Definition', rows: [{ name: object.name, definition }] }] }
     },
 
+    async objectDdl(ref, childDb = null) {
+      const qualified = ref.schema
+        ? `${dialect.quoteIdent(ref.schema)}.${dialect.quoteIdent(ref.name)}`
+        : dialect.quoteIdent(ref.name)
+      const rows = await metaRows<{ definition: string | null }>(
+        'select object_definition(object_id(@p1)) as definition',
+        [qualified],
+        childDb,
+      )
+      const definition = rows[0]?.definition
+      if (!definition) {
+        const noun = ref.kind === 'function' ? 'Function' : 'View'
+        throw new Error(`${noun} ${ref.name} was not found (or its definition is not accessible).`)
+      }
+      // CREATE OR ALTER (SQL Server 2016 SP1+) re-runs as a single batch — no
+      // DROP/GO dance, and it keeps existing permissions. Leave one alone if the
+      // stored text already uses it.
+      if (/\bCREATE\s+OR\s+ALTER\b/i.test(definition)) return definition
+      return definition.replace(/\bCREATE\s+(FUNCTION|VIEW|PROC|PROCEDURE|TRIGGER)\b/i, 'CREATE OR ALTER $1')
+    },
+
     async inspectServer(childDb = null) {
       type Row = { name: string; definition: string }
       const properties = await metaRows<Row>(

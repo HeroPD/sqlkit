@@ -43,7 +43,7 @@ import type { EmptyAction } from './editor-empty'
 import { clearInspectDraftCache, dropInspectDraft, type ColumnAlterEventDetail } from './table-inspect'
 import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
-import type { ObjectInspectDetail, TableBrowseDetail, TableCreateDetail, TableSelectDetail } from './explorer-view'
+import type { ObjectEditDetail, ObjectInspectDetail, TableBrowseDetail, TableCreateDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
 import type { TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
@@ -198,7 +198,9 @@ export class WorkbenchScreen extends LitElement {
     newQuery: () => this._ctx.newQuery(),
     runActiveTab: () => {
       const tab = this._ctx.activeSqlTab()
-      if (tab?.content.trim()) void this._runSql(tab.content.trim())
+      if (!tab?.content.trim()) return
+      const leading = tab.content.slice(0, tab.content.length - tab.content.trimStart().length)
+      void this._runSql(tab.content.trim(), undefined, undefined, undefined, 1 + (leading.match(/\n/g)?.length ?? 0))
     },
     saveActiveTab: () => void this._fileOps.saveActive(),
     formatActiveTab: () => this.renderRoot.querySelector('sql-editor')?.formatSql(),
@@ -591,7 +593,8 @@ export class WorkbenchScreen extends LitElement {
 
   // Runs against the in-use context (⌘K), connecting it first if needed.
   // `filter`/`sort` re-run with grid-injected clauses; omitting them clears both.
-  private async _runSql(sqlText: string, sort?: QuerySort | null, suppliedParams?: unknown[], filter?: string | null) {
+  // `baseLine` is the editor line the SQL starts on, for error-line mapping.
+  private async _runSql(sqlText: string, sort?: QuerySort | null, suppliedParams?: unknown[], filter?: string | null, baseLine?: number) {
     // The run belongs to the tab it started from, even if the user switches
     // tabs or contexts before it finishes.
     const tabId = this._ctx.activeTabId
@@ -666,6 +669,7 @@ export class WorkbenchScreen extends LitElement {
       sort,
       filter,
       executionId,
+      baseLine,
     })
     // A run that could have changed the schema updates what the tree,
     // completions and grid editability believe — same as the Inspect apply
@@ -732,6 +736,7 @@ export class WorkbenchScreen extends LitElement {
         @table-inspect=${this._onTableInspect}
         @table-create=${this._onTableCreate}
         @object-inspect=${this._onObjectInspect}
+        @object-edit=${this._onObjectEdit}
         @matview-refresh=${this._onMatviewRefresh}
         @table-truncate=${this._onTableTruncate}
         @table-drop=${this._onTableDrop}
@@ -1037,6 +1042,7 @@ export class WorkbenchScreen extends LitElement {
             .functions=${this._live.objects[activeTab.profileId]?.functions ?? []}
             @alter-columns=${this._onAlterColumns}
             @inspect-dirty=${this._onInspectDirty}
+            @object-edit=${this._onObjectEdit}
           ></table-inspect>
         </div>
       `
@@ -1050,6 +1056,7 @@ export class WorkbenchScreen extends LitElement {
             .object=${activeTab.object}
             .objectKind=${activeTab.objectKind}
             .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
+            @object-edit=${this._onObjectEdit}
           ></table-inspect>
         </div>
       `
@@ -1093,6 +1100,7 @@ export class WorkbenchScreen extends LitElement {
             .columnWidths=${this._resultColumnWidths()}
             .streamExportAvailable=${this._canStreamExport()}
             @cancel-query=${this._onCancelQuery}
+            @goto-error-line=${this._onGotoErrorLine}
             @stream-export=${this._onStreamExport}
             @load-more=${this._onLoadMore}
             @cell-edit=${this._onCellEdit}
@@ -1399,6 +1407,31 @@ export class WorkbenchScreen extends LitElement {
     this._ctx.addTab({ id, kind: 'inspect-object', profileId: profile.id, object, objectKind })
   }
 
+  // "Edit" a function/view: fetch its re-runnable CREATE DDL and open it in a
+  // new SQL tab. It is not auto-run — the user reviews and executes it.
+  private async _onObjectEdit(event: Event) {
+    const { ref } = (event as CustomEvent<ObjectEditDetail>).detail
+    const profile = this._config.activeProfile()
+    if (!profile) return
+    const childDb = this._ctx.activeChildDb
+    let result
+    try {
+      result = await window.sqlkit.getObjectDdl(profile.id, childDb, ref)
+    } catch (error) {
+      this._dialogs.notice(t('explorer.editFailedTitle'), (error as Error).message)
+      return
+    }
+    if (!result.success) {
+      this._dialogs.notice(t('explorer.editFailedTitle'), result.error)
+      return
+    }
+    // Bail if the context changed while the DDL loaded — a stale tab would
+    // belong to the wrong database.
+    if (this._ctx.activeDbId !== profile.id || this._ctx.activeChildDb !== childDb) return
+    const id = `edit:${profile.id}:${childDb ?? ''}:${ref.kind}:${ref.schema ?? ''}:${ref.name}`
+    this._ctx.addTab({ id, kind: 'sql', name: `${ref.name}.sql`, path: null, content: result.sql, savedContent: result.sql })
+  }
+
   // A search match opens the file and lands the cursor on the matched line.
   private async _onSearchOpen(event: Event) {
     const { file, line } = (event as CustomEvent<SearchOpenDetail>).detail
@@ -1438,8 +1471,15 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onRunQuery(event: Event) {
-    const { sql } = (event as CustomEvent<RunQueryDetail>).detail
-    void this._runSql(sql)
+    const { sql, line } = (event as CustomEvent<RunQueryDetail>).detail
+    void this._runSql(sql, undefined, undefined, undefined, line)
+  }
+
+  // "Line N" click on a failed run: the error shown belongs to the active tab,
+  // so the reveal targets the editor currently mounted.
+  private _onGotoErrorLine(event: Event) {
+    const { line } = (event as CustomEvent<{ line: number }>).detail
+    this.renderRoot.querySelector('sql-editor')?.revealLine(line)
   }
 
   // The pending runQuery settles on its own with "Query cancelled." — this

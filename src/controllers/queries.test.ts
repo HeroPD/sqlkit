@@ -75,6 +75,28 @@ describe('QueriesController.execute', () => {
     expect(controller.tasks[0]?.status).toBe('done')
   })
 
+  it('maps a driver error line to a document line via baseLine', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute({ ...runArgs, baseLine: 10 })
+    settle({ success: false, error: 'syntax error', errorLine: 3 })
+    await done
+
+    expect(controller.runFor('t1')).toMatchObject({ phase: 'error', errorLine: 12 })
+  })
+
+  it('omits the error line when the run has no editor origin', async () => {
+    const { settle } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute(runArgs)
+    settle({ success: false, error: 'syntax error', errorLine: 3 })
+    await done
+
+    expect(controller.runFor('t1')).toEqual({ phase: 'error', error: 'syntax error', sql: 'SELECT 1' })
+  })
+
   it('marks a task cancelled from the typed response flag, not the error text', async () => {
     const { settle } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)

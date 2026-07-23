@@ -50,8 +50,8 @@ export class EditorTab extends LitElement {
     :host {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 0 12px;
+      gap: 4px;
+      padding: 0 8px;
       min-width: 100px;
       max-width: 200px;
       font-size: var(--font-size);
@@ -75,16 +75,6 @@ export class EditorTab extends LitElement {
       /* Paint the 1px divider in the editor color so the active tab merges
          into the editor below instead of being separated by a line. */
       border-bottom-color: var(--tab-active-bg);
-    }
-
-    :host([active])::after {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 2.5px;
-      background: var(--tab-active-top);
     }
 
     .label {

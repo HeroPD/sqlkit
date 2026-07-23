@@ -479,6 +479,21 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { columns: [], sections: [{ title: 'Definition', rows: [{ name: object.name, definition }] }] }
     },
 
+    async objectDdl(ref, childDb = null) {
+      // SHOW CREATE can't be parameterized, so the identifier is quoted inline.
+      const target = ref.schema
+        ? `${dialect.quoteIdent(ref.schema)}.${dialect.quoteIdent(ref.name)}`
+        : dialect.quoteIdent(ref.name)
+      const objectType = ref.kind === 'function' ? 'FUNCTION' : 'VIEW'
+      const column = ref.kind === 'function' ? 'Create Function' : 'Create View'
+      const rows = await metaRows<Record<string, string | null>>(`SHOW CREATE ${objectType} ${target}`, [], childDb)
+      const create = rows[0]?.[column]
+      if (!create) throw new Error(`${objectType === 'FUNCTION' ? 'Function' : 'View'} ${ref.name} was not found.`)
+      // MySQL has no CREATE OR REPLACE for functions (and SHOW CREATE VIEW omits
+      // it), so drop-then-create makes the statement re-runnable.
+      return `DROP ${objectType} IF EXISTS ${target};\n\n${create}`
+    },
+
     async inspectServer(childDb = null) {
       type Row = { name: string; definition: string }
       const engines = await metaRows<Row>(

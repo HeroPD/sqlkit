@@ -1,7 +1,7 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { icons, scrollbars, typography } from '../shared-styles'
-import type { ColumnRef, DbObject, DbObjectKind, Engine, InspectColumn, TableInspection, TableRef } from '../electron'
+import type { ColumnRef, DbObject, DbObjectKind, Engine, InspectColumn, ObjectDdlRef, TableInspection, TableRef } from '../electron'
 import { dialectFor } from '../dialect'
 import { cellsToTsv } from '../result-export'
 import { buildCreateTable, canAddConstraint, type ColumnAdd, type ColumnAlter } from '../sql-write'
@@ -519,6 +519,7 @@ export class TableInspect extends LitElement {
     if (!menu) return ''
     const items: MenuItem[] = [{ id: 'copy-name', label: t('inspect.copyName') }]
     if (menu.definition) items.push({ id: 'copy-definition', label: t('inspect.copyDefinition') })
+    if (this._editableDdlRef()) items.push({ id: 'edit-ddl', label: t('inspect.editSource'), separatorBefore: true })
     const dropTarget = menu.section ? this._dropTarget(menu.section) : null
     if (menu.operationIndex !== undefined) {
       const staged = this._operations[menu.operationIndex]
@@ -571,9 +572,28 @@ export class TableInspect extends LitElement {
     return original.length > 32 ? `${original.slice(0, 32)}…` : original
   }
 
+  // The function/view whose CREATE DDL the "Edit Source" action opens, or null
+  // when the inspected target has no editable DDL (a plain table, a type, a new
+  // table draft).
+  private _editableDdlRef(): ObjectDdlRef | null {
+    if (this.object && this.objectKind === 'function') {
+      return { schema: this.object.schema, name: this.object.name, kind: 'function', detail: this.object.detail }
+    }
+    const table = this.table
+    if (!this.createTable && table && (table.kind === 'view' || table.kind === 'matview')) {
+      return { schema: table.schema, name: table.name, kind: table.kind, detail: null }
+    }
+    return null
+  }
+
   private _onMenuPick(id: string, menu: RowMenu) {
-    if (id === 'copy-name') return void navigator.clipboard.writeText(menu.name)
-    if (id === 'copy-definition') return void navigator.clipboard.writeText(menu.definition ?? '')
+    if (id === 'copy-name') return void window.sqlkit.writeClipboardText(menu.name)
+    if (id === 'copy-definition') return void window.sqlkit.writeClipboardText(menu.definition ?? '')
+    if (id === 'edit-ddl') {
+      const ref = this._editableDdlRef()
+      if (ref) this.dispatchEvent(new CustomEvent<{ ref: ObjectDdlRef }>('object-edit', { detail: { ref }, bubbles: true, composed: true }))
+      return
+    }
     if (id === 'edit-object' && menu.operationIndex !== undefined) return this._editOperation(menu.operationIndex)
     if (id === 'rename-object' && menu.section) return this._beginSectionRename(menu.section, menu.name)
     if (id === 'remove-staged-operation' && menu.operationIndex !== undefined) {
@@ -954,21 +974,30 @@ export class TableInspect extends LitElement {
     return this._fieldText(column, field as EditField)
   }
 
-  // Copies the selected rectangle as TSV.
+  // Copies the selected rectangle as TSV, or a single cell as its raw text.
   private _copySelection() {
     const s = this._sel
     if (!s) return
     const rowCount = this._gridRowCount(s.grid)
     const fields = this._gridFields(s.grid)
     if (!rowCount) return
+    const r0 = Math.max(0, Math.min(s.r0, s.r1))
     const r1 = Math.min(rowCount - 1, Math.max(s.r0, s.r1))
     const c0 = Math.min(s.c0, s.c1)
     const c1 = Math.max(s.c0, s.c1)
+    // A single-cell copy is a plain-text grab (e.g. a multi-line function body);
+    // hand back the raw value. TSV field escaping only earns its keep across a
+    // multi-cell rectangle, where a stray tab/newline would split the paste.
+    if (r0 === r1 && c0 === c1) {
+      const field = fields[c0]
+      if (field) void window.sqlkit.writeClipboardText(this._cellValue(s.grid, r0, field))
+      return
+    }
     const cells: unknown[][] = []
-    for (let r = Math.max(0, Math.min(s.r0, s.r1)); r <= r1; r += 1) {
+    for (let r = r0; r <= r1; r += 1) {
       cells.push(fields.slice(c0, c1 + 1).map((field) => this._cellValue(s.grid, r, field)))
     }
-    if (cells.length) void navigator.clipboard.writeText(cellsToTsv(cells))
+    if (cells.length) void window.sqlkit.writeClipboardText(cellsToTsv(cells))
   }
 
   private _focusGrid() {
@@ -1671,7 +1700,7 @@ export class TableInspect extends LitElement {
                               this._commitSectionRename((event.currentTarget as HTMLInputElement).value)
                             }}
                           />`
-                        : row.name}
+                        : html`<span class="name-text">${row.name}</span>`}
                       ${stagedIndex >= 0
                         ? html`<button
                             class="remove-staged"
@@ -1685,9 +1714,8 @@ export class TableInspect extends LitElement {
                           ><i class="icon icon-x" aria-hidden="true"></i></button>`
                         : ''}
                     </td>
-                    <td data-field="definition" class="mono def${this._isSelected(grid, index, 1) ? ' selected' : ''}" title=${row.definition}>
-                      ${highlightDefinition(row.definition)}
-                    </td>
+                    <td data-field="definition" class="mono def${this._isSelected(grid, index, 1) ? ' selected' : ''}" title=${row.definition}
+                      >${highlightDefinition(row.definition)}</td>
                   </tr>
                 `},
               )}
@@ -2311,7 +2339,15 @@ export class TableInspect extends LitElement {
         position: relative;
         color: var(--text);
         overflow: hidden;
-        white-space: nowrap;
+      }
+
+      /* Clamp a long object name to two lines instead of clipping it on one. */
+      .name-text {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        word-break: break-word;
       }
 
       .staged-add .name-cell,
@@ -2320,10 +2356,11 @@ export class TableInspect extends LitElement {
         padding-right: 24px;
       }
 
-      /* No pre-wrap: a definition's own newlines (trigger bodies) collapse and
-         the text wraps normally instead of stretching the row. */
+      /* Definitions render verbatim; preserve the source's own newlines and
+         indentation (function/trigger bodies) and wrap long single lines. */
       .def {
         color: var(--text-2);
+        white-space: pre-wrap;
         word-break: break-word;
       }
 

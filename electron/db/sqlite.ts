@@ -201,6 +201,22 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
       return request({ type: 'inspectTable', table })
     },
 
+    async objectDdl(ref) {
+      // SQLite has no stored functions or materialized views; only plain views
+      // carry editable DDL (their CREATE text lives in sqlite_master).
+      if (ref.kind !== 'view') throw new Error(`SQLite has no editable ${ref.kind} objects.`)
+      const result = await request({
+        type: 'query',
+        sql: "select sql from sqlite_master where type = 'view' and name = ?",
+        params: [ref.name],
+      })
+      const create = result.rows[0]?.[0]
+      if (typeof create !== 'string' || !create) throw new Error(`View ${ref.name} was not found.`)
+      // No CREATE OR REPLACE VIEW in SQLite, so drop-then-create is re-runnable.
+      const quoted = `"${ref.name.replaceAll('"', '""')}"`
+      return `DROP VIEW IF EXISTS ${quoted};\n\n${create}`
+    },
+
     async cancel(executionId) {
       // Only entries with an executionId (queries, exports) are cancellable:
       // runBatch/runDdl saves never get one, so even a blanket cancel leaves
