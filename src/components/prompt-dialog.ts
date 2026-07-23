@@ -103,7 +103,7 @@ export class PromptDialog extends LitElement {
 
       .panel {
         width: min(380px, calc(100vw - 80px));
-        padding: 18px 20px;
+        padding: 16px;
         gap: 6px;
       }
 
@@ -114,7 +114,7 @@ export class PromptDialog extends LitElement {
         color: var(--input-fg);
         background: var(--input-bg);
         border: 1px solid var(--border);
-        border-radius: 4px;
+        border-radius: 6px;
         outline: none;
       }
 
@@ -126,7 +126,7 @@ export class PromptDialog extends LitElement {
         display: flex;
         justify-content: flex-end;
         gap: 8px;
-        margin-top: 12px;
+        margin-top: 14px;
       }
     `,
   ]

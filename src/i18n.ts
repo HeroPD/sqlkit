@@ -501,8 +501,6 @@ const enUS = {
   'editing.cannotSaveEditTitle': 'Cannot save an edit',
   'editing.saveRowNotLoaded': 'A row is no longer loaded in the current result.',
   'editing.saveMissingPrimaryKey': "A row's primary key value is missing from the result.",
-  'editing.cannotSafelyDeleteTitle': 'Cannot safely delete this row',
-  'editing.deleteNeedsAllColumns': 'Refresh with every table column in the result before deleting. SqlKit Studio uses the original row values to avoid deleting a row changed by another session.',
   'editing.cannotDeleteRowTitle': 'Cannot delete this row',
   'editing.cannotDeleteRowsTitle': 'Cannot delete rows',
   'editing.noRowsSelected': 'No rows are selected.',

@@ -311,15 +311,74 @@ describe('buildDraftInserts', () => {
 })
 
 describe('buildDeleteRows', () => {
-  it('builds a Postgres DELETE for selected row keys', () => {
+  it('collapses single-column keys into one IN list', () => {
     const { sql, params } = buildDeleteRows({
       table: users,
-      rows: [[{ name: 'id', value: 1 }], [{ name: 'id', value: 2 }]],
+      rows: [[{ name: 'id', value: 1 }], [{ name: 'id', value: 2 }], [{ name: 'id', value: 3 }]],
       engine: 'postgresql',
     })
 
-    expect(sql).toBe('DELETE FROM "public"."users"\n WHERE ("id" IS NOT DISTINCT FROM $1) OR ("id" IS NOT DISTINCT FROM $2)')
-    expect(params).toEqual([1, 2])
+    expect(sql).toBe('DELETE FROM "public"."users"\n WHERE "id" IN ($1, $2, $3)')
+    expect(params).toEqual([1, 2, 3])
+  })
+
+  it('keeps IN comparisons exact per engine', () => {
+    const mysqlText = buildDeleteRows({
+      table: users,
+      rows: [
+        [{ name: 'name', value: 'Ada', columnMeta: col({ name: 'name', dataType: 'varchar(255)' }) }],
+        [{ name: 'name', value: 'Bob', columnMeta: col({ name: 'name', dataType: 'varchar(255)' }) }],
+      ],
+      engine: 'mysql',
+    })
+    expect(mysqlText.sql).toContain('BINARY `name` IN (?, ?)')
+
+    const mysqlInt = buildDeleteRows({
+      table: users,
+      rows: [
+        [{ name: 'id', value: '9223372036854775807', columnMeta: col({ name: 'id', dataType: 'bigint unsigned' }) }],
+        [{ name: 'id', value: '2', columnMeta: col({ name: 'id', dataType: 'bigint unsigned' }) }],
+      ],
+      engine: 'mysql',
+    })
+    expect(mysqlInt.params).toEqual([9223372036854775807n, 2n])
+
+    const mysqlDecimal = buildDeleteRows({
+      table: users,
+      rows: [
+        [{ name: 'price', value: '12.50', columnMeta: col({ name: 'price', dataType: 'decimal(10,2)' }) }],
+        [{ name: 'price', value: '7', columnMeta: col({ name: 'price', dataType: 'decimal(10,2)' }) }],
+      ],
+      engine: 'mysql',
+    })
+    expect(mysqlDecimal.sql).toContain('`price` IN (CAST(? AS DECIMAL(65,2)), CAST(? AS DECIMAL(65,0)))')
+
+    const sqlite = buildDeleteRows({
+      table: { schema: null, name: 'users', kind: 'table' },
+      rows: [[{ name: 'id', value: 1 }], [{ name: 'id', value: 2 }]],
+      engine: 'sqlite',
+    })
+    expect(sqlite.sql).toBe('DELETE FROM "users"\n WHERE "id" COLLATE BINARY IN (?, ?)')
+
+    const mssqlText = buildDeleteRows({
+      table: users,
+      rows: [
+        [{ name: 'name', value: 'Ada', columnMeta: col({ name: 'name', dataType: 'nvarchar(50)' }) }],
+        [{ name: 'name', value: 'Bob', columnMeta: col({ name: 'name', dataType: 'nvarchar(50)' }) }],
+      ],
+      engine: 'sqlserver',
+    })
+    expect(mssqlText.sql).toContain('[name] COLLATE Latin1_General_100_BIN2 IN (@p1, @p2)')
+  })
+
+  it('falls back to null-safe predicates when a key value is NULL', () => {
+    const { sql, params } = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: 1 }], [{ name: 'id', value: null }]],
+      engine: 'postgresql',
+    })
+    expect(sql).toBe('DELETE FROM "public"."users"\n WHERE ("id" IS NOT DISTINCT FROM $1)\n    OR ("id" IS NULL)')
+    expect(params).toEqual([1])
   })
 
   it('supports SQLite placeholders and composite primary keys', () => {
@@ -329,8 +388,23 @@ describe('buildDeleteRows', () => {
       engine: 'sqlite',
     })
 
-    expect(sql).toBe('DELETE FROM "line_items"\n WHERE ("order_id" COLLATE BINARY IS ? AND "sku" COLLATE BINARY IS ?)')
+    expect(sql).toBe('DELETE FROM "line_items"\n WHERE "order_id" COLLATE BINARY IS ? AND "sku" COLLATE BINARY IS ?')
     expect(params).toEqual([10, 'A1'])
+  })
+
+  it('joins composite-key rows with newline-separated OR groups', () => {
+    const { sql } = buildDeleteRows({
+      table: { schema: null, name: 'line_items', kind: 'table' },
+      rows: [
+        [{ name: 'order_id', value: 10 }, { name: 'sku', value: 'A1' }],
+        [{ name: 'order_id', value: 11 }, { name: 'sku', value: 'B2' }],
+      ],
+      engine: 'postgresql',
+    })
+    expect(sql).toBe(
+      'DELETE FROM "line_items"\n WHERE ("order_id" IS NOT DISTINCT FROM $1 AND "sku" IS NOT DISTINCT FROM $2)'
+      + '\n    OR ("order_id" IS NOT DISTINCT FROM $3 AND "sku" IS NOT DISTINCT FROM $4)',
+    )
   })
 
   it('uses IS NULL for optimistic row guards', () => {
@@ -372,6 +446,13 @@ describe('buildDeleteRows', () => {
   it('throws without rows or primary keys', () => {
     expect(() => buildDeleteRows({ table: users, rows: [], engine: 'postgresql' })).toThrow()
     expect(() => buildDeleteRows({ table: users, rows: [[]], engine: 'postgresql' })).toThrow()
+  })
+
+  it('rejects a deleted row wider than the parameter ceiling wherever it lands', () => {
+    const wide = Array.from({ length: 901 }, (_, index) => ({ name: `c${index}`, value: index }))
+    expect(() => buildDeleteRowBatches({ table: users, rows: [wide], engine: 'sqlite' })).toThrow(/bind parameters/i)
+    expect(() => buildDeleteRowBatches({ table: users, rows: [[{ name: 'id', value: 1 }, { name: 'v', value: 2 }], wide], engine: 'sqlite' }))
+      .toThrow(/bind parameters/i)
   })
 })
 

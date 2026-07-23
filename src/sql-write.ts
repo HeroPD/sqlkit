@@ -725,19 +725,48 @@ function orderColumnRenames(pairs: Array<{ from: string; to: string }>): Array<{
   return ordered
 }
 
+// Rows keyed by one shared non-null column can collapse into a single IN list;
+// NULLs, composite keys, or unguardable types keep the per-row OR predicates.
+const canUseMembership = (engine: Engine, rows: RowKey[]): boolean => {
+  if (rows.length < 2) return false
+  const first = rows[0]![0]!
+  return rows.every((pks) => pks.length === 1 && pks[0]!.name === first.name && pks[0]!.value != null)
+    && supportsOptimisticComparison(engine, first.columnMeta)
+}
+
+// `col IN (…)` with comparisonPredicate's exactness moved onto the shared left
+// side (binary/collated) and per-value DECIMAL casts kept on the parameters.
+const membershipPredicate = (engine: Engine, dialect: Dialect, rows: RowKey[], bind: (value: unknown) => string) => {
+  const first = rows[0]![0]!
+  const identifier = dialect.quoteIdent(first.name)
+  const values = rows.map((pks) => {
+    const parameter = bind(exactGuardValue(engine, pks[0]!))
+    const scale = engine === 'mysql' ? mysqlDecimalScale(pks[0]!) : null
+    return scale === null ? parameter : `CAST(${parameter} AS DECIMAL(65,${scale}))`
+  })
+  let lhs = identifier
+  if (engine === 'mysql' && isTextType(first.columnMeta)) lhs = `BINARY ${identifier}`
+  if (engine === 'sqlite') lhs = `${identifier} COLLATE BINARY`
+  if (engine === 'sqlserver' && isTextType(first.columnMeta)) lhs = `${identifier} COLLATE Latin1_General_100_BIN2`
+  return `${lhs} IN (${values.join(', ')})`
+}
+
 export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: unknown[]; expectedRows: number } {
   if (spec.rows.length === 0) throw new Error(t('write.deleteNeedsRows'))
+  if (spec.rows.some((pks) => pks.length === 0)) throw new Error(t('write.deleteNeedsPrimaryKey'))
   const dialect = dialectFor(spec.engine)
   const params: unknown[] = []
   const bind = (value: unknown) => {
     params.push(value)
     return dialect.placeholder(params.length)
   }
-  const condition = (pks: RowKey) => {
-    if (pks.length === 0) throw new Error(t('write.deleteNeedsPrimaryKey'))
-    return pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind)).join(' AND ')
-  }
-  const where = spec.rows.map((pks) => `(${condition(pks)})`).join(' OR ')
+  const condition = (pks: RowKey) =>
+    pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind)).join(' AND ')
+  const where = canUseMembership(spec.engine, spec.rows)
+    ? membershipPredicate(spec.engine, dialect, spec.rows, bind)
+    : spec.rows.length === 1
+      ? condition(spec.rows[0]!)
+      : spec.rows.map((pks) => `(${condition(pks)})`).join('\n    OR ')
   return { sql: `DELETE FROM ${quoteQualified(spec.table, dialect)}\n WHERE ${where}`, params, expectedRows: spec.rows.length }
 }
 
@@ -753,6 +782,9 @@ export function buildDeleteRowBatches(spec: DeleteRowsSpec): Array<ReturnType<ty
     if (!pending.length) throw new Error(t('write.deletedRowTooWide'))
     result.push(buildDeleteRows({ ...spec, rows: pending }))
     pending = [row]
+    if (buildDeleteRows({ ...spec, rows: pending }).params.length > parameterLimit(spec.engine)) {
+      throw new Error(t('write.deletedRowTooWide'))
+    }
   }
   if (pending.length) result.push(buildDeleteRows({ ...spec, rows: pending }))
   return result

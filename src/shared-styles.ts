@@ -135,9 +135,9 @@ export const overlay = css`
 `
 
 // App-wide control standard: every input, select, and button looks the same.
-// Buttons come in three variants — `primary` (accent fill), `secondary`
-// (subtle fill), and `link` (borderless accent text, used in lists/sidebars).
-// Components add only layout (margins, widths) on top.
+// Buttons are bordered tinted surfaces matching the overlay aesthetic —
+// `primary` (accent tint), `secondary` (neutral tint), and `link` (borderless
+// accent text, used in lists/sidebars). Components add only layout on top.
 export const controls = css`
   input,
   select {
@@ -149,7 +149,7 @@ export const controls = css`
     color: var(--input-fg);
     background: var(--input-bg);
     border: 1px solid var(--input-border);
-    border-radius: 4px;
+    border-radius: 6px;
     box-sizing: border-box;
     outline: none;
   }
@@ -176,11 +176,12 @@ export const controls = css`
 
   button {
     height: var(--control-h);
-    padding: 0 14px;
-    font-family: inherit;
+    padding: 0 12px;
+    font-family: var(--ui-font);
     font-size: var(--font-size);
-    border: none;
-    border-radius: 3px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    box-sizing: border-box;
     cursor: pointer;
   }
 
@@ -188,22 +189,28 @@ export const controls = css`
     outline: 1px solid var(--focus-border);
   }
 
-  button.primary {
-    color: var(--btn-fg);
-    background: var(--btn-bg);
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
-  button.primary:hover {
-    background: var(--btn-hover);
+  button.primary {
+    color: var(--on-accent);
+    background: var(--accent);
+  }
+
+  button.primary:hover:not(:disabled) {
+    background: var(--accent-hover);
   }
 
   button.secondary {
-    color: var(--btn-secondary-fg);
-    background: var(--btn-secondary-bg);
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 5%, transparent);
+    border-color: var(--border-subtle);
   }
 
-  button.secondary:hover {
-    background: var(--btn-secondary-hover);
+  button.secondary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text) 10%, transparent);
   }
 
   button.link {

@@ -71,7 +71,7 @@ export class ConfirmDialog extends LitElement {
 
       .panel {
         width: min(380px, calc(100vw - 80px));
-        padding: 18px 20px;
+        padding: 16px;
         gap: 6px;
       }
 
@@ -79,15 +79,16 @@ export class ConfirmDialog extends LitElement {
         display: flex;
         justify-content: flex-end;
         gap: 8px;
-        margin-top: 12px;
+        margin-top: 14px;
       }
 
-      button.danger {
-        background: color-mix(in srgb, var(--status-dot-error) 75%, #000);
+      /* Extra .primary keeps these above the shared primary:hover rule in specificity. */
+      button.primary.danger {
+        background: color-mix(in srgb, var(--status-dot-error) 78%, #000);
       }
 
-      button.danger:hover {
-        background: var(--status-dot-error);
+      button.primary.danger:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--status-dot-error) 92%, #000);
       }
     `,
   ]

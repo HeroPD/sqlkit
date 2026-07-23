@@ -70,7 +70,7 @@ describe('result edit context', () => {
     expect(buildEditSpecs(editInput, [{ row: 0, col: 4 }], 'Globex')).toMatchObject({ ok: false })
   })
 
-  it('deletes with every original column value and blocks partial projections', () => {
+  it('deletes by primary key alone, including from partial projections', () => {
     const complete = input({
       columns: ['id', 'name', 'company_id'],
       columnSources: [source(accounts, 'id'), source(accounts, 'name'), source(accounts, 'company_id')],
@@ -83,11 +83,7 @@ describe('result edit context', () => {
     const keys = rowKeysForDelete(ctx!, [0])
     expect(keys.ok).toBe(true)
     if (keys.ok) {
-      expect(keys.value[0]?.map(({ name, value }) => ({ name, value }))).toEqual([
-        { name: 'id', value: 1 },
-        { name: 'name', value: 'Ada' },
-        { name: 'company_id', value: null },
-      ])
+      expect(keys.value[0]?.map(({ name, value }) => ({ name, value }))).toEqual([{ name: 'id', value: 1 }])
     }
 
     const partial = input({
@@ -97,7 +93,10 @@ describe('result edit context', () => {
       rowCount: 1,
       durationMs: 1,
     }, 'select id, name from public.accounts')
-    expect(rowKeysForDelete(singleTableEditContext(partial)!, [0])).toMatchObject({ ok: false })
+    expect(rowKeysForDelete(singleTableEditContext(partial)!, [0])).toMatchObject({
+      ok: true,
+      value: [[{ name: 'id', value: 1 }]],
+    })
   })
 
   it('does not fall back to result column names when metadata says the PK is absent', () => {

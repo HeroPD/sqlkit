@@ -229,28 +229,14 @@ export function buildPendingUpdate(
   return table && specs.length ? { ok: true, value: { table, edits: specs } } : { ok: false, issue: cannotEditColumn }
 }
 
+// Deletes match on the primary key alone — it already identifies the row, so
+// guarding every displayed column only bloats the statement. SQL Server's
+// rowversion token still rides along via rowKey: one column, exact concurrency.
 export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): EditResult<RowKey[]> {
-  const hasSources = ctx.result.columnSources !== undefined
-  // A real version token (SQL Server rowversion) beats guarding on every
-  // column: it changes on any concurrent write and always compares cleanly.
   const version = versionGuard(ctx)
-  const guardColumns = version ? [version.columnMeta] : ctx.columns
-  const unsupported = ctx.engine ? guardColumns.find((column) => !supportsOptimisticComparison(ctx.engine!, column)) : undefined
+  const keyColumns = [...ctx.pkIndexes.map((pk) => pk.columnMeta), ...(version ? [version.columnMeta] : [])]
+  const unsupported = ctx.engine ? keyColumns.find((column) => !supportsOptimisticComparison(ctx.engine!, column)) : undefined
   if (unsupported) return { ok: false, issue: cannotCompareColumn(unsupported, t('editing.actionDeleteRow')) }
-  const guards = guardColumns.map((column) => {
-    const sourceIndex = columnSourceIndex(ctx.result, ctx.table, column.name)
-    const fallbackIndex = !hasSources ? simpleColumnProjectionIndex(ctx.result.columns, ctx.sql, column.name) : -1
-    return { name: column.name, index: sourceIndex >= 0 ? sourceIndex : fallbackIndex, columnMeta: column }
-  })
-  if (guards.some((guard) => guard.index < 0)) {
-    return {
-      ok: false,
-      issue: {
-        title: t('editing.cannotSafelyDeleteTitle'),
-        detail: t('editing.deleteNeedsAllColumns'),
-      },
-    }
-  }
   const keys: RowKey[] = []
   for (const rowIndex of rows) {
     if (!ctx.result.rows[rowIndex]) {
@@ -260,15 +246,10 @@ export function rowKeysForDelete(ctx: SingleTableEditContext, rows: number[]): E
     if (pks.some((pk) => pk.value === null || pk.value === undefined)) {
       return { ok: false, issue: { title: t('editing.cannotDeleteRowTitle'), detail: t('editing.missingPrimaryKey') } }
     }
-    const byName = new Map(pks.map((key) => [key.name.toLowerCase(), key]))
-    for (const guard of guards) {
-      if (!byName.has(guard.name.toLowerCase())) byName.set(guard.name.toLowerCase(), {
-        name: guard.name,
-        value: ctx.result.rows[rowIndex]?.[guard.index],
-        columnMeta: guard.columnMeta,
-      })
+    if (version && !pks.some((key) => key.name.toLowerCase() === version.name.toLowerCase())) {
+      pks.push({ name: version.name, value: ctx.result.rows[rowIndex]?.[version.index], columnMeta: version.columnMeta })
     }
-    keys.push([...byName.values()])
+    keys.push(pks)
   }
   return keys.length ? { ok: true, value: keys } : { ok: false, issue: { title: t('editing.cannotDeleteRowsTitle'), detail: t('editing.noRowsSelected') } }
 }

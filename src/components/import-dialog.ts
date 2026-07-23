@@ -285,8 +285,8 @@ export class ImportDialog extends LitElement {
       .panel { width: min(760px, calc(100vw - 64px)); max-height: calc(100vh - 64px); padding: 18px 20px; gap: 12px; overflow: hidden; }
       .toolbar, .options, .footer, .actions { display: flex; align-items: center; gap: 10px; }
       .toolbar { justify-content: space-between; }
-      .file { display: inline-flex; align-items: center; width: min(360px, 55%); height: var(--control-h); padding: 0 14px; overflow: hidden; color: var(--btn-secondary-fg); white-space: nowrap; text-overflow: ellipsis; background: var(--btn-secondary-bg); border-radius: 3px; cursor: pointer; }
-      .file:hover { background: var(--btn-secondary-hover); }
+      .file { display: inline-flex; align-items: center; width: min(360px, 55%); height: var(--control-h); padding: 0 12px; overflow: hidden; color: var(--text); white-space: nowrap; text-overflow: ellipsis; background: color-mix(in srgb, var(--text) 5%, transparent); border: 1px solid var(--border-subtle); border-radius: 6px; box-sizing: border-box; cursor: pointer; }
+      .file:hover { background: color-mix(in srgb, var(--text) 10%, transparent); }
       .file input { display: none; }
       .compact { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: var(--font-size-sm); }
       .compact select { width: 120px; }
