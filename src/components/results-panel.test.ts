@@ -200,7 +200,7 @@ describe('results-panel multiple and paged results', () => {
 
 describe('results-panel collapse toggle', () => {
   const collapseButton = (el: HTMLElement) =>
-    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label$="results panel"]')!
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label*="results panel"]')!
 
   it('toggles the chevron and dispatches toggle-collapse on click', async () => {
     const el = await mount()

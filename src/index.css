@@ -34,7 +34,7 @@
   --sidebar-w: 280px;
   --tab-h: 35px;
   --panel-header-h: 35px;
-  --status-bar-h: 22px;
+  --status-bar-h: 30px;
 
   --bg: #13161d;
   --sidebar-bg: #181c25;
@@ -53,9 +53,8 @@
   --tab-inactive-fg: #808996;
   --tab-border: #252c3a;
   --tab-hover-bg: #1d2430;
-  --status-bar-bg: #007acc;
-  --status-bar-fg: #ffffff;
-  --status-bar-disconnected: #68217a;
+  --status-bar-bg: var(--titlebar-bg);
+  --status-bar-fg: var(--text-2);
   --status-dot-connected: #73e05a;
   --status-dot-warning: #d18616;
   --status-dot-error: #f14c4c;
@@ -140,7 +139,6 @@
   --tab-inactive-fg: #8195a8;
   --tab-border: #26384a;
   --tab-hover-bg: #192b40;
-  --status-bar-bg: #176b9c;
   --grid-border: #213347;
   --row-alt: #101c2a;
   --row-hover: #153a56;
@@ -199,7 +197,6 @@
   --tab-inactive-fg: #91857b;
   --tab-border: #39302b;
   --tab-hover-bg: #312923;
-  --status-bar-bg: #9a5926;
   --grid-border: #332b27;
   --row-alt: #1d1916;
   --row-hover: #432d20;
@@ -262,8 +259,6 @@
   --tab-inactive-fg: #626873;
   --tab-border: #cfd3d8;
   --tab-hover-bg: #dce0e5;
-  --status-bar-bg: #0067a8;
-  --status-bar-disconnected: #68217a;
   --grid-border: #e0e3e7;
   --row-alt: #f8f9fa;
   --row-hover: #dcecf8;

@@ -840,8 +840,8 @@ export class ResultsPanel extends LitElement {
           : ''}
         <button
           class="head-action"
-          data-tooltip=${this.collapsed ? t('results.expand') : t('results.collapse')}
-          aria-label=${this.collapsed ? t('results.expand') : t('results.collapse')}
+          data-tooltip=${t(this.collapsed ? 'results.expand' : 'results.collapse', { shortcut: isMac ? '⌘J' : 'Ctrl+J' })}
+          aria-label=${t(this.collapsed ? 'results.expand' : 'results.collapse', { shortcut: isMac ? '⌘J' : 'Ctrl+J' })}
           aria-expanded=${!this.collapsed}
           @click=${this._toggleCollapse}
         >

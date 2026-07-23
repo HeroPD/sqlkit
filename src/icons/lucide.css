@@ -73,6 +73,8 @@
 .icon-link::before { content: "\e102"; }
 .icon-list::before { content: "\e106"; }
 .icon-loader-circle::before { content: "\e10a"; }
+.icon-panel-bottom::before { content: "\e42c"; }
+.icon-panel-left::before { content: "\e12a"; }
 .icon-plug::before { content: "\e37f"; }
 .icon-refresh-cw::before { content: "\e145"; }
 .icon-regex::before { content: "\e1fc"; }

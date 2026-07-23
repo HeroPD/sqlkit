@@ -38,6 +38,7 @@ import './results-panel'
 import './search-view'
 import './sql-editor'
 import './status-bar'
+import type { StatusConnection } from './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
 import { clearInspectDraftCache, dropInspectDraft, type ColumnAlterEventDetail } from './table-inspect'
@@ -875,8 +876,13 @@ export class WorkbenchScreen extends LitElement {
       <status-bar
         .workspaceName=${this.workspace?.name ?? ''}
         .contextName=${this._contextLabel()}
-        .connectedCount=${this._live.connected().length}
-        .connectedName=${this._connectedName()}
+        .connections=${this._connectionList()}
+        .sidebarOpen=${this._activeView !== null}
+        .panelOpen=${!this._layout.panelCollapsed}
+        @status-switch-database=${() => this._cmdPalette.open('databases')}
+        @status-pick-connection=${this._onStatusPickConnection}
+        @status-toggle-sidebar=${() => this._toggleSidebar()}
+        @status-toggle-panel=${() => this._layout.togglePanelCollapse()}
       ></status-bar>
     `
   }
@@ -887,10 +893,19 @@ export class WorkbenchScreen extends LitElement {
     return this._ctx.activeChildDb ? `${profile.name} · ${this._ctx.activeChildDb}` : profile.name
   }
 
-  private _connectedName() {
-    const [only, ...rest] = this._live.connected()
-    if (!only || rest.length) return ''
-    return this._config.byId(only.profileId)?.name ?? ''
+  private _connectionList(): StatusConnection[] {
+    return this._live.connected().map((status) => ({
+      profileId: status.profileId,
+      name: this._config.byId(status.profileId)?.name ?? status.profileId,
+      childDb: status.children?.find((child) => child.inUse)?.name ?? null,
+      version: status.serverVersion ?? null,
+      active: this._ctx.activeDbId === status.profileId,
+    }))
+  }
+
+  private _onStatusPickConnection(event: Event) {
+    const { profileId } = (event as CustomEvent<{ profileId: string }>).detail
+    this._setActiveDb(profileId)
   }
 
   // View-specific actions level with the sidebar title (reference layout).
