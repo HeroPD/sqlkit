@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import sql from 'mssql'
+import { EventEmitter } from 'node:events'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { ConnectionProfile } from '../../src/electron'
-import { mssqlTls, mssqlVersion, normalizeMssqlRow, tediousToMssqlType, toBindable } from './mssql'
+import { mssqlTls, mssqlVersion, normalizeMssqlRow, streamMssqlExport, tediousToMssqlType, toBindable } from './mssql'
 
 describe('mssqlVersion', () => {
   it('shortens the @@version banner to product and year', () => {
@@ -118,5 +119,58 @@ describe('tediousToMssqlType', () => {
     expect(tediousToMssqlType(meta('IntN'))).toEqual({})
     expect(tediousToMssqlType(meta('NVarChar'))).toEqual({})
     expect(tediousToMssqlType(meta('BitN'))).toEqual({})
+  })
+})
+
+describe('streamMssqlExport', () => {
+  // A fake streaming sql.Request: the test drives its recordset/row/done events.
+  const fakeRequest = () => {
+    const request = new EventEmitter() as EventEmitter & {
+      stream: boolean
+      arrayRowMode: boolean
+      pause: () => void
+      resume: () => void
+      cancel: () => void
+      query: (sqlText: string) => Promise<void>
+    }
+    request.pause = vi.fn()
+    request.resume = vi.fn()
+    request.cancel = vi.fn()
+    request.query = vi.fn(() => Promise.resolve())
+    return request
+  }
+  const fakeWriter = () => ({
+    columns: vi.fn(),
+    rows: vi.fn(() => Promise.resolve()),
+    close: vi.fn(() => Promise.resolve({ rowCount: 0 })),
+  })
+
+  it('streams one result set into the writer', async () => {
+    const request = fakeRequest()
+    const writer = fakeWriter()
+    const done = streamMssqlExport(request as unknown as sql.Request, 'select 1', writer)
+    request.emit('recordset', [{ name: 'a' }])
+    request.emit('row', [1])
+    request.emit('row', [2])
+    request.emit('done')
+    await done
+    expect(writer.columns).toHaveBeenCalledWith(['a'])
+    expect(writer.rows).toHaveBeenCalledWith([[1], [2]])
+  })
+
+  it('fails instead of merging a second result set under the first header', async () => {
+    // T-SQL statements need no semicolons, so the read-only guard can miss a
+    // batch; rows of a different shape must never land under the first header.
+    const request = fakeRequest()
+    const writer = fakeWriter()
+    const done = streamMssqlExport(request as unknown as sql.Request, 'select 1 select 2, 3', writer)
+    request.emit('recordset', [{ name: 'a' }])
+    request.emit('row', [1])
+    request.emit('recordset', [{ name: 'b' }, { name: 'c' }])
+    request.emit('row', [2, 3])
+    request.emit('done')
+    await expect(done).rejects.toThrow('single statement')
+    expect(request.cancel).toHaveBeenCalled()
+    expect(writer.rows).not.toHaveBeenCalled()
   })
 })

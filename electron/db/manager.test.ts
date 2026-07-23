@@ -41,6 +41,7 @@ vi.mock('./driver', async (importOriginal) => {
 
 import { createConnectionManager } from './manager'
 import { PAGE_SIZE } from './result-sessions'
+import { resolveEndpoint } from './transport'
 
 const profile = (overrides: Partial<ConnectionProfile> = {}): ConnectionProfile => ({
   id: 'p1',
@@ -129,6 +130,28 @@ describe('connection manager: connect lifecycle', () => {
     expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'connected' })])
     const res = await manager.query('p1', null, 'select 1')
     expect(res.success).toBe(true)
+  })
+
+  it('tears down the tunnel, pools and buffered results when the transport drops', async () => {
+    const close = vi.fn(() => Promise.resolve())
+    const disconnect = vi.fn(() => Promise.resolve())
+    hoisted.endpoint = tunnelEndpoint(close)
+    hoisted.driver = fakeDriver({ disconnect, query: vi.fn(() => Promise.resolve(rowsResult(PAGE_SIZE + 50))) })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    const response = await manager.query('p1', null, 'select * from t')
+    if (!response.success) throw new Error(response.error)
+    const sessionId = response.result.sessionId!
+
+    const onTransportError = vi.mocked(resolveEndpoint).mock.calls.at(-1)![1]
+    onTransportError('SSH tunnel closed unexpectedly')
+
+    expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'error', error: 'SSH tunnel closed unexpectedly' })])
+    await vi.waitFor(() => {
+      expect(close).toHaveBeenCalled()
+      expect(disconnect).toHaveBeenCalled()
+    })
+    expect(manager.fetchRows(sessionId, 0, 10)).toEqual({ success: false, error: expect.stringContaining('expired') })
   })
 
   it('supersedes an in-flight connect and tears down its resources', async () => {

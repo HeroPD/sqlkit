@@ -717,7 +717,7 @@ export class ResultsPanel extends LitElement {
     const showWriteTools = exportable && canEditResult && (this.rowEditable || pendingCount > 0)
     const canToggleRecord = exportable && (this._record !== null || (this._sel ? this._refAt(this._sel.r1) !== null : false))
     const runSql = this.run.phase === 'done' || this.run.phase === 'error' ? this.run.sql : undefined
-    const canFilter = !!runSql && isFilterableQuery(runSql)
+    const canFilter = !!runSql && isFilterableQuery(runSql, this.engine)
     const selected = this.rowEditable && canEditResult ? this._selectedRefs() : { results: [], drafts: [] }
     const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
@@ -1970,10 +1970,10 @@ export class ResultsPanel extends LitElement {
   // grid-injected sort, else the query's own ORDER BY parsed from the SQL.
   private _sortState(result: QueryResult): { sortable: boolean; current: QuerySort | null } {
     const sql = this.run.phase === 'done' ? this.run.sql : undefined
-    const sortable = !!sql && isReorderableQuery(sql)
+    const sortable = !!sql && isReorderableQuery(sql, this.engine)
     let current: QuerySort | null = sortable ? this.sort : null
     if (!current && sortable && sql) {
-      const parsed = activeSort(sql, result.columns)
+      const parsed = activeSort(sql, result.columns, this.engine)
       if (parsed) current = { columnIndex: parsed.index, direction: parsed.dir }
     }
     return { sortable, current }

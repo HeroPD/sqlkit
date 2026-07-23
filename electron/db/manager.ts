@@ -8,6 +8,7 @@ import type {
   DbObject,
   DbObjectKind,
   DdlResult,
+  Engine,
   FetchRowsResult,
   InspectResult,
   ObjectDdlRef,
@@ -32,7 +33,7 @@ import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
 type ConnectionResources = { driver: Driver | null; tunnel: Tunnel | null }
 type Active =
   | ({ phase: 'connecting'; profileId: string } & ConnectionResources)
-  | { phase: 'connected'; profileId: string; driver: Driver; tunnel: Tunnel | null; serverVersion: string }
+  | { phase: 'connected'; profileId: string; engine: Engine; driver: Driver; tunnel: Tunnel | null; serverVersion: string }
   | ({ phase: 'error'; profileId: string; error: string } & ConnectionResources)
 
 export type ConnectionManager = ReturnType<typeof createConnectionManager>
@@ -105,8 +106,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   // Drops a stale 'error' entry so the status list stops reporting a failure for
   // settings that no longer exist (e.g. after the profile is edited and saved).
   // A live or in-flight connection is left untouched; teardown here is a no-op
-  // for a failed connect (already cleaned up) and closes any lingering pool/tunnel
-  // left by a transport error.
+  // for a failed connect or transport error (both already cleaned up).
   async function clearError(profileId: string) {
     if (connections.get(profileId)?.phase === 'error') await disconnect(profileId)
   }
@@ -145,11 +145,19 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
 
     // A tunnel that drops after it was established won't recover on its own and
-    // takes the pools under it with it, so flag the connection as failed. Only
-    // flag the session that actually failed; a reconnect may have already
-    // replaced this entry.
+    // takes the pools under it with it, so flag the connection as failed and
+    // free everything it held — pools, listener, buffered results — instead of
+    // keeping them until the user reconnects. Only the session that actually
+    // failed; a reconnect may have already replaced this entry.
     const onTransportError = (message: string) => {
-      if (isCurrent()) register({ phase: 'error', profileId: profile.id, error: message, ...resources })
+      if (!isCurrent()) return
+      sessions.closeProfile(profile.id)
+      register({ phase: 'error', profileId: profile.id, error: message, driver: null, tunnel: null })
+      // Tunnel first: a pool drain can hang waiting on sockets that ride it.
+      void (async () => {
+        await resources.tunnel?.close().catch(() => {})
+        await resources.driver?.disconnect().catch(() => {})
+      })()
     }
 
     // Pool clients drop routinely while idle (managed-database idle timeouts,
@@ -180,6 +188,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       register({
         profileId: profile.id,
         phase: 'connected',
+        engine: profile.engine,
         serverVersion,
         driver: resources.driver,
         tunnel: resources.tunnel,
@@ -282,10 +291,11 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     format: ExportFormat,
     executionId?: string,
   ): Promise<{ success: boolean; rowCount?: number; error?: string; cancelled?: boolean }> {
-    const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: t('connection.notConnected') }
+    const active = connections.get(profileId)
+    if (active?.phase !== 'connected') return { success: false, error: t('connection.notConnected') }
+    const driver = active.driver
     if (!driver.exportQuery) return { success: false, error: t('connection.exportUnsupported') }
-    if (!isReadOnlyQuery(sql)) return { success: false, error: t('export.readOnlyOnly') }
+    if (!isReadOnlyQuery(sql, active.engine)) return { success: false, error: t('export.readOnlyOnly') }
     try {
       const { rowCount } = await driver.exportQuery({ sql, params: params ?? [], childDb, sort, filter, filePath, format, executionId })
       return { success: true, rowCount }

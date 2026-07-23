@@ -822,7 +822,7 @@ function streamQuery(
 // Streams every row of a read-only query into `writer` with backpressure: while
 // a chunk is written to disk the request is paused so the server can't outrun
 // the file. Rows are normalized losslessly (like the buffered path); no row cap.
-function streamMssqlExport(
+export function streamMssqlExport(
   request: sql.Request,
   sqlText: string,
   writer: ExportWriter,
@@ -859,8 +859,14 @@ function streamMssqlExport(
       }, fail)
     }
     request.on('recordset', (recordset: MssqlColumn[]) => {
-      // Read-only single result set — the first recordset defines the columns.
-      if (columnsSet) return
+      // A second result set (T-SQL needs no semicolons between statements, so
+      // the read-only guard can miss a batch) would silently merge rows of a
+      // different shape under the first header — fail the export instead.
+      if (columnsSet) {
+        fail(new Error(t('export.singleStatement')))
+        try { request.cancel() } catch { /* request may already be complete */ }
+        return
+      }
       fields = recordset
       writer.columns(recordset.map((column) => column.name))
       columnsSet = true

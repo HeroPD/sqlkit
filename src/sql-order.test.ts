@@ -25,6 +25,12 @@ describe('isReorderableQuery', () => {
   it('ignores semicolons inside strings', () => {
     expect(isReorderableQuery("SELECT ';' AS c FROM users")).toBe(true)
   })
+
+  it('masks dialect-specific quoting and comments by engine', () => {
+    expect(isReorderableQuery('SELECT [a;b] FROM t', 'sqlserver')).toBe(true)
+    expect(isReorderableQuery('SELECT 1 # ; DROP TABLE t', 'mysql')).toBe(true)
+    expect(isReorderableQuery('SELECT $$ ; drop $$ AS v', 'postgresql')).toBe(true)
+  })
 })
 
 describe('applyOrderBy', () => {
@@ -57,6 +63,19 @@ describe('applyOrderBy', () => {
   it('does not treat LIMIT inside a subquery as the outer tail', () => {
     expect(applyOrderBy('SELECT * FROM (SELECT * FROM t LIMIT 3) s', asc('"x"'))).toBe(
       'SELECT * FROM (SELECT * FROM t LIMIT 3) s\nORDER BY "x" ASC',
+    )
+  })
+
+  it('does not treat a SQL Server bracketed identifier as a clause keyword', () => {
+    expect(applyOrderBy('SELECT [limit] FROM t', asc('1'), 'sqlserver')).toBe('SELECT [limit] FROM t\nORDER BY 1 ASC')
+    expect(applyOrderBy('SELECT [order] FROM t ORDER BY 1', desc('2'), 'sqlserver')).toBe(
+      'SELECT [order] FROM t\nORDER BY 2 DESC',
+    )
+  })
+
+  it('does not move the ORDER BY into a MySQL # comment', () => {
+    expect(applyOrderBy('SELECT * FROM t # limit note', asc('1'), 'mysql')).toBe(
+      'SELECT * FROM t # limit note\nORDER BY 1 ASC',
     )
   })
 })
@@ -108,5 +127,18 @@ describe('isReadOnlyQuery', () => {
   it('rejects multi-statement scripts', () => {
     expect(isReadOnlyQuery('SELECT 1; DROP TABLE t')).toBe(false)
     expect(isReadOnlyQuery('')).toBe(false)
+  })
+
+  it('classifies by the session sql_mode flags', () => {
+    const smuggled = "SELECT 'abc\\'; DROP TABLE t; SELECT '1'"
+    // Default escaping: \' is an escaped quote, so this is one read-only SELECT.
+    expect(isReadOnlyQuery(smuggled, 'mysql')).toBe(true)
+    // NO_BACKSLASH_ESCAPES: the string ends at \', making this three statements.
+    expect(isReadOnlyQuery(smuggled, 'mysql', { noBackslashEscapes: true })).toBe(false)
+  })
+
+  it('masks a MySQL # comment before looking for CTE writes', () => {
+    expect(isReadOnlyQuery('WITH x AS (SELECT 1) SELECT * FROM x # update note', 'mysql')).toBe(true)
+    expect(isReadOnlyQuery('WITH x AS (UPDATE t SET a = 1) SELECT 1', 'mysql')).toBe(false)
   })
 })

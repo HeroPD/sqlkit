@@ -129,7 +129,12 @@ export async function openSshTunnel(
         : ''
       const finalError = rejectionMessage ? new Error(`${rejectionMessage}${mismatchHint}`) : error
       if (settled) {
-        if (!closing) onError(`SSH tunnel: ${finalError.message}`)
+        // The session is gone for good: free the local listener and forwarded
+        // sockets before reporting, so nothing keeps listening on a dead tunnel.
+        if (!closing) {
+          void close()
+          onError(`SSH tunnel: ${finalError.message}`)
+        }
         return
       }
       settled = true
@@ -139,7 +144,10 @@ export async function openSshTunnel(
 
     client.on('error', fail)
     client.on('close', () => {
-      if (settled && !closing) onError('SSH tunnel closed unexpectedly')
+      if (settled && !closing) {
+        void close()
+        onError('SSH tunnel closed unexpectedly')
+      }
     })
 
     client.on('ready', () => {

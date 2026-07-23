@@ -7,6 +7,7 @@ import type { Endpoint } from './transport'
 import { openExportWriter, type ExportWriter } from './export'
 import { sslOptions } from './postgres'
 import { prepareSqlRun } from './sql-script'
+import { isReadOnlyQuery } from '../../src/sql-order'
 import type { SqlModeFlags } from '../../src/sql-mask'
 import { t } from '../../src/i18n'
 
@@ -384,6 +385,10 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
     async exportQuery({ sql, params, childDb, sort, filter, filePath, format, executionId }) {
       const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode })
+      // The manager's read-only gate masks with default flags; recheck with the
+      // session's real sql_mode — NO_BACKSLASH_ESCAPES can hide a second
+      // statement that this multipleStatements connection would execute.
+      if (!isReadOnlyQuery(plan.batches[0]!, 'mysql', sqlMode)) throw new Error(t('export.readOnlyOnly'))
       // Registered like query() so Stop (and disconnect) can KILL QUERY a
       // runaway export instead of it streaming to completion unstoppably.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }

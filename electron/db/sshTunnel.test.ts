@@ -17,10 +17,13 @@ vi.mock('electron', () => ({ app: { getPath: () => state.userData } }))
 // without a real bastion.
 let server: Server
 let sshPort = 0
+// The latest server-side session, so a test can drop it mid-tunnel.
+let lastClient: { end(): void } | null = null
 
 beforeAll(async () => {
   const hostKey = utils.generateKeyPairSync('ed25519').private
   server = new Server({ hostKeys: [hostKey] }, (client) => {
+    lastClient = client
     // The client aborts the handshake on a host-key mismatch; swallow the
     // resulting server-side error so it isn't an uncaught exception.
     client.on('error', () => undefined)
@@ -84,6 +87,25 @@ describe('openSshTunnel: forwarding', () => {
   it('stops accepting connections on the local port after close', async () => {
     const tunnel = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined, () => true)
     await tunnel.close()
+    const refused = await new Promise<boolean>((resolve) => {
+      const socket = net.connect(tunnel.localPort, '127.0.0.1')
+      socket.on('connect', () => {
+        socket.destroy()
+        resolve(false)
+      })
+      socket.on('error', () => resolve(true))
+    })
+    expect(refused).toBe(true)
+  }, 15000)
+
+  it('reports once and frees the local listener when the SSH session drops', async () => {
+    const errors: string[] = []
+    const tunnel = await openSshTunnel(sshConfig(), 'example.invalid', 5432, (message) => errors.push(message), () => true)
+
+    lastClient!.end() // the bastion drops the established session
+
+    await vi.waitFor(() => expect(errors.length).toBeGreaterThan(0))
+    expect(errors).toHaveLength(1)
     const refused = await new Promise<boolean>((resolve) => {
       const socket = net.connect(tunnel.localPort, '127.0.0.1')
       socket.on('connect', () => {

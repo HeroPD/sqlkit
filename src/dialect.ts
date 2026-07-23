@@ -1,4 +1,5 @@
 import type { Engine, QuerySort } from './electron'
+import type { SqlModeFlags } from './sql-mask'
 import { applyOrderBy as placeOrderBy } from './sql-order'
 
 // Per-engine SQL construction. Each backend spells things differently —
@@ -16,7 +17,7 @@ export type Dialect = {
   /** Bind placeholder for a 1-based parameter position: `$1`.. on Postgres, `?` elsewhere. */
   placeholder(index: number): string
   /** Inserts or replaces the outer query's ORDER BY for a single-column sort. */
-  applyOrderBy(sql: string, sort: QuerySort): string
+  applyOrderBy(sql: string, sort: QuerySort, mode?: SqlModeFlags): string
   /** A small browse query for a table, using this engine's row-limit syntax. */
   browseTable(qualifiedTable: string, limit: number): string
   /** Whether this engine has native column comments — drives whether the inspector
@@ -156,7 +157,7 @@ const makeDialect = (engine: Engine): Dialect => {
     placeholder: (index) => (engine === 'postgresql' ? `$${index}` : engine === 'sqlserver' ? `@p${index}` : '?'),
     // Positional ORDER BY (`ORDER BY <n>`) targets the Nth output column
     // unambiguously; a named ORDER BY breaks on duplicate or expression columns.
-    applyOrderBy: (sql, sort) => placeOrderBy(sql, { column: String(sort.columnIndex + 1), dir: sort.direction }),
+    applyOrderBy: (sql, sort, mode) => placeOrderBy(sql, { column: String(sort.columnIndex + 1), dir: sort.direction }, engine, mode),
     browseTable: (qualifiedTable, limit) =>
       engine === 'sqlserver'
         ? `SELECT TOP (${Math.max(1, Math.trunc(limit))}) * FROM ${qualifiedTable}`

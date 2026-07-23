@@ -1651,7 +1651,7 @@ export class WorkbenchScreen extends LitElement {
   private _onSortColumn(event: Event) {
     const { columnIndex, direction } = (event as CustomEvent<SortColumnDetail>).detail
     const run = this._queries.runFor(this._ctx.activeTabId)
-    if (run.phase !== 'done' || !run.sql || !isReorderableQuery(run.sql)) return
+    if (run.phase !== 'done' || !run.sql || !isReorderableQuery(run.sql, this._config.activeProfile()?.engine)) return
     void this._runSql(
       run.sql,
       direction ? { columnIndex, direction } : undefined,
@@ -1664,7 +1664,7 @@ export class WorkbenchScreen extends LitElement {
     const condition = (event as CustomEvent<{ condition: string | null }>).detail.condition
     const tabId = this._ctx.activeTabId
     const run = this._queries.runFor(tabId)
-    if ((run.phase !== 'done' && run.phase !== 'error') || !run.sql || !isFilterableQuery(run.sql)) return
+    if ((run.phase !== 'done' && run.phase !== 'error') || !run.sql || !isFilterableQuery(run.sql, this._config.activeProfile()?.engine)) return
     void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, condition)
   }
 

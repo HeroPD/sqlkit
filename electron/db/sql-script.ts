@@ -256,8 +256,8 @@ export function prepareSqlRun(args: {
   }
 
   if (args.sort) {
-    if (!isReorderableQuery(sql)) throw new Error(t('query.sortSingleSelect'))
-    sql = dialectFor(args.engine).applyOrderBy(sql, args.sort)
+    if (!isReorderableQuery(sql, args.engine, args.sqlMode)) throw new Error(t('query.sortSingleSelect'))
+    sql = dialectFor(args.engine).applyOrderBy(sql, args.sort, args.sqlMode)
   }
 
   assertSelfContainedTransaction(sql, args.engine, args.sqlMode)
