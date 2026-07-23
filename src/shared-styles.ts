@@ -229,3 +229,84 @@ export const controls = css`
     background: var(--list-hover);
   }
 `
+
+// App-wide hover tooltip: any element with a data-tooltip attribute grows a
+// delayed floating label. Defaults to below-center; add .tooltip-up to open
+// above (bottom bars), .tooltip-start / .tooltip-end to hug an edge instead
+// of centering (elements near a window edge). Font resets keep the label
+// legible inside uppercase/spaced contexts like panel heads.
+export const tooltip = css`
+  [data-tooltip] {
+    position: relative;
+  }
+
+  [data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    top: calc(100% + 7px);
+    left: 50%;
+    z-index: 20;
+    padding: 5px 7px;
+    color: var(--text);
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+    font-family: var(--ui-font);
+    font-size: var(--font-size-sm);
+    font-weight: 400;
+    letter-spacing: normal;
+    line-height: 1.25;
+    text-transform: none;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    translate: -50% -2px;
+    transition:
+      opacity 80ms ease,
+      visibility 0s linear 80ms,
+      translate 80ms ease;
+  }
+
+  [data-tooltip]:hover::after,
+  [data-tooltip]:focus-visible::after {
+    opacity: 1;
+    visibility: visible;
+    translate: -50% 0;
+    transition-delay: 400ms;
+  }
+
+  .tooltip-up[data-tooltip]::after {
+    top: auto;
+    bottom: calc(100% + 7px);
+    translate: -50% 2px;
+  }
+
+  :is(.tooltip-start, .tooltip-end)[data-tooltip]::after {
+    translate: 0 -2px;
+  }
+
+  .tooltip-up:is(.tooltip-start, .tooltip-end)[data-tooltip]::after {
+    translate: 0 2px;
+  }
+
+  .tooltip-start[data-tooltip]::after {
+    left: 0;
+  }
+
+  .tooltip-end[data-tooltip]::after {
+    right: 0;
+    left: auto;
+  }
+
+  .tooltip-up[data-tooltip]:hover::after,
+  .tooltip-up[data-tooltip]:focus-visible::after {
+    translate: -50% 0;
+  }
+
+  :is(.tooltip-start, .tooltip-end)[data-tooltip]:hover::after,
+  :is(.tooltip-start, .tooltip-end)[data-tooltip]:focus-visible::after {
+    translate: 0 0;
+  }
+`

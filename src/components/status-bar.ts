@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { icons } from '../shared-styles'
+import { icons, tooltip } from '../shared-styles'
 import { t } from '../i18n'
 import { mod } from '../platform'
 
@@ -29,6 +29,10 @@ export class StatusBar extends LitElement {
 
   @property({ type: Boolean })
   panelOpen = false
+
+  /** False when no editor tab is open, so there is no panel to toggle. */
+  @property({ type: Boolean })
+  panelEnabled = true
 
   /** Name of the ⌘K context; empty hides the segment. */
   @property()
@@ -67,8 +71,9 @@ export class StatusBar extends LitElement {
     return html`
       <footer>
         <button
-          class="item toggle ${this.sidebarOpen ? 'on' : ''}"
-          title="${t('action.toggleSidebar')} (${mod('B')})"
+          class="item toggle tooltip-up tooltip-start ${this.sidebarOpen ? 'on' : ''}"
+          data-tooltip="${t('action.toggleSidebar')} (${mod('B')})"
+          aria-label="${t('action.toggleSidebar')} (${mod('B')})"
           aria-pressed=${String(this.sidebarOpen)}
           @click=${() => this._emit('status-toggle-sidebar')}
         >
@@ -77,7 +82,7 @@ export class StatusBar extends LitElement {
         <span class="item static">${this.workspaceName || t('app.name')}</span>
         ${this.contextName
           ? html`
-              <button class="item" title=${t('action.switchDatabase')} @click=${this._switchDatabase}>
+              <button class="item tooltip-up" data-tooltip=${t('action.switchDatabase')} @click=${this._switchDatabase}>
                 <i class="icon icon-database" aria-hidden="true"></i>
                 ${this.contextName}
               </button>
@@ -85,8 +90,8 @@ export class StatusBar extends LitElement {
           : ''}
         <span class="spacer"></span>
         <button
-          class="item"
-          title=${count ? t('status.connections') : t('action.switchDatabase')}
+          class="item tooltip-up"
+          data-tooltip=${count ? t('status.connections') : t('action.switchDatabase')}
           aria-haspopup=${count ? 'menu' : undefined}
           aria-expanded=${count ? String(this._open) : undefined}
           @click=${count ? this._togglePopover : this._switchDatabase}
@@ -98,9 +103,11 @@ export class StatusBar extends LitElement {
             : ''}
         </button>
         <button
-          class="item toggle ${this.panelOpen ? 'on' : ''}"
-          title="${t('action.toggleResults')} (${mod('J')})"
+          class="item toggle tooltip-up tooltip-end ${this.panelOpen ? 'on' : ''}"
+          data-tooltip="${t('action.toggleResults')} (${mod('J')})"
+          aria-label="${t('action.toggleResults')} (${mod('J')})"
           aria-pressed=${String(this.panelOpen)}
+          ?disabled=${!this.panelEnabled}
           @click=${() => this._emit('status-toggle-panel')}
         >
           <i class="icon icon-panel-bottom" aria-hidden="true"></i>
@@ -169,6 +176,7 @@ export class StatusBar extends LitElement {
 
   static styles = [
     icons,
+    tooltip,
     css`
       :host {
         display: block;
@@ -218,10 +226,16 @@ export class StatusBar extends LitElement {
         color: var(--text);
       }
 
-      button.item:hover,
-      button.item:focus-visible {
+      button.item:hover:not(:disabled),
+      button.item:focus-visible:not(:disabled) {
         background: color-mix(in srgb, var(--text) 9%, transparent);
         outline: none;
+      }
+
+      button.item:disabled {
+        color: var(--text-3);
+        opacity: 0.45;
+        cursor: default;
       }
 
       .icon {

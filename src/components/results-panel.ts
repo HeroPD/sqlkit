@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { icons, scrollbars, typography } from '../shared-styles'
+import { icons, scrollbars, tooltip, typography } from '../shared-styles'
 import { isMac } from '../platform'
 import type { Engine, QueryResult, QuerySort } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
@@ -829,7 +829,7 @@ export class ResultsPanel extends LitElement {
         ${exportable
           ? html`
               <button
-                class="head-action"
+                class="head-action tooltip-end"
                 data-tooltip=${t('results.export')}
                 aria-label=${t('results.export')}
                 @click=${() => (this._exportOpen = true)}
@@ -839,7 +839,7 @@ export class ResultsPanel extends LitElement {
             `
           : ''}
         <button
-          class="head-action"
+          class="head-action tooltip-end"
           data-tooltip=${t(this.collapsed ? 'results.expand' : 'results.collapse', { shortcut: isMac ? '⌘J' : 'Ctrl+J' })}
           aria-label=${t(this.collapsed ? 'results.expand' : 'results.collapse', { shortcut: isMac ? '⌘J' : 'Ctrl+J' })}
           aria-expanded=${!this.collapsed}
@@ -2038,6 +2038,7 @@ export class ResultsPanel extends LitElement {
     typography,
     icons,
     scrollbars,
+    tooltip,
     css`
       :host {
         position: relative;
@@ -2074,54 +2075,6 @@ export class ResultsPanel extends LitElement {
         border: none;
         border-radius: 4px;
         cursor: pointer;
-      }
-
-      .head-action[data-tooltip]::after,
-      .filter-action[data-tooltip]::after {
-        content: attr(data-tooltip);
-        position: absolute;
-        top: calc(100% + 7px);
-        left: 50%;
-        z-index: 20;
-        padding: 5px 7px;
-        color: var(--text);
-        background: var(--input-bg);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
-        font-family: var(--ui-font);
-        font-size: var(--font-size-sm);
-        font-weight: 400;
-        letter-spacing: normal;
-        line-height: 1.25;
-        text-transform: none;
-        white-space: nowrap;
-        pointer-events: none;
-        opacity: 0;
-        visibility: hidden;
-        transform: translate(-50%, -2px);
-        transition: opacity 80ms ease, visibility 0s linear 80ms, transform 80ms ease;
-      }
-
-      .head-action[data-tooltip]:hover::after,
-      .head-action[data-tooltip]:focus-visible::after,
-      .filter-action[data-tooltip]:hover::after,
-      .filter-action[data-tooltip]:focus-visible::after {
-        opacity: 1;
-        visibility: visible;
-        transform: translate(-50%, 0);
-        transition-delay: 400ms;
-      }
-
-      .head > .head-action[data-tooltip]::after {
-        right: 0;
-        left: auto;
-        transform: translateY(-2px);
-      }
-
-      .head > .head-action[data-tooltip]:hover::after,
-      .head > .head-action[data-tooltip]:focus-visible::after {
-        transform: translateY(0);
       }
 
       .head-action:hover:not(:disabled) {

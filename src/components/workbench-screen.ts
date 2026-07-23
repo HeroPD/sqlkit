@@ -879,6 +879,7 @@ export class WorkbenchScreen extends LitElement {
         .connections=${this._connectionList()}
         .sidebarOpen=${this._activeView !== null}
         .panelOpen=${!this._layout.panelCollapsed}
+        .panelEnabled=${this._ctx.tabs.length > 0}
         @status-switch-database=${() => this._cmdPalette.open('databases')}
         @status-pick-connection=${this._onStatusPickConnection}
         @status-toggle-sidebar=${() => this._toggleSidebar()}

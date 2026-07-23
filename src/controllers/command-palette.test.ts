@@ -169,4 +169,47 @@ describe('CommandPaletteController pick dispatch', () => {
     expect(actions.setActiveDb).toHaveBeenCalledWith('p1')
     expect(ctrl.mode).toBeNull()
   })
+
+  it('lands on the remembered child when the palette closes without a pick after an all-mode connect', async () => {
+    const profile = { id: 'p1', name: 'Local', databaseMode: 'all', database: '', lastChildDb: 'appdb' } as ConnectionProfile
+    const statuses = { p1: { phase: 'connected', children: [{ name: 'postgres', inUse: true }, { name: 'appdb' }] } }
+    const { ctrl, actions, live } = setup({ connections: [profile], phase: 'disconnected', statuses })
+    ctrl.open('databases')
+    ctrl.onPick(pick('databases', 'db:p1'))
+    await new Promise((resolve) => setTimeout(resolve))
+    expect(actions.setActiveDb).not.toHaveBeenCalled() // children listed; still picking
+
+    live.phase.mockReturnValue('connected')
+    ctrl.close()
+    expect(actions.setActiveDb).toHaveBeenCalledWith('p1', 'appdb')
+    expect(live.setActiveChild).toHaveBeenCalledWith('p1', 'appdb') // driver follows off the discovery db
+  })
+
+  it('falls back to the discovery child when nothing is remembered', async () => {
+    const profile = { id: 'p1', name: 'Local', databaseMode: 'all', database: '' } as ConnectionProfile
+    const statuses = { p1: { phase: 'connected', children: [{ name: 'postgres', inUse: true }] } }
+    const { ctrl, actions, live } = setup({ connections: [profile], phase: 'disconnected', statuses })
+    ctrl.open('databases')
+    ctrl.onPick(pick('databases', 'db:p1'))
+    ctrl.close() // dismissed before the connect resolved
+    live.phase.mockReturnValue('connected')
+    await new Promise((resolve) => setTimeout(resolve))
+
+    expect(actions.setActiveDb).toHaveBeenCalledWith('p1', 'postgres')
+    expect(live.setActiveChild).not.toHaveBeenCalled() // driver is already there
+  })
+
+  it('does not auto-land when a child was picked explicitly', async () => {
+    const profile = { id: 'p1', name: 'Local', databaseMode: 'all' } as ConnectionProfile
+    const statuses = { p1: { phase: 'connected', children: [{ name: 'postgres', inUse: true }, { name: 'appdb' }] } }
+    const { ctrl, actions, live } = setup({ connections: [profile], phase: 'disconnected', statuses })
+    ctrl.open('databases')
+    ctrl.onPick(pick('databases', 'db:p1'))
+    await new Promise((resolve) => setTimeout(resolve))
+
+    live.phase.mockReturnValue('connected')
+    ctrl.onPick(pick('databases', 'child:p1:appdb'))
+    expect(actions.setActiveDb).toHaveBeenCalledTimes(1)
+    expect(actions.setActiveDb).toHaveBeenCalledWith('p1', 'appdb')
+  })
 })

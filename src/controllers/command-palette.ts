@@ -34,6 +34,11 @@ type Deps = {
 export class CommandPaletteController implements ReactiveController {
   mode: PaletteMode | null = null
 
+  // All-mode profile connected via a ⌘K parent pick whose child hasn't been
+  // chosen yet; dismissing the palette lands on its in-use database instead
+  // of leaving the fresh connection without a context.
+  private pendingAllConnect: string | null = null
+
   private host: ReactiveControllerHost
   private deps: Deps
 
@@ -46,22 +51,26 @@ export class CommandPaletteController implements ReactiveController {
   // Drop a palette left open when the workbench unmounts.
   hostDisconnected() {
     this.mode = null
+    this.pendingAllConnect = null
   }
 
   open(mode: PaletteMode) {
+    // Leaving databases mode abandons the child pick like a close would.
+    if (this.mode === 'databases' && mode !== 'databases') this.settlePendingConnect()
     this.mode = mode
     this.host.requestUpdate()
   }
 
   close() {
     this.mode = null
+    this.settlePendingConnect()
     this.host.requestUpdate()
   }
 
   // Pressing a palette's own shortcut again closes it.
   toggle(mode: PaletteMode) {
-    this.mode = this.mode === mode ? null : mode
-    this.host.requestUpdate()
+    if (this.mode === mode) this.close()
+    else this.open(mode)
   }
 
   entries(): PaletteEntry[] {
@@ -148,6 +157,9 @@ export class CommandPaletteController implements ReactiveController {
 
   onPick = (event: Event) => {
     const { mode, id } = (event as CustomEvent<{ mode: PaletteMode; id: string }>).detail
+
+    // An explicit pick supersedes the land-on-in-use fallback.
+    this.pendingAllConnect = null
 
     if (mode === 'commands') {
       this.close()
@@ -250,9 +262,37 @@ export class CommandPaletteController implements ReactiveController {
   private async connect(profile: ConnectionProfile) {
     const result = await this.deps.live.connect(profile)
     if (!result.success) return // the entry shows the error state
+    if (profile.databaseMode === 'all') {
+      // Children just appeared; keep picking. If the palette is already gone,
+      // no pick is coming — land on the database the driver is using.
+      if (this.mode === 'databases') this.pendingAllConnect = profile.id
+      else this.activateInUse(profile.id)
+      return
+    }
     if (this.mode !== 'databases') return // closed meanwhile: treat as canceled
-    if (profile.databaseMode === 'all') return // children just appeared; keep picking
     this.deps.setActiveDb(profile.id)
     this.close()
+  }
+
+  private settlePendingConnect() {
+    const profileId = this.pendingAllConnect
+    this.pendingAllConnect = null
+    if (profileId) this.activateInUse(profileId)
+  }
+
+  // Make the connection the context. A fresh all-mode connect sits on the
+  // discovery database, so prefer the child the user last worked in (then the
+  // configured one) and point the driver at it; the discovery child is only
+  // the last resort.
+  private activateInUse(profileId: string) {
+    if (this.deps.live.phase(profileId) !== 'connected') return
+    const profile = this.deps.connections().find((connection) => connection.id === profileId)
+    const children = this.deps.live.statuses[profileId]?.children ?? []
+    const known = (name: string | null | undefined) =>
+      name && children.some((child) => child.name === name) ? name : null
+    const inUse = children.find((child) => child.inUse)?.name ?? null
+    const target = known(profile?.lastChildDb) ?? known(profile?.database.trim()) ?? inUse
+    this.deps.setActiveDb(profileId, target ?? undefined)
+    if (target && target !== inUse) void this.deps.live.setActiveChild(profileId, target)
   }
 }
