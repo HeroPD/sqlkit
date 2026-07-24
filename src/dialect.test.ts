@@ -1,5 +1,31 @@
 import { describe, expect, it } from 'vitest'
-import { dialectFor, sqlOptionToken } from './dialect'
+import { dialectFor, defaultValueSuggestions, sqlOptionToken } from './dialect'
+
+describe('defaultValueSuggestions', () => {
+  it('narrows suggestions to the column type', () => {
+    expect(defaultValueSuggestions('postgresql', 'integer', false)).toEqual(['0', '1'])
+    expect(defaultValueSuggestions('postgresql', 'text', false)).toEqual(["''"])
+    expect(defaultValueSuggestions('postgresql', 'boolean', false)).toEqual(['true', 'false', '0', '1'])
+    expect(defaultValueSuggestions('postgresql', 'timestamptz', false)).toEqual([
+      'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'now()',
+    ])
+  })
+
+  it('offers NULL only when the column is nullable', () => {
+    expect(defaultValueSuggestions('postgresql', 'integer', true)).toEqual(['NULL', '0', '1'])
+    expect(defaultValueSuggestions('postgresql', 'integer', false)).not.toContain('NULL')
+  })
+
+  it('respects the engine list (no now() on SQL Server; GETDATE instead)', () => {
+    expect(defaultValueSuggestions('sqlserver', 'datetime2', false)).toEqual(['GETDATE()', 'SYSDATETIME()'])
+    expect(defaultValueSuggestions('sqlite', 'integer', false)).toEqual(['0', '1'])
+  })
+
+  it('keeps the full list for an unrecognized type', () => {
+    expect(defaultValueSuggestions('postgresql', 'uuid', true)).toContain("''")
+    expect(defaultValueSuggestions('postgresql', 'uuid', true)).toContain('NULL')
+  })
+})
 
 describe('sqlOptionToken', () => {
   it('passes charset/collation/locale names through unchanged', () => {

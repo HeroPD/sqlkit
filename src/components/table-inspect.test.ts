@@ -43,6 +43,7 @@ const internals = (view: TableInspect) =>
     _isAddition(name: string): boolean
     _addColumn(): void
     _removeAddition(key: string): void
+    _toggleAutoIncrement(key: string): void
     _additionColumns(): InspectColumn[]
     _canDropColumn(): boolean
     _isDropped(name: string): boolean
@@ -566,7 +567,7 @@ describe('TableInspect column editing', () => {
     const view = new TableInspect()
     view.engine = 'postgresql'
     const inner = internals(view)
-    const column = inspectCol({ name: 'created_at', default: 'now()' })
+    const column = inspectCol({ name: 'created_at', dataType: 'timestamptz', default: 'now()' })
 
     const key = (init: Partial<KeyboardEvent>, value: string) =>
       ({
@@ -605,7 +606,7 @@ describe('TableInspect column editing', () => {
   })
 
   it('keeps a default picker selection when the previous input blurs', async () => {
-    const column = inspectCol({ name: 'created_at', default: 'now()' })
+    const column = inspectCol({ name: 'created_at', dataType: 'timestamptz', default: 'now()' })
     const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({ success: true, inspection: { columns: [column], sections: [] } }))
     ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
 
@@ -1640,9 +1641,6 @@ describe('TableInspect create-table mode', () => {
     const name = view.shadowRoot!.querySelector<HTMLInputElement>('.table-name-input')!
     name.value = 'projects'
     name.dispatchEvent(new FocusEvent('blur'))
-    internals(view)._onAddDdl(new CustomEvent<AddObjectDetail>('add-ddl', {
-      detail: { operation: { kind: 'constraint', spec: { name: 'projects_pkey', type: 'PRIMARY KEY', columns: ['id'] } } },
-    }))
     await view.updateComplete
 
     const onSave = vi.fn()
@@ -1653,7 +1651,8 @@ describe('TableInspect create-table mode', () => {
     expect(detail.createTable).toBe(true)
     expect(detail.tabId).toBe('create-1')
     expect(detail.table).toEqual({ schema: null, name: 'projects', kind: 'table' })
-    expect(detail.additions).toEqual([{ name: 'id', dataType: 'integer', nullable: false, default: null, comment: null }])
+    // The seeded id is an auto-increment column; its PK constraint tracks the rename.
+    expect(detail.additions).toEqual([{ name: 'id', dataType: 'integer', nullable: false, default: null, comment: null, autoIncrement: true }])
     expect(detail.operations).toEqual([
       { kind: 'constraint', spec: { name: 'projects_pkey', type: 'PRIMARY KEY', columns: ['id'] } },
     ])
@@ -1683,6 +1682,37 @@ describe('TableInspect create-table mode', () => {
     expect(await seedType('sqlite')).toBe('integer')
   })
 
+  it('seeds the id column as an auto-increment primary key by default', async () => {
+    clearInspectDraftCache()
+    ;(window as never as { sqlkit: { inspectTable: () => void } }).sqlkit = { inspectTable: vi.fn() }
+    const view = new TableInspect()
+    view.tabId = 'create-ai'
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'new_table', kind: 'table' }
+    view.createTable = true
+    document.body.append(view)
+    await view.updateComplete
+
+    // The id row reads as the primary key and shows the identity keyword as its default.
+    expect(view.shadowRoot!.querySelector('.columns-table .icon-key.pk')).toBeTruthy()
+    expect(view.shadowRoot!.querySelector('.columns-table')?.textContent).toContain('IDENTITY')
+    // The primary key is a staged constraint, so it also appears in the Constraints section.
+    expect([...view.shadowRoot!.querySelectorAll('h4')].some((h) => h.textContent?.includes('Constraints'))).toBe(true)
+
+    const onSave = vi.fn()
+    view.addEventListener('alter-columns', onSave)
+    view.save()
+    const detail = (onSave.mock.calls[0]![0] as CustomEvent<ColumnAlterEventDetail>).detail
+    expect(detail.additions).toEqual([
+      { name: 'id', dataType: 'bigint', nullable: false, default: null, comment: null, autoIncrement: true },
+    ])
+    expect(detail.operations).toEqual([
+      { kind: 'constraint', spec: { name: 'new_table_pkey', type: 'PRIMARY KEY', columns: ['id'] } },
+    ])
+    view.remove()
+  })
+
   const stagedConstraintView = async () => {
     clearInspectDraftCache()
     ;(window as never as { sqlkit: { inspectTable: () => void } }).sqlkit = { inspectTable: vi.fn() }
@@ -1694,10 +1724,7 @@ describe('TableInspect create-table mode', () => {
     view.createTable = true
     document.body.append(view)
     await view.updateComplete
-    internals(view)._onAddDdl(new CustomEvent<AddObjectDetail>('add-ddl', {
-      detail: { operation: { kind: 'constraint', spec: { name: 'projects_pkey', type: 'PRIMARY KEY', columns: ['id'] } } },
-    }))
-    await view.updateComplete
+    // The draft auto-seeds a PRIMARY KEY constraint named "projects_pkey" on id.
     return view
   }
 

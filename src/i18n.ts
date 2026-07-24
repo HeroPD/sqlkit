@@ -344,6 +344,8 @@ const enUS = {
   'inspect.dropForeignKey': 'Drop Foreign Key',
   'inspect.dropConstraint': 'Drop Constraint',
   'inspect.removeColumn': 'Remove Column',
+  'inspect.setAutoIncrement': 'Set Auto-increment',
+  'inspect.removeAutoIncrement': 'Remove Auto-increment',
   'inspect.restoreColumn': 'Restore Column',
   'inspect.resetTo': 'Reset to {value}',
   'inspect.resetRow': 'Reset Row',

@@ -2,9 +2,9 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { icons, scrollbars, typography } from '../shared-styles'
 import type { ColumnRef, DbObject, DbObjectKind, Engine, InspectColumn, ObjectDdlRef, TableInspection, TableRef } from '../electron'
-import { dialectFor } from '../dialect'
+import { dialectFor, defaultValueSuggestions } from '../dialect'
 import { cellsToTsv } from '../result-export'
-import { buildCreateTable, canAddConstraint, type ColumnAdd, type ColumnAlter } from '../sql-write'
+import { autoIncrementLabel, buildCreateTable, canAddConstraint, type ColumnAdd, type ColumnAlter } from '../sql-write'
 import './context-menu'
 import './inspect-add-dialog'
 import type { AddObjectDetail, AddObjectKind } from './inspect-add-dialog'
@@ -374,8 +374,8 @@ export class TableInspect extends LitElement {
     }
     this._createName = this.table?.name ?? ''
     this._edits = this.createTable ? this._seedCreateEdits() : new Map<string, ColumnDiff>()
-    this._operations = []
-    this._history = [{ edits: new Map(this._edits), operations: [], tableName: this.createTable ? this._createName : null }]
+    this._operations = this.createTable ? this._seedCreateOperations() : []
+    this._history = [{ edits: new Map(this._edits), operations: [...this._operations], tableName: this.createTable ? this._createName : null }]
     this._historyIndex = 0
     this._addSeq = this.createTable ? 1 : 0
   }
@@ -384,7 +384,13 @@ export class TableInspect extends LitElement {
   // INTEGER so a later PRIMARY KEY becomes a rowid alias; other engines use bigint.
   private _seedCreateEdits(): Map<string, ColumnDiff> {
     const dataType = this.engine === 'sqlite' ? 'integer' : 'bigint'
-    return new Map<string, ColumnDiff>([[`${ADD_KEY_PREFIX}0`, { name: 'id', dataType, nullable: false }]])
+    return new Map<string, ColumnDiff>([[`${ADD_KEY_PREFIX}0`, { name: 'id', dataType, nullable: false, autoIncrement: true }]])
+  }
+
+  // The draft's primary key rides as a staged constraint on the id column, so it
+  // shows in the Constraints section (SQLite folds it inline at build time).
+  private _seedCreateOperations(): InspectOperation[] {
+    return [{ kind: 'constraint', spec: { name: `${this._createName || 'table'}_pkey`, type: 'PRIMARY KEY', columns: ['id'] } }]
   }
 
   private _stashDraft() {
@@ -543,6 +549,10 @@ export class TableInspect extends LitElement {
       }
       items.push({ id: 'drop-object', label: labels[dropTarget], danger: true })
     } else if (menu.col && this._isAddition(menu.col.name)) {
+      if (this.createTable) {
+        const on = this._edits.get(menu.col.name)?.autoIncrement
+        items.push({ id: 'toggle-auto-increment', label: t(on ? 'inspect.removeAutoIncrement' : 'inspect.setAutoIncrement') })
+      }
       items.push({ id: 'remove-column', label: t('inspect.removeColumn') })
     } else if (menu.col && this._isDropped(menu.col.name)) {
       items.push({ id: 'restore-column', label: t('inspect.restoreColumn') })
@@ -601,7 +611,8 @@ export class TableInspect extends LitElement {
     } else if (id === 'drop-object' && menu.section) {
       const target = this._dropTarget(menu.section)
       if (target) this._commitDraft(this._edits, [...this._operations, { kind: 'drop', target, name: menu.name }])
-    } else if (id === 'remove-column' && menu.col) this._removeAddition(menu.col.name)
+    } else if (id === 'toggle-auto-increment' && menu.col) this._toggleAutoIncrement(menu.col.name)
+    else if (id === 'remove-column' && menu.col) this._removeAddition(menu.col.name)
     else if (id === 'drop-column' && menu.col) this._dropColumn(menu.col)
     else if (id === 'restore-column' && menu.col) this._resetRow(menu.col)
     else if (id === 'reset-field' && menu.col && menu.field) this._resetField(menu.col, menu.field)
@@ -1014,7 +1025,11 @@ export class TableInspect extends LitElement {
     if (col && this._isDropped(col.name)) return false
     // A staged new column is fully definable on any engine that can ADD COLUMN;
     // only its comment needs engine support to be expressible in DDL.
-    if (col && this._isAddition(col.name)) return field === 'comment' ? dialect.supportsColumnComments : true
+    if (col && this._isAddition(col.name)) {
+      // Auto-increment generates its own values, so its default cell is locked.
+      if (field === 'default' && this._edits.get(col.name)?.autoIncrement) return false
+      return field === 'comment' ? dialect.supportsColumnComments : true
+    }
     if (col?.generated && field !== 'name') return false
     if (field === 'name') return dialect.columnEdits.rename
     return dialect.columnEdits[field]
@@ -1086,6 +1101,22 @@ export class TableInspect extends LitElement {
     this._startEdit(key, 'name')
   }
 
+  // Toggles auto-increment on a staged new column. Enabling coerces a non-integer
+  // placeholder type to the engine's integer and forces NOT NULL (PK implies it).
+  private _toggleAutoIncrement(key: string) {
+    const current = this._edits.get(key) ?? {}
+    const edit: ColumnDiff = { ...current }
+    if (current.autoIncrement) {
+      delete edit.autoIncrement
+    } else {
+      edit.autoIncrement = true
+      edit.nullable = false
+      const type = (edit.dataType ?? this._placeholderType()).toLowerCase()
+      if (!/int|serial/.test(type)) edit.dataType = this.engine === 'sqlite' ? 'integer' : 'bigint'
+    }
+    this._applyEdit(key, edit)
+  }
+
   private _removeAddition(key: string) {
     if (this._editing?.col === key) this._editing = null
     const next = new Map(this._edits)
@@ -1095,6 +1126,8 @@ export class TableInspect extends LitElement {
 
   // Effective text for a field: the staged value if edited, else what loaded.
   private _fieldText(col: InspectColumn, field: EditField): string {
+    // Auto-increment owns the default: show the engine's identity keyword, locked.
+    if (field === 'default' && this.engine && this._edits.get(col.name)?.autoIncrement) return autoIncrementLabel(this.engine)
     const edit = this._edits.get(col.name)
     if (edit && field in edit) return (edit[field] as string | null) ?? ''
     return this._fieldOriginal(col, field)
@@ -1172,7 +1205,13 @@ export class TableInspect extends LitElement {
     this._tableNameEditing = false
     const name = raw.trim()
     if (!name || name === this._createName) return
-    this._commitDraft(this._edits, this._operations, name)
+    // Keep an unedited auto-seeded PK constraint name in step with the table name.
+    const wasDefault = `${this._createName}_pkey`
+    const operations = this._operations.map((operation) =>
+      operation.kind === 'constraint' && operation.spec.type === 'PRIMARY KEY' && operation.spec.name === wasDefault
+        ? { ...operation, spec: { ...operation.spec, name: `${name}_pkey` } }
+        : operation)
+    this._commitDraft(this._edits, operations, name)
   }
 
   private _editsEqual(a: Map<string, ColumnDiff>, b: Map<string, ColumnDiff>): boolean {
@@ -1387,8 +1426,8 @@ export class TableInspect extends LitElement {
   discard = () => {
     this._createName = this.table?.name ?? ''
     this._edits = this.createTable ? this._seedCreateEdits() : new Map<string, ColumnDiff>()
-    this._operations = []
-    this._history = [{ edits: new Map(this._edits), operations: [], tableName: this.createTable ? this._createName : null }]
+    this._operations = this.createTable ? this._seedCreateOperations() : []
+    this._history = [{ edits: new Map(this._edits), operations: [...this._operations], tableName: this.createTable ? this._createName : null }]
     this._historyIndex = 0
     this._addSeq = this.createTable ? 1 : 0
     this._editing = null
@@ -1529,6 +1568,7 @@ export class TableInspect extends LitElement {
       nullable: diff.nullable ?? true,
       default: diff.default != null && diff.default !== '' ? diff.default : null,
       comment: diff.comment != null && diff.comment !== '' ? diff.comment : null,
+      ...(diff.autoIncrement ? { autoIncrement: true } : {}),
     }
   }
 
@@ -1804,17 +1844,21 @@ export class TableInspect extends LitElement {
       >
         <td class="icon-cell">
           ${addition
-            ? html`
-                <button
-                  class="remove-btn"
-                  type="button"
-                  title=${t('inspect.removeColumn')}
-                  aria-label=${t('inspect.removeColumn')}
-                  @click=${() => this._removeAddition(column.name)}
-                >
-                  <i class="icon icon-x" aria-hidden="true"></i>
-                </button>
-              `
+            ? primaryKey
+              ? // An auto-increment addition is the primary key; show the key
+                // icon (removal stays available via the row context menu).
+                html`<span class="key-icons"><i class="icon icon-key pk" aria-hidden="true" title=${t('inspect.primaryKeyLabel')}></i></span>`
+              : html`
+                  <button
+                    class="remove-btn"
+                    type="button"
+                    title=${t('inspect.removeColumn')}
+                    aria-label=${t('inspect.removeColumn')}
+                    @click=${() => this._removeAddition(column.name)}
+                  >
+                    <i class="icon icon-x" aria-hidden="true"></i>
+                  </button>
+                `
             : dropped
               ? html`
                   <button
@@ -1970,7 +2014,9 @@ export class TableInspect extends LitElement {
 
   private _defaultItems(col: InspectColumn, filter?: string): MenuItem[] {
     const current = this._fieldText(col, 'default').trim().toLowerCase()
-    const values = this.engine ? dialectFor(this.engine).commonDefaultValues : []
+    const values = this.engine
+      ? defaultValueSuggestions(this.engine, this._fieldText(col, 'dataType'), this._fieldNullable(col))
+      : []
     const prefix = filter?.toLowerCase().trim() ?? ''
     const matches = prefix ? values.filter((value) => value.toLowerCase().startsWith(prefix)) : values
     return matches.map((value) => ({ id: `default:${value}`, label: value, checked: value.toLowerCase() === current }))

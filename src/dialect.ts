@@ -156,6 +156,30 @@ const defaultValuesFor: Record<Engine, string[]> = {
   sqlserver: ['NULL', 'GETDATE()', 'SYSDATETIME()', '0', '1', "''"],
 }
 
+const TEMPORAL_DEFAULTS = new Set(['CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'now()', 'GETDATE()', 'SYSDATETIME()'])
+
+// Narrows an engine's default expressions to those sensible for a column of the
+// given type, adding NULL only when the column is nullable. Suggestions only —
+// the editor still accepts any typed expression. Unknown types keep the full
+// list so nothing useful is hidden.
+export const defaultValueSuggestions = (engine: Engine, dataType: string, nullable: boolean): string[] => {
+  const type = dataType.toLowerCase()
+  const temporal = /date|time|timestamp|interval/.test(type)
+  const boolean = /bool/.test(type) || type === 'bit'
+  const numeric = /int|serial|numeric|decimal|real|double|float|money/.test(type)
+  const text = /char|text|string|clob/.test(type)
+  const known = temporal || boolean || numeric || text
+  return defaultValuesFor[engine].filter((value) => {
+    if (value === 'NULL') return nullable
+    if (!known) return true
+    if (TEMPORAL_DEFAULTS.has(value)) return temporal
+    if (value === 'true' || value === 'false') return boolean
+    if (value === '0' || value === '1') return numeric || boolean
+    if (value === "''") return text
+    return false
+  })
+}
+
 const makeDialect = (engine: Engine): Dialect => {
   const quoteIdent = quoteFor[engine]
   return {
