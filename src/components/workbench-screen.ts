@@ -66,13 +66,16 @@ import { t } from '../i18n'
 
 // icon markup lives in ACTIVITY_ICONS (inline SVG, keyed by id) — see the
 // activity-bar render and `.activity-bar svg` styles.
+// shortcutKey binds ⌘⇧<key> to that view. Letters dodge the macOS ⌘⇧3/4/5
+// screenshot keys; the set avoids combos the app menu owns (⌘⇧S/N/W) and ones
+// tests guard for the browser (⌘⇧R reload, ⌘⇧Z redo).
 const VIEWS = [
-  { id: 'explorer', title: t('view.explorer'), hint: t('view.explorer.empty') },
-  { id: 'search', title: t('view.search'), hint: t('view.search.empty') },
-  { id: 'databases', title: t('view.databases'), hint: t('view.databases.empty') },
-  { id: 'history', title: t('view.history'), hint: t('view.history.empty') },
-  { id: 'tasks', title: t('view.tasks'), hint: t('view.tasks.empty') },
-  { id: 'server', title: t('view.server'), hint: t('view.server.empty') },
+  { id: 'explorer', title: t('view.explorer'), hint: t('view.explorer.empty'), shortcutKey: 'E' },
+  { id: 'search', title: t('view.search'), hint: t('view.search.empty'), shortcutKey: 'F' },
+  { id: 'databases', title: t('view.databases'), hint: t('view.databases.empty'), shortcutKey: 'D' },
+  { id: 'history', title: t('view.history'), hint: t('view.history.empty'), shortcutKey: 'H' },
+  { id: 'tasks', title: t('view.tasks'), hint: t('view.tasks.empty'), shortcutKey: 'T' },
+  { id: 'server', title: t('view.server'), hint: t('view.server.empty'), shortcutKey: 'G' },
 ] as const
 
 
@@ -516,6 +519,15 @@ export class WorkbenchScreen extends LitElement {
       this._cmdPalette.toggle(event.shiftKey ? 'commands' : 'quick')
       return
     }
+    // ⌘⇧<letter> switches the sidebar activity view (toggling it shut if open).
+    if (event.shiftKey && !event.altKey) {
+      const view = VIEWS.find((candidate) => candidate.shortcutKey.toLowerCase() === key)
+      if (view) {
+        event.preventDefault()
+        this._activeView = this._activeView === view.id ? null : view.id
+        return
+      }
+    }
     if (event.shiftKey) return
     if (key === 'k') {
       event.preventDefault()
@@ -732,6 +744,7 @@ export class WorkbenchScreen extends LitElement {
         @db-remove=${this._onDbRemove}
         @db-create-database=${this._onDbCreateDatabase}
         @db-drop-database=${this._onDbDropDatabase}
+        @db-use-child=${this._onDbUseChild}
         @add-database=${this._onAddDatabase}
         @table-select=${this._onTableSelect}
         @table-browse=${this._onTableBrowse}
@@ -761,7 +774,7 @@ export class WorkbenchScreen extends LitElement {
             (view) => html`
               <activity-button
                 view=${view.id}
-                title=${view.title}
+                title=${`${view.title} (${isMac ? '⇧⌘' : 'Shift+Ctrl+'}${view.shortcutKey})`}
                 .active=${view.id === this._activeView}
                 .badge=${view.id === 'tasks' ? this._queries.longRunningCount() : 0}
               >
@@ -973,6 +986,8 @@ export class WorkbenchScreen extends LitElement {
           .connections=${this._config.connections}
           .statuses=${this._live.statuses}
           .activeTabId=${this._ctx.activeTabId}
+          .activeProfileId=${this._ctx.activeDbId}
+          .activeChildDb=${this._ctx.activeChildDb}
         ></databases-view>
       `
     }
@@ -1222,6 +1237,14 @@ export class WorkbenchScreen extends LitElement {
   private _onDbDropDatabase(event: Event) {
     const { id, database } = (event as CustomEvent<{ id: string; database: string }>).detail
     this._schemaOps.dropDatabase(id, database)
+  }
+
+  // Switch an all-databases connection's active child from the Databases list:
+  // move the working context and point the driver at it (so the ACTIVE tag follows).
+  private _onDbUseChild(event: Event) {
+    const { id, database } = (event as CustomEvent<{ id: string; database: string }>).detail
+    this._setActiveDb(id, database)
+    void this._alignActiveChild(id, database)
   }
 
   // Workbench cleanup after a child database is dropped on the server.

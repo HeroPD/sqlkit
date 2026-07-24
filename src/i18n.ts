@@ -432,6 +432,7 @@ const enUS = {
   'database.edit': 'Edit Connection',
   'database.remove': 'Remove Database…',
   'database.drop': 'Drop Database "{name}"…',
+  'database.use': 'Switch to this Database',
   'database.active': 'active',
   'config.newDatabase': 'New Database',
   'config.untitled': 'Untitled',

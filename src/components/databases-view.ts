@@ -8,11 +8,11 @@ import './db-list-item'
 import { t } from '../i18n'
 
 // The Databases sidebar view: connection list with live status, the child
-// databases of all-databases connections (display-only — the active child
-// is switched via ⌘K, never from here; connecting does adopt the connection
-// as the in-use context), and the add button. db-list-item events
-// (db-select / db-connect / db-disconnect) bubble through; this view adds
-// `add-database` and, via the right-click menu, `db-remove`.
+// databases of all-databases connections, and the add button. Exactly one child
+// carries the "active" tag — the workbench's single active context — and any
+// other child can be clicked (or picked from its menu) to switch to it. Events
+// (db-select / db-connect / db-disconnect / db-use-child / db-drop-database /
+// db-remove / add-database) bubble through to the workbench.
 @customElement('databases-view')
 export class DatabasesView extends LitElement {
   @property({ attribute: false })
@@ -25,11 +25,18 @@ export class DatabasesView extends LitElement {
   @property()
   activeTabId: string | null = null
 
+  /** The workbench's single active context — the one child that shows "active". */
+  @property()
+  activeProfileId: string | null = null
+
+  @property()
+  activeChildDb: string | null = null
+
   @state()
   private _menu: { x: number; y: number; id: string } | null = null
 
   @state()
-  private _childMenu: { x: number; y: number; id: string; database: string } | null = null
+  private _childMenu: { x: number; y: number; id: string; database: string; canDrop: boolean } | null = null
 
   render() {
     return html`
@@ -71,31 +78,40 @@ export class DatabasesView extends LitElement {
   private _renderChildMenu() {
     const menu = this._childMenu
     if (!menu) return ''
-    const items: MenuItem[] = [{ id: 'drop-db', label: t('database.drop', { name: menu.database }), danger: true }]
+    // Switch to any non-active child; drop only one the driver isn't sitting on.
+    const items: MenuItem[] = [{ id: 'use-db', label: t('database.use') }]
+    if (menu.canDrop) items.push({ id: 'drop-db', label: t('database.drop', { name: menu.database }), danger: true, separatorBefore: true })
     return html`
       <context-menu
         .x=${menu.x}
         .y=${menu.y}
         .items=${items}
-        @menu-pick=${() =>
-          this.dispatchEvent(
-            new CustomEvent('db-drop-database', {
-              detail: { id: menu.id, database: menu.database },
-              bubbles: true,
-              composed: true,
-            }),
-          )}
+        @menu-pick=${(e: CustomEvent<MenuPickDetail>) => this._onChildMenuPick(e.detail.id, menu)}
         @menu-close=${() => (this._childMenu = null)}
       ></context-menu>
     `
   }
 
-  // The in-use child can't be dropped (the connection sits on it), so it
-  // gets no menu rather than a doomed action.
-  private _onChildMenu(event: MouseEvent, id: string, database: string, inUse: boolean) {
+  private _onChildMenuPick(action: string, menu: { id: string; database: string }) {
+    const type = action === 'use-db' ? 'db-use-child' : 'db-drop-database'
+    this.dispatchEvent(
+      new CustomEvent(type, { detail: { id: menu.id, database: menu.database }, bubbles: true, composed: true }),
+    )
+  }
+
+  // The active child already is the context (nothing to switch to or drop), so
+  // it gets no menu. `inUse` (driver) gates dropping — you can't drop the DB the
+  // connection sits on, even when it isn't the active context.
+  private _onChildMenu(event: MouseEvent, id: string, database: string, active: boolean, inUse: boolean) {
     event.preventDefault()
-    if (inUse) return
-    this._childMenu = { x: event.clientX, y: event.clientY, id, database }
+    if (active) return
+    this._childMenu = { x: event.clientX, y: event.clientY, id, database, canDrop: !inUse }
+  }
+
+  // Left-click a non-active child to make it the connection's active database.
+  private _onChildClick(id: string, database: string, active: boolean) {
+    if (active) return
+    this.dispatchEvent(new CustomEvent('db-use-child', { detail: { id, database }, bubbles: true, composed: true }))
   }
 
   private _onItemMenu(event: MouseEvent, id: string) {
@@ -140,27 +156,30 @@ export class DatabasesView extends LitElement {
     `
   }
 
-  // Child databases of an all-databases connection — display only; switching
-  // the active one happens in the ⌘K palette. A single child carries no
-  // information, so it stays hidden.
+  // Child databases of an all-databases connection. Click a non-active child (or
+  // use its menu) to make it the connection's active database. A single child
+  // carries no information, so the list stays hidden.
   private _renderChildren(profileId: string, status: ConnectionStatus) {
     const children = status.children ?? []
     if (children.length < 2) return ''
     return html`
       <div class="child-list">
-        ${children.map(
-          (child) => html`
+        ${children.map((child) => {
+          // "active" is the single workbench context; driver in-use only gates drop.
+          const active = profileId === this.activeProfileId && child.name === this.activeChildDb
+          return html`
             <div
-              class="child-row ${child.inUse ? 'in-use' : ''}"
-              title=${child.name}
-              @contextmenu=${(event: MouseEvent) => this._onChildMenu(event, profileId, child.name, child.inUse)}
+              class="child-row ${active ? 'active' : 'switchable'}"
+              title=${active ? child.name : t('database.use')}
+              @click=${() => this._onChildClick(profileId, child.name, active)}
+              @contextmenu=${(event: MouseEvent) => this._onChildMenu(event, profileId, child.name, active, child.inUse)}
             >
               <i class="icon icon-package" aria-hidden="true"></i>
               <span class="child-name">${child.name}</span>
-              ${child.inUse ? html`<span class="child-tag">${t('database.active')}</span>` : ''}
+              ${active ? html`<span class="child-tag">${t('database.active')}</span>` : ''}
             </div>
-          `,
-        )}
+          `
+        })}
       </div>
     `
   }
@@ -213,8 +232,17 @@ export class DatabasesView extends LitElement {
         user-select: none;
       }
 
-      .child-row.in-use {
+      .child-row.active {
         color: var(--text);
+      }
+
+      .child-row.switchable {
+        cursor: pointer;
+      }
+
+      .child-row.switchable:hover {
+        color: var(--text);
+        background: var(--list-hover);
       }
 
       .child-name {

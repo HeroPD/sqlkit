@@ -438,6 +438,27 @@ describe('WorkbenchScreen result refresh shortcuts', () => {
     expect(forceReload.defaultPrevented).toBe(false)
   })
 
+  it('switches the sidebar view on ⌘⇧<letter>, toggling, without hijacking menu chords', () => {
+    const workbench = setup() as unknown as { _onGlobalKeydown(e: KeyboardEvent): void; _activeView: string | null }
+    const press = (key: string) => {
+      const event = keydown({ key, metaKey: true, shiftKey: true })
+      workbench._onGlobalKeydown(event)
+      return event
+    }
+
+    expect(press('D').defaultPrevented).toBe(true)
+    expect(workbench._activeView).toBe('databases')
+    expect(press('H').defaultPrevented).toBe(true)
+    expect(workbench._activeView).toBe('history')
+    // Pressing the active view's chord again collapses the sidebar.
+    press('H')
+    expect(workbench._activeView).toBeNull()
+
+    // ⌘⇧S (menu Save As) and ⌘⇧R (force reload) are not claimed as view chords.
+    expect(press('S').defaultPrevented).toBe(false)
+    expect(press('R').defaultPrevented).toBe(false)
+  })
+
   it('leaves Cmd/Ctrl+Enter to the focused SQL editor', () => {
     const workbench = setup()
     const ctrl = keydown({ key: 'Enter', ctrlKey: true })
