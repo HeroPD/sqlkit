@@ -183,7 +183,7 @@ export class CreateDatabaseDialog extends LitElement {
       }
 
       label {
-        font-size: var(--font-size-sm);
+        font-size: var(--font-size);
         color: var(--text-3);
       }
 

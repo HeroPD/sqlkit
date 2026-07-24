@@ -288,25 +288,25 @@ export class ImportDialog extends LitElement {
       .file { display: inline-flex; align-items: center; width: min(360px, 55%); height: var(--control-h); padding: 0 12px; overflow: hidden; color: var(--text); white-space: nowrap; text-overflow: ellipsis; background: color-mix(in srgb, var(--text) 5%, transparent); border: 1px solid var(--border-subtle); border-radius: 6px; box-sizing: border-box; cursor: pointer; }
       .file:hover { background: color-mix(in srgb, var(--text) 10%, transparent); }
       .file input { display: none; }
-      .compact { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: var(--font-size-sm); }
+      .compact { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: var(--font-size); }
       .compact select { width: 120px; }
-      .options { flex-wrap: wrap; color: var(--text-2); font-size: var(--font-size-sm); }
+      .options { flex-wrap: wrap; color: var(--text-2); font-size: var(--font-size); }
       .options label { display: flex; align-items: center; gap: 6px; }
       .options input { width: auto; height: auto; }
       .mapping-wrap { min-height: 0; display: flex; flex-direction: column; gap: 6px; }
-      .mapping-title { color: var(--text-2); font-size: var(--font-size-sm); font-weight: 600; }
+      .mapping-title { color: var(--text-2); font-size: var(--font-size); font-weight: 600; }
       .mapping { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; max-height: 190px; overflow: auto; padding-right: 4px; }
       .mapping label { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(130px, 1.4fr); align-items: center; gap: 8px; min-width: 0; }
-      .mapping span { overflow: hidden; color: var(--text); font-family: var(--mono-font); font-size: var(--font-size-sm); text-overflow: ellipsis; white-space: nowrap; }
-      .mapping em { color: var(--text-3); font-family: var(--ui-font); font-size: var(--font-size-sm); font-style: normal; }
-      .mapping select { height: 28px; font-size: var(--font-size-sm); }
+      .mapping span { overflow: hidden; color: var(--text); font-family: var(--mono-font); font-size: var(--font-size); text-overflow: ellipsis; white-space: nowrap; }
+      .mapping em { color: var(--text-3); font-family: var(--ui-font); font-size: var(--font-size); font-style: normal; }
+      .mapping select { height: 28px; font-size: var(--font-size); }
       .preview { min-height: 120px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--editor-bg); }
-      table { border-collapse: collapse; min-width: 100%; font-family: var(--mono-font); font-size: var(--font-size-sm); }
+      table { border-collapse: collapse; min-width: 100%; font-family: var(--mono-font); font-size: var(--font-size); }
       th, td { max-width: 240px; padding: 5px 8px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
       th { position: sticky; top: 0; color: var(--text-2); background: var(--sidebar-bg); }
       td { color: var(--text); }
-      .empty { min-height: 180px; display: grid; place-items: center; border: 1px dashed var(--border); border-radius: 4px; font-size: var(--font-size-sm); }
-      .error { color: var(--status-dot-error); font-size: var(--font-size-sm); }
+      .empty { min-height: 180px; display: grid; place-items: center; border: 1px dashed var(--border); border-radius: 4px; font-size: var(--font-size); }
+      .error { color: var(--status-dot-error); font-size: var(--font-size); }
       .footer { justify-content: space-between; }
       .actions { margin-left: auto; }
       button:disabled { opacity: 0.6; cursor: not-allowed; }

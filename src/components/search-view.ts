@@ -252,7 +252,7 @@ export class SearchView extends LitElement {
         text-overflow: ellipsis;
         color: var(--text-2);
         font-family: var(--mono-font);
-        font-size: 12px;
+        font-size: var(--font-size);
       }
 
       .hl {

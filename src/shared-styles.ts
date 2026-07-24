@@ -99,9 +99,9 @@ export const typography = css`
 
 // App-wide overlay standard: the dimmed backdrop and floating panel every
 // modal composes. The surface matches context-menu (elevated bg, subtle
-// border, 10px radius, soft shadow); content text runs at 13px like the menus
-// and result grid, with .small staying at --font-size-sm. Dialogs add only
-// layout (width, padding, gap, overflow) on top.
+// border, 10px radius, soft shadow); content text runs at --font-size (14px),
+// with .small staying at --font-size-sm. Dialogs add only layout (width,
+// padding, gap, overflow) on top.
 export const overlay = css`
   .backdrop {
     position: fixed;
@@ -116,7 +116,7 @@ export const overlay = css`
   .panel {
     display: flex;
     flex-direction: column;
-    font-size: 13px;
+    font-size: var(--font-size);
     background: var(--overlay-bg);
     border: 1px solid var(--border-subtle);
     border-radius: 10px;
@@ -126,7 +126,7 @@ export const overlay = css`
   }
 
   .panel :is(p, input:not([type='checkbox']), select, button) {
-    font-size: 13px;
+    font-size: var(--font-size);
   }
 
   .panel .small {
@@ -391,7 +391,7 @@ export const popover = css`
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 14px;
+    font-size: var(--font-size);
     line-height: 20px;
     text-align: left;
     cursor: pointer;

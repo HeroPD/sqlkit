@@ -2157,7 +2157,7 @@ export class TableInspect extends LitElement {
 
       .head h3 {
         margin: 0;
-        font-size: 14px;
+        font-size: var(--font-size);
         font-weight: 600;
         color: var(--text);
       }
@@ -2272,7 +2272,7 @@ export class TableInspect extends LitElement {
       table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 12px;
+        font-size: var(--font-size);
       }
 
       td,
@@ -2480,7 +2480,7 @@ export class TableInspect extends LitElement {
       .error {
         margin: 10px 0;
         font-family: var(--mono-font);
-        font-size: 12px;
+        font-size: var(--font-size-sm);
         color: var(--status-dot-error);
         white-space: pre-wrap;
       }
@@ -2584,7 +2584,7 @@ export class TableInspect extends LitElement {
 
       .save-error {
         margin: 6px 0 0;
-        font-size: 12px;
+        font-size: var(--font-size-sm);
         color: var(--status-dot-error);
       }
 

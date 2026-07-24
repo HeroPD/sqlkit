@@ -630,7 +630,7 @@ export class InspectAddDialog extends LitElement {
 
       .error {
         color: var(--status-dot-error);
-        font-size: var(--font-size-sm);
+        font-size: var(--font-size);
         margin: 0;
       }
 

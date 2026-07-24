@@ -169,7 +169,7 @@ export class ExportDialog extends LitElement {
       .label {
         width: 52px;
         flex-shrink: 0;
-        font-size: var(--font-size-sm);
+        font-size: var(--font-size);
         color: var(--text-2);
       }
 
@@ -181,7 +181,7 @@ export class ExportDialog extends LitElement {
       .format {
         padding: 3px 12px;
         font: inherit;
-        font-size: var(--font-size-sm);
+        font-size: var(--font-size);
         color: var(--text-2);
         background: transparent;
         border: 1px solid var(--border);

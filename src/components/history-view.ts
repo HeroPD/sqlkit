@@ -186,7 +186,7 @@ export class HistoryView extends LitElement {
         text-overflow: ellipsis;
         white-space: nowrap;
         font-family: var(--mono-font);
-        font-size: 12px;
+        font-size: var(--font-size);
         color: var(--text);
       }
 

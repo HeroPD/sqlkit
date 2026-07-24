@@ -166,7 +166,7 @@ export class ContextMenu extends LitElement {
       background: transparent;
       color: var(--text);
       font: inherit;
-      font-size: 13px;
+      font-size: var(--font-size);
       line-height: 20px;
       text-align: left;
       cursor: pointer;

@@ -221,7 +221,7 @@ export class ReviewQueryDialog extends LitElement {
         word-break: break-word;
         font-family: var(--mono-font);
         font-feature-settings: 'liga' 0, 'calt' 0;
-        font-size: 12px;
+        font-size: var(--font-size);
         line-height: 1.5;
         color: var(--text);
         background: var(--editor-bg);

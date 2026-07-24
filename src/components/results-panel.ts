@@ -2205,7 +2205,7 @@ export class ResultsPanel extends LitElement {
       .stop {
         padding: 2px 10px;
         font: inherit;
-        font-size: 11px;
+        font-size: var(--font-size);
         color: var(--status-dot-error);
         background: transparent;
         border: 1px solid var(--border-subtle);
@@ -2221,7 +2221,7 @@ export class ResultsPanel extends LitElement {
         margin: 0;
         padding: 10px 12px;
         font-family: var(--mono-font);
-        font-size: 12px;
+        font-size: var(--font-size-sm);
         color: var(--status-dot-error);
         white-space: pre-wrap;
       }
