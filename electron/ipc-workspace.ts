@@ -102,6 +102,13 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     BrowserWindow.fromWebContents(event.sender)?.setTitle(t('app.name'))
   })
 
+  // Reveals the open workspace root in the OS file manager. The path comes from
+  // the trusted session map, never the renderer, so there is nothing to validate.
+  ipcMain.handle('workspace:reveal', (event) => {
+    const workspace = context.workspaceFor(event.sender)
+    if (workspace) shell.showItemInFolder(workspace)
+  })
+
   ipcMain.handle('app:new-window', () => context.createWindow())
 
   ipcMain.handle('file:list', (event, folder: string) =>

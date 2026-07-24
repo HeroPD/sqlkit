@@ -296,6 +296,34 @@ export type FileSaveResult =
 
 export type FileDeleteResult = { success: true } | { success: false; canceled?: boolean; error?: string }
 
+/** User-picked CREATE DATABASE options; each field is engine-specific and optional. */
+export type DatabaseCreateOptions = {
+  charset?: string
+  collation?: string
+  encoding?: string
+  ctype?: string
+  owner?: string
+  template?: string
+}
+
+/** Server-provided option values for the create-database dialog, keyed by engine. */
+export type DatabaseCreateMeta = {
+  engine: Engine
+  collations: string[]
+  charsets?: string[]
+  collationsByCharset?: Record<string, string[]>
+  defaultCollationByCharset?: Record<string, string>
+  encodings?: string[]
+  owners?: string[]
+  templates?: string[]
+  /** The values the server would use with no options given; the dialog pre-selects these. */
+  defaults?: DatabaseCreateOptions
+}
+
+export type DatabaseCreateMetaResult =
+  | { success: true; meta: DatabaseCreateMeta }
+  | { success: false; error: string }
+
 export type SqlkitApi = {
   /** OS clipboard access lives in the trusted process so packaged sandboxed renderers work reliably. */
   readClipboardText: () => Promise<string>
@@ -303,6 +331,8 @@ export type SqlkitApi = {
   openWorkspace: () => Promise<WorkspaceResult>
   openWorkspacePath: (path: string) => Promise<WorkspaceResult>
   closeWorkspace: () => Promise<void>
+  /** Reveals the open workspace root in the OS file manager (Finder/Explorer). */
+  revealWorkspace: () => Promise<void>
   newWindow: () => Promise<void>
   getRecentWorkspaces: () => Promise<RecentWorkspace[]>
   getTheme: () => Promise<ThemeId>
@@ -362,8 +392,10 @@ export type SqlkitApi = {
   closeSession: (sessionId: string) => Promise<void>
   /** Cancels one in-flight execution; omit executionId only for connection teardown. */
   cancelQuery: (profileId: string, executionId?: string) => Promise<{ success: boolean; error?: string }>
-  /** Server-side CREATE DATABASE on a connected profile (postgres only). */
-  createDatabase: (profileId: string, name: string) => Promise<{ success: boolean; error?: string }>
+  /** Engine-specific option values (collations, charsets, …) for the create dialog. */
+  databaseCreateMeta: (profileId: string) => Promise<DatabaseCreateMetaResult>
+  /** Server-side CREATE DATABASE on a connected profile, with engine-specific options. */
+  createDatabase: (profileId: string, name: string, options?: DatabaseCreateOptions) => Promise<{ success: boolean; error?: string }>
   /** Server-side DROP DATABASE; refuses the connection's in-use child. */
   dropDatabase: (profileId: string, name: string) => Promise<{ success: boolean; error?: string }>
   // Metadata is scoped to a specific child database (all-databases mode), like

@@ -20,6 +20,7 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 const sqlkit = {
   runDdl: vi.fn(),
+  databaseCreateMeta: vi.fn(),
   createDatabase: vi.fn(),
   dropDatabase: vi.fn(),
 }
@@ -255,26 +256,36 @@ describe('alterColumns', () => {
 })
 
 describe('createDatabase / dropDatabase', () => {
-  it('creates the database named in the prompt and stays quiet on success', async () => {
+  it('creates the database named in the dialog and stays quiet on success', async () => {
+    sqlkit.databaseCreateMeta.mockResolvedValue({ success: true, meta: { engine: 'postgresql', collations: [] } })
     sqlkit.createDatabase.mockResolvedValue({ success: true })
     const h = harness()
-    h.ops.createDatabase('p1')
+    await h.ops.createDatabase('p1')
     expect(sqlkit.createDatabase).not.toHaveBeenCalled()
 
-    h.dialogs.prompt?.action('analytics')
+    h.dialogs.createDb?.action('analytics', { encoding: 'UTF8' })
     await flush()
-    expect(sqlkit.createDatabase).toHaveBeenCalledWith('p1', 'analytics')
+    expect(sqlkit.createDatabase).toHaveBeenCalledWith('p1', 'analytics', { encoding: 'UTF8' })
     expect(h.dialogs.confirm).toBeNull()
   })
 
   it('notices a failed create', async () => {
+    sqlkit.databaseCreateMeta.mockResolvedValue({ success: true, meta: { engine: 'postgresql', collations: [] } })
     sqlkit.createDatabase.mockResolvedValue({ success: false, error: 'exists' })
     const h = harness()
-    h.ops.createDatabase('p1')
-    h.dialogs.prompt?.action('analytics')
+    await h.ops.createDatabase('p1')
+    h.dialogs.createDb?.action('analytics', {})
     await flush()
     expect(h.dialogs.confirm?.message).toBe('Could not create "analytics"')
     expect(h.dialogs.confirm?.detail).toBe('exists')
+  })
+
+  it('notices when create metadata cannot be loaded', async () => {
+    sqlkit.databaseCreateMeta.mockResolvedValue({ success: false, error: 'not connected' })
+    const h = harness()
+    await h.ops.createDatabase('p1')
+    expect(h.dialogs.createDb).toBeNull()
+    expect(h.dialogs.confirm?.detail).toBe('not connected')
   })
 
   it('drops only after confirm, then lets the workbench clean up its buckets', async () => {

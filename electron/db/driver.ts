@@ -4,6 +4,8 @@ import type {
   ChildDb,
   ColumnRef,
   ConnectionProfile,
+  DatabaseCreateMeta,
+  DatabaseCreateOptions,
   DbObject,
   DbObjectKind,
   DbObjects,
@@ -90,8 +92,10 @@ export type Driver = {
   inspectServer?(childDb?: string | null): Promise<InspectSection[]>
   /** Child databases; undefined for engines without all-databases support. */
   children?(): ChildDb[]
+  /** Engine-specific option values (collations, charsets, …) for the create dialog. */
+  databaseCreateMeta?(): Promise<DatabaseCreateMeta>
   /** Server-side CREATE DATABASE; undefined for file-based engines. */
-  createDatabase?(name: string): Promise<void>
+  createDatabase?(name: string, options?: DatabaseCreateOptions): Promise<void>
   /** Server-side DROP DATABASE; refuses the in-use child. */
   dropDatabase?(name: string): Promise<void>
   /** Switches the active child; false when the name is unknown. */

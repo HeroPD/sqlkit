@@ -51,6 +51,14 @@ export type ColumnEditCapabilities = {
 
 // SQL-standard double quotes (Postgres, SQLite), MySQL backticks, SQL Server
 // brackets. Each doubles its own quote char to escape it.
+// Validates a bare-word SQL option token (charset/collation/encoding/locale
+// name): letters, digits, and _ . - only. Throws otherwise, so a server-sourced
+// value can be interpolated into DDL without quoting or injection risk.
+export const sqlOptionToken = (value: string): string => {
+  if (!/^[A-Za-z0-9_.-]+$/.test(value)) throw new Error(`Invalid SQL option value: ${value}`)
+  return value
+}
+
 const ansiQuote = (name: string) => `"${name.replaceAll('"', '""')}"`
 const backtickQuote = (name: string) => `\`${name.replaceAll('`', '``')}\``
 const bracketQuote = (name: string) => `[${name.replaceAll(']', ']]')}]`

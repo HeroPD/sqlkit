@@ -4,7 +4,7 @@ import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
-import { dialectFor } from '../../src/dialect'
+import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -399,10 +399,23 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       }
     },
 
-    async createDatabase(name) {
+    async databaseCreateMeta() {
+      const collations = await metaRows<{ name: string }>('select name from sys.fn_helpcollations() order by name')
+      const [server] = await metaRows<{ collation: string }>(
+        "select cast(serverproperty('Collation') as nvarchar(200)) as collation",
+      )
+      return {
+        engine: profile.engine,
+        collations: collations.map((row) => row.name),
+        defaults: { collation: server?.collation },
+      }
+    },
+
+    async createDatabase(name, options) {
       const pool = await poolForQuery()
+      const collate = options?.collation ? ` collate ${sqlOptionToken(options.collation)}` : ''
       // CREATE DATABASE refuses transactions and sp_executesql; plain batch.
-      await pool.request().batch(`create database ${dialect.quoteIdent(name)}`)
+      await pool.request().batch(`create database ${dialect.quoteIdent(name)}${collate}`)
       if (profile.databaseMode === 'all' && pools && !pools.has(name)) {
         pools.set(name, makePool(name))
         childNames = [...childNames, name].sort()

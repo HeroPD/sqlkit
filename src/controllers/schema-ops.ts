@@ -1,4 +1,4 @@
-import type { ConnectionProfile, DdlResult, Engine, TableRef } from '../electron'
+import type { ConnectionProfile, DatabaseCreateOptions, DdlResult, Engine, TableRef } from '../electron'
 import type { DialogsController } from './dialogs'
 import { dialectFor } from '../dialect'
 import {
@@ -168,13 +168,15 @@ export class SchemaOpsController {
     return null
   }
 
-  createDatabase(profileId: string) {
-    this.deps.dialogs.prompt = {
-      message: t('schema.createDatabase'),
-      detail: t('schema.createDatabaseDetail'),
-      confirmLabel: t('common.create'),
-      placeholder: 'my_database',
-      action: (name) => void this._createDatabase(profileId, name),
+  async createDatabase(profileId: string) {
+    const meta = await window.sqlkit.databaseCreateMeta(profileId)
+    if (!meta.success) {
+      this.deps.dialogs.notice(t('schema.createDatabase'), meta.error ?? t('common.unknownError'))
+      return
+    }
+    this.deps.dialogs.createDb = {
+      meta: meta.meta,
+      action: (name, options) => void this._createDatabase(profileId, name, options),
     }
   }
 
@@ -187,8 +189,8 @@ export class SchemaOpsController {
     }
   }
 
-  private async _createDatabase(profileId: string, name: string) {
-    const result = await window.sqlkit.createDatabase(profileId, name)
+  private async _createDatabase(profileId: string, name: string, options: DatabaseCreateOptions) {
+    const result = await window.sqlkit.createDatabase(profileId, name, options)
     if (!result.success) this.deps.dialogs.notice(t('schema.createFailed', { name }), result.error ?? t('common.unknownError'))
   }
 

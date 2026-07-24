@@ -483,7 +483,7 @@ describe('connection manager: database mutations', () => {
     await manager.connect(profile())
 
     expect(await manager.createDatabase('p1', 'newdb')).toEqual({ success: true })
-    expect(createDatabase).toHaveBeenCalledWith('newdb')
+    expect(createDatabase).toHaveBeenCalledWith('newdb', undefined)
     expect(await manager.dropDatabase('p1', 'olddb')).toEqual({ success: true })
     expect(dropDatabase).toHaveBeenCalledWith('olddb')
   })

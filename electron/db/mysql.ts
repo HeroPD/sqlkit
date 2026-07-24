@@ -1,6 +1,6 @@
 import mysql from 'mysql2/promise'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
-import { dialectFor } from '../../src/dialect'
+import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -342,8 +342,37 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       }
     },
 
-    async createDatabase(name) {
-      await activePool().query(`create database ${dialect.quoteIdent(name)}`)
+    async databaseCreateMeta() {
+      const charsets = await metaRows<{ name: string; def: string }>(
+        'select character_set_name as name, default_collate_name as def from information_schema.character_sets order by name',
+      )
+      const collations = await metaRows<{ name: string; cs: string }>(
+        'select collation_name as name, character_set_name as cs from information_schema.collations order by cs, name',
+      )
+      const collationsByCharset: Record<string, string[]> = {}
+      for (const row of collations) (collationsByCharset[row.cs] ??= []).push(row.name)
+      const defaultCollationByCharset: Record<string, string> = {}
+      for (const row of charsets) defaultCollationByCharset[row.name] = row.def
+      const [server] = await metaRows<{ charset: string; collation: string }>(
+        'select @@character_set_server as charset, @@collation_server as collation',
+      )
+      return {
+        engine: profile.engine,
+        charsets: charsets.map((row) => row.name),
+        collations: collations.map((row) => row.name),
+        collationsByCharset,
+        defaultCollationByCharset,
+        defaults: { charset: server?.charset, collation: server?.collation },
+      }
+    },
+
+    async createDatabase(name, options) {
+      let sql = `create database ${dialect.quoteIdent(name)}`
+      // charset/collation are bare-word identifiers in MySQL; the strict guard
+      // both validates and blocks injection, so no quoting is needed.
+      if (options?.charset) sql += ` character set ${sqlOptionToken(options.charset)}`
+      if (options?.collation) sql += ` collate ${sqlOptionToken(options.collation)}`
+      await activePool().query(sql)
       if (profile.databaseMode === 'all' && pools && !pools.has(name)) {
         pools.set(name, makePool(name))
         childNames = [...childNames, name].sort()

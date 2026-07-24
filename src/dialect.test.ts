@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { dialectFor } from './dialect'
+import { dialectFor, sqlOptionToken } from './dialect'
+
+describe('sqlOptionToken', () => {
+  it('passes charset/collation/locale names through unchanged', () => {
+    for (const value of ['utf8mb4', 'utf8mb4_0900_ai_ci', 'Latin1_General_100_CI_AS', 'UTF8', 'en_US.UTF-8', 'C', 'POSIX']) {
+      expect(sqlOptionToken(value)).toBe(value)
+    }
+  })
+
+  it('rejects anything with quotes, spaces, or statement separators', () => {
+    for (const value of ["utf8'; drop database x --", 'a b', 'x;y', 'utf8`', 'x)']) {
+      expect(() => sqlOptionToken(value)).toThrow()
+    }
+  })
+})
 
 describe('dialectFor: identifier quoting', () => {
   it('quotes per engine and escapes the quote char', () => {

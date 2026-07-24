@@ -2,7 +2,7 @@ import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { icons, tooltip } from '../shared-styles'
 import { t } from '../i18n'
-import { mod } from '../platform'
+import { isMac, mod } from '../platform'
 
 export type StatusConnection = {
   profileId: string
@@ -44,6 +44,9 @@ export class StatusBar extends LitElement {
   @state()
   private _open = false
 
+  @state()
+  private _wsOpen = false
+
   connectedCallback() {
     super.connectedCallback()
     window.addEventListener('keydown', this._onKeydown)
@@ -57,6 +60,8 @@ export class StatusBar extends LitElement {
   willUpdate() {
     // A disconnect can empty the list while the popover is up.
     if (!this.connections.length) this._open = false
+    // No workspace (welcome screen) means no menu to show.
+    if (!this.workspaceName) this._wsOpen = false
   }
 
   render() {
@@ -79,7 +84,18 @@ export class StatusBar extends LitElement {
         >
           <i class="icon icon-panel-left" aria-hidden="true"></i>
         </button>
-        <span class="item static">${this.workspaceName || t('app.name')}</span>
+        ${this.workspaceName
+          ? html`
+              <button
+                class="item tooltip-up"
+                aria-haspopup="menu"
+                aria-expanded=${String(this._wsOpen)}
+                @click=${this._toggleWorkspaceMenu}
+              >
+                ${this.workspaceName}
+              </button>
+            `
+          : html`<span class="item static">${t('app.name')}</span>`}
         ${this.contextName
           ? html`
               <button class="item tooltip-up" data-tooltip=${t('action.switchDatabase')} @click=${this._switchDatabase}>
@@ -114,6 +130,28 @@ export class StatusBar extends LitElement {
         </button>
       </footer>
       ${this._open ? this._renderPopover() : ''}
+      ${this._wsOpen ? this._renderWorkspaceMenu() : ''}
+    `
+  }
+
+  // Anchored above the workspace item (left edge), styled like the connections popover.
+  private _renderWorkspaceMenu() {
+    return html`
+      <div class="pop-backdrop" @mousedown=${() => (this._wsOpen = false)}></div>
+      <div class="pop left" role="menu" aria-label=${this.workspaceName}>
+        <button class="pop-item plain" role="menuitem" @mousedown=${(e: Event) => e.preventDefault()} @click=${() => this._workspaceAction('status-reveal-workspace')}>
+          <i class="icon icon-folder" aria-hidden="true"></i>
+          <span class="label">${isMac ? t('action.revealInFinder') : t('action.revealInExplorer')}</span>
+        </button>
+        <button class="pop-item plain" role="menuitem" @mousedown=${(e: Event) => e.preventDefault()} @click=${() => this._workspaceAction('status-copy-workspace-path')}>
+          <i class="icon icon-copy" aria-hidden="true"></i>
+          <span class="label">${t('action.copyPath')}</span>
+        </button>
+        <button class="pop-item plain" role="menuitem" @mousedown=${(e: Event) => e.preventDefault()} @click=${() => this._workspaceAction('open-folder')}>
+          <i class="icon icon-refresh-cw" aria-hidden="true"></i>
+          <span class="label">${t('action.switchWorkspace')}</span>
+        </button>
+      </div>
     `
   }
 
@@ -145,14 +183,26 @@ export class StatusBar extends LitElement {
   }
 
   private _onKeydown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape' && this._open) {
+    if (event.key === 'Escape' && (this._open || this._wsOpen)) {
       event.preventDefault()
       this._open = false
+      this._wsOpen = false
     }
   }
 
   private _togglePopover() {
+    this._wsOpen = false
     this._open = !this._open
+  }
+
+  private _toggleWorkspaceMenu() {
+    this._open = false
+    this._wsOpen = !this._wsOpen
+  }
+
+  private _workspaceAction(event: string) {
+    this._wsOpen = false
+    this._emit(event)
   }
 
   private _switchDatabase() {
@@ -263,6 +313,12 @@ export class StatusBar extends LitElement {
         z-index: 90;
       }
 
+      .pop.left {
+        right: auto;
+        left: 6px;
+        min-width: 200px;
+      }
+
       .pop {
         position: fixed;
         right: 6px;
@@ -306,6 +362,13 @@ export class StatusBar extends LitElement {
       .pop-item:focus-visible {
         background: color-mix(in srgb, var(--text) 9%, transparent);
         outline: none;
+      }
+
+      /* Workspace menu rows: icon + label, no check/meta grid. */
+      .pop-item.plain {
+        grid-template-columns: 16px minmax(0, 1fr);
+        --icon-size: 14px;
+        color: var(--text);
       }
 
       .check {

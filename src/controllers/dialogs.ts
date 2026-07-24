@@ -1,5 +1,7 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { PromptConfirmDetail } from '../components/prompt-dialog'
+import type { CreateDatabaseDetail } from '../components/create-database-dialog'
+import type { DatabaseCreateMeta, DatabaseCreateOptions } from '../electron'
 import { t } from '../i18n'
 
 type ConfirmConfig = { message: string; detail: string; confirmLabel: string; action: () => void }
@@ -15,6 +17,8 @@ type PromptConfig = {
 // A generated write statement awaiting the user's review before it runs. `run`
 // resolves to an error message to show inline in the dialog, or null on success.
 type ReviewConfig = { sql: string; params: unknown[]; warning?: string; run: () => Promise<string | null> }
+// A CREATE DATABASE dialog: the server's option metadata plus the action run on accept.
+type CreateDbConfig = { meta: DatabaseCreateMeta; action: (name: string, options: DatabaseCreateOptions) => void }
 
 // Owns the modal confirm/prompt dialogs the workbench pops for destructive or
 // input actions. The dialog views are their own components; this holds which
@@ -28,6 +32,7 @@ export class DialogsController implements ReactiveController {
   private _confirmQueue: ConfirmConfig[] = []
   private _promptQueue: PromptConfig[] = []
   private _reviewQueue: ReviewConfig[] = []
+  private _createDbQueue: CreateDbConfig[] = []
   private host: ReactiveControllerHost
 
   constructor(host: ReactiveControllerHost) {
@@ -39,6 +44,7 @@ export class DialogsController implements ReactiveController {
     this._confirmQueue = []
     this._promptQueue = []
     this._reviewQueue = []
+    this._createDbQueue = []
   }
 
   // Setting a config enqueues it; setting null dismisses the current (head) one.
@@ -69,6 +75,15 @@ export class DialogsController implements ReactiveController {
     this.host.requestUpdate()
   }
 
+  get createDb() {
+    return this._createDbQueue[0] ?? null
+  }
+  set createDb(config: CreateDbConfig | null) {
+    if (config) this._createDbQueue.push(config)
+    else this._createDbQueue.shift()
+    this.host.requestUpdate()
+  }
+
   // Error notice via the confirm dialog, with only an acknowledge action.
   notice(message: string, detail: string) {
     this.confirm = { message, detail, confirmLabel: t('common.ok'), action: () => {} }
@@ -85,5 +100,12 @@ export class DialogsController implements ReactiveController {
     const current = this._promptQueue.shift()
     this.host.requestUpdate()
     current?.action(value)
+  }
+
+  acceptCreateDb = (event: Event) => {
+    const { name, options } = (event as CustomEvent<CreateDatabaseDetail>).detail
+    const current = this._createDbQueue.shift()
+    this.host.requestUpdate()
+    current?.action(name, options)
   }
 }

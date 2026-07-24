@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
-import { dialectFor } from '../../src/dialect'
+import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
@@ -12,6 +12,13 @@ import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 import { openExportWriter, type ExportWriter } from './export'
 import { prepareSqlRun } from './sql-script'
+
+// PostgreSQL server encodings are a fixed, compile-time set with no catalog to
+// query, so the create dialog offers this documented list.
+const PG_ENCODINGS = [
+  'UTF8', 'SQL_ASCII', 'LATIN1', 'LATIN2', 'LATIN9', 'WIN1250', 'WIN1251', 'WIN1252', 'WIN1256',
+  'ISO_8859_5', 'ISO_8859_7', 'KOI8R', 'EUC_CN', 'EUC_JP', 'EUC_KR', 'EUC_TW',
+]
 
 const expandHome = (p: string) => (p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p)
 
@@ -333,10 +340,54 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       }
     },
 
-    async createDatabase(name) {
+    async databaseCreateMeta() {
+      const rows = async <T>(sql: string) => (await activePool().query(sql)).rows as T[]
+      const locales = await rows<{ loc: string }>(
+        `select distinct collcollate as loc from pg_collation where collcollate <> ''
+         union select distinct collctype from pg_collation where collctype <> '' order by 1`,
+      )
+      const owners = await rows<{ rolname: string }>('select rolname from pg_roles order by rolname')
+      const templates = await rows<{ datname: string }>(
+        'select datname from pg_database where datistemplate order by datname',
+      )
+      // A new database inherits template1's encoding/collation/ctype and is owned
+      // by the current role unless overridden — those are the defaults to show.
+      const [tpl] = await rows<{ owner: string; encoding: string; collation: string; ctype: string }>(
+        `select current_user as owner, pg_encoding_to_char(encoding) as encoding,
+                datcollate as collation, datctype as ctype
+         from pg_database where datname = 'template1'`,
+      )
+      const uniq = (values: (string | undefined)[]): string[] =>
+        values.filter((value, index, all): value is string => !!value && all.indexOf(value) === index)
+      const collations = uniq(['C', 'POSIX', tpl?.collation, tpl?.ctype, ...locales.map((row) => row.loc)])
+      return {
+        engine: profile.engine,
+        collations,
+        encodings: uniq([tpl?.encoding, ...PG_ENCODINGS]),
+        owners: owners.map((row) => row.rolname),
+        templates: templates.map((row) => row.datname),
+        defaults: {
+          owner: tpl?.owner,
+          template: 'template1',
+          encoding: tpl?.encoding,
+          collation: tpl?.collation,
+          ctype: tpl?.ctype,
+        },
+      }
+    },
+
+    async createDatabase(name, options) {
       // CREATE DATABASE refuses to run inside a transaction; a plain
       // single-statement pool query never opens one, so this is fine.
-      await activePool().query(`create database ${dialect.quoteIdent(name)}`)
+      const literal = (value: string) => `'${sqlOptionToken(value)}'`
+      const parts: string[] = []
+      if (options?.owner) parts.push(`owner ${dialect.quoteIdent(options.owner)}`)
+      if (options?.template) parts.push(`template ${dialect.quoteIdent(options.template)}`)
+      if (options?.encoding) parts.push(`encoding ${literal(options.encoding)}`)
+      if (options?.collation) parts.push(`lc_collate ${literal(options.collation)}`)
+      if (options?.ctype) parts.push(`lc_ctype ${literal(options.ctype)}`)
+      const withClause = parts.length ? ` with ${parts.join(' ')}` : ''
+      await activePool().query(`create database ${dialect.quoteIdent(name)}${withClause}`)
       if (profile.databaseMode === 'all' && pools && !pools.has(name)) {
         pools.set(name, makePool(name))
         childNames = [...childNames, name].sort()

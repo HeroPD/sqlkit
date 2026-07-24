@@ -22,6 +22,7 @@ import './activity-button'
 import './command-palette'
 import './confirm-dialog'
 import './prompt-dialog'
+import './create-database-dialog'
 import './parameter-dialog'
 import './review-query-dialog'
 import './table-inspect'
@@ -862,6 +863,18 @@ export class WorkbenchScreen extends LitElement {
             ></review-query-dialog>
           `
         : ''}
+      ${this._dialogs.createDb
+        ? keyed(
+            this._dialogs.createDb,
+            html`
+              <create-database-dialog
+                .meta=${this._dialogs.createDb.meta}
+                @dialog-cancel=${() => (this._dialogs.createDb = null)}
+                @dialog-confirm=${this._dialogs.acceptCreateDb}
+              ></create-database-dialog>
+            `,
+          )
+        : ''}
       ${this._renderCsvImportDialog()}
       ${this._parameterPrompt
         ? html`
@@ -882,6 +895,8 @@ export class WorkbenchScreen extends LitElement {
         .panelEnabled=${this._ctx.tabs.length > 0}
         @status-switch-database=${() => this._cmdPalette.open('databases')}
         @status-pick-connection=${this._onStatusPickConnection}
+        @status-reveal-workspace=${() => void window.sqlkit.revealWorkspace()}
+        @status-copy-workspace-path=${this._onCopyWorkspacePath}
         @status-toggle-sidebar=${() => this._toggleSidebar()}
         @status-toggle-panel=${() => this._layout.togglePanelCollapse()}
       ></status-bar>
@@ -907,6 +922,10 @@ export class WorkbenchScreen extends LitElement {
   private _onStatusPickConnection(event: Event) {
     const { profileId } = (event as CustomEvent<{ profileId: string }>).detail
     this._setActiveDb(profileId)
+  }
+
+  private _onCopyWorkspacePath = () => {
+    if (this.workspace) void window.sqlkit.writeClipboardText(this.workspace.path)
   }
 
   // View-specific actions level with the sidebar title (reference layout).
@@ -1197,7 +1216,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _onDbCreateDatabase(event: Event) {
     const { id } = (event as CustomEvent<{ id: string }>).detail
-    this._schemaOps.createDatabase(id)
+    void this._schemaOps.createDatabase(id)
   }
 
   private _onDbDropDatabase(event: Event) {

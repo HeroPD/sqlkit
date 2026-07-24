@@ -8,6 +8,7 @@ import { testSshTunnel } from './db/transport'
 import {
   batchStatements,
   connectionProfile,
+  databaseCreateOptions,
   databaseObject,
   databaseObjectKind,
   ddlStatements,
@@ -151,8 +152,14 @@ export function registerDbIpc(context: DbIpcContext) {
       stringValue(profileId, 'Profile id', 200),
       executionId === undefined ? undefined : stringValue(executionId, 'Execution id', 200),
     ))
-  ipcMain.handle('db:create-database', (event, profileId: unknown, name: unknown) =>
-    manager(event).createDatabase(stringValue(profileId, 'Profile id', 200), stringValue(name, 'Database name', 2_000)))
+  ipcMain.handle('db:database-create-meta', (event, profileId: unknown) =>
+    manager(event).databaseCreateMeta(stringValue(profileId, 'Profile id', 200)))
+  ipcMain.handle('db:create-database', (event, profileId: unknown, name: unknown, options: unknown) =>
+    manager(event).createDatabase(
+      stringValue(profileId, 'Profile id', 200),
+      stringValue(name, 'Database name', 2_000),
+      databaseCreateOptions(options),
+    ))
   ipcMain.handle('db:drop-database', (event, profileId: unknown, name: unknown) =>
     manager(event).dropDatabase(stringValue(profileId, 'Profile id', 200), stringValue(name, 'Database name', 2_000)))
   ipcMain.handle('db:list-tables', (event, profileId: unknown, childDb: unknown) =>

@@ -121,6 +121,22 @@ export function connectionProfile(value: unknown): ConnectionProfile {
   return parsed
 }
 
+// CREATE DATABASE options: all optional, short strings. Drivers additionally
+// guard each value against a strict token regex before it reaches the SQL.
+export function databaseCreateOptions(value: unknown) {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Database options are invalid')
+  const options = value as Record<string, unknown>
+  return {
+    charset: optionalString(options.charset, 'Charset', 256),
+    collation: optionalString(options.collation, 'Collation', 256),
+    encoding: optionalString(options.encoding, 'Encoding', 256),
+    ctype: optionalString(options.ctype, 'Ctype', 256),
+    owner: optionalString(options.owner, 'Owner', 256),
+    template: optionalString(options.template, 'Template', 256),
+  }
+}
+
 export function workspaceConfig(value: unknown): WorkspaceConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Workspace config is invalid')
   const config = value as Record<string, unknown>

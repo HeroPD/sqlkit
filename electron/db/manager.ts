@@ -5,6 +5,8 @@ import type {
   ConnectResult,
   ConnectionProfile,
   ConnectionStatus,
+  DatabaseCreateMetaResult,
+  DatabaseCreateOptions,
   DbObject,
   DbObjectKind,
   DdlResult,
@@ -360,8 +362,19 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
-  const createDatabase = (profileId: string, name: string) =>
-    mutateDatabase(profileId, (driver) => driver.createDatabase?.(name))
+  const createDatabase = (profileId: string, name: string, options?: DatabaseCreateOptions) =>
+    mutateDatabase(profileId, (driver) => driver.createDatabase?.(name, options))
+
+  async function databaseCreateMeta(profileId: string): Promise<DatabaseCreateMetaResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.databaseCreateMeta) return { success: false, error: t('connection.engineUnsupported') }
+    try {
+      return { success: true, meta: await driver.databaseCreateMeta() }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
 
   const dropDatabase = (profileId: string, name: string) =>
     mutateDatabase(profileId, (driver) => driver.dropDatabase?.(name))
@@ -467,6 +480,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     inspectServer,
     setActiveChild,
     createDatabase,
+    databaseCreateMeta,
     dropDatabase,
   }
 }
