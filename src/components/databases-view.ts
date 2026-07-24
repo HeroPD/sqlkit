@@ -226,7 +226,7 @@ export class DatabasesView extends LitElement {
         align-items: center;
         gap: 6px;
         padding: 2px 10px 2px 36px;
-        font-size: var(--font-size-sm);
+        font-size: var(--font-size);
         color: var(--text-2);
         white-space: nowrap;
         user-select: none;

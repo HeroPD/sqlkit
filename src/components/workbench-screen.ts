@@ -199,7 +199,12 @@ export class WorkbenchScreen extends LitElement {
     activeChildDb: () => this._ctx.activeChildDb,
     openFile: (file) => void this._fileOps.openFile(file),
     openTable: (key) => this._openTableFromPalette(key),
-    setActiveDb: (profileId, childDb) => this._setActiveDb(profileId, childDb),
+    // Picking a database from the palette lands the user on its files — open
+    // the Explorer so the switch has a visible result.
+    setActiveDb: (profileId, childDb) => {
+      this._setActiveDb(profileId, childDb)
+      this._activeView = 'explorer'
+    },
     newQuery: () => this._ctx.newQuery(),
     runActiveTab: () => {
       const tab = this._ctx.activeSqlTab()
