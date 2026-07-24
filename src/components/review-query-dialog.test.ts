@@ -14,6 +14,12 @@ describe('previewSql', () => {
     )
   })
 
+  it('combines SQL Server named placeholders, including double-digit positions', () => {
+    expect(
+      previewSql('update t set a = @p1 where id = @p10 and b = @p2', ['x', 'y', 0, 0, 0, 0, 0, 0, 0, 42]),
+    ).toBe("update t set a = 'x' where id = 42 and b = 'y'")
+  })
+
   it('leaves missing placeholders untouched', () => {
     expect(previewSql('select $1, $2', ['x'])).toBe("select 'x', $2")
   })

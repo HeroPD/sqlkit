@@ -20,6 +20,13 @@ export const previewSql = (sql: string, params: unknown[]): string => {
       return value === undefined ? match : formatPreviewParam(value)
     })
   }
+  // SQL Server binds named params (@p1, @p2, ..); substitute those for review too.
+  if (/@p\d+/.test(sql)) {
+    return sql.replace(/@p(\d+)/g, (match, n: string) => {
+      const value = params[Number(n) - 1]
+      return value === undefined ? match : formatPreviewParam(value)
+    })
+  }
   let index = 0
   return sql.replace(/\?/g, (match) => (index < params.length ? formatPreviewParam(params[index++]) : match))
 }
@@ -75,8 +82,8 @@ export function sqlPreviewParts(sql: string): SqlPreviewPart[] {
 
 // Shows a generated write statement (UPDATE today; INSERT/DELETE later) and its
 // bound params for the user to read before it runs. Dispatches `dialog-confirm`
-// / `dialog-cancel`; closes itself on Escape or backdrop click. There is no
-// Enter-to-confirm — a write should take a deliberate click.
+// / `dialog-cancel`; closes itself on Escape or backdrop click. Enter runs the
+// statement, unless the Cancel button holds focus (then Enter cancels).
 @customElement('review-query-dialog')
 export class ReviewQueryDialog extends LitElement {
   @property()
@@ -143,9 +150,18 @@ export class ReviewQueryDialog extends LitElement {
   }
 
   private _onKeydown = (event: KeyboardEvent) => {
-    if (event.key !== 'Escape' || this._applying) return
-    event.preventDefault()
-    this._cancel()
+    if (this._applying) return
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      this._cancel()
+      return
+    }
+    // Enter runs the statement. A focused button handles its own Enter (so Enter
+    // on Cancel still cancels); otherwise we confirm.
+    if (event.key === 'Enter' && !(this.shadowRoot?.activeElement instanceof HTMLButtonElement)) {
+      event.preventDefault()
+      void this._confirm()
+    }
   }
 
   private _onBackdropDown(event: MouseEvent) {

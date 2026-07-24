@@ -180,7 +180,7 @@ describe('ExplorerView context menu', () => {
 
     internals(view)._onTableMenuPick('copy-select', table('order details', 'sales'))
 
-    expect(writeText).toHaveBeenCalledWith('SELECT TOP (100) * FROM [sales].[order details];')
+    expect(writeText).toHaveBeenCalledWith('SELECT TOP 100 * FROM [sales].[order details];')
   })
 
   it('dispatches a CSV import for the right-clicked table', () => {

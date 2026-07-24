@@ -796,7 +796,7 @@ export class ResultsPanel extends LitElement {
                 ${canFilter
                   ? html`
                       <button
-                        class="head-action ${this.filter !== null || this._filterOpen ? 'active' : ''}"
+                        class="head-action ${this._filterOpen ? 'active' : ''} ${this.filter !== null ? 'filtered' : ''}"
                         data-tooltip=${t('results.filter')}
                         aria-label=${t('results.filter')}
                         aria-expanded=${this._filterOpen}
@@ -851,7 +851,7 @@ export class ResultsPanel extends LitElement {
       ${this._filterOpen && canFilter && !this.collapsed
         ? html`
             <div class="filter-bar">
-              <i class="icon icon-filter" aria-hidden="true"></i>
+              <i class="icon icon-filter ${this.filter !== null ? 'filtered' : ''}" aria-hidden="true"></i>
               <sql-expression-editor
                 class="filter-input"
                 aria-label=${t('results.filter')}
@@ -2087,6 +2087,14 @@ export class ResultsPanel extends LitElement {
         background: var(--list-selection);
       }
 
+      /* Filter toggle: accent funnel when a filter is applied (persists with the
+         bar closed). Color only, so the .active background still shows when the
+         bar is also open. */
+      .head-action.filtered,
+      .head-action.filtered:hover:not(:disabled) {
+        color: var(--accent);
+      }
+
       .head-action.danger:hover:not(:disabled) {
         color: var(--status-dot-error);
       }
@@ -2120,6 +2128,11 @@ export class ResultsPanel extends LitElement {
         background: var(--header-bg);
         border-bottom: 1px solid var(--border-subtle);
         color: var(--text-3);
+      }
+
+      /* Accent the leading funnel while a filter is actually applied. */
+      .filter-bar .icon-filter.filtered {
+        color: var(--accent);
       }
 
       .filter-input {

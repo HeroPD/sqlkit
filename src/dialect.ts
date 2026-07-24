@@ -160,7 +160,7 @@ const makeDialect = (engine: Engine): Dialect => {
     applyOrderBy: (sql, sort, mode) => placeOrderBy(sql, { column: String(sort.columnIndex + 1), dir: sort.direction }, engine, mode),
     browseTable: (qualifiedTable, limit) =>
       engine === 'sqlserver'
-        ? `SELECT TOP (${Math.max(1, Math.trunc(limit))}) * FROM ${qualifiedTable}`
+        ? `SELECT TOP ${Math.max(1, Math.trunc(limit))} * FROM ${qualifiedTable}`
         : `SELECT * FROM ${qualifiedTable} LIMIT ${Math.max(1, Math.trunc(limit))}`,
     supportsColumnComments: columnCommentsFor[engine],
     bindBoolean: (value) => (engine === 'sqlite' ? (value ? 1 : 0) : value),
