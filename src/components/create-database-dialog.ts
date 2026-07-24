@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js'
 import type { DatabaseCreateMeta, DatabaseCreateOptions } from '../electron'
 import { controls, overlay, typography } from '../shared-styles'
 import { t } from '../i18n'
+import './ui-select'
 
 export type CreateDatabaseDetail = { name: string; options: DatabaseCreateOptions }
 
@@ -114,13 +115,14 @@ export class CreateDatabaseDialog extends LitElement {
   }
 
   private _select(label: string, value: string, options: string[], onChange: (value: string) => void) {
+    const items = [
+      ...(value === '' ? [{ value: '', label: t('schema.serverDefault') }] : []),
+      ...options.map((option) => ({ value: option })),
+    ]
     return html`
       <div class="field">
         <label>${label}</label>
-        <select .value=${value} @change=${(e: Event) => onChange((e.target as HTMLSelectElement).value)}>
-          ${value === '' ? html`<option value="">${t('schema.serverDefault')}</option>` : ''}
-          ${options.map((option) => html`<option value=${option} ?selected=${option === value}>${option}</option>`)}
-        </select>
+        <ui-select .value=${value} .options=${items} @change=${(e: CustomEvent<{ value: string }>) => onChange(e.detail.value)}></ui-select>
       </div>
     `
   }
@@ -187,8 +189,7 @@ export class CreateDatabaseDialog extends LitElement {
         color: var(--text-3);
       }
 
-      input,
-      select {
+      input {
         padding: 5px 8px;
         font: inherit;
         color: var(--input-fg);
@@ -198,8 +199,7 @@ export class CreateDatabaseDialog extends LitElement {
         outline: none;
       }
 
-      input:focus,
-      select:focus {
+      input:focus {
         border-color: var(--input-focus-border);
       }
 

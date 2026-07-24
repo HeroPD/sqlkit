@@ -127,10 +127,10 @@ describe('results-panel multiple and paged results', () => {
     document.body.append(el)
     await el.updateComplete
 
-    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.result-set-select')!
+    const select = el.shadowRoot!.querySelector('ui-select.result-set-select' as 'ui-select')!
     expect(select).toBeTruthy()
     select.value = '0'
-    select.dispatchEvent(new Event('change'))
+    select.dispatchEvent(new CustomEvent('change', { detail: { value: '0' } }))
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('thead th:not(.num)')?.textContent).toContain('first')
 
@@ -162,14 +162,14 @@ describe('results-panel multiple and paged results', () => {
     const internal = el as unknown as { _widthOverrides: Map<number, number> }
     expect(internal._widthOverrides.get(0)).toBe(321)
 
-    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.result-set-select')!
+    const select = el.shadowRoot!.querySelector('ui-select.result-set-select' as 'ui-select')!
     select.value = '0'
-    select.dispatchEvent(new Event('change'))
+    select.dispatchEvent(new CustomEvent('change', { detail: { value: '0' } }))
     await el.updateComplete
     expect(internal._widthOverrides.size).toBe(0)
 
     select.value = '1'
-    select.dispatchEvent(new Event('change'))
+    select.dispatchEvent(new CustomEvent('change', { detail: { value: '1' } }))
     await el.updateComplete
     expect(internal._widthOverrides.get(0)).toBe(321)
     el.remove()

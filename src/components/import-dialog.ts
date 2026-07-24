@@ -5,6 +5,7 @@ import { csvShapeError, parseCsv } from '../csv-import'
 import { SQL_NULL, type CellInput } from '../sql-write'
 import { controls, overlay, scrollbars, typography } from '../shared-styles'
 import { formatInteger, rowWord, t } from '../i18n'
+import './ui-select'
 
 export type ImportConfirmDetail = { columns: ColumnRef[]; rows: CellInput[][] }
 export type ImportColumn = {
@@ -62,11 +63,15 @@ export class ImportDialog extends LitElement {
             </label>
             <label class="compact">
               <span>${t('import.delimiter')}</span>
-              <select .value=${this._delimiter} @change=${this._onDelimiterChange}>
-                <option value=",">${t('import.comma')}</option>
-                <option value="\t">${t('import.tab')}</option>
-                <option value=";">${t('import.semicolon')}</option>
-              </select>
+              <ui-select
+                .value=${this._delimiter}
+                .options=${[
+                  { value: ',', label: t('import.comma') },
+                  { value: '\t', label: t('import.tab') },
+                  { value: ';', label: t('import.semicolon') },
+                ]}
+                @change=${this._onDelimiterChange}
+              ></ui-select>
             </label>
           </div>
           <div class="options">
@@ -87,16 +92,18 @@ export class ImportDialog extends LitElement {
                         <span title=${`${column.dataType}${qualifier ? ` · ${qualifier}` : ''}`}>
                           ${column.name}${qualifier ? html` <em>${qualifier}</em>` : ''}
                         </span>
-                        <select
+                        <ui-select
                           .value=${this._mapping[targetIndex] === null ? '' : String(this._mapping[targetIndex])}
                           ?disabled=${locked}
-                          @change=${(event: Event) => this._mapColumn(targetIndex, event)}
-                        >
-                          <option value="">${locked ? t('import.notInsertable') : t('import.skip')}</option>
-                          ${headers.map((header, sourceIndex) => html`
-                            <option value=${sourceIndex}>${header || t('import.column', { index: sourceIndex + 1 })}</option>
-                          `)}
-                        </select>
+                          .options=${[
+                            { value: '', label: locked ? t('import.notInsertable') : t('import.skip') },
+                            ...headers.map((header, sourceIndex) => ({
+                              value: String(sourceIndex),
+                              label: header || t('import.column', { index: sourceIndex + 1 }),
+                            })),
+                          ]}
+                          @change=${(event: CustomEvent<{ value: string }>) => this._mapColumn(targetIndex, event)}
+                        ></ui-select>
                       </label>
                     `})}
                   </div>
@@ -197,8 +204,8 @@ export class ImportDialog extends LitElement {
     })
   }
 
-  private _onDelimiterChange(event: Event) {
-    this._delimiter = (event.target as HTMLSelectElement).value
+  private _onDelimiterChange(event: CustomEvent<{ value: string }>) {
+    this._delimiter = event.detail.value
     if (!this._source) return
     try {
       this._parseAndMap()
@@ -222,8 +229,8 @@ export class ImportDialog extends LitElement {
     this._emptyAsNull = (event.target as HTMLInputElement).checked
   }
 
-  private _mapColumn(targetIndex: number, event: Event) {
-    const value = (event.target as HTMLSelectElement).value
+  private _mapColumn(targetIndex: number, event: CustomEvent<{ value: string }>) {
+    const value = event.detail.value
     this._mapping = this._mapping.map((mapped, index) => index === targetIndex ? (value === '' ? null : Number(value)) : mapped)
   }
 
@@ -289,7 +296,7 @@ export class ImportDialog extends LitElement {
       .file:hover { background: color-mix(in srgb, var(--text) 10%, transparent); }
       .file input { display: none; }
       .compact { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: var(--font-size); }
-      .compact select { width: 120px; }
+      .compact ui-select { width: 120px; }
       .options { flex-wrap: wrap; color: var(--text-2); font-size: var(--font-size); }
       .options label { display: flex; align-items: center; gap: 6px; }
       .options input { width: auto; height: auto; }
@@ -299,7 +306,7 @@ export class ImportDialog extends LitElement {
       .mapping label { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(130px, 1.4fr); align-items: center; gap: 8px; min-width: 0; }
       .mapping span { overflow: hidden; color: var(--text); font-family: var(--mono-font); font-size: var(--font-size); text-overflow: ellipsis; white-space: nowrap; }
       .mapping em { color: var(--text-3); font-family: var(--ui-font); font-size: var(--font-size); font-style: normal; }
-      .mapping select { height: 28px; font-size: var(--font-size); }
+      .mapping ui-select { min-width: 0; }
       .preview { min-height: 120px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--editor-bg); }
       table { border-collapse: collapse; min-width: 100%; font-family: var(--mono-font); font-size: var(--font-size); }
       th, td { max-width: 240px; padding: 5px 8px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }

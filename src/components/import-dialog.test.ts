@@ -80,7 +80,7 @@ describe('import-dialog', () => {
     await dialog.updateComplete
 
     expect(inner._mapping).toEqual([null, 1, null, null])
-    const selects = dialog.shadowRoot!.querySelectorAll<HTMLSelectElement>('.mapping select')
+    const selects = dialog.shadowRoot!.querySelector('.mapping')!.querySelectorAll('ui-select')
     expect(selects[0]?.disabled).toBe(true)
     expect(selects[1]?.disabled).toBe(false)
     expect(selects[2]?.disabled).toBe(true)

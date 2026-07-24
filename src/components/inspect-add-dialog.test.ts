@@ -186,9 +186,9 @@ describe('inspect-add-dialog: foreign key', () => {
     el.shadowRoot!.querySelector('picker-input[placeholder="id"]')!.dispatchEvent(
       new CustomEvent('value-change', { detail: { value: 'id' }, bubbles: true, composed: true }),
     )
-    const onDelete = el.shadowRoot!.querySelectorAll<HTMLSelectElement>('select')[0]!
+    const onDelete = el.shadowRoot!.querySelectorAll('ui-select')[0]!
     onDelete.value = 'CASCADE'
-    onDelete.dispatchEvent(new Event('change'))
+    onDelete.dispatchEvent(new CustomEvent('change', { detail: { value: 'CASCADE' } }))
     await el.updateComplete
     create(el)
 
@@ -233,9 +233,9 @@ describe('inspect-add-dialog: constraint', () => {
     el.addEventListener('add-ddl', onDdl)
 
     await setInput(el, 'input[type="text"]', 'uq_email')
-    const typeSelect = el.shadowRoot!.querySelector<HTMLSelectElement>('select')!
+    const typeSelect = el.shadowRoot!.querySelector('ui-select')!
     typeSelect.value = 'UNIQUE'
-    typeSelect.dispatchEvent(new Event('change'))
+    typeSelect.dispatchEvent(new CustomEvent('change', { detail: { value: 'UNIQUE' } }))
     await el.updateComplete
     el.shadowRoot!.querySelectorAll<HTMLInputElement>('.checks input[type="checkbox"]').forEach((box) => box.click())
     await el.updateComplete
@@ -256,9 +256,9 @@ describe('inspect-add-dialog: constraint', () => {
     el.addEventListener('add-ddl', onDdl)
 
     await setInput(el, 'input[type="text"]', 'users_pkey')
-    const typeSelect = el.shadowRoot!.querySelector<HTMLSelectElement>('select')!
+    const typeSelect = el.shadowRoot!.querySelector('ui-select')!
     typeSelect.value = 'PRIMARY KEY'
-    typeSelect.dispatchEvent(new Event('change'))
+    typeSelect.dispatchEvent(new CustomEvent('change', { detail: { value: 'PRIMARY KEY' } }))
     await el.updateComplete
     el.shadowRoot!.querySelectorAll<HTMLInputElement>('.checks input[type="checkbox"]').forEach((box) => box.click())
     create(el)

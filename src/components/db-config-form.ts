@@ -1,6 +1,7 @@
 import { LitElement, css, html, type PropertyValues, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { controls, typography } from '../shared-styles'
+import { UiSelect } from './ui-select'
 import type { ConnectionProfile, DatabaseMode, Engine, EngineFlavor, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
 import { connectionUrlFromProfile, profileFromConnectionUrl } from '../connection-url'
 import { t } from '../i18n'
@@ -106,19 +107,11 @@ export class DbConfigForm extends LitElement {
           ${this._field(
             t('config.driver'),
             html`
-              <select @change=${(e: Event) => this._onEngineChange((e.target as HTMLSelectElement).value)}>
-                ${ENGINES.map(
-                  (entry) => html`
-                    <option
-                      value=${entry.id}
-                      ?selected=${entry.id === (draft.flavor ?? draft.engine)}
-                      ?disabled=${entry.disabled ?? false}
-                    >
-                      ${entry.label}
-                    </option>
-                  `,
-                )}
-              </select>
+              <ui-select
+                .value=${draft.flavor ?? draft.engine}
+                .options=${ENGINES.map((entry) => ({ value: entry.id, label: entry.label, disabled: entry.disabled }))}
+                @change=${(e: CustomEvent<{ value: string }>) => this._onEngineChange(e.detail.value)}
+              ></ui-select>
             `,
           )}
         </section>
@@ -177,13 +170,14 @@ export class DbConfigForm extends LitElement {
         ${this._field(
           t('config.mode'),
           html`
-            <select
-              @change=${(e: Event) =>
-                this._patch({ databaseMode: (e.target as HTMLSelectElement).value as DatabaseMode })}
-            >
-              <option value="single" ?selected=${(draft.databaseMode ?? 'single') === 'single'}>${t('config.singleDatabase')}</option>
-              <option value="all" ?selected=${draft.databaseMode === 'all'}>${t('config.allDatabases')}</option>
-            </select>
+            <ui-select
+              .value=${draft.databaseMode ?? 'single'}
+              .options=${[
+                { value: 'single', label: t('config.singleDatabase') },
+                { value: 'all', label: t('config.allDatabases') },
+              ]}
+              @change=${(e: CustomEvent<{ value: string }>) => this._patch({ databaseMode: e.detail.value as DatabaseMode })}
+            ></ui-select>
           `,
           t('config.allDatabasesHelp'),
         )}
@@ -224,12 +218,16 @@ export class DbConfigForm extends LitElement {
         ${this._field(
           t('config.mode'),
           html`
-            <select @change=${(e: Event) => this._patchSsl(ssl, { mode: (e.target as HTMLSelectElement).value as SslMode })}>
-              <option value="disable" ?selected=${ssl.mode === 'disable'}>${t('config.disable')}</option>
-              <option value="require" ?selected=${ssl.mode === 'require'}>${t('config.requireEncryption')}</option>
-              <option value="verify-ca" ?selected=${ssl.mode === 'verify-ca'} ?disabled=${draft.engine === 'sqlserver'}>${t('config.verifyCa')}</option>
-              <option value="verify-full" ?selected=${ssl.mode === 'verify-full'}>${t('config.verifyFull')}</option>
-            </select>
+            <ui-select
+              .value=${ssl.mode}
+              .options=${[
+                { value: 'disable', label: t('config.disable') },
+                { value: 'require', label: t('config.requireEncryption') },
+                { value: 'verify-ca', label: t('config.verifyCa'), disabled: draft.engine === 'sqlserver' },
+                { value: 'verify-full', label: t('config.verifyFull') },
+              ]}
+              @change=${(e: CustomEvent<{ value: string }>) => this._patchSsl(ssl, { mode: e.detail.value as SslMode })}
+            ></ui-select>
           `,
           ssl.mode === 'require' ? '' : t('config.verifyFullHelp'),
         )}
@@ -265,22 +263,12 @@ export class DbConfigForm extends LitElement {
   }
 
   private _onFieldKeydown(event: KeyboardEvent) {
-    if (event.key === 'Enter') {
-      const target = event.target
-      if (!(target instanceof HTMLSelectElement)) return
-      event.preventDefault()
-      const picker = target as HTMLSelectElement & { showPicker?: () => void }
-      // showPicker() returns void, so `?? click()` would fire both; branch instead.
-      if (picker.showPicker) picker.showPicker()
-      else target.click()
-      return
-    }
-
+    // ui-select opens itself on Enter and swallows its arrows while open.
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
     const target = event.target
-    if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return
+    if (!(target instanceof HTMLInputElement || target instanceof UiSelect)) return
 
-    const controls = [...this.renderRoot.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.field-control input, .field-control select')]
+    const controls = [...this.renderRoot.querySelectorAll<HTMLInputElement | UiSelect>('.field-control input, .field-control ui-select')]
       .filter((control) => !control.disabled && control.getClientRects().length > 0)
     const index = controls.indexOf(target)
     if (index < 0) return
@@ -326,16 +314,18 @@ export class DbConfigForm extends LitElement {
       ${this._field(
         t('config.authMethod'),
         html`
-          <select
-            @change=${(e: Event) => this._patchSsh(ssh, {
-              authType: (e.target as HTMLSelectElement).value as SshAuthType,
+          <ui-select
+            .value=${ssh.authType}
+            .options=${[
+              { value: 'key', label: t('config.privateKey') },
+              { value: 'password', label: t('config.password') },
+            ]}
+            @change=${(e: CustomEvent<{ value: string }>) => this._patchSsh(ssh, {
+              authType: e.detail.value as SshAuthType,
               passwordSaved: false,
               passphraseSaved: false,
             })}
-          >
-            <option value="key" ?selected=${ssh.authType === 'key'}>${t('config.privateKey')}</option>
-            <option value="password" ?selected=${ssh.authType === 'password'}>${t('config.password')}</option>
-          </select>
+          ></ui-select>
         `,
       )}
       ${ssh.authType === 'key'

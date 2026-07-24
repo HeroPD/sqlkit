@@ -15,6 +15,7 @@ import './export-dialog'
 import type { ExportConfirmDetail } from './export-dialog'
 import './sql-expression-editor'
 import type { SqlExpressionEditor } from './sql-expression-editor'
+import './ui-select'
 import { formatInteger, rowWord, t } from '../i18n'
 
 /** What the results panel is currently showing. */
@@ -275,8 +276,8 @@ export class ResultsPanel extends LitElement {
     return !sets?.length || this._resultSetIndex === sets.length - 1
   }
 
-  private _selectResultSet = (event: Event) => {
-    this._resultSetIndex = Number((event.target as HTMLSelectElement).value)
+  private _selectResultSet = (event: CustomEvent<{ value: string }>) => {
+    this._resultSetIndex = Number(event.detail.value)
     this._sel = null
     this._editing = null
     this._record = null
@@ -725,16 +726,21 @@ export class ResultsPanel extends LitElement {
         <span>${t('results.title')}</span>
         ${this.run.phase === 'done' && (this.run.result.resultSets?.length ?? 0) > 1
           ? html`
-              <select class="result-set-select" aria-label=${t('results.resultSet')} @change=${this._selectResultSet} .value=${String(this._resultSetIndex)}>
-                ${this.run.result.resultSets!.map((set, index) =>
-                  html`<option value=${index}>${t('results.resultOption', {
+              <ui-select
+                class="result-set-select"
+                label=${t('results.resultSet')}
+                .value=${String(this._resultSetIndex)}
+                .options=${this.run.result.resultSets!.map((set, index) => ({
+                  value: String(index),
+                  label: t('results.resultOption', {
                     index: index + 1,
                     count: formatInteger(set.rowCount),
                     approximate: set.rowCountExact === false ? '+' : '',
                     rows: rowWord(set.rowCount),
-                  })}</option>`,
-                )}
-              </select>
+                  }),
+                }))}
+                @change=${this._selectResultSet}
+              ></ui-select>
             `
           : ''}
         ${showWriteTools
@@ -2047,6 +2053,12 @@ export class ResultsPanel extends LitElement {
         flex-direction: column;
         min-height: 0;
         background: var(--editor-bg);
+      }
+
+      /* Compact control tucked into the 28px head bar. */
+      .result-set-select {
+        width: max-content;
+        --control-h: 22px;
       }
 
       .head {

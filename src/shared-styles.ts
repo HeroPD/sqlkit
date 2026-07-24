@@ -125,7 +125,7 @@ export const overlay = css`
       0 1px 3px rgba(0, 0, 0, 0.2);
   }
 
-  .panel :is(p, input:not([type='checkbox']), select, button) {
+  .panel :is(p, input:not([type='checkbox']), ui-select, button) {
     font-size: var(--font-size);
   }
 
@@ -135,12 +135,13 @@ export const overlay = css`
 `
 
 // App-wide control standard: every input, select, and button looks the same.
-// Buttons are bordered tinted surfaces matching the overlay aesthetic —
-// `primary` (accent tint), `secondary` (neutral tint), and `link` (borderless
-// accent text, used in lists/sidebars). Components add only layout on top.
+// Dropdowns are the <ui-select> component (components/ui-select.ts), whose
+// trigger mirrors the input rules here. Buttons are bordered tinted surfaces
+// matching the overlay aesthetic — `primary` (accent tint), `secondary`
+// (neutral tint), and `link` (borderless accent text, used in lists/sidebars).
+// Components add only layout on top.
 export const controls = css`
-  input,
-  select {
+  input {
     width: 100%;
     height: var(--control-h);
     padding: 0 12px;
@@ -154,22 +155,16 @@ export const controls = css`
     outline: none;
   }
 
-  select {
-    color-scheme: dark;
-  }
-
   input::placeholder {
     color: var(--input-placeholder);
   }
 
-  input:focus,
-  select:focus {
+  input:focus {
     border-color: var(--input-focus-border);
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--input-focus-border) 35%, transparent);
   }
 
-  input:disabled,
-  select:disabled {
+  input:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }

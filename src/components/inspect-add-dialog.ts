@@ -4,6 +4,7 @@ import { controls, overlay, typography } from '../shared-styles'
 import type { ColumnRef, DbObject, Engine, TableRef } from '../electron'
 import './sql-expression-editor'
 import './picker-input'
+import './ui-select'
 import type { PickerInputItem } from './picker-input'
 import { buildInspectOperation, type InspectOperation } from '../inspect-operations'
 import {
@@ -221,9 +222,11 @@ export class InspectAddDialog extends LitElement {
 
   private _actionSelect(value: ForeignKeyAction, actions: ForeignKeyAction[], set: (value: ForeignKeyAction) => void) {
     return html`
-      <select @change=${(e: Event) => set((e.target as HTMLSelectElement).value as ForeignKeyAction)}>
-        ${actions.map((action) => html`<option value=${action} ?selected=${value === action}>${action}</option>`)}
-      </select>
+      <ui-select
+        .value=${value}
+        .options=${actions.map((action) => ({ value: action }))}
+        @change=${(e: CustomEvent<{ value: string }>) => set(e.detail.value as ForeignKeyAction)}
+      ></ui-select>
     `
   }
 
@@ -238,11 +241,11 @@ export class InspectAddDialog extends LitElement {
       ${this._field(
         t('inspect.type'),
         html`
-          <select @change=${(e: Event) => (this._constraintType = (e.target as HTMLSelectElement).value as typeof this._constraintType)}>
-            <option value="CHECK" ?selected=${this._constraintType === 'CHECK'}>CHECK</option>
-            <option value="UNIQUE" ?selected=${this._constraintType === 'UNIQUE'}>UNIQUE</option>
-            <option value="PRIMARY KEY" ?selected=${this._constraintType === 'PRIMARY KEY'}>PRIMARY KEY</option>
-          </select>
+          <ui-select
+            .value=${this._constraintType}
+            .options=${[{ value: 'CHECK' }, { value: 'UNIQUE' }, { value: 'PRIMARY KEY' }]}
+            @change=${(e: CustomEvent<{ value: string }>) => (this._constraintType = e.detail.value as typeof this._constraintType)}
+          ></ui-select>
         `,
       )}
       ${this._constraintType === 'CHECK'
@@ -300,9 +303,11 @@ export class InspectAddDialog extends LitElement {
         ? this._field(
             t('inspect.method'),
             html`
-              <select @change=${(e: Event) => (this._method = (e.target as HTMLSelectElement).value)}>
-                ${PG_INDEX_METHODS.map((method) => html`<option value=${method} ?selected=${this._method === method}>${method}</option>`)}
-              </select>
+              <ui-select
+                .value=${this._method}
+                .options=${PG_INDEX_METHODS.map((method) => ({ value: method }))}
+                @change=${(e: CustomEvent<{ value: string }>) => (this._method = e.detail.value)}
+              ></ui-select>
             `,
           )
         : ''}
@@ -318,9 +323,11 @@ export class InspectAddDialog extends LitElement {
       ${this._field(
         t('inspect.timing'),
         html`
-          <select @change=${(e: Event) => (this._timing = (e.target as HTMLSelectElement).value as TriggerSpec['timing'])}>
-            ${caps.timings.map((option) => html`<option value=${option} ?selected=${timing === option}>${option}</option>`)}
-          </select>
+          <ui-select
+            .value=${timing}
+            .options=${caps.timings.map((option) => ({ value: option }))}
+            @change=${(e: CustomEvent<{ value: string }>) => (this._timing = e.detail.value as TriggerSpec['timing'])}
+          ></ui-select>
         `,
       )}
       ${this._field(
@@ -339,18 +346,22 @@ export class InspectAddDialog extends LitElement {
               </div>
             `
           : html`
-              <select @change=${(e: Event) => (this._events = [(e.target as HTMLSelectElement).value as TriggerEvent])}>
-                ${TRIGGER_EVENTS.map((event) => html`<option value=${event} ?selected=${this._events[0] === event}>${event}</option>`)}
-              </select>
+              <ui-select
+                .value=${this._events[0] ?? ''}
+                .options=${TRIGGER_EVENTS.map((event) => ({ value: event }))}
+                @change=${(e: CustomEvent<{ value: string }>) => (this._events = [e.detail.value as TriggerEvent])}
+              ></ui-select>
             `,
       )}
       ${caps.levels.length > 1
         ? this._field(
             t('inspect.forEach'),
             html`
-              <select @change=${(e: Event) => (this._level = (e.target as HTMLSelectElement).value as TriggerSpec['level'])}>
-                ${caps.levels.map((option) => html`<option value=${option} ?selected=${level === option}>${option}</option>`)}
-              </select>
+              <ui-select
+                .value=${level}
+                .options=${caps.levels.map((option) => ({ value: option }))}
+                @change=${(e: CustomEvent<{ value: string }>) => (this._level = e.detail.value as TriggerSpec['level'])}
+              ></ui-select>
             `,
           )
         : ''}
