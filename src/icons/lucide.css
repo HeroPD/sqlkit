@@ -56,6 +56,8 @@
 .icon-database::before { content: "\e0ad"; }
 .icon-unplug::before { content: "\e45d"; }
 .icon-square::before { content: "\e167"; }
+.icon-square-check::before { content: "\e559"; }
+.icon-square-check-big::before { content: "\e16a"; }
 .icon-undo-2::before { content: "\e2a1"; }
 .icon-download::before { content: "\e0b2"; }
 .icon-eye::before { content: "\e0ba"; }

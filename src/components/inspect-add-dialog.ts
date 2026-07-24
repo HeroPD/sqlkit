@@ -602,13 +602,6 @@ export class InspectAddDialog extends LitElement {
         user-select: none;
       }
 
-      .toggle input[type='checkbox'] {
-        width: auto;
-        height: auto;
-        margin: 0;
-        accent-color: var(--accent);
-      }
-
       .mono {
         font-family: var(--mono-font);
       }

@@ -262,7 +262,10 @@ export class ExplorerView extends LitElement {
               @mousedown=${(event: MouseEvent) => event.preventDefault()}
               @click=${() => this._toggleKind(kind)}
             >
-              <span class="check">${this._hiddenKinds.has(kind) ? '' : '✓'}</span>
+              <i
+                class="icon check ${this._hiddenKinds.has(kind) ? 'icon-square' : 'icon-square-check'}"
+                aria-hidden="true"
+              ></i>
               <span class="label">${filterKindLabel(kind)}</span>
               <span class="meta">${this._kindCount(kind)}</span>
             </button>
@@ -871,6 +874,20 @@ export class ExplorerView extends LitElement {
       /* Kind labels read as "Table"/"View"/… regardless of the driver's casing. */
       .pop.kinds .label {
         text-transform: capitalize;
+      }
+
+      /* Plain-menu aesthetic (16px icon column, 14px icons) but keeping the
+         third column for per-kind counts. */
+      .pop.kinds .pop-item {
+        grid-template-columns: 20px minmax(0, 1fr) auto;
+        --icon-size: 14px;
+      }
+
+      /* Filter toggles read as checkboxes. The outline square is inset in its
+         em box, so oversize it a few px to match the visual weight of other icons. */
+      .pop.kinds .check {
+        font-size: calc(var(--icon-size) + 4px);
+        color: var(--text-2);
       }
 
       .section-head-row {

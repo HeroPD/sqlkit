@@ -125,7 +125,7 @@ export const overlay = css`
       0 1px 3px rgba(0, 0, 0, 0.2);
   }
 
-  .panel :is(p, input, select, button) {
+  .panel :is(p, input:not([type='checkbox']), select, button) {
     font-size: 13px;
   }
 
@@ -172,6 +172,45 @@ export const controls = css`
   select:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  /* Checkboxes render as Lucide glyphs: square (off) → square-check (on),
+     same color throughout. The native input stays for focus/keyboard/form semantics. */
+  input[type='checkbox'] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 1em;
+    height: 1em;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: none;
+    flex-shrink: 0;
+    font-family: 'lucide' !important;
+    font-size: 17px;
+    line-height: 1;
+    color: var(--text-2);
+    cursor: pointer;
+    vertical-align: text-bottom;
+  }
+
+  input[type='checkbox']::before {
+    content: '\\e167';
+    display: block;
+  }
+
+  input[type='checkbox']:checked::before {
+    content: '\\e559';
+  }
+
+  input[type='checkbox']:focus {
+    box-shadow: none;
+  }
+
+  input[type='checkbox']:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 1px;
+    border-radius: 3px;
   }
 
   button {
@@ -352,7 +391,7 @@ export const popover = css`
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 13px;
+    font-size: 14px;
     line-height: 20px;
     text-align: left;
     cursor: pointer;
