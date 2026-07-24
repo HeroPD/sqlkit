@@ -170,6 +170,8 @@ const enUS = {
   'explorer.selectDatabase': 'Select a database to see its tables ({shortcut}).',
   'explorer.connectDatabase': 'Connect a database to see tables ({shortcut}).',
   'explorer.noTables': 'No tables.',
+  'explorer.filterKinds': 'Filter by type',
+  'explorer.allHidden': 'All object types hidden — adjust the filter.',
   'explorer.loadingColumns': 'Loading columns…',
   'explorer.noColumns': 'No columns.',
   'explorer.doubleClickBrowse': 'double-click to browse',

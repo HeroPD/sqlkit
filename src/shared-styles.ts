@@ -310,3 +310,84 @@ export const tooltip = css`
     translate: 0 0;
   }
 `
+
+// The standard anchored popover menu (status-bar connection switcher, explorer
+// kind filter, workspace menu). Positioning (which edge it anchors to) is left
+// to the caller via inline style or a local rule — everything visual is here.
+export const popover = css`
+  .pop-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+  }
+
+  .pop {
+    position: fixed;
+    z-index: 91;
+    min-width: 190px;
+    max-width: min(320px, calc(100vw - 12px));
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    background: var(--overlay-bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.28),
+      0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+
+  .pop-item {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 8px;
+    width: 100%;
+    min-height: 26px;
+    padding: 3px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    line-height: 20px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .pop-item:hover,
+  .pop-item:focus-visible {
+    background: color-mix(in srgb, var(--text) 9%, transparent);
+    outline: none;
+  }
+
+  /* Icon + label rows (no check/meta columns), e.g. the workspace menu. */
+  .pop-item.plain {
+    grid-template-columns: 16px minmax(0, 1fr);
+    --icon-size: 14px;
+  }
+
+  .pop .check {
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+  }
+
+  .pop .label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pop .meta {
+    color: var(--text-3);
+    font-size: var(--font-size-sm);
+    white-space: nowrap;
+    text-align: right;
+  }
+`

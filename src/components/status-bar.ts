@@ -1,6 +1,6 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { icons, tooltip } from '../shared-styles'
+import { icons, popover, tooltip } from '../shared-styles'
 import { t } from '../i18n'
 import { isMac, mod } from '../platform'
 
@@ -227,6 +227,7 @@ export class StatusBar extends LitElement {
   static styles = [
     icons,
     tooltip,
+    popover,
     css`
       :host {
         display: block;
@@ -307,88 +308,18 @@ export class StatusBar extends LitElement {
         background: var(--status-dot-connected);
       }
 
-      .pop-backdrop {
-        position: fixed;
-        inset: 0;
-        z-index: 90;
+      /* Anchor the shared popover to the bottom-right, above the status bar. */
+      .pop {
+        right: 6px;
+        bottom: calc(var(--status-bar-h) + 4px);
+        min-width: 220px;
+        max-height: calc(100vh - var(--status-bar-h) - 12px);
       }
 
       .pop.left {
         right: auto;
         left: 6px;
         min-width: 200px;
-      }
-
-      .pop {
-        position: fixed;
-        right: 6px;
-        bottom: calc(var(--status-bar-h) + 4px);
-        z-index: 91;
-        min-width: 220px;
-        max-width: min(320px, calc(100vw - 12px));
-        max-height: calc(100vh - var(--status-bar-h) - 12px);
-        overflow-y: auto;
-        padding: 4px;
-        display: flex;
-        flex-direction: column;
-        background: var(--overlay-bg);
-        border: 1px solid var(--border-subtle);
-        border-radius: 10px;
-        box-shadow:
-          0 8px 24px rgba(0, 0, 0, 0.28),
-          0 1px 3px rgba(0, 0, 0, 0.2);
-      }
-
-      .pop-item {
-        display: grid;
-        grid-template-columns: 14px minmax(0, 1fr) auto;
-        align-items: center;
-        column-gap: 8px;
-        width: 100%;
-        min-height: 26px;
-        padding: 3px 8px;
-        border: none;
-        border-radius: 6px;
-        background: transparent;
-        color: var(--text);
-        font: inherit;
-        font-size: 13px;
-        line-height: 20px;
-        text-align: left;
-        cursor: pointer;
-      }
-
-      .pop-item:hover,
-      .pop-item:focus-visible {
-        background: color-mix(in srgb, var(--text) 9%, transparent);
-        outline: none;
-      }
-
-      /* Workspace menu rows: icon + label, no check/meta grid. */
-      .pop-item.plain {
-        grid-template-columns: 16px minmax(0, 1fr);
-        --icon-size: 14px;
-        color: var(--text);
-      }
-
-      .check {
-        color: var(--accent);
-        font-size: 12px;
-        font-weight: 600;
-        text-align: center;
-      }
-
-      .label {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .meta {
-        color: var(--text-3);
-        font-size: var(--font-size-sm);
-        white-space: nowrap;
       }
 
       .version {

@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { icons, scrollbars, typography } from '../shared-styles'
+import { icons, popover, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
 import { TABLE_KIND_ICONS, tableKindLabel } from '../table-kinds'
@@ -18,6 +18,15 @@ export const tableLabel = (table: TableRef) => (table.schema ? `${table.schema}.
 
 const objectIcon = (label: 'Functions' | 'Types', object: DbObject) =>
   label === 'Functions' ? 'icon-square-function' : object.detail === 'enum' ? 'icon-list' : 'icon-boxes'
+
+// Object kinds the Tables list can be filtered by. Persisted globally, but the
+// selection resets when the connection changes so a hidden kind never reads as
+// "my tables are gone" on a different database.
+type FilterKind = TableRef['kind'] | DbObjectKind
+const FILTER_KINDS: FilterKind[] = ['table', 'view', 'matview', 'foreign', 'function', 'type']
+const FILTER_STORAGE_KEY = 'sqlkit-explorer-hidden-kinds'
+const filterKindLabel = (kind: FilterKind) =>
+  kind === 'function' ? t('explorer.functions') : kind === 'type' ? t('explorer.types') : tableKindLabel(kind)
 
 export type TableSelectDetail = { key: string }
 export type ObjectInspectDetail = { object: DbObject; objectKind: DbObjectKind }
@@ -107,6 +116,33 @@ export class ExplorerView extends LitElement {
   @state()
   private _tree: TreeState = { collapsedSchemas: new Set(), expandedTables: new Set(), expandedObjectGroups: new Set() }
 
+  /** Object kinds hidden from the Tables list; persisted globally. */
+  @state()
+  private _hiddenKinds = new Set<FilterKind>()
+
+  /** Anchor position of the open kind-filter popover, or null when closed. */
+  @state()
+  private _filterMenu: { right: number; top: number } | null = null
+
+  /** Last connection seen, so a connection switch can reset the filter. */
+  private _lastProfileId: string | null = null
+
+  connectedCallback() {
+    super.connectedCallback()
+    window.addEventListener('keydown', this._onFilterKeydown)
+    try {
+      const raw = localStorage.getItem(FILTER_STORAGE_KEY)
+      if (raw) this._hiddenKinds = new Set((JSON.parse(raw) as FilterKind[]).filter((k) => FILTER_KINDS.includes(k)))
+    } catch {
+      // A corrupt value just means no filter.
+    }
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback()
+    window.removeEventListener('keydown', this._onFilterKeydown)
+  }
+
   @state()
   private _layout: SectionLayout = { filesCollapsed: false, tablesCollapsed: false, filesHeight: null, resizing: null }
 
@@ -125,6 +161,17 @@ export class ExplorerView extends LitElement {
   }
 
   protected willUpdate(changed: PropertyValues) {
+    // Switching to a different connection clears the kind filter — a persisted
+    // filter carried into another database could hide kinds and read as missing
+    // tables. The first connection (null → id) keeps the loaded filter.
+    if (changed.has('profileId') && this.profileId) {
+      if (this._lastProfileId && this._lastProfileId !== this.profileId && this._hiddenKinds.size) {
+        this._hiddenKinds = new Set()
+        this._persistHiddenKinds()
+        this._filterMenu = null
+      }
+      this._lastProfileId = this.profileId
+    }
     // Drop collapse/expand state for profiles that no longer exist — every key
     // is prefixed with its profile id, which is a colon-free UUID.
     if (changed.has('profileIds')) {
@@ -153,6 +200,76 @@ export class ExplorerView extends LitElement {
         this._patchTree({ collapsedSchemas })
       }
     }
+  }
+
+  private _persistHiddenKinds() {
+    try {
+      if (this._hiddenKinds.size) localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify([...this._hiddenKinds]))
+      else localStorage.removeItem(FILTER_STORAGE_KEY)
+    } catch {
+      // Blocked storage still leaves the filter working for the session.
+    }
+  }
+
+  // Kinds actually present in the current metadata — no empty toggles.
+  private _presentKinds(): FilterKind[] {
+    const present = new Set<FilterKind>()
+    for (const table of this.tables ?? []) present.add(table.kind)
+    if (this.objects?.functions.length) present.add('function')
+    if (this.objects?.types.length) present.add('type')
+    return FILTER_KINDS.filter((kind) => present.has(kind))
+  }
+
+  private _kindCount(kind: FilterKind): number {
+    if (kind === 'function') return this.objects?.functions.length ?? 0
+    if (kind === 'type') return this.objects?.types.length ?? 0
+    return (this.tables ?? []).filter((table) => table.kind === kind).length
+  }
+
+  private _toggleKind(kind: FilterKind) {
+    const next = new Set(this._hiddenKinds)
+    if (next.has(kind)) next.delete(kind)
+    else next.add(kind)
+    this._hiddenKinds = next
+    this._persistHiddenKinds()
+  }
+
+  private _toggleFilterMenu(event: MouseEvent) {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    this._filterMenu = this._filterMenu ? null : { right: window.innerWidth - rect.right, top: rect.bottom + 4 }
+  }
+
+  private _onFilterKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape' && this._filterMenu) {
+      event.preventDefault()
+      this._filterMenu = null
+    }
+  }
+
+  private _renderFilterMenu() {
+    const menu = this._filterMenu
+    if (!menu) return ''
+    const kinds = this._presentKinds()
+    return html`
+      <div class="pop-backdrop" @mousedown=${() => (this._filterMenu = null)}></div>
+      <div class="pop kinds" style="right: ${menu.right}px; top: ${menu.top}px" role="menu" aria-label=${t('explorer.filterKinds')}>
+        ${kinds.map(
+          (kind) => html`
+            <button
+              class="pop-item"
+              role="menuitemcheckbox"
+              aria-checked=${this._hiddenKinds.has(kind) ? 'false' : 'true'}
+              @mousedown=${(event: MouseEvent) => event.preventDefault()}
+              @click=${() => this._toggleKind(kind)}
+            >
+              <span class="check">${this._hiddenKinds.has(kind) ? '' : '✓'}</span>
+              <span class="label">${filterKindLabel(kind)}</span>
+              <span class="meta">${this._kindCount(kind)}</span>
+            </button>
+          `,
+        )}
+      </div>
+    `
   }
 
   render() {
@@ -204,6 +321,16 @@ export class ExplorerView extends LitElement {
           ${this.tables !== null
             ? html`
                 <button
+                  class="head-action ${this._hiddenKinds.size ? 'filtered' : ''}"
+                  title=${t('explorer.filterKinds')}
+                  aria-label=${t('explorer.filterKinds')}
+                  aria-haspopup="menu"
+                  aria-expanded=${this._filterMenu ? 'true' : 'false'}
+                  @click=${this._toggleFilterMenu}
+                >
+                  <i class="icon icon-filter" aria-hidden="true"></i>
+                </button>
+                <button
                   class="head-action"
                   title=${t('explorer.refreshMetadata')}
                   aria-label=${t('explorer.refreshMetadata')}
@@ -218,7 +345,7 @@ export class ExplorerView extends LitElement {
           ? ''
           : html`<div class="section-body" @contextmenu=${(event: MouseEvent) => this._onTablesMenu(event, this._defaultCreateSchema())}>${this._renderTables()}</div>`}
       </div>
-      ${this._renderTableMenu()} ${this._renderObjectMenu()}
+      ${this._renderTableMenu()} ${this._renderObjectMenu()} ${this._renderFilterMenu()}
     `
   }
 
@@ -328,6 +455,13 @@ export class ExplorerView extends LitElement {
     if (!this.tables.length) return html`<p class="muted hint">${t('explorer.noTables')}</p>`
     const profileId = this.profileId
 
+    // Kind filter: hide rows of hidden kinds. If it empties the whole list, say
+    // so — the accented funnel plus this hint keep it from looking like data loss.
+    const visibleTables = this.tables.filter((table) => !this._hiddenKinds.has(table.kind))
+    if (!visibleTables.length && !this._anyObjectsVisible(null)) {
+      return html`<p class="muted hint">${this._hiddenKinds.size ? t('explorer.allHidden') : t('explorer.noTables')}</p>`
+    }
+
     // Group by schema, preserving the driver's order. With one schema (or
     // none — SQLite) the list stays flat: a lone group header is just noise.
     const groups = new Map<string, TableRef[]>()
@@ -342,13 +476,16 @@ export class ExplorerView extends LitElement {
       return html`
         <div class="etable-list">
           ${this._renderObjectGroups(profileId, schema, false)}
-          ${this.tables.map((table) => this._renderTableRow(profileId, table, false))}
+          ${visibleTables.map((table) => this._renderTableRow(profileId, table, false))}
         </div>
       `
     }
     return html`
       <div class="etable-list">
         ${[...groups.entries()].map(([schema, tables]) => {
+          const visible = tables.filter((table) => !this._hiddenKinds.has(table.kind))
+          // Drop a schema group only when the filter leaves it nothing at all.
+          if (!visible.length && !this._anyObjectsVisible(schema)) return ''
           const groupKey = `${profileId}:${schema}`
           const collapsed = this._tree.collapsedSchemas.has(groupKey)
           return html`
@@ -359,14 +496,24 @@ export class ExplorerView extends LitElement {
             >
               <i class="icon icon-chevron-right chevron ${collapsed ? '' : 'expanded'}" aria-hidden="true"></i>
               <span>${schema}</span>
-              <span class="schema-count">${tables.length}</span>
+              <span class="schema-count">${visible.length}</span>
             </button>
             ${collapsed ? '' : this._renderObjectGroups(profileId, schema, true)}
-            ${collapsed ? '' : tables.map((table) => this._renderTableRow(profileId, table, true))}
+            ${collapsed ? '' : visible.map((table) => this._renderTableRow(profileId, table, true))}
           `
         })}
       </div>
     `
+  }
+
+  // Whether any function/type group would render for a schema (null = any
+  // schema) given the current kind filter — used to decide if a group is empty.
+  private _anyObjectsVisible(schema: string | null): boolean {
+    if (!this.objects) return false
+    const inSchema = (object: DbObject) => schema === null || (object.schema ?? '') === (schema ?? '')
+    const functions = !this._hiddenKinds.has('function') && this.objects.functions.some(inSchema)
+    const types = !this._hiddenKinds.has('type') && this.objects.types.some(inSchema)
+    return functions || types
   }
 
   // Functions/Types as collapsed group rows under the schema's tables, the
@@ -375,8 +522,8 @@ export class ExplorerView extends LitElement {
     if (!this.objects) return ''
     const match = (object: DbObject) => (object.schema ?? '') === (schema ?? '')
     return html`
-      ${this._renderObjectGroup(profileId, schema, 'Functions', this.objects.functions.filter(match), nested)}
-      ${this._renderObjectGroup(profileId, schema, 'Types', this.objects.types.filter(match), nested)}
+      ${this._hiddenKinds.has('function') ? '' : this._renderObjectGroup(profileId, schema, 'Functions', this.objects.functions.filter(match), nested)}
+      ${this._hiddenKinds.has('type') ? '' : this._renderObjectGroup(profileId, schema, 'Types', this.objects.types.filter(match), nested)}
     `
   }
 
@@ -602,6 +749,7 @@ export class ExplorerView extends LitElement {
   static styles = [
     typography,
     icons,
+    popover,
     // The scroll containers in this root include the <file-tree> host itself;
     // its scrollbar is styled from here, not from its own stylesheet.
     scrollbars,
@@ -712,6 +860,17 @@ export class ExplorerView extends LitElement {
       .head-action:hover {
         background: var(--list-hover);
         color: var(--text);
+      }
+
+      /* Accent the funnel while a kind filter is active. */
+      .head-action.filtered,
+      .head-action.filtered:hover {
+        color: var(--accent);
+      }
+
+      /* Kind labels read as "Table"/"View"/… regardless of the driver's casing. */
+      .pop.kinds .label {
+        text-transform: capitalize;
       }
 
       .section-head-row {
