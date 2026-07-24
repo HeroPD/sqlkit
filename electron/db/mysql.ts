@@ -218,7 +218,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           releaseToPool()
           throw new Error(t('query.cancelled'))
         }
-        const result = await streamQuery(raw, plan.batches[0]!, plan.params, started)
+        const result = await streamQuery(raw, plan.batches[0]!, plan.params, started, childDb ?? active)
         releaseToPool()
         return result
       } catch (error) {
@@ -647,6 +647,7 @@ function streamQuery(
   sql: string,
   params: unknown[],
   started: number,
+  activeDb: string,
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     let columns: string[] = []
@@ -674,10 +675,16 @@ function streamQuery(
       pushCurrent()
       const list = Array.isArray(fields) ? (fields as FieldMeta[]) : []
       columns = list.map((field) => field.name)
+      // Active-db columns get schema null to match listTables' TableRefs; cross-db
+      // ones keep the db name so they never bind to a same-named active-db table.
+      const sourceSchema = (field: FieldMeta) => {
+        const db = field.db ?? field.schema ?? null
+        return db && db.toLowerCase() === activeDb.toLowerCase() ? null : db
+      }
       columnSources = list.some((field) => field.orgTable && field.orgName)
         ? list.map((field) =>
             field.orgTable && field.orgName
-              ? { schema: field.db ?? field.schema ?? null, table: field.orgTable, column: field.orgName }
+              ? { schema: sourceSchema(field), table: field.orgTable, column: field.orgName }
               : { schema: null, table: null, column: null },
           )
         : undefined

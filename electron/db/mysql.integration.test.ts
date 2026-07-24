@@ -291,10 +291,27 @@ DELIMITER ;`)
     const driver = await connectDriver()
     try {
       const result = await driver.query('select id, name, 1 as lit from authors order by id limit 1')
-      expect(result.columnSources?.[0]).toEqual({ schema: dbName(), table: 'authors', column: 'id' })
-      expect(result.columnSources?.[1]).toEqual({ schema: dbName(), table: 'authors', column: 'name' })
+      // Active-db sources carry schema null so they match listTables' TableRefs.
+      expect(result.columnSources?.[0]).toEqual({ schema: null, table: 'authors', column: 'id' })
+      expect(result.columnSources?.[1]).toEqual({ schema: null, table: 'authors', column: 'name' })
       expect(result.columnSources?.[2]).toEqual({ schema: null, table: null, column: null })
     } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('keeps the database name on column sources from another database', async () => {
+    const other = 'sqlkit_xdb_probe'
+    const driver = await connectDriver()
+    try {
+      await admin.query(`drop database if exists ${other}`)
+      await admin.query(`create database ${other}`)
+      await admin.query(`create table ${other}.things (id int primary key)`)
+      await admin.query(`insert into ${other}.things values (1)`)
+      const result = await driver.query(`select id from ${other}.things`)
+      expect(result.columnSources?.[0]).toEqual({ schema: other, table: 'things', column: 'id' })
+    } finally {
+      await admin.query(`drop database if exists ${other}`).catch(() => {})
       await driver.disconnect()
     }
   })

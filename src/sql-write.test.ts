@@ -53,9 +53,9 @@ describe('quoteQualified', () => {
 })
 
 describe('coerceValue', () => {
-  it('parses numeric and boolean columns, passes text through', () => {
+  it('parses integer and boolean columns, passes text through', () => {
     expect(coerceValue('42', col({ dataType: 'integer' }))).toBe(42)
-    expect(coerceValue('3.5', col({ dataType: 'numeric' }))).toBe(3.5)
+    expect(coerceValue('3.5', col({ dataType: 'double precision' }))).toBe(3.5)
     expect(coerceValue('true', col({ dataType: 'boolean' }))).toBe(true)
     expect(coerceValue('Ada', col({ dataType: 'text' }))).toBe('Ada')
   })
@@ -86,6 +86,17 @@ describe('coerceValue', () => {
     expect(coerceValue('0.123456789012345678', col({ dataType: 'numeric' }))).toBe('0.123456789012345678')
     // Small, exactly-representable values still bind as numbers.
     expect(coerceValue('42', col({ dataType: 'integer' }))).toBe(42)
+  })
+
+  it('keeps exact numeric types as text even when Number() round-trips', () => {
+    // A double can shortest-print "0.1" yet is 0.10000000000000000555 in binary;
+    // binding it as a float corrupts high-scale decimal writes (SQL Server).
+    expect(coerceValue('0.1', col({ dataType: 'decimal(38,20)' }))).toBe('0.1')
+    expect(coerceValue('3.5', col({ dataType: 'numeric' }))).toBe('3.5')
+    expect(coerceValue('12.34', col({ dataType: 'money' }))).toBe('12.34')
+    // Approximate types still bind as JS numbers — that IS their native shape.
+    expect(coerceValue('0.1', col({ dataType: 'real' }))).toBe(0.1)
+    expect(coerceValue('0.1', col({ dataType: 'float' }))).toBe(0.1)
   })
 })
 

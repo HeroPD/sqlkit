@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ConnectionProfile, InspectColumn } from '../../src/electron'
-import { buildAddConstraint, buildAddForeignKey, buildColumnAlter, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+import { buildAddConstraint, buildAddForeignKey, buildBatchUpdates, buildColumnAlter, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 
 const inspectColumnFixture = (name: string): InspectColumn =>
   ({ name, dataType: 'int', nullable: true, default: null, primaryKey: false, comment: null })
@@ -200,6 +200,34 @@ describeDb('mssql driver (integration)', () => {
       expect((await driver.query('select count(*) from batch')).rows).toEqual([[2]])
     } finally {
       await driver.query('drop table if exists batch').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('saves a high-scale decimal cell edit losslessly (no float round-trip)', async () => {
+    const driver = await connectDriver()
+    const colMeta = (name: string, dataType: string, primaryKey = false) =>
+      ({ schema: 'dbo', table: 'dec_prec', name, dataType, nullable: !primaryKey, primaryKey, foreignKey: false })
+    try {
+      await driver.query('create table dec_prec (id int primary key, d decimal(38,20))')
+      await driver.query("insert into dec_prec values (1, cast('0.30000000000000000001' as decimal(38,20)))")
+      const statements = buildBatchUpdates({
+        table: { schema: 'dbo', name: 'dec_prec', kind: 'table' },
+        engine: 'sqlserver',
+        edits: [{
+          column: 'd',
+          columnMeta: colMeta('d', 'decimal(38,20)'),
+          value: '0.1',
+          originalValue: '0.30000000000000000001',
+          pks: [{ name: 'id', value: 1, columnMeta: colMeta('id', 'int', true) }],
+        }],
+      })
+      expect(await driver.runBatch!(statements)).toEqual({ success: true })
+      // Bound as a float, d would be 0.10000000000000000555 and this returns 0.
+      const check = await driver.query("select iif(d = cast('0.1' as decimal(38,20)), 1, 0) from dec_prec where id = 1")
+      expect(check.rows).toEqual([[1]])
+    } finally {
+      await driver.query('drop table if exists dec_prec').catch(() => {})
       await driver.disconnect()
     }
   })

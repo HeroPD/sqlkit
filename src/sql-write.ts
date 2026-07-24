@@ -18,17 +18,21 @@ export const isSqlNull = (value: unknown): value is SqlNull =>
   typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'sql-null'
 
 // Turns an explicit editor value into a bound parameter, guided by the column's
-// declared type: numeric/boolean parsed when lossless; anything else passed as
-// text for the engine to cast. Unparseable input falls back to text so a typo
+// declared type: integer/float/boolean parsed when lossless; anything else passed
+// as text for the engine to cast. Unparseable input falls back to text so a typo
 // surfaces as a DB error rather than a silent wrong value.
 export function coerceValue(value: CellInput, column: ColumnRef | undefined, engine?: Engine): unknown {
   if (isSqlNull(value)) return null
   const type = column?.dataType?.toLowerCase() ?? ''
-  if (/int|serial|numeric|decimal|real|double|float|money/.test(type)) {
+  // Exact numerics stay text: a JS number is a double (node-mssql binds it as a
+  // binary Float), so "0.1" into decimal(38,20) would store 0.10000000000000000555.
+  // Every engine parses text → decimal exactly instead.
+  if (/numeric|decimal|money/.test(type)) return value
+  if (/int|serial|real|double|float/.test(type)) {
     const trimmed = value.trim()
     if (trimmed === '') return value
     // Keep the raw string unless it round-trips losslessly through Number: a
-    // bigint/numeric past 2^53 routed through Number() rounds — corrupting the save.
+    // bigint past 2^53 routed through Number() rounds — corrupting the save.
     const n = Number(trimmed)
     return Number.isFinite(n) && String(n) === trimmed ? n : value
   }
