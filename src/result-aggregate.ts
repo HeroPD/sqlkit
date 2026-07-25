@@ -28,9 +28,6 @@ export function parseFixed(text: string): Fixed | null {
   return { digits: negative ? -digits : digits, scale: fraction.length }
 }
 
-const scaleTo = (value: Fixed, scale: number): bigint =>
-  value.digits * 10n ** BigInt(scale - value.scale)
-
 /** Renders digits/10^scale, trimming trailing fraction zeros but keeping `min`. */
 export function formatFixed({ digits, scale }: Fixed, minScale = 0): string {
   const negative = digits < 0n
@@ -84,8 +81,49 @@ export function aggregateCells(values: readonly unknown[]): SelectionStats {
   let count = 0
   let nulls = 0
   let approximate = false
-  const exact: Fixed[] = []
-  const floats: number[] = []
+
+  // Exact accumulators, all held at one running scale that widens as wider
+  // values arrive. Single pass: nothing is buffered, and no value makes a
+  // string round trip on the way to the total.
+  let exactCount = 0
+  let scale = 0
+  let sum = 0n
+  let least: bigint | null = null
+  let most: bigint | null = null
+
+  const widen = (to: number) => {
+    if (to <= scale) return
+    const factor = 10n ** BigInt(to - scale)
+    sum *= factor
+    if (least !== null) least *= factor
+    if (most !== null) most *= factor
+    scale = to
+  }
+
+  const addExact = (value: Fixed) => {
+    widen(value.scale)
+    const digits = value.digits * 10n ** BigInt(scale - value.scale)
+    sum += digits
+    if (least === null || digits < least) least = digits
+    if (most === null || digits > most) most = digits
+    exactCount += 1
+  }
+
+  // Float accumulators, for real/float columns and exponent forms. Kept as
+  // running scalars so min/max never need an array (a spread of one would sit
+  // close to the argument-count limit at the caller's cell cap).
+  let floatCount = 0
+  let floatSum = 0
+  let floatLeast = Number.POSITIVE_INFINITY
+  let floatMost = Number.NEGATIVE_INFINITY
+
+  const addFloat = (value: number) => {
+    floatSum += value
+    if (value < floatLeast) floatLeast = value
+    if (value > floatMost) floatMost = value
+    floatCount += 1
+    approximate = true
+  }
 
   for (const value of values) {
     count += 1
@@ -94,83 +132,76 @@ export function aggregateCells(values: readonly unknown[]): SelectionStats {
       continue
     }
     if (typeof value === 'bigint') {
-      exact.push({ digits: value, scale: 0 })
+      addExact({ digits: value, scale: 0 })
       continue
     }
     if (typeof value === 'number') {
       if (!Number.isFinite(value)) continue
-      // An integer-valued double is exact; a fractional one is already a float,
-      // so parse its shortest representation and accept the rounding.
-      if (Number.isInteger(value)) exact.push({ digits: BigInt(value), scale: 0 })
-      else {
-        const parsed = parseFixed(String(value))
-        if (parsed) exact.push(parsed)
-        else floats.push(value)
+      if (Number.isInteger(value)) {
+        addExact({ digits: BigInt(value), scale: 0 })
+        continue
+      }
+      // A fractional double is already approximate; its shortest decimal form
+      // is the faithful reading of it, so keep it on the exact path but say so.
+      const parsed = parseFixed(String(value))
+      if (parsed) {
+        addExact(parsed)
         approximate = true
+      } else {
+        addFloat(value)
       }
       continue
     }
-    if (typeof value === 'string') {
-      const parsed = parseFixed(value)
-      if (parsed) exact.push(parsed)
-      else {
-        // Exponent notation ("1.5e-7") is numeric but not exactly parseable here.
-        const asFloat = Number(value.trim())
-        if (value.trim() !== '' && Number.isFinite(asFloat)) {
-          floats.push(asFloat)
-          approximate = true
-        }
-      }
+    if (typeof value !== 'string') continue
+    const parsed = parseFixed(value)
+    if (parsed) {
+      addExact(parsed)
+      continue
     }
+    // Exponent notation ("1.5e-7") is numeric but not exactly parseable here.
+    const asFloat = Number(value.trim())
+    if (value.trim() !== '' && Number.isFinite(asFloat)) addFloat(asFloat)
   }
 
-  const numeric = exact.length + floats.length
+  const numeric = exactCount + floatCount
   if (!numeric) return { ...EMPTY, count, nulls }
 
-  if (floats.length) {
-    // Mixed or float-only: one float total, rounded for display.
-    let total = floats.reduce((sum, value) => sum + value, 0)
-    for (const value of exact) total += Number(formatFixed(value))
-    const all = [...floats, ...exact.map((value) => Number(formatFixed(value)))]
+  if (floatCount) {
+    // Mixed or float-only: fold the exact side in once — three conversions,
+    // not one per value — and report rounded floats.
+    const exactSum = exactCount ? Number(formatFixed({ digits: sum, scale })) : 0
+    const total = floatSum + exactSum
+    const low = exactCount ? Math.min(floatLeast, Number(formatFixed({ digits: least!, scale }))) : floatLeast
+    const high = exactCount ? Math.max(floatMost, Number(formatFixed({ digits: most!, scale }))) : floatMost
     return {
       count,
       numeric,
       nulls,
       sum: formatFloat(total),
       avg: formatFloat(total / numeric),
-      min: formatFloat(Math.min(...all)),
-      max: formatFloat(Math.max(...all)),
+      min: formatFloat(low),
+      max: formatFloat(high),
       approximate: true,
     }
   }
 
-  // All exact: align every value to the widest scale and work in BigInt.
-  const scale = exact.reduce((widest, value) => Math.max(widest, value.scale), 0)
-  const aligned = exact.map((value) => scaleTo(value, scale))
-  const total = aligned.reduce((sum, value) => sum + value, 0n)
-  const smallest = aligned.reduce((least, value) => (value < least ? value : least))
-  const largest = aligned.reduce((most, value) => (value > most ? value : most))
-
-  // Round-half-away-from-zero division for the average, at scale + extra digits.
-  const avgScale = scale + AVG_EXTRA_SCALE
-  const numerator = total * 10n ** BigInt(AVG_EXTRA_SCALE) * 2n
-  const divisor = BigInt(numeric) * 2n
-  const quotient = numerator / divisor
-  const remainder = (numerator % divisor) * 2n
-  const rounded = remainder >= divisor
-    ? quotient + (total < 0n ? -1n : 1n)
-    : remainder <= -divisor
-      ? quotient - 1n
-      : quotient
+  // The average still divides, so it carries extra fraction digits and rounds
+  // half away from zero at that width.
+  const scaled = sum * 10n ** BigInt(AVG_EXTRA_SCALE)
+  const divisor = BigInt(numeric)
+  const quotient = scaled / divisor
+  const remainder = scaled % divisor
+  const magnitude = remainder < 0n ? -remainder : remainder
+  const rounded = magnitude * 2n >= divisor ? quotient + (scaled < 0n ? -1n : 1n) : quotient
 
   return {
     count,
     numeric,
     nulls,
-    sum: formatFixed({ digits: total, scale }, scale),
-    avg: formatFixed({ digits: rounded, scale: avgScale }, Math.min(scale, 2)),
-    min: formatFixed({ digits: smallest, scale }, scale),
-    max: formatFixed({ digits: largest, scale }, scale),
+    sum: formatFixed({ digits: sum, scale }, scale),
+    avg: formatFixed({ digits: rounded, scale: scale + AVG_EXTRA_SCALE }, Math.min(scale, 2)),
+    min: formatFixed({ digits: least!, scale }, scale),
+    max: formatFixed({ digits: most!, scale }, scale),
     approximate,
   }
 }

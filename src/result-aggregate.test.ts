@@ -133,6 +133,39 @@ describe('aggregateCells', () => {
     expect(stats.max).toBe('0.50')
   })
 
+  // The accumulator holds one running scale and widens it as wider values
+  // arrive, so order must not matter.
+  it('is order-independent when scales widen', () => {
+    const ascending = aggregateCells(['1', '2.5', '3.125'])
+    const descending = aggregateCells(['3.125', '2.5', '1'])
+    expect(ascending.sum).toBe('6.625')
+    expect(descending.sum).toBe(ascending.sum)
+    expect(descending.min).toBe(ascending.min)
+    expect(descending.max).toBe(ascending.max)
+    expect(descending.avg).toBe(ascending.avg)
+  })
+
+  it('keeps min/max exact when a wider value arrives after a narrower one', () => {
+    // Widening must rescale the running min/max too, not just the sum.
+    const stats = aggregateCells(['0.10', '0.100000000000000000001'])
+    expect(stats.min).toBe('0.100000000000000000000')
+    expect(stats.max).toBe('0.100000000000000000001')
+    expect(stats.approximate).toBe(false)
+  })
+
+  // Min/max used to go through Math.min(...array), which sits near the
+  // argument-count limit at the caller's 100k cell cap.
+  it('handles a selection at the caller cell cap without spreading', () => {
+    const exact = Array.from({ length: 100_000 }, (_, i) => String(i))
+    expect(aggregateCells(exact).sum).toBe(String((99_999 * 100_000) / 2))
+    // The float branch is the one that used the spread.
+    const floats = Array.from({ length: 100_000 }, (_, i) => i + 0.5)
+    const stats = aggregateCells(floats)
+    expect(stats.min).toBe('0.5')
+    expect(stats.max).toBe('99999.5')
+    expect(stats.numeric).toBe(100_000)
+  })
+
   it('leaves blobs and objects out of the aggregate', () => {
     const stats = aggregateCells([new Uint8Array([1, 2]), { a: 1 }, '3'])
     expect(stats.count).toBe(3)

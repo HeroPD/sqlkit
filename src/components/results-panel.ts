@@ -1240,20 +1240,33 @@ export class ResultsPanel extends LitElement {
     `
   }
 
-  // Excel-style readout for the status bar. Recomputed only when the selection
-  // rectangle actually changes (not on every repaint), and only for a rectangle
-  // small enough that walking it is free — past that the cell count alone goes
-  // out, since it comes from the rectangle without touching any values.
-  private _statsRect: string | null = null
+  // Excel-style readout for the status bar. Recomputed only when something the
+  // aggregate actually depends on changed, and only for a rectangle small
+  // enough that walking it is free — past that the cell count alone goes out,
+  // since it comes from the rectangle without touching any values.
+  private _statsInputs: readonly unknown[] | null = null
+
+  // Every input _recordValue reads, plus the selection rectangle. The stats memo
+  // keys on this, so adding a source to _recordValue and invalidating the memo
+  // are the same edit. Identities rather than a changedProperties allowlist:
+  // _resultSetIndex is a plain field, so Lit would never report it as changed.
+  private _statsDependencies(): readonly unknown[] {
+    const s = this._sel
+    return [
+      s && `${Math.min(s.r0, s.r1)}:${Math.min(s.c0, s.c1)}:${Math.max(s.r0, s.r1)}:${Math.max(s.c0, s.c1)}`,
+      this.edits,
+      this.drafts,
+      this.run,
+      this._resultSetIndex,
+    ]
+  }
 
   private _publishSelectionStats() {
-    const rect = this._sel
-      ? `${Math.min(this._sel.r0, this._sel.r1)}:${Math.min(this._sel.c0, this._sel.c1)}:` +
-        `${Math.max(this._sel.r0, this._sel.r1)}:${Math.max(this._sel.c0, this._sel.c1)}`
-      : null
-    if (rect === this._statsRect) return
-    this._statsRect = rect
-    const targets = rect ? this._selectedCellTargets() : []
+    const inputs = this._statsDependencies()
+    const previous = this._statsInputs
+    if (previous && inputs.every((value, index) => value === previous[index])) return
+    this._statsInputs = inputs
+    const targets = this._sel ? this._selectedCellTargets() : []
     // A single cell carries no aggregate worth showing; Excel stays quiet too.
     const stats = targets.length > 1
       ? (targets.length > MAX_STATS_CELLS

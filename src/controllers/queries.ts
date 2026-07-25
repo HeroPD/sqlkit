@@ -51,6 +51,11 @@ const retainedResultBytes = (result: QueryResult): number => {
 
 // Shared empty edits map, so a tab with no pending edits returns a stable
 // reference (no spurious re-renders).
+// Shared stable empties, so a tab with nothing staged returns the same
+// reference every call. Consumers memoise on these identities, so a fresh {} or
+// [] here reads as "the data changed" on every render.
+const NO_DRAFTS: DraftRow[] = []
+const IDLE_RUN: QueryRun = { phase: 'idle' }
 const NO_EDITS: ReadonlyMap<string, CellInput> = new Map()
 const NO_DELETES: ReadonlySet<number> = new Set()
 
@@ -128,7 +133,7 @@ export class QueriesController implements ReactiveController {
 
   /** What the results panel shows: the given tab's last run. */
   runFor(tabId: string | null): QueryRun {
-    return (tabId ? this.runs.get(tabId) : undefined) ?? { phase: 'idle' }
+    return (tabId ? this.runs.get(tabId) : undefined) ?? IDLE_RUN
   }
 
   /** The column sort applied to the tab's current result, if any. */
@@ -185,7 +190,7 @@ export class QueriesController implements ReactiveController {
 
   /** The tab's staged new rows; empty when none. */
   draftsFor(tabId: string | null): DraftRow[] {
-    return (tabId ? this.drafts.get(tabId) : undefined) ?? []
+    return (tabId ? this.drafts.get(tabId) : undefined) ?? NO_DRAFTS
   }
 
   /** Inserts an all-default new row (every cell untouched) below result row

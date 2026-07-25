@@ -61,6 +61,29 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+// Consumers (results-panel's status-bar readout) memoise on these identities, so
+// a fresh [] or {} per call reads as "the data changed" on every render and can
+// drive an unbounded render loop. Pin the stability rather than the values.
+describe('QueriesController empty accessors are referentially stable', () => {
+  it('returns the same reference for a tab with nothing staged', () => {
+    const queries = new QueriesController(host(), () => true)
+    for (const read of [
+      () => queries.runFor('t1'),
+      () => queries.draftsFor('t1'),
+      () => queries.editsFor('t1'),
+      () => queries.pendingDeletesFor('t1'),
+      () => queries.columnWidthsFor('t1', ['a']),
+      () => queries.sortFor('t1'),
+      () => queries.filterFor('t1'),
+    ]) {
+      expect(read()).toBe(read())
+    }
+    // Also stable across different tabs and for a null tab id.
+    expect(queries.draftsFor('t1')).toBe(queries.draftsFor('t2'))
+    expect(queries.runFor(null)).toBe(queries.runFor('t9'))
+  })
+})
+
 describe('QueriesController.execute', () => {
   it('records the result when no workspace switch intervenes', async () => {
     const { settle } = deferRunQuery()
