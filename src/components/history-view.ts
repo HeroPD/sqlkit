@@ -81,18 +81,22 @@ export class HistoryView extends LitElement {
   }
 
   private _renderItem(item: HistoryItem) {
-    const meta = [
+    // Outcome and duration read as one coloured unit ("OK 12 ms" / "Error 4 ms"),
+    // replacing the status strip down the row edge — consecutive successes used to
+    // fuse into one long green bar. The word stays alongside the colour: colour
+    // alone must not be what tells you a query broke.
+    const parts: unknown[] = [
       formatTime(item.createdAt),
-      item.success ? t('common.ok') : t('common.error'),
-      `${Math.max(1, Math.round(item.durationMs))} ms`,
-      item.rowCount !== null ? `${formatInteger(item.rowCount)} ${rowWord(item.rowCount)}` : '',
+      html`<span class="outcome ${item.success ? 'ok' : 'error'}"
+        >${item.success ? t('common.ok') : t('common.error')} ${Math.max(1, Math.round(item.durationMs))} ms</span
+      >`,
     ]
-      .filter(Boolean)
-      .join(' · ')
+    if (item.rowCount !== null) parts.push(`${formatInteger(item.rowCount)} ${rowWord(item.rowCount)}`)
+    const meta = parts.flatMap((part, index) => (index === 0 ? [part] : [' · ', part]))
 
     return html`
       <div
-        class="item ${item.success ? 'ok' : 'error'}"
+        class="item"
         role="button"
         tabindex="0"
         title=${item.success ? item.sql : `${item.sql}\n\n${item.error}`}
@@ -167,14 +171,9 @@ export class HistoryView extends LitElement {
         display: flex;
         flex-direction: column;
         gap: 2px;
-        padding: 5px 10px 5px 12px;
-        border-left: 2px solid var(--status-dot-connected);
+        padding: 5px 10px 5px 14px;
         cursor: pointer;
         user-select: none;
-      }
-
-      .item.error {
-        border-left-color: var(--status-dot-error);
       }
 
       .item:hover {
@@ -193,6 +192,18 @@ export class HistoryView extends LitElement {
       .meta {
         font-size: var(--font-size-sm);
         color: var(--text-3);
+      }
+
+      .outcome {
+        font-variant-numeric: tabular-nums;
+      }
+
+      .outcome.ok {
+        color: var(--status-dot-connected);
+      }
+
+      .outcome.error {
+        color: var(--status-dot-error);
       }
     `,
   ]
