@@ -2,6 +2,8 @@ import pg from 'pg'
 import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import net from 'node:net'
+import tls from 'node:tls'
 import type { ConnectionOptions } from 'node:tls'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
@@ -47,12 +49,17 @@ export function sslOptions(profile: ConnectionProfile): boolean | ConnectionOpti
 // cost nothing. Queries and table listings always target the active child.
 // Dials the endpoint, not the profile — the transport layer may have
 // rewritten host/port to an SSH tunnel's local end.
-type RunningEntry = { executionId?: string; pid: number | null; cancelRequested: boolean }
+type RunningEntry = { executionId?: string; pid: number | null; secret: number | null; cancelRequested: boolean }
 
 // node-postgres exposes the backend PID at runtime but omits it from the public
 // PoolClient type. Keep that upgrade-sensitive assertion at one boundary.
 const backendPid = (client: pg.PoolClient): number | null =>
   (client as pg.PoolClient & { processID?: number }).processID ?? null
+
+// The cancel key from the same BackendKeyData as the PID; both are needed for a
+// protocol-level CancelRequest. Also untyped on the public PoolClient.
+const backendSecret = (client: pg.PoolClient): number | null =>
+  (client as pg.PoolClient & { secretKey?: number }).secretKey ?? null
 
 // The client's underlying socket, for pausing reads to backpressure a streamed
 // export. node-postgres doesn't expose it publicly, so reach it at one boundary.
@@ -150,30 +157,72 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     await client.query('DISCARD ALL')
   }
 
-  const cancelBackends = async (entries: RunningEntry[], database: string) => {
-    const client = new pg.Client({
-      host: endpoint.host,
-      port: endpoint.port,
-      user: profile.username,
-      password: profile.password,
-      database,
-      ssl,
-      connectionTimeoutMillis: 8000,
-      keepAlive: true,
-      keepAliveInitialDelayMillis: 30_000,
+  // Cancellation goes over the wire protocol rather than through
+  // pg_cancel_backend, which is what libpq's PQcancel does. A CancelRequest is a
+  // bare connection carrying the BackendKeyData this session was given, and it is
+  // the only form that survives a connection pooler: PgBouncer hands clients a
+  // synthetic PID and routes cancels itself, so pg_cancel_backend against that
+  // PID returns false and the query runs to completion (verified against
+  // PgBouncer 1.25.2 in transaction mode). Passing a pooler's random 32-bit key
+  // to pg_cancel_backend is also not merely useless — it could land in real PID
+  // range and interrupt an unrelated backend.
+  // No reply is defined, so delivery is all this can report; the cancelled
+  // statement itself surfaces as 57014 on the query that was running.
+  const CANCEL_REQUEST_CODE = 80877102
+  const SSL_REQUEST_CODE = 80877103
+
+  const cancelPacket = (processId: number, secretKey: number): Buffer => {
+    const packet = Buffer.alloc(16)
+    packet.writeInt32BE(16, 0)
+    packet.writeInt32BE(CANCEL_REQUEST_CODE, 4)
+    packet.writeInt32BE(processId, 8)
+    packet.writeInt32BE(secretKey, 12)
+    return packet
+  }
+
+  const sendCancelRequest = (processId: number, secretKey: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      const socket = net.connect({ host: endpoint.host, port: endpoint.port })
+      let settled = false
+      const done = (delivered: boolean) => {
+        if (settled) return
+        settled = true
+        socket.destroy()
+        resolve(delivered)
+      }
+      socket.setTimeout(8000, () => done(false))
+      socket.on('error', () => done(false))
+      socket.on('connect', () => {
+        if (!ssl) {
+          socket.write(cancelPacket(processId, secretKey), () => done(true))
+          return
+        }
+        // TLS endpoints need the SSLRequest handshake before any other message.
+        const request = Buffer.alloc(8)
+        request.writeInt32BE(8, 0)
+        request.writeInt32BE(SSL_REQUEST_CODE, 4)
+        socket.write(request)
+        socket.once('data', (response) => {
+          // 'S' accepts TLS; 'N' refuses it, and a cleartext cancel on a server
+          // demanding TLS would be rejected anyway.
+          if (response[0] !== 0x53) return done(false)
+          const secure = tls.connect({
+            socket,
+            ...(typeof ssl === 'object' ? ssl : {}),
+            servername: endpoint.host,
+          })
+          secure.on('error', () => done(false))
+          secure.on('secureConnect', () =>
+            secure.write(cancelPacket(processId, secretKey), () => done(true)))
+        })
+      })
     })
-    try {
-      await client.connect()
-      // The dial takes real time; a finished query's client (same PID) may now
-      // serve another query — re-check membership so a late cancel can't hit it.
-      const live = entries.filter((entry) => running.has(entry) && entry.pid !== null)
-      return await Promise.all(live.map((entry) => client
-        .query<{ ok: boolean }>('select pg_cancel_backend($1) as ok', [entry.pid])
-        .then((result) => result.rows[0]?.ok === true)
-        .catch(() => false)))
-    } finally {
-      await client.end().catch(() => {})
-    }
+
+  const cancelBackends = async (entries: RunningEntry[]) => {
+    // Re-check membership: a query that finished in the meantime must not have a
+    // cancel aimed at the key its connection now serves another statement under.
+    const live = entries.filter((entry) => running.has(entry) && entry.pid !== null && entry.secret !== null)
+    return await Promise.all(live.map((entry) => sendCancelRequest(entry.pid!, entry.secret!)))
   }
 
   return {
@@ -215,7 +264,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const pool = poolForQuery(childDb)
       // Checked out manually (not pool.query) so the backend PID is known
       // while the statement runs and cancel() has a target.
-      const entry = { executionId, pid: null as number | null, cancelRequested: false }
+      const entry = { executionId, pid: null as number | null, secret: null as number | null, cancelRequested: false }
       running.add(entry)
       let client: pg.PoolClient | null = null
       let released = false
@@ -229,6 +278,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       try {
         client = await pool.connect()
         entry.pid = backendPid(client)
+        entry.secret = backendSecret(client)
         if (entry.cancelRequested) {
           releaseToPool()
           throw new Error(t('query.cancelled'))
@@ -265,7 +315,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // One checked-out client for the whole batch: a pool-routed sequence would
       // spread the statements across backends, so BEGIN/COMMIT couldn't bind them.
       const client = await pool.connect()
-      const entry = { pid: backendPid(client), cancelRequested: false }
+      const entry = { pid: backendPid(client), secret: backendSecret(client), cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the client re-enters the pool (see query()).
       const releaseToPool = () => {
@@ -311,7 +361,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       if (!statements.length) return { success: true }
       const pool = poolForQuery(childDb)
       const client = await pool.connect()
-      const entry = { pid: backendPid(client), cancelRequested: false }
+      const entry = { pid: backendPid(client), secret: backendSecret(client), cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the client re-enters the pool (see query()).
       const releaseToPool = () => {
@@ -431,7 +481,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       if (!targets.length) return { running: entries.length, cancelled: queued.length }
       // pg_cancel_backend returns false for a PID that's already gone or that
       // we lack permission to signal; count only the ones it actually hit.
-      const sent = await cancelBackends(targets, active)
+      const sent = await cancelBackends(targets)
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
@@ -439,13 +489,14 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort, filter })
       // Registered like query() so Stop (and disconnect) can interrupt a
       // runaway export instead of it streaming to completion unstoppably.
-      const entry = { executionId, pid: null as number | null, cancelRequested: false }
+      const entry = { executionId, pid: null as number | null, secret: null as number | null, cancelRequested: false }
       running.add(entry)
       let client: pg.PoolClient | null = null
       const writer = openExportWriter(filePath, format)
       try {
         client = await poolForQuery(childDb).connect()
         entry.pid = backendPid(client)
+        entry.secret = backendSecret(client)
         if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         await streamPgExport(client, plan.batches[0]!, plan.params, writer)
         const result = await writer.close()

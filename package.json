@@ -46,11 +46,14 @@
   "dependencies": {
     "@fontsource-variable/ibm-plex-sans": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
-    "mssql": "12.6.0",
+    "mssql": "12.7.0",
     "mysql2": "^3.22.5",
     "pg": "^8.21.0",
     "ssh2": "^1.17.0",
-    "tedious": "19.2.2"
+    "tedious": "20.0.0"
+  },
+  "overrides": {
+    "tedious": "20.0.0"
   },
   "allowScripts": {
     "cpu-features@0.0.10": true,

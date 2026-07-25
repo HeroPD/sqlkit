@@ -84,6 +84,18 @@ export function supportsOptimisticComparison(engine: Engine, column: ColumnRef |
 const isTextType = (column: ColumnRef | undefined) =>
   /^(?:n?varchar|n?char|text|tinytext|mediumtext|longtext|citext)/.test(baseType(column))
 
+// SQL Server non-Unicode text. A binary collation on nvarchar compares UTF-16
+// code points, so it is exact whatever the column's own collation is — but on
+// varchar/char it reinterprets the stored bytes through Latin1's code page,
+// misreading anything held under another one (Chinese_PRC_*, a _UTF8 collation).
+// Widening to nvarchar first decodes with the column's real collation.
+// text/ntext never reach here: supportsOptimisticComparison rejects them.
+const isNonUnicodeText = (column: ColumnRef | undefined) => /^(?:varchar|char)$/.test(baseType(column))
+
+// The exact-comparison left side for a SQL Server text column.
+const mssqlBinaryText = (identifier: string, column: ColumnRef | undefined) =>
+  `${isNonUnicodeText(column) ? `CONVERT(nvarchar(max), ${identifier})` : identifier} COLLATE Latin1_General_100_BIN2`
+
 const isIntegerType = (column: ColumnRef | undefined) =>
   /^(?:big|medium|small|tiny)?int(?:eger)?\b/.test(baseType(column))
 
@@ -133,7 +145,7 @@ const comparisonPredicate = (
   }
   if (engine === 'sqlite') return `${identifier} COLLATE BINARY IS ${parameter}`
   if (isTextType(key.columnMeta)) {
-    return `${identifier} COLLATE Latin1_General_100_BIN2 = ${parameter} COLLATE Latin1_General_100_BIN2`
+    return `${mssqlBinaryText(identifier, key.columnMeta)} = ${parameter} COLLATE Latin1_General_100_BIN2`
   }
   return `${identifier} = ${parameter}`
 }
@@ -787,7 +799,7 @@ const membershipPredicate = (engine: Engine, dialect: Dialect, rows: RowKey[], b
   let lhs = identifier
   if (engine === 'mysql' && isTextType(first.columnMeta)) lhs = `BINARY ${identifier}`
   if (engine === 'sqlite') lhs = `${identifier} COLLATE BINARY`
-  if (engine === 'sqlserver' && isTextType(first.columnMeta)) lhs = `${identifier} COLLATE Latin1_General_100_BIN2`
+  if (engine === 'sqlserver' && isTextType(first.columnMeta)) lhs = mssqlBinaryText(identifier, first.columnMeta)
   return `${lhs} IN (${values.join(', ')})`
 }
 

@@ -10,7 +10,7 @@ const inspectColumnFixture = (name: string): InspectColumn =>
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { createPostgresDriver } from './postgres'
-import { adminPool, endpointFor, profileFromUrl, testDatabaseUrl } from './test-db'
+import { adminPool, endpointFor, profileFromUrl, testDatabaseUrl, testPooledDatabaseUrl } from './test-db'
 
 const url = testDatabaseUrl()
 const describeDb = url ? describe : describe.skip
@@ -503,6 +503,55 @@ describeDb('postgres driver (integration)', () => {
         expect(driver.children?.().find((child) => child.name === other.name)?.inUse).toBe(true)
       }
       expect(driver.useChild?.('sqlkit_no_such_database')).toBe(false)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+})
+
+// A transaction-pooling proxy in front of the same server. It hands each client
+// a synthetic BackendKeyData, so pg_cancel_backend against that PID returns
+// false and the statement runs to completion — cancellation only lands over the
+// wire protocol. Verified against PgBouncer 1.25.2 in transaction mode; skipped
+// unless TEST_POOLED_DATABASE_URL points at one.
+const pooledUrl = testPooledDatabaseUrl()
+const describePooled = pooledUrl ? describe : describe.skip
+
+describePooled('postgres driver through a transaction pooler (integration)', () => {
+  const connectPooled = async (): Promise<Driver> => {
+    const profile = profileFromUrl(pooledUrl!, { databaseMode: 'single' })
+    const driver = createPostgresDriver(profile, endpointFor(profile), { onError: () => {} })
+    await driver.connect()
+    return driver
+  }
+
+  it('cancels an in-flight query over the wire protocol', async () => {
+    const driver = await connectPooled()
+    try {
+      const running = driver.query('select pg_sleep(20)', [], null, null, null, 'slow-pooled')
+      const cancelled = expect(running).rejects.toThrow('Query cancelled.')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const started = Date.now()
+      const outcome = await driver.cancel?.('slow-pooled')
+      expect(outcome?.running).toBeGreaterThanOrEqual(1)
+      expect(outcome?.cancelled).toBeGreaterThanOrEqual(1)
+      await cancelled
+      // The point of the test: interrupted promptly, not after pg_sleep(20).
+      expect(Date.now() - started).toBeLessThan(5_000)
+      expect((await driver.query('select 1')).rows).toEqual([[1]])
+    } finally {
+      await driver.disconnect()
+    }
+  }, 30_000)
+
+  it('resets a pooled session between queries', async () => {
+    // DISCARD ALL is passed through by PgBouncer rather than refused, so the
+    // ordinary reset path works here too; this pins that behavior so a pooler
+    // that does refuse it shows up as a failure rather than silent churn.
+    const driver = await connectPooled()
+    try {
+      await driver.query("set search_path to pg_catalog")
+      expect((await driver.query('show search_path')).rows[0]?.[0]).not.toBe('pg_catalog')
     } finally {
       await driver.disconnect()
     }

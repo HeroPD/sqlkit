@@ -92,9 +92,24 @@ export function decodeDateTimeOffsetPayload(
 
 /**
  * Tedious decodes exact numerics through Number and discards datetimeoffset's
- * zone. Its row-token parser calls this exported function dynamically, so a
- * narrow adapter can preserve those wire values without forking the driver.
- * The dependency is pinned and this shape is asserted at startup and in tests.
+ * zone, and exposes no hook to change that — the decode happens in the token
+ * parser, upstream of anything public, and by the time a value reaches the
+ * Request 'row' event it is already lossy. So a narrow adapter swaps the one
+ * export instead of forking the driver.
+ *
+ * Why swapping the export works: tedious' row parsers call it as
+ * `(0, _valueParser.readValue)(…)` (see token/row-token-parser.js and
+ * token/nbcrow-token-parser.js), a property lookup on the module exports
+ * resolved per call — an artifact of its Babel ESM→CJS build. If tedious ever
+ * ships native ESM, bundles, or otherwise captures `readValue` in a local
+ * binding, this assignment still succeeds but stops taking effect. That fails
+ * loudly rather than silently: mssql.integration.test.ts asserts decimal(38,2),
+ * money, datetimeoffset(7) and datetime2(7) as exact text, so an unreached patch
+ * turns them back into Number/Date and normalizeMssqlRow throws.
+ *
+ * tedious is pinned exactly and forced tree-wide through package.json overrides,
+ * so `mssql` can never resolve a second nested copy this patch would miss.
+ * Verified against 19.2.2 and 20.0.0, whose value-parser.js is byte-identical.
  */
 export function installLosslessTediousParsers() {
   const parser = require('tedious/lib/value-parser.js') as ValueParser & { [PATCHED]?: boolean }

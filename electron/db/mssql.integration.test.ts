@@ -232,6 +232,46 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
+  it('guards a varchar key held under a non-Latin1 collation', async () => {
+    // The optimistic guard compares text under a binary collation. Forcing
+    // Latin1_General_100_BIN2 straight onto a varchar column reinterprets its
+    // bytes through code page 1252, so a value stored under another code page
+    // would not match and the save would abort with "0 matched". The guard
+    // widens to nvarchar first, decoding with the column's own collation.
+    const driver = await connectDriver()
+    const colMeta = (name: string, dataType: string, primaryKey = false) =>
+      ({ schema: 'dbo', table: 'coll_guard', name, dataType, nullable: !primaryKey, primaryKey, foreignKey: false })
+    try {
+      await driver.query(
+        'create table coll_guard (id int primary key, label varchar(50) collate Chinese_PRC_CI_AS, note nvarchar(50))',
+      )
+      await driver.query("insert into coll_guard values (1, N'中文字', N'before')")
+      const stored = await driver.query('select label from coll_guard where id = 1')
+      const label = stored.rows[0]?.[0] as string
+      const statements = buildBatchUpdates({
+        table: { schema: 'dbo', name: 'coll_guard', kind: 'table' },
+        engine: 'sqlserver',
+        edits: [{
+          column: 'note',
+          columnMeta: colMeta('note', 'nvarchar(50)'),
+          value: 'after',
+          originalValue: 'before',
+          // The non-Unicode, non-Latin1 column is the guarded key.
+          pks: [
+            { name: 'id', value: 1, columnMeta: colMeta('id', 'int', true) },
+            { name: 'label', value: label, columnMeta: colMeta('label', 'varchar(50)') },
+          ],
+        }],
+      })
+      expect(statements[0]!.sql).toContain('CONVERT(nvarchar(max), [label])')
+      expect(await driver.runBatch!(statements)).toEqual({ success: true })
+      expect((await driver.query('select note from coll_guard where id = 1')).rows).toEqual([['after']])
+    } finally {
+      await driver.query('drop table if exists coll_guard').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('does not trip the zero-rows gate on a no-op update', async () => {
     const driver = await connectDriver()
     try {

@@ -99,6 +99,30 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
+  it('refuses a single-database connection with no database instead of connecting blind', async () => {
+    // MySQL has no universal default schema (no `postgres`, no `master`), so this
+    // used to connect schema-less: database() was NULL, every metadata read came
+    // back empty, and the UI reported "connected" over an empty explorer with no
+    // error. Adopting some schema automatically would be worse — it would aim the
+    // user's next DROP at a database they never picked.
+    await expect(connectDriver({ database: '', databaseMode: 'single' })).rejects.toThrow(/needs a database/i)
+  })
+
+  it('browses every schema when all-databases mode has no database set', async () => {
+    // The same blank field is legitimate in all-databases mode: the child list is
+    // discovered, so there is a real schema to resolve database() against.
+    const driver = await connectDriver({ database: '', databaseMode: 'all' })
+    try {
+      const children = driver.children?.() ?? []
+      expect(children.length).toBeGreaterThan(0)
+      expect(children.map((child) => child.name)).not.toContain('')
+      const inUse = children.find((child) => child.inUse)!
+      expect((await driver.query('select database()')).rows[0]?.[0]).toBe(inUse.name)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('returns columns, rows, rowCount and a duration for a select', async () => {
     const driver = await connectDriver()
     try {

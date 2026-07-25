@@ -382,6 +382,41 @@ describe('buildDeleteRows', () => {
     expect(mssqlText.sql).toContain('[name] COLLATE Latin1_General_100_BIN2 IN (@p1, @p2)')
   })
 
+  it('widens a non-Unicode SQL Server text key before the binary collation', () => {
+    // A binary collation on varchar reinterprets the stored bytes through
+    // Latin1's code page, so a column held under another one (Chinese_PRC_*, a
+    // _UTF8 collation) would compare wrong. nvarchar needs no widening: BIN2
+    // there is already a code-point comparison.
+    const varcharKey = { name: 'name', value: 'Ada', columnMeta: col({ name: 'name', dataType: 'varchar(50)' }) }
+    const membership = buildDeleteRows({
+      table: users,
+      rows: [[varcharKey], [{ ...varcharKey, value: 'Bob' }]],
+      engine: 'sqlserver',
+    })
+    expect(membership.sql).toContain('CONVERT(nvarchar(max), [name]) COLLATE Latin1_General_100_BIN2 IN (@p1, @p2)')
+
+    const equality = buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: 1 }, varcharKey]],
+      engine: 'sqlserver',
+    })
+    expect(equality.sql).toContain('CONVERT(nvarchar(max), [name]) COLLATE Latin1_General_100_BIN2 = @p2 COLLATE Latin1_General_100_BIN2')
+
+    // char behaves like varchar; nvarchar stays untouched.
+    const charKey = buildDeleteRows({
+      table: users,
+      rows: [[{ ...varcharKey, columnMeta: col({ name: 'name', dataType: 'char(3)' }) }]],
+      engine: 'sqlserver',
+    })
+    expect(charKey.sql).toContain('CONVERT(nvarchar(max), [name])')
+    const unicode = buildDeleteRows({
+      table: users,
+      rows: [[{ ...varcharKey, columnMeta: col({ name: 'name', dataType: 'nvarchar(50)' }) }]],
+      engine: 'sqlserver',
+    })
+    expect(unicode.sql).not.toContain('CONVERT(')
+  })
+
   it('falls back to null-safe predicates when a key value is NULL', () => {
     const { sql, params } = buildDeleteRows({
       table: users,

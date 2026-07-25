@@ -97,6 +97,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       ssl,
       connectionLimit: 4,
       connectTimeout: 8000,
+      // mysql2 queues checkouts without bound by default; cap the backlog so a
+      // saturated pool errors instead of growing a queue nobody drains.
+      queueLimit: 64,
       // RESET CONNECTION on release rolls back implicit transactions and
       // removes SET/session/temp-table state before another tab borrows it.
       resetOnRelease: true,
@@ -130,10 +133,45 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     return pool
   }
 
-  // Metadata helper: object rows, cast to the query's concrete shape.
+  // mysql2's pool has no acquire timeout (pg bounds the wait with
+  // connectionTimeoutMillis, node-mssql through tarn's acquireTimeoutMillis), so
+  // four long user queries would queue every metadata read behind them forever —
+  // the explorer, inspector and completions hang with nothing to report. Bound
+  // the wait so they fail fast with a message instead.
+  const ACQUIRE_TIMEOUT_MS = 8_000
+
+  const acquire = (pool: mysql.Pool): Promise<mysql.PoolConnection> =>
+    new Promise((resolve, reject) => {
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        reject(new Error(t('connection.poolBusy')))
+      }, ACQUIRE_TIMEOUT_MS)
+      pool.getConnection().then(
+        (conn) => {
+          clearTimeout(timer)
+          // Checkout won the race after we gave up: hand it straight back rather
+          // than leak a connection nobody will release.
+          if (timedOut) conn.release()
+          else resolve(conn)
+        },
+        (error: unknown) => {
+          clearTimeout(timer)
+          if (!timedOut) reject(error instanceof Error ? error : new Error(String(error)))
+        },
+      )
+    })
+
+  // Metadata helper: object rows, cast to the query's concrete shape. Checked out
+  // explicitly (not pool.query) so the bounded acquire above applies.
   const metaRows = async <T>(sql: string, params: unknown[] = [], childDb?: string | null): Promise<T[]> => {
-    const [rows] = await poolForQuery(childDb).query(sql, params)
-    return rows as unknown as T[]
+    const conn = await acquire(poolForQuery(childDb))
+    try {
+      const [rows] = await conn.query(sql, params)
+      return rows as unknown as T[]
+    } finally {
+      conn.release()
+    }
   }
 
   const dialect = dialectFor(profile.engine)
@@ -169,22 +207,32 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const version = mysqlVersion(banner?.version ?? '')
       sqlMode = sqlModeFlags(banner?.mode ?? '')
 
+      const userSchemas = async () => (await metaRows<{ name: string }>(
+        `select schema_name as name from information_schema.schemata
+         where schema_name not in (${SYSTEM_SCHEMAS.map(() => '?').join(', ')}) order by schema_name`,
+        SYSTEM_SCHEMAS,
+      )).map((row) => row.name)
+
       if (profile.databaseMode === 'all') {
-        const listed = await metaRows<{ name: string }>(
-          `select schema_name as name from information_schema.schemata
-           where schema_name not in (${SYSTEM_SCHEMAS.map(() => '?').join(', ')}) order by schema_name`,
-          SYSTEM_SCHEMAS,
-        )
-        childNames = listed.map((row) => row.name)
-        if (!childNames.length) childNames = [discovery]
+        childNames = await userSchemas()
+        if (!childNames.length) childNames = discovery ? [discovery] : []
         for (const name of childNames) {
           if (!pools.has(name)) pools.set(name, makePool(name))
         }
-      } else {
+        if (!childNames.length) throw new Error(t('connection.mysqlNoDatabase'))
+      } else if (discovery) {
         childNames = [discovery]
+      } else {
+        // MySQL has no universal default schema to fall back on the way Postgres
+        // has `postgres` and SQL Server has `master`. Connecting schema-less
+        // leaves every metadata query's database() NULL, so the app would report
+        // "connected" over an empty explorer with nothing explaining why. Refuse
+        // instead: picking a schema on the user's behalf would silently aim
+        // their next DROP or UPDATE at a database they never chose.
+        throw new Error(t('connection.mysqlDatabaseRequired'))
       }
 
-      active = childNames.includes(discovery) ? discovery : (childNames[0] ?? discovery)
+      active = childNames.includes(discovery) ? discovery : childNames[0]!
       return version
     },
 
@@ -211,7 +259,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         conn = null
       }
       try {
-        conn = await poolForQuery(childDb).getConnection()
+        conn = await acquire(poolForQuery(childDb))
         const raw = rawOf(conn)
         entry.threadId = raw.threadId ?? null
         if (entry.cancelRequested) {
@@ -234,7 +282,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       if (!statements.length) return { success: true }
       // One checked-out connection for the whole batch so the transaction binds
       // every statement.
-      const conn = await poolForQuery(childDb).getConnection()
+      const conn = await acquire(poolForQuery(childDb))
       const entry = { threadId: rawOf(conn).threadId ?? null, cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the connection re-enters the pool (see query()).
@@ -313,7 +361,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       if (!statements.length) return { success: true }
       // No transaction: MySQL DDL commits implicitly, so statements run one by
       // one and a failure reports how far it got rather than rolling back.
-      const conn = await poolForQuery(childDb).getConnection()
+      const conn = await acquire(poolForQuery(childDb))
       const entry = { threadId: rawOf(conn).threadId ?? null, cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the connection re-enters the pool (see query()).
@@ -425,7 +473,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       let conn: mysql.PoolConnection | null = null
       const writer = openExportWriter(filePath, format)
       try {
-        conn = await poolForQuery(childDb).getConnection()
+        conn = await acquire(poolForQuery(childDb))
         entry.threadId = rawOf(conn).threadId ?? null
         if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         await streamMysqlExport(rawOf(conn), plan.batches[0]!, plan.params, writer)

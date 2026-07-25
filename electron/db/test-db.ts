@@ -22,6 +22,14 @@ export function testMssqlUrl(): string | undefined {
   return testUrl('TEST_MSSQL_URL')
 }
 
+/** The same Postgres reached through a transaction-pooling proxy (PgBouncer,
+ * Supavisor, RDS Proxy). Such an endpoint gives each client a synthetic
+ * BackendKeyData, so cancellation only works over the wire protocol — the one
+ * behavior a direct connection cannot exercise. Undefined skips those tests. */
+export function testPooledDatabaseUrl(): string | undefined {
+  return testUrl('TEST_POOLED_DATABASE_URL')
+}
+
 function testUrl(name: string): string | undefined {
   const fromEnv = process.env[name]?.trim()
   if (fromEnv) return fromEnv

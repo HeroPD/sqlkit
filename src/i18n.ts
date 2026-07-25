@@ -667,6 +667,9 @@ const enUS = {
   'connection.superseded': 'Connection superseded',
   'connection.mysqlTransactionUnknown': 'Could not verify transactional storage for this save; run the statements manually instead.',
   'connection.tediousIncompatible': 'The installed Tedious version is incompatible with SqlKit Studio lossless value decoding.',
+  'connection.mysqlNoDatabase': 'This MySQL server has no user database to browse. Create one, or set a database on the connection.',
+  'connection.mysqlDatabaseRequired': 'MySQL needs a database on this connection. Set one, or switch the connection to all-databases mode to browse every schema.',
+  'connection.poolBusy': 'This connection is busy running queries. Stop a running query, or try again in a moment.',
 } as const
 
 export type MessageKey = keyof typeof enUS
