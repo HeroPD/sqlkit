@@ -5,6 +5,7 @@ import { isMac } from '../platform'
 import type { Engine, QueryResult, QuerySort } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { MAX_FETCH_ROWS } from '../result-limits'
+import { aggregateCells } from '../result-aggregate'
 import { cellToTsv, cellsToTsv, parseClipboardTsv, toDelimited, toJson, type ExportFormat } from '../result-export'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
 import { uuidv4, uuidv7 } from '../uuid'
@@ -34,6 +35,10 @@ export type SortColumnDetail = { columnIndex: number; direction: SortDir | null 
 // (by draft array index). The grid lays these out in one interleaved sequence,
 // so selection/navigation work in a single "display row" coordinate space.
 type RowRef = { kind: 'result'; row: number } | { kind: 'draft'; index: number }
+
+// Selected cells whose values are worth walking for the status-bar readout.
+// Past this only the count goes out, so a huge drag can't cost a repaint.
+const MAX_STATS_CELLS = 100_000
 
 const NUM_COL_MIN_WIDTH = 30
 const NUM_COL_MAX_WIDTH = 96
@@ -355,6 +360,7 @@ export class ResultsPanel extends LitElement {
   }
 
   protected updated() {
+    this._publishSelectionStats()
     if (this._resetScroll) {
       this._resetScroll = false
       const body = this._bodyEl()
@@ -1232,6 +1238,36 @@ export class ResultsPanel extends LitElement {
         </div>
       </section>
     `
+  }
+
+  // Excel-style readout for the status bar. Recomputed only when the selection
+  // rectangle actually changes (not on every repaint), and only for a rectangle
+  // small enough that walking it is free — past that the cell count alone goes
+  // out, since it comes from the rectangle without touching any values.
+  private _statsRect: string | null = null
+
+  private _publishSelectionStats() {
+    const rect = this._sel
+      ? `${Math.min(this._sel.r0, this._sel.r1)}:${Math.min(this._sel.c0, this._sel.c1)}:` +
+        `${Math.max(this._sel.r0, this._sel.r1)}:${Math.max(this._sel.c0, this._sel.c1)}`
+      : null
+    if (rect === this._statsRect) return
+    this._statsRect = rect
+    const targets = rect ? this._selectedCellTargets() : []
+    // A single cell carries no aggregate worth showing; Excel stays quiet too.
+    const stats = targets.length > 1
+      ? (targets.length > MAX_STATS_CELLS
+          ? { ...aggregateCells([]), count: targets.length }
+          : aggregateCells(targets.map(({ ref, col }) => {
+              const value = this._recordValue(ref, col)
+              return isSqlNull(value) ? null : value
+            })))
+      : null
+    this.dispatchEvent(new CustomEvent('selection-stats', {
+      detail: { stats },
+      bubbles: true,
+      composed: true,
+    }))
   }
 
   private _recordValue(ref: RowRef, col: number): unknown {

@@ -1,8 +1,13 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { icons, popover, tooltip } from '../shared-styles'
-import { t } from '../i18n'
+import type { SelectionStats } from '../result-aggregate'
+import { formatInteger, t } from '../i18n'
 import { isMac, mod } from '../platform'
+
+// Mirrors the shared popover's min-width, so the measured anchor offset can be
+// clamped without letting the panel run off the left edge.
+const MIN_POP_WIDTH = 190
 
 export type StatusConnection = {
   profileId: string
@@ -41,11 +46,27 @@ export class StatusBar extends LitElement {
   @property({ attribute: false })
   connections: StatusConnection[] = []
 
+  /** Aggregate over the grid's selected cells; null when nothing multi-cell is
+   * selected. Numeric fields are pre-formatted strings — exact decimals never
+   * pass through a float on the way here. */
+  @property({ attribute: false })
+  selectionStats: SelectionStats | null = null
+
   @state()
   private _open = false
 
   @state()
   private _wsOpen = false
+
+  @state()
+  private _statsOpen = false
+
+  // Distance from the viewport's right edge to the stats button's right edge, so
+  // the popover hangs off its own trigger rather than the window corner. The
+  // button's width tracks its content ("Sum 17520.50" vs "Count 4"), so this is
+  // re-measured on every update while open, not just on open.
+  @state()
+  private _statsAnchorRight = 6
 
   connectedCallback() {
     super.connectedCallback()
@@ -57,11 +78,87 @@ export class StatusBar extends LitElement {
     window.removeEventListener('keydown', this._onKeydown)
   }
 
+  updated() {
+    if (!this._statsOpen) return
+    const button = this.shadowRoot?.querySelector<HTMLElement>('.item.stats')
+    if (!button) return
+    const rect = button.getBoundingClientRect()
+    // Keep the panel on screen if the button ever sits close to the left edge.
+    const next = Math.max(6, Math.min(window.innerWidth - rect.right, window.innerWidth - MIN_POP_WIDTH))
+    // Only reassign on a real change, so this converges instead of re-rendering.
+    if (Math.abs(next - this._statsAnchorRight) > 0.5) this._statsAnchorRight = next
+  }
+
   willUpdate() {
     // A disconnect can empty the list while the popover is up.
     if (!this.connections.length) this._open = false
     // No workspace (welcome screen) means no menu to show.
     if (!this.workspaceName) this._wsOpen = false
+    // Selection cleared (or shrunk to one cell) while the readout was open.
+    if (!this.selectionStats || this.selectionStats.count < 2) this._statsOpen = false
+  }
+
+  // Excel-style selection readout: the headline figure in the bar, the rest
+  // behind a click like the connections popover. Sum leads when the selection
+  // holds numbers, otherwise the cell count does. '≈' marks a total that passed
+  // through a float (a real/float column, or exponent notation) rather than
+  // exact decimal arithmetic.
+  private _statsHeadline(stats: SelectionStats): string {
+    const mark = stats.approximate ? '≈' : ''
+    return stats.numeric > 0 && stats.sum !== null
+      ? `${t('status.selectionSum')} ${mark}${stats.sum}`
+      : `${t('status.selectionCount')} ${formatInteger(stats.count)}`
+  }
+
+  private _renderSelectionStats() {
+    const stats = this.selectionStats
+    if (!stats || stats.count < 2) return ''
+    return html`
+      <button
+        class="item stats tooltip-up"
+        data-tooltip=${t('status.selectionDetails')}
+        aria-haspopup="menu"
+        aria-expanded=${String(this._statsOpen)}
+        @click=${this._toggleStats}
+      >
+        ${this._statsHeadline(stats)}
+      </button>
+    `
+  }
+
+  // Anchored above the bar like the connections popover. A readout, not a menu
+  // of actions, so the rows are plain and not focusable.
+  private _renderStatsPopover() {
+    const stats = this.selectionStats
+    if (!stats) return ''
+    const mark = stats.approximate ? '≈' : ''
+    const rows: Array<[string, string]> = [[t('status.selectionCount'), formatInteger(stats.count)]]
+    if (stats.numeric !== stats.count) rows.push([t('status.selectionNumeric'), formatInteger(stats.numeric)])
+    if (stats.numeric > 0) {
+      if (stats.sum !== null) rows.push([t('status.selectionSum'), `${mark}${stats.sum}`])
+      if (stats.avg !== null) rows.push([t('status.selectionAvg'), `${mark}${stats.avg}`])
+      if (stats.min !== null) rows.push([t('status.selectionMin'), `${mark}${stats.min}`])
+      if (stats.max !== null) rows.push([t('status.selectionMax'), `${mark}${stats.max}`])
+    }
+    rows.push([t('status.selectionNulls'), formatInteger(stats.nulls)])
+    return html`
+      <div class="pop-backdrop" @mousedown=${() => (this._statsOpen = false)}></div>
+      <div
+        class="pop stats-pop"
+        role="menu"
+        aria-label=${t('status.selectionDetails')}
+        style="right: ${this._statsAnchorRight}px"
+      >
+        ${rows.map(
+          ([label, value]) => html`
+            <div class="pop-row" role="presentation">
+              <span class="label">${label}</span>
+              <span class="value">${value}</span>
+            </div>
+          `,
+        )}
+      </div>
+    `
   }
 
   render() {
@@ -105,6 +202,7 @@ export class StatusBar extends LitElement {
             `
           : ''}
         <span class="spacer"></span>
+        ${this._renderSelectionStats()}
         <button
           class="item tooltip-up"
           data-tooltip=${count ? t('status.connections') : t('action.switchDatabase')}
@@ -131,6 +229,7 @@ export class StatusBar extends LitElement {
       </footer>
       ${this._open ? this._renderPopover() : ''}
       ${this._wsOpen ? this._renderWorkspaceMenu() : ''}
+      ${this._statsOpen ? this._renderStatsPopover() : ''}
     `
   }
 
@@ -183,21 +282,30 @@ export class StatusBar extends LitElement {
   }
 
   private _onKeydown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape' && (this._open || this._wsOpen)) {
+    if (event.key === 'Escape' && (this._open || this._wsOpen || this._statsOpen)) {
       event.preventDefault()
       this._open = false
       this._wsOpen = false
+      this._statsOpen = false
     }
   }
 
   private _togglePopover() {
     this._wsOpen = false
+    this._statsOpen = false
     this._open = !this._open
   }
 
   private _toggleWorkspaceMenu() {
     this._open = false
+    this._statsOpen = false
     this._wsOpen = !this._wsOpen
+  }
+
+  private _toggleStats = () => {
+    this._open = false
+    this._wsOpen = false
+    this._statsOpen = !this._statsOpen
   }
 
   private _workspaceAction(event: string) {
@@ -293,6 +401,27 @@ export class StatusBar extends LitElement {
         vertical-align: -1px;
       }
 
+      .item.stats {
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .pop-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        min-height: 24px;
+        padding: 2px 8px;
+        font-size: var(--font-size);
+        line-height: 20px;
+      }
+      .pop-row .label {
+        opacity: 0.7;
+      }
+      .pop-row .value {
+        font-variant-numeric: tabular-nums;
+        font-family: var(--font-mono);
+      }
       .spacer {
         flex: 1;
       }

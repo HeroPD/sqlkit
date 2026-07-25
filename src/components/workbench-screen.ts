@@ -55,6 +55,7 @@ import { isFilterableQuery } from '../sql-filter'
 import { isReadOnlyQuery, isReorderableQuery } from '../sql-order'
 import type { ExportFormat } from '../result-export'
 import type { SortColumnDetail } from './results-panel'
+import type { SelectionStats } from '../result-aggregate'
 import type { QuerySort } from '../electron'
 import { stripExplain } from '../sql-types'
 import type { SearchOpenDetail } from './search-view'
@@ -140,6 +141,11 @@ export class WorkbenchScreen extends LitElement {
   private _live = new ConnectionsController(this)
 
   private _workspaceFiles = new FilesController(this)
+
+  // Aggregate over the result grid's selected cells, shown in the status bar.
+  // Published by results-panel on selection change, not computed here.
+  @state()
+  private _selectionStats: SelectionStats | null = null
 
   @state()
   private _activeView: ViewId | null = 'explorer'
@@ -738,6 +744,10 @@ export class WorkbenchScreen extends LitElement {
 
   // --- render -------------------------------------------------------------------
 
+  private _onSelectionStats = (event: CustomEvent<{ stats: SelectionStats | null }>) => {
+    this._selectionStats = event.detail.stats
+  }
+
   render() {
     const activeView = VIEWS.find((view) => view.id === this._activeView)
     return html`
@@ -911,6 +921,7 @@ export class WorkbenchScreen extends LitElement {
         .sidebarOpen=${this._activeView !== null}
         .panelOpen=${!this._layout.panelCollapsed}
         .panelEnabled=${this._ctx.tabs.length > 0}
+        .selectionStats=${this._selectionStats}
         @status-switch-database=${() => this._cmdPalette.open('databases')}
         @status-pick-connection=${this._onStatusPickConnection}
         @status-reveal-workspace=${() => void window.sqlkit.revealWorkspace()}
@@ -1158,6 +1169,7 @@ export class WorkbenchScreen extends LitElement {
             @goto-error-line=${this._onGotoErrorLine}
             @stream-export=${this._onStreamExport}
             @load-more=${this._onLoadMore}
+            @selection-stats=${this._onSelectionStats}
             @cell-edit=${this._onCellEdit}
             @cell-edit-clear=${this._onCellEditClear}
             @cells-fill=${this._onCellsFill}

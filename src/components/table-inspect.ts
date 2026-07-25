@@ -2259,9 +2259,11 @@ export class TableInspect extends LitElement {
         line-height: 1;
       }
 
+      /* No nudge: lucide's em box equals the line box at line-height 1 (ascent
+         1em, descent 0) and the glyph is centred in it, so the button's flex
+         centring lands it dead centre. A margin here only pushes it off. */
       .add-btn .icon {
-        font-size: 11px;
-        margin: 1px 0 0 1px;
+        font-size: 13px;
         -webkit-text-stroke: 0.6px currentColor;
       }
 
