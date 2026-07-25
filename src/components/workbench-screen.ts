@@ -1143,21 +1143,24 @@ export class WorkbenchScreen extends LitElement {
               @editor-notice=${this._onGridNotice}
             ></sql-editor>
           </div>
-          <div
-            class="panel-resize ${this._layout.panelResizing ? 'active' : ''}"
-            role="separator"
-            aria-label=${t('workbench.resizeResults')}
-            title=${t('workbench.resizeResults')}
-            @pointerdown=${this._layout.onPanelResizeStart}
-            @dblclick=${this._layout.resetPanelHeight}
-          ></div>
+          ${this._layout.panelCollapsed
+            ? ''
+            : html`
+                <div
+                  class="panel-resize ${this._layout.panelResizing ? 'active' : ''}"
+                  role="separator"
+                  aria-label=${t('workbench.resizeResults')}
+                  title=${t('workbench.resizeResults')}
+                  @pointerdown=${this._layout.onPanelResizeStart}
+                  @dblclick=${this._layout.resetPanelHeight}
+                ></div>
+              `}
           <results-panel
             .run=${this._queries.runFor(this._ctx.activeTabId)}
             .engine=${this._config.activeProfile()?.engine ?? 'postgresql'}
             .canCancel=${this._config.activeProfile()?.engine !== 'sqlite'}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
-            .collapsed=${this._layout.panelCollapsed}
             .drafts=${this._queries.draftsFor(this._ctx.activeTabId)}
             .edits=${this._queries.editsFor(this._ctx.activeTabId)}
             .pendingDeletes=${this._queries.pendingDeletesFor(this._ctx.activeTabId)}
@@ -1184,8 +1187,7 @@ export class WorkbenchScreen extends LitElement {
             @resize-columns=${this._onResizeColumns}
             @sort-column=${this._onSortColumn}
             @filter-condition=${this._onFilterCondition}
-            @toggle-collapse=${() => this._layout.togglePanelCollapse()}
-            style="height: ${this._layout.panelStyleHeight()}"
+            style="height: ${this._layout.panelStyleHeight()}${this._layout.panelCollapsed ? '; display: none' : ''}"
           ></results-panel>
         </div>
       `

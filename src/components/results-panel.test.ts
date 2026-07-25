@@ -198,41 +198,26 @@ describe('results-panel multiple and paged results', () => {
   })
 })
 
-describe('results-panel collapse toggle', () => {
-  const collapseButton = (el: HTMLElement) =>
-    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label*="results panel"]')!
-
-  it('toggles the chevron and dispatches toggle-collapse on click', async () => {
+describe('results-panel has no collapse control of its own', () => {
+  // Hiding the panel is the status bar's toggle (and ⌘J) only — the panel used to
+  // carry a duplicate chevron, and the owner now sets display:none rather than
+  // shrinking the host to its toolbar.
+  it('renders no results-panel show/hide button', async () => {
     const el = await mount()
-    const toggled = vi.fn()
-    el.addEventListener('toggle-collapse', toggled)
-
-    const button = collapseButton(el)
-    expect(button.getAttribute('aria-expanded')).toBe('true')
-    expect(button.querySelector('.icon-chevron-down')).toBeTruthy()
-
-    button.click()
-    expect(toggled).toHaveBeenCalledOnce()
-
-    // The owner drives the collapsed state back down; the chevron follows it.
-    ;(el as unknown as { collapsed: boolean }).collapsed = true
-    await el.updateComplete
-    const flipped = collapseButton(el)
-    expect(flipped.getAttribute('aria-expanded')).toBe('false')
-    expect(flipped.querySelector('.icon-chevron-up')).toBeTruthy()
+    const buttons = [...el.shadowRoot!.querySelectorAll('button')]
+    expect(buttons.some((b) => /results panel/i.test(b.getAttribute('aria-label') ?? ''))).toBe(false)
+    expect(el.shadowRoot!.querySelector('[class*="chevron-down"], [class*="chevron-up"]')).toBeNull()
     el.remove()
   })
 
-  it('shows the collapse button even with no result', async () => {
-    const el = document.createElement('results-panel')
-    el.run = { phase: 'idle' }
-    document.body.append(el)
-    await el.updateComplete
-    expect(collapseButton(el)).toBeTruthy()
+  it('keeps the filter bar reachable without a collapsed state', async () => {
+    // The filter bar used to be suppressed by `collapsed`; that property is gone,
+    // so opening the filter must still show it.
+    const el = await mount()
+    expect((el as unknown as Record<string, unknown>).collapsed).toBeUndefined()
     el.remove()
   })
 })
-
 describe('results-panel draft rows', () => {
   async function mountWithDrafts(cellRows: Array<Array<string | null>>, after = -1) {
     const el = await mount()

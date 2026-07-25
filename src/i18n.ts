@@ -92,8 +92,6 @@ const enUS = {
   'results.discardChanges': 'Discard changes',
   'results.discardAllShortcut': 'Discard all changes ({shortcut})',
   'results.export': 'Export results…',
-  'results.expand': 'Expand results panel ({shortcut})',
-  'results.collapse': 'Collapse results panel ({shortcut})',
   'results.gridView': 'Grid view',
   'results.listView': 'List view',
   'results.viewShortcut': '{view} ({shortcut})',

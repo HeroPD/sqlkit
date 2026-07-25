@@ -146,10 +146,6 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   rowEditable = false
 
-  /** Collapsed to just this head; the owner shrinks the host height to match. */
-  @property({ attribute: false })
-  collapsed = false
-
   /** Unsaved new rows interleaved into the grid: `after` is the result row each
    * one renders below (-1 = above the first row); `cells` align to result columns. */
   @property({ attribute: false })
@@ -676,10 +672,6 @@ export class ResultsPanel extends LitElement {
     return { results, drafts }
   }
 
-  private _toggleCollapse = () => {
-    this.dispatchEvent(new CustomEvent('toggle-collapse', { bubbles: true, composed: true }))
-  }
-
   private _toggleFilter = () => {
     this._filterOpen = !this._filterOpen
     if (this._filterOpen) {
@@ -850,17 +842,8 @@ export class ResultsPanel extends LitElement {
               </button>
             `
           : ''}
-        <button
-          class="head-action tooltip-end"
-          data-tooltip=${t(this.collapsed ? 'results.expand' : 'results.collapse', { shortcut: isMac ? '⌘J' : 'Ctrl+J' })}
-          aria-label=${t(this.collapsed ? 'results.expand' : 'results.collapse', { shortcut: isMac ? '⌘J' : 'Ctrl+J' })}
-          aria-expanded=${!this.collapsed}
-          @click=${this._toggleCollapse}
-        >
-          <i class="icon icon-chevron-${this.collapsed ? 'up' : 'down'}" aria-hidden="true"></i>
-        </button>
       </div>
-      ${this._filterOpen && canFilter && !this.collapsed
+      ${this._filterOpen && canFilter
         ? html`
             <div class="filter-bar">
               <i class="icon icon-filter ${this.filter !== null ? 'filtered' : ''}" aria-hidden="true"></i>

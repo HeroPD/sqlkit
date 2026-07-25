@@ -4,8 +4,6 @@ import type { ReactiveController, ReactiveControllerHost } from 'lit'
 // the rest of the area (no fixed cap). A small floor keeps the panel usable.
 const EDITOR_MIN_HEIGHT = 250
 const RESULTS_MIN_HEIGHT = 80
-// Collapsed, only the results head (its toolbar) shows; matches its CSS height.
-const COLLAPSED_HEIGHT = 28
 
 type Deps = {
   // Committing a collapse drag drops the active sidebar view (host state).
@@ -30,7 +28,8 @@ export class LayoutController implements ReactiveController {
   // null = the default split: results take 70% of the editor area, editor 30%.
   panelHeight: number | null = null
   panelResizing: { startY: number; startHeight: number; maxHeight: number } | null = null
-  // Collapsed to just the head, handing the rest of the area to the editor.
+  // Hidden entirely, handing the whole area to the editor. The status bar's
+  // toggle (and ⌘J) is the only control; the panel keeps its state while hidden.
   panelCollapsed = false
 
   private host: ReactiveControllerHost
@@ -74,10 +73,10 @@ export class LayoutController implements ReactiveController {
     this.host.requestUpdate()
   }
 
-  // The CSS height for the results-panel host: collapsed to its head, an
-  // explicit dragged height, or the default 70% split.
+  // The CSS height for the results-panel host: an explicit dragged height, or
+  // the default 70% split. A hidden panel keeps its height (the owner sets
+  // display:none) so revealing it restores the same size.
   panelStyleHeight(): string {
-    if (this.panelCollapsed) return `${COLLAPSED_HEIGHT}px`
     return this.panelHeight === null ? '70%' : `${this.panelHeight}px`
   }
 
