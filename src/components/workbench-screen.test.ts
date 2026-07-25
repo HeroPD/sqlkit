@@ -245,8 +245,42 @@ describe('WorkbenchScreen result sorting', () => {
 
     workbench._onSortColumn(new CustomEvent('sort-column', { detail: { columnIndex: 0, direction: 'asc' } }))
 
-    expect(runSql).toHaveBeenCalledWith('select id from accounts', { columnIndex: 0, direction: 'asc' }, undefined, null)
+    expect(runSql).toHaveBeenCalledWith('select id from accounts', { columnIndex: 0, direction: 'asc' }, undefined, null, undefined, undefined)
     expect(workbench._dialogs.confirm).toBeNull()
+  })
+
+  // A followed result belongs to another table than its tab. A re-run that
+  // dropped run.table would fall back to the tab's, retargeting grid writes.
+  it('carries the run table through a sort re-run', () => {
+    const screen = new WorkbenchScreen()
+    const runSql = vi.fn()
+    const table: TableRef = { schema: 'public', name: 'authors', kind: 'table' }
+    const workbench = screen as never as {
+      _ctx: { activeTabId: string | null }
+      _queries: { runFor(tabId: string | null): unknown }
+      _runSql: typeof runSql
+      _onSortColumn(event: Event): void
+    }
+    workbench._ctx.activeTabId = 'tab-a'
+    workbench._queries.runFor = () => ({
+      phase: 'done',
+      sql: 'select id from authors where id = $1',
+      params: [7],
+      table,
+      result: { columns: ['id'], rows: [[7]], rowCount: 1, durationMs: 1 },
+    })
+    workbench._runSql = runSql
+
+    workbench._onSortColumn(new CustomEvent('sort-column', { detail: { columnIndex: 0, direction: 'asc' } }))
+
+    expect(runSql).toHaveBeenCalledWith(
+      'select id from authors where id = $1',
+      { columnIndex: 0, direction: 'asc' },
+      [7],
+      null,
+      undefined,
+      { table },
+    )
   })
 
   it('re-runs the base SQL with a condition while preserving sort and params', () => {
@@ -278,7 +312,69 @@ describe('WorkbenchScreen result sorting', () => {
       { columnIndex: 0, direction: 'desc' },
       ['bound'],
       'id > 10',
+      undefined,
+      undefined,
     )
+  })
+})
+
+describe('WorkbenchScreen leaving a result with staged work', () => {
+  type Guard = {
+    _ctx: { activeTabId: string | null }
+    _queries: {
+      hasStaged(tabId: string | null): boolean
+      discardStaged(tabId: string): void
+      canGoBack(tabId: string | null): boolean
+      canGoForward(tabId: string | null): boolean
+      goBack(tabId: string | null): boolean
+    }
+    _dialogs: { confirm: { action(): void } | null }
+    _guardStagedLeave(tabId: string, leave: () => void): void
+    _onResultNavigate(event: Event): void
+  }
+
+  it('leaves at once when nothing is staged', () => {
+    const workbench = new WorkbenchScreen() as never as Guard
+    const leave = vi.fn()
+    workbench._queries.hasStaged = () => false
+
+    workbench._guardStagedLeave('tab-a', leave)
+
+    expect(leave).toHaveBeenCalledTimes(1)
+    expect(workbench._dialogs.confirm).toBeNull()
+  })
+
+  // Confirming the prompt must discard for real: nothing on the navigation path
+  // realigns staged state, and stale row-indexed edits would arm writes against
+  // whatever result appears next.
+  it('discards staged work when the user confirms, then leaves', () => {
+    const workbench = new WorkbenchScreen() as never as Guard
+    const leave = vi.fn()
+    const discardStaged = vi.fn()
+    workbench._queries.hasStaged = () => true
+    workbench._queries.discardStaged = discardStaged
+
+    workbench._guardStagedLeave('tab-a', leave)
+    expect(leave).not.toHaveBeenCalled()
+    expect(discardStaged).not.toHaveBeenCalled()
+
+    workbench._dialogs.confirm!.action()
+    expect(discardStaged).toHaveBeenCalledWith('tab-a')
+    expect(leave).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not offer a discard for a navigation that will not happen', () => {
+    const workbench = new WorkbenchScreen() as never as Guard
+    const goBack = vi.fn()
+    workbench._ctx.activeTabId = 'tab-a'
+    workbench._queries.hasStaged = () => true
+    workbench._queries.canGoBack = () => false
+    workbench._queries.goBack = goBack
+
+    workbench._onResultNavigate(new CustomEvent('result-navigate', { detail: { direction: 'back' } }))
+
+    expect(workbench._dialogs.confirm).toBeNull()
+    expect(goBack).not.toHaveBeenCalled()
   })
 })
 

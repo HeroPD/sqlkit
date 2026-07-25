@@ -605,11 +605,67 @@ describe('sqlite driver: listColumns', () => {
 
     expect(await driver.listColumns()).toEqual([
       { schema: null, table: 'child', name: 'id', dataType: 'INTEGER', nullable: true, primaryKey: true, foreignKey: false },
-      { schema: null, table: 'child', name: 'parent_id', dataType: 'INTEGER', nullable: true, primaryKey: false, foreignKey: true },
+      {
+        schema: null,
+        table: 'child',
+        name: 'parent_id',
+        dataType: 'INTEGER',
+        nullable: true,
+        primaryKey: false,
+        foreignKey: true,
+        references: { schema: null, table: 'parent', column: 'id', constraint: 'fk_0' },
+      },
       { schema: null, table: 'child', name: 'note', dataType: 'TEXT', nullable: true, primaryKey: false, foreignKey: false },
       { schema: null, table: 'parent', name: 'id', dataType: 'INTEGER', nullable: true, primaryKey: true, foreignKey: false },
       { schema: null, table: 'parent', name: 'name', dataType: 'TEXT', nullable: false, primaryKey: false, foreignKey: false },
     ])
+  })
+
+  // pragma_foreign_key_list reports a NULL `to` when the key targets the parent's
+  // primary key implicitly, so the target has to be resolved from the parent.
+  it('resolves an implicit foreign-key target to the parent primary key', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table parent(id integer primary key, name text)')
+    await driver.query('create table child(id integer primary key, parent_id integer references parent)')
+
+    const columns = await driver.listColumns()
+    const parentId = columns.find((column) => column.table === 'child' && column.name === 'parent_id')
+    expect(parentId?.foreignKey).toBe(true)
+    expect(parentId?.references).toEqual({ schema: null, table: 'parent', column: 'id', constraint: 'fk_0' })
+  })
+
+  it('pairs a composite foreign key positionally and groups it under one constraint', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table parent(a integer, b integer, primary key (a, b))')
+    await driver.query('create table child(id integer primary key, pa integer, pb integer, foreign key (pa, pb) references parent(a, b))')
+
+    const columns = await driver.listColumns()
+    const find = (name: string) => columns.find((column) => column.table === 'child' && column.name === name)?.references
+    expect(find('pa')).toMatchObject({ table: 'parent', column: 'a' })
+    expect(find('pb')).toMatchObject({ table: 'parent', column: 'b' })
+    // One synthesized constraint label for both columns, so a caller can tell the
+    // key is composite and refuse to navigate half of it.
+    expect(find('pa')?.constraint).toBe(find('pb')?.constraint)
+  })
+
+  it('pairs a composite implicit target against the parent primary key in order', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table parent(a integer, b integer, primary key (a, b))')
+    await driver.query('create table child(id integer primary key, pa integer, pb integer, foreign key (pa, pb) references parent)')
+
+    const columns = await driver.listColumns()
+    const find = (name: string) => columns.find((column) => column.table === 'child' && column.name === name)?.references
+    // pragma_table_info.pk is 1-based within the key, foreign_key_list.seq 0-based.
+    expect(find('pa')).toMatchObject({ table: 'parent', column: 'a' })
+    expect(find('pb')).toMatchObject({ table: 'parent', column: 'b' })
+  })
+
+  it('leaves a non-foreign-key column without a reference', async () => {
+    const driver = await memoryDriver()
+    await driver.query('create table solo(id integer primary key, note text)')
+
+    const columns = await driver.listColumns()
+    expect(columns.find((column) => column.name === 'note')?.references).toBeUndefined()
   })
 
   it('defaults a missing column type to "any" and includes view columns', async () => {

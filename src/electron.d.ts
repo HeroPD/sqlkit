@@ -223,6 +223,24 @@ export type ColumnRef = {
   primaryKey: boolean
   /** Member of a foreign-key constraint referencing another table. */
   foreignKey: boolean
+  /** Where this column points, when it is part of a foreign key. Absent when the
+   * column is not a foreign key, or when the target could not be resolved (the
+   * referenced relation may be invisible to this user) — `foreignKey` can be
+   * true without it, so a key marker never depends on resolving the target.
+   * `constraint` names the owning constraint, so a caller can group the columns
+   * of a composite key: navigating one column of a multi-column key would filter
+   * on half the key and return the wrong rows. */
+  references?: ColumnReference
+}
+
+/** The resolved target of one foreign-key column. */
+export type ColumnReference = {
+  /** Schema of the referenced table; null on engines without schemas. */
+  schema: string | null
+  table: string
+  column: string
+  /** Owning constraint, for grouping the columns of a composite key. */
+  constraint: string
 }
 
 export type ColumnsResult = { success: true; columns: ColumnRef[] } | { success: false; error: string }

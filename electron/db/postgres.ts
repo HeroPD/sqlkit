@@ -9,6 +9,7 @@ import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResul
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
+import { columnReference } from './column-reference'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -560,12 +561,30 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
                 not a.attnotnull as nullable,
                 coalesce(i.indisprimary, false) as primary_key,
                 exists (select 1 from pg_catalog.pg_constraint fk
-                        where fk.contype = 'f' and fk.conrelid = a.attrelid and a.attnum = any(fk.conkey)) as foreign_key
+                        where fk.contype = 'f' and fk.conrelid = a.attrelid and a.attnum = any(fk.conkey)) as foreign_key,
+                ref.constraint_name, ref.ref_schema, ref.ref_table, ref.ref_column
          from pg_catalog.pg_attribute a
          join pg_catalog.pg_class c on c.oid = a.attrelid
          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
          left join pg_catalog.pg_index i
            on i.indrelid = a.attrelid and i.indisprimary and a.attnum = any(i.indkey)
+         -- conkey and confkey are positionally paired arrays, so the referenced
+         -- column is confkey at the same subscript this column sits at in conkey.
+         -- A column can belong to several foreign keys; take the first by name so
+         -- the choice is stable rather than plan-dependent.
+         left join lateral (
+           select fk.conname as constraint_name, fn.nspname as ref_schema,
+                  fc.relname as ref_table, fa.attname as ref_column
+           from pg_catalog.pg_constraint fk
+           cross join lateral generate_subscripts(fk.conkey, 1) as pos(i)
+           join pg_catalog.pg_class fc on fc.oid = fk.confrelid
+           join pg_catalog.pg_namespace fn on fn.oid = fc.relnamespace
+           join pg_catalog.pg_attribute fa
+             on fa.attrelid = fk.confrelid and fa.attnum = fk.confkey[pos.i] and not fa.attisdropped
+           where fk.contype = 'f' and fk.conrelid = a.attrelid and fk.conkey[pos.i] = a.attnum
+           order by fk.conname
+           limit 1
+         ) ref on true
          where c.relkind in ('r', 'p', 'v', 'm', 'f')
            and not coalesce(c.relispartition, false)
            and n.nspname !~ '^pg_'
@@ -583,6 +602,10 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           nullable: boolean
           primary_key: boolean
           foreign_key: boolean
+          constraint_name: string | null
+          ref_schema: string | null
+          ref_table: string | null
+          ref_column: string | null
         }): ColumnRef => ({
           schema: row.table_schema,
           table: row.table_name,
@@ -591,6 +614,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           nullable: row.nullable,
           primaryKey: row.primary_key,
           foreignKey: row.foreign_key,
+          ...columnReference(row.ref_schema, row.ref_table, row.ref_column, row.constraint_name),
         }),
       )
     },

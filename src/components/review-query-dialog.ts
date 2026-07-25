@@ -1,84 +1,11 @@
 import { LitElement, type PropertyValues, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { controls, icons, overlay, scrollbars, typography } from '../shared-styles'
+import { controls, icons, overlay, scrollbars, sqlHighlight, typography } from '../shared-styles'
 import { t } from '../i18n'
+import { formatPreviewParam, previewSql, sqlPreviewParts } from '../sql-preview'
 
-// Renders a bound parameter in SQL-ish form for review only; execution still
-// uses the original parameterized query.
-export const formatPreviewParam = (value: unknown): string => {
-  if (value === null || value === undefined) return 'NULL'
-  if (typeof value === 'string') return `'${value.replaceAll("'", "''")}'`
-  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value)
-  return `'${JSON.stringify(value).replaceAll("'", "''")}'`
-}
-
-export const previewSql = (sql: string, params: unknown[]): string => {
-  if (!params.length) return sql
-  if (/\$\d+/.test(sql)) {
-    return sql.replace(/\$(\d+)/g, (match, n: string) => {
-      const value = params[Number(n) - 1]
-      return value === undefined ? match : formatPreviewParam(value)
-    })
-  }
-  // SQL Server binds named params (@p1, @p2, ..); substitute those for review too.
-  if (/@p\d+/.test(sql)) {
-    return sql.replace(/@p(\d+)/g, (match, n: string) => {
-      const value = params[Number(n) - 1]
-      return value === undefined ? match : formatPreviewParam(value)
-    })
-  }
-  let index = 0
-  return sql.replace(/\?/g, (match) => (index < params.length ? formatPreviewParam(params[index++]) : match))
-}
-
-const SQL_KEYWORDS = new Set(
-  `SELECT FROM WHERE JOIN INNER LEFT RIGHT FULL CROSS ON GROUP ORDER BY HAVING INSERT INTO VALUES UPDATE SET DELETE WITH AS DISTINCT UNION ALL EXCEPT INTERSECT CASE WHEN THEN ELSE END AND OR NOT NULL IS IN LIKE BETWEEN EXISTS TRUE FALSE CREATE ALTER DROP TABLE INDEX VIEW PRIMARY KEY FOREIGN REFERENCES RETURNING LIMIT OFFSET`
-    .split(/\s+/),
-)
-
-type SqlPreviewPart = { text: string; kind: 'keyword' | 'string' | null }
-
-const pushPart = (parts: SqlPreviewPart[], text: string, kind: SqlPreviewPart['kind'] = null) => {
-  if (!text) return
-  const last = parts.at(-1)
-  if (last?.kind === kind) last.text += text
-  else parts.push({ text, kind })
-}
-
-export function sqlPreviewParts(sql: string): SqlPreviewPart[] {
-  const parts: SqlPreviewPart[] = []
-  for (let i = 0; i < sql.length;) {
-    const ch = sql[i]
-    if (ch === undefined) break
-    if (ch === "'") {
-      let end = i + 1
-      while (end < sql.length) {
-        if (sql[end] === "'" && sql[end + 1] === "'") {
-          end += 2
-          continue
-        }
-        if (sql[end] === "'") {
-          end += 1
-          break
-        }
-        end += 1
-      }
-      pushPart(parts, sql.slice(i, end), 'string')
-      i = end
-      continue
-    }
-    if (/[A-Za-z_]/.test(ch)) {
-      const match = /^[A-Za-z_][\w$]*/.exec(sql.slice(i))
-      const word = match?.[0] ?? ch
-      pushPart(parts, word, SQL_KEYWORDS.has(word.toUpperCase()) ? 'keyword' : null)
-      i += word.length
-      continue
-    }
-    pushPart(parts, ch)
-    i += 1
-  }
-  return parts
-}
+// Re-exported so existing importers keep their path.
+export { formatPreviewParam, previewSql, sqlPreviewParts }
 
 // Shows a generated write statement (UPDATE today; INSERT/DELETE later) and its
 // bound params for the user to read before it runs. Dispatches `dialog-confirm`
@@ -199,6 +126,7 @@ export class ReviewQueryDialog extends LitElement {
     scrollbars,
     icons,
     overlay,
+    sqlHighlight,
     css`
       :host {
         display: contents;
@@ -251,16 +179,6 @@ export class ReviewQueryDialog extends LitElement {
 
       .sql code {
         font: inherit;
-      }
-
-      .sql .keyword {
-        /* Same softened One Dark keyword color as sql-editor.ts. */
-        color: #a163b5;
-      }
-
-      .sql .string {
-        /* Same softened One Dark string color as sql-editor.ts. */
-        color: #7d9f65;
       }
 
       .actions {

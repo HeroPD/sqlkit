@@ -141,3 +141,34 @@ describe('dialectFor: column edit capabilities', () => {
     expect(dialectFor('sqlite').commonDefaultValues).not.toContain('now()')
   })
 })
+
+// Following a foreign key needs a browse narrowed to one value. Row capping is
+// the part that actually diverges: T-SQL caps before the projection.
+describe('browseTableWhere', () => {
+  it('appends a LIMIT tail on the engines that have one', () => {
+    for (const engine of ['postgresql', 'mysql', 'sqlite'] as const) {
+      const dialect = dialectFor(engine)
+      expect(dialect.browseTableWhere('t', 'c', dialect.placeholder(1), 200)).toBe(
+        `SELECT * FROM t WHERE c = ${dialect.placeholder(1)} LIMIT 200`,
+      )
+    }
+  })
+
+  it('caps rows before the projection on SQL Server, with its named placeholder', () => {
+    const dialect = dialectFor('sqlserver')
+    expect(dialect.browseTableWhere('t', 'c', dialect.placeholder(1), 200)).toBe('SELECT TOP 200 * FROM t WHERE c = @p1')
+  })
+
+  it('binds through each engine own marker, never an interpolated value', () => {
+    expect(dialectFor('postgresql').placeholder(1)).toBe('$1')
+    expect(dialectFor('mysql').placeholder(1)).toBe('?')
+    expect(dialectFor('sqlite').placeholder(1)).toBe('?')
+    expect(dialectFor('sqlserver').placeholder(1)).toBe('@p1')
+  })
+
+  it('floors a fractional limit and never emits a zero cap', () => {
+    const dialect = dialectFor('postgresql')
+    expect(dialect.browseTableWhere('t', 'c', '$1', 10.9)).toContain('LIMIT 10')
+    expect(dialect.browseTableWhere('t', 'c', '$1', 0)).toContain('LIMIT 1')
+  })
+})

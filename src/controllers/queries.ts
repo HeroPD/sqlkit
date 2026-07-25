@@ -1,5 +1,5 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ConnectionProfile, QueryResponse, QueryResult, QueryResultSet, QuerySort } from '../electron'
+import type { ConnectionProfile, QueryResponse, QueryResult, QueryResultSet, QuerySort, TableRef } from '../electron'
 import type { QueryRun } from '../components/results-panel'
 import type { DraftRow } from '../result-editing'
 import type { CellInput } from '../sql-write'
@@ -72,14 +72,25 @@ const MAX_STAGED_HISTORY = 100
 // `deletes` holds result-row data indices marked for deletion (run on save).
 type StagedSnapshot = { drafts: DraftRow[]; edits: Map<string, CellInput>; deletes: number[] }
 
+// One tab's result navigation: following a foreign key shows another table's rows
+// in the same tab, so results form a browser-style trail rather than a single
+// slot. `index` is the visible entry; entries after it are the forward branch.
+type RunHistory = { stack: QueryRun[]; index: number }
+
+// Trail depth per tab. Each retained entry may pin a main-process row buffer, so
+// this is a memory bound as much as a UX one; the oldest entry falls off (and its
+// buffer is freed) rather than the trail growing without limit.
+const MAX_RUN_HISTORY = 10
+
 // Owns everything a query run produces: the per-tab results (switching tabs
 // brings a tab's result back), the cross-connection task list with its live
 // ticker, and per-context history. The workbench decides what to run and
 // ensures the connection; execute() does the bookkeeping. Runtime-only, like
 // the other controllers.
 export class QueriesController implements ReactiveController {
-  /** Last run of every tab, keyed by tab id. */
-  runs = new Map<string, QueryRun>()
+  /** Navigation history of every tab, keyed by tab id. The entry at `index` is
+   * what the results panel shows; the rest are reachable with back/forward. */
+  private runs = new Map<string, RunHistory>()
 
   /** Unsaved new rows staged in the grid, keyed by tab id. */
   drafts = new Map<string, DraftRow[]>()
@@ -131,9 +142,74 @@ export class QueriesController implements ReactiveController {
     this.timer = null
   }
 
-  /** What the results panel shows: the given tab's last run. */
+  /** What the results panel shows: the visible entry of the tab's trail. */
   runFor(tabId: string | null): QueryRun {
-    return (tabId ? this.runs.get(tabId) : undefined) ?? IDLE_RUN
+    const history = tabId ? this.runs.get(tabId) : undefined
+    return history?.stack[history.index] ?? IDLE_RUN
+  }
+
+  /** Whether the tab's trail can step back / forward, for the toolbar buttons.
+   * Never while the visible entry is running: the response lands at the visible
+   * index, so stepping mid-flight would drop it onto a history entry — and would
+   * let a second run start while the first is still in flight. */
+  canGoBack(tabId: string | null): boolean {
+    const history = tabId ? this.runs.get(tabId) : undefined
+    return !!history && history.index > 0 && !this.visibleRunning(history)
+  }
+
+  canGoForward(tabId: string | null): boolean {
+    const history = tabId ? this.runs.get(tabId) : undefined
+    return !!history && history.index < history.stack.length - 1 && !this.visibleRunning(history)
+  }
+
+  private visibleRunning(history: RunHistory): boolean {
+    return history.stack[history.index]?.phase === 'running'
+  }
+
+  /** Steps the visible entry back/forward. Buffers are left alone: an entry the
+   * user can still reach must keep its rows, so nothing is freed on a step.
+   * Returns false when there is nowhere to go. */
+  goBack(tabId: string | null): boolean {
+    return this.step(tabId, -1)
+  }
+
+  goForward(tabId: string | null): boolean {
+    return this.step(tabId, 1)
+  }
+
+  private step(tabId: string | null, delta: number): boolean {
+    const history = tabId ? this.runs.get(tabId) : undefined
+    // Refusing mid-run keeps the invariant execute() relies on: the entry it
+    // marked running is still the visible one when its response lands.
+    if (!history || this.visibleRunning(history)) return false
+    const next = history.index + delta
+    if (next < 0 || next >= history.stack.length) return false
+    this.runs = new Map(this.runs).set(tabId!, { stack: history.stack, index: next })
+    this.host.requestUpdate()
+    return true
+  }
+
+  /** Appends a result as a new trail entry — following a foreign key, not a
+   * re-run. Any forward branch is dropped (and its buffers freed) the way a
+   * browser discards forward history once you navigate somewhere new. */
+  pushRun(tabId: string, run: QueryRun) {
+    if (!this.tabExists(tabId)) return
+    const history = this.runs.get(tabId)
+    if (!history) {
+      this.setRun(tabId, run)
+      return
+    }
+    // Entries past the visible one are unreachable once this lands, so free them.
+    for (const dropped of history.stack.slice(history.index + 1)) this.closeRunSession(dropped)
+    let stack = [...history.stack.slice(0, history.index + 1), run]
+    if (stack.length > MAX_RUN_HISTORY) {
+      // The oldest entries fall off the back; their buffers go with them.
+      for (const dropped of stack.slice(0, stack.length - MAX_RUN_HISTORY)) this.closeRunSession(dropped)
+      stack = stack.slice(stack.length - MAX_RUN_HISTORY)
+    }
+    this.runs = new Map(this.runs).set(tabId, { stack, index: stack.length - 1 })
+    this.evictRetainedResults(tabId)
+    this.host.requestUpdate()
   }
 
   /** The column sort applied to the tab's current result, if any. */
@@ -158,30 +234,71 @@ export class QueriesController implements ReactiveController {
     this.host.requestUpdate()
   }
 
-  /** A run belongs to the tab that started it, wherever the user is now. */
+  /** A run belongs to the tab that started it, wherever the user is now. It
+   * replaces the visible trail entry rather than extending the trail: re-running
+   * the editor's SQL supersedes what it shows, so back/forward keeps meaning the
+   * places the user navigated to, not every re-run of the same query.
+   *
+   * Deliberately does not free the buffer of the entry it replaces — loadMore
+   * calls this to append a fetched page, reusing that very session. Call sites
+   * that truly discard a result (beginRun, execute) close it explicitly first. */
   setRun(tabId: string, run: QueryRun) {
     if (!this.tabExists(tabId)) return
+    const history = this.runs.get(tabId)
     const next = new Map(this.runs)
     next.delete(tabId)
-    next.set(tabId, run)
+    if (history) {
+      const stack = [...history.stack]
+      stack[history.index] = run
+      next.set(tabId, { stack, index: history.index })
+    } else {
+      next.set(tabId, { stack: [run], index: 0 })
+    }
     this.runs = next
     this.evictRetainedResults(tabId)
     this.host.requestUpdate()
   }
 
+  // Releases retained result rows once the renderer is holding more than the soft
+  // cap, oldest tab first. Walks whole trails, not just visible entries: a tab's
+  // back history retains rows too, and an off-screen entry is the cheapest thing
+  // to give up — so those go before any visible result does.
   private evictRetainedResults(protectedTabId: string) {
-    let total = [...this.runs.values()].reduce((bytes, entry) =>
-      bytes + (entry.phase === 'done' ? retainedResultBytes(entry.result) : 0), 0)
+    const bytesOf = (run: QueryRun) => (run.phase === 'done' ? retainedResultBytes(run.result) : 0)
+    let total = 0
+    for (const history of this.runs.values()) for (const run of history.stack) total += bytesOf(run)
     if (total <= MAX_RETAINED_RESULT_BYTES) return
+
     const next = new Map(this.runs)
-    for (const [tabId, entry] of next) {
+    const released = (): QueryRun => ({ phase: 'error', error: t('results.released') })
+    // Off-screen trail entries first: dropping one costs the user nothing until
+    // they step back to it, whereas dropping a visible result empties the grid.
+    for (const [tabId, history] of next) {
       if (total <= MAX_RETAINED_RESULT_BYTES) break
+      const stack = [...history.stack]
+      for (let index = 0; index < stack.length; index += 1) {
+        if (total <= MAX_RETAINED_RESULT_BYTES) break
+        if (index === history.index) continue
+        const entry = stack[index]!
+        if (entry.phase !== 'done') continue
+        total -= bytesOf(entry)
+        this.closeResultSessions(entry.result)
+        stack[index] = released()
+      }
+      next.set(tabId, { stack, index: history.index })
+    }
+    // Still over: give up visible results too, oldest tab first.
+    for (const [tabId, history] of next) {
+      if (total <= MAX_RETAINED_RESULT_BYTES) break
+      const entry = history.stack[history.index]
       // Staged edits are row-index/version aligned to this exact snapshot. Keep
       // their result available even when that temporarily exceeds the soft cap.
-      if (tabId === protectedTabId || entry.phase !== 'done' || this.hasStaged(tabId)) continue
-      total -= retainedResultBytes(entry.result)
+      if (tabId === protectedTabId || entry?.phase !== 'done' || this.hasStaged(tabId)) continue
+      total -= bytesOf(entry)
       this.closeResultSessions(entry.result)
-      next.set(tabId, { phase: 'error', error: t('results.released') })
+      const stack = [...history.stack]
+      stack[history.index] = released()
+      next.set(tabId, { stack, index: history.index })
     }
     this.runs = next
   }
@@ -298,6 +415,12 @@ export class QueriesController implements ReactiveController {
   /** Discards all staged changes (new rows and cell edits) for a tab — undoable. */
   clearStaged(tabId: string) {
     this.commitStaged(tabId, { drafts: [], edits: new Map(), deletes: [] })
+  }
+
+  /** Discards a tab's staged work outright, undo history included — for leaving
+   * the result it is aligned to, where ⌘Z restoring it would retarget rows. */
+  discardStaged(tabId: string) {
+    this.realignStaged(tabId, null)
   }
 
   // --- pending row deletions ------------------------------------------------
@@ -448,9 +571,19 @@ export class QueriesController implements ReactiveController {
   }
 
   /** Marks a tab as running before connection/child alignment awaits. */
-  beginRun(tabId: string, executionId: string, profileId: string, note?: string) {
-    this.closeRunSession(this.runs.get(tabId))
-    this.setRun(tabId, note ? { phase: 'running', executionId, profileId, note } : { phase: 'running', executionId, profileId })
+  beginRun(tabId: string, executionId: string, profileId: string, note?: string, push = false) {
+    const run: QueryRun = note
+      ? { phase: 'running', executionId, profileId, note }
+      : { phase: 'running', executionId, profileId }
+    // `push` starts a new trail entry (following a foreign key) instead of
+    // superseding what the tab shows, so the result behind stays reachable —
+    // and its buffer must survive, hence no closeVisibleSession on that path.
+    if (push) {
+      this.pushRun(tabId, run)
+      return
+    }
+    this.closeVisibleSession(tabId)
+    this.setRun(tabId, run)
   }
 
   /** Runs the SQL on an already-connected profile and records the outcome.
@@ -468,6 +601,9 @@ export class QueriesController implements ReactiveController {
     executionId?: string
     /** Editor line the SQL starts on; maps a driver error line back to the doc. */
     baseLine?: number
+    /** Editable source of this result, when known — recorded on the run so it
+     * survives independently of the tab's own table (see QueryRun). */
+    table?: TableRef
   }) {
     const { tabId, profile, childDb, contextKey, sql, params, sort, filter } = args
     const executionId = args.executionId ?? crypto.randomUUID()
@@ -476,8 +612,9 @@ export class QueriesController implements ReactiveController {
     if (filter) this.filters.set(tabId, filter)
     else this.filters.delete(tabId)
     const gen = this.generation
-    // A new query supersedes the tab's old buffered result.
-    this.closeRunSession(this.runs.get(tabId))
+    // A re-run supersedes what the visible entry shows, so free its buffer; the
+    // rest of the trail is untouched and stays reachable with back.
+    this.closeVisibleSession(tabId)
     this.setRun(tabId, { phase: 'running', executionId, profileId: profile.id })
     const task: TaskItem = {
       id: executionId,
@@ -526,8 +663,8 @@ export class QueriesController implements ReactiveController {
     this.setRun(
       tabId,
       response.success
-        ? { phase: 'done', result: response.result, sql, params }
-        : { phase: 'error', error: response.error, sql, params, ...(errorLine !== undefined ? { errorLine } : {}) },
+        ? { phase: 'done', result: response.result, sql, params, ...(args.table ? { table: args.table } : {}) }
+        : { phase: 'error', error: response.error, sql, params, ...(errorLine !== undefined ? { errorLine } : {}), ...(args.table ? { table: args.table } : {}) },
     )
     this.finishTask(task.id, response, task.startedAt)
     this.history = capHistoryPerContext(
@@ -640,8 +777,8 @@ export class QueriesController implements ReactiveController {
   // Pulls the next page of a paged result from the main-process buffer and
   // appends it. Called as the grid scrolls toward the end of what's loaded.
   async loadMore(tabId: string, resultSetIndex?: number) {
-    const run = this.runs.get(tabId)
-    if (run?.phase !== 'done') return
+    const run = this.runFor(tabId)
+    if (run.phase !== 'done') return
     const isEarlierSet = resultSetIndex !== undefined
       && !!run.result.resultSets
       && resultSetIndex >= 0
@@ -656,10 +793,11 @@ export class QueriesController implements ReactiveController {
     try {
       const response = await window.sqlkit.fetchRows(result.sessionId, result.rows.length, FETCH_PAGE)
       if (this.generation !== gen) return
-      // The run may have been superseded (new query) while fetching; only touch
-      // it when it's still the same buffered result.
-      const current = this.runs.get(tabId)
-      if (current?.phase !== 'done') return
+      // The run may have been superseded (a re-run) or the trail stepped
+      // elsewhere while fetching; only touch it when the visible entry is still
+      // the same buffered result — the sessionId check below settles both.
+      const current = this.runFor(tabId)
+      if (current.phase !== 'done') return
       const currentResult = isEarlierSet ? current.result.resultSets?.[resultSetIndex] : current.result
       if (currentResult?.sessionId !== result.sessionId) return
 
@@ -674,7 +812,9 @@ export class QueriesController implements ReactiveController {
       // bufferedRowCount to what's loaded so the grid stops asking.
       if (!response.success || response.rows.length === 0) {
         if (currentResult.bufferedRowCount !== currentResult.rows.length) {
-          this.setRun(tabId, { phase: 'done', result: replaceResult({ ...currentResult, bufferedRowCount: currentResult.rows.length }), sql: current.sql, params: current.params })
+          // Carry `table` through: dropping it here would silently disarm editing
+          // (or retarget it at the tab's table) the moment the grid paged.
+          this.setRun(tabId, { phase: 'done', result: replaceResult({ ...currentResult, bufferedRowCount: currentResult.rows.length }), sql: current.sql, params: current.params, ...(current.table ? { table: current.table } : {}) })
         }
         return
       }
@@ -683,6 +823,7 @@ export class QueriesController implements ReactiveController {
         result: replaceResult({ ...currentResult, rows: [...currentResult.rows, ...response.rows] }),
         sql: current.sql,
         params: current.params,
+        ...(current.table ? { table: current.table } : {}),
       })
     } finally {
       this.fetching.delete(fetchKey)
@@ -693,6 +834,20 @@ export class QueriesController implements ReactiveController {
   private closeRunSession(run: QueryRun | undefined) {
     if (run?.phase !== 'done') return
     this.closeResultSessions(run.result)
+  }
+
+  /** Frees the buffer of the entry currently on screen, leaving the rest of the
+   * trail reachable. For a run that supersedes what the tab is showing. */
+  private closeVisibleSession(tabId: string) {
+    this.closeRunSession(this.runFor(tabId))
+  }
+
+  /** Frees every buffer a tab's whole trail holds — the tab (or workspace) is
+   * going away, so no entry stays reachable. */
+  private closeTrailSessions(tabId: string) {
+    const history = this.runs.get(tabId)
+    if (!history) return
+    for (const run of history.stack) this.closeRunSession(run)
   }
 
   private closeResultSessions(result: QueryResult) {
@@ -706,10 +861,11 @@ export class QueriesController implements ReactiveController {
   // --- tab lifecycle hooks, called by the workbench's tab management -------
 
   dropTab(tabId: string) {
-    this.closeRunSession(this.runs.get(tabId))
+    this.closeTrailSessions(tabId)
     this.runs.delete(tabId)
     this.drafts.delete(tabId)
     this.edits.delete(tabId)
+    this.deletions.delete(tabId)
     this.sorts.delete(tabId)
     this.filters.delete(tabId)
     this.columnWidths.delete(tabId)
@@ -728,6 +884,12 @@ export class QueriesController implements ReactiveController {
       const nextEdits = new Map(this.edits)
       nextEdits.delete(oldId)
       this.edits = nextEdits.set(newId, edit)
+    }
+    const deletes = this.deletions.get(oldId)
+    if (deletes) {
+      const nextDeletions = new Map(this.deletions)
+      nextDeletions.delete(oldId)
+      this.deletions = nextDeletions.set(newId, deletes)
     }
     const sort = this.sorts.get(oldId)
     if (sort) {
@@ -760,7 +922,7 @@ export class QueriesController implements ReactiveController {
   sweepOrphans() {
     for (const id of [...this.runs.keys()]) {
       if (!this.tabExists(id)) {
-        this.closeRunSession(this.runs.get(id))
+        this.closeTrailSessions(id)
         this.runs.delete(id)
       }
     }
@@ -769,6 +931,9 @@ export class QueriesController implements ReactiveController {
     }
     for (const id of [...this.edits.keys()]) {
       if (!this.tabExists(id)) this.edits.delete(id)
+    }
+    for (const id of [...this.deletions.keys()]) {
+      if (!this.tabExists(id)) this.deletions.delete(id)
     }
     for (const id of [...this.sorts.keys()]) {
       if (!this.tabExists(id)) this.sorts.delete(id)
@@ -789,10 +954,11 @@ export class QueriesController implements ReactiveController {
     // Invalidate any in-flight execute() so its result can't land in the new
     // workspace's state after this clears everything.
     this.generation += 1
-    for (const run of this.runs.values()) this.closeRunSession(run)
+    for (const history of this.runs.values()) for (const run of history.stack) this.closeRunSession(run)
     this.runs = new Map()
     this.drafts = new Map()
     this.edits = new Map()
+    this.deletions = new Map()
     this.sorts = new Map()
     this.filters = new Map()
     this.columnWidths = new Map()

@@ -1,6 +1,7 @@
 import mysql from 'mysql2/promise'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
+import { columnReference } from './column-reference'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -506,13 +507,43 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async listColumns(childDb = null) {
-      const rows = await metaRows<{ table_name: string; name: string; data_type: string; nullable: number; pk: number; fk: number }>(
+      const rows = await metaRows<{
+        table_name: string
+        name: string
+        data_type: string
+        nullable: number
+        pk: number
+        fk: number
+        ref_constraint: string | null
+        ref_schema: string | null
+        ref_table: string | null
+        ref_column: string | null
+      }>(
+        // The FK target rides along on the same key_column_usage row the fk flag
+        // is derived from. A column can sit in several foreign keys, so the NOT
+        // EXISTS keeps exactly one row per column — the first constraint by name,
+        // matching the postgres driver's rule so the pick is stable either side.
+        // referenced_table_schema collapses to null for the active database, like
+        // listTables' TableRefs; a cross-database FK keeps its schema so it can
+        // never bind to a same-named table in the active one.
         `select c.table_name as table_name, c.column_name as name, c.column_type as data_type,
                 c.is_nullable = 'YES' as nullable, c.column_key = 'PRI' as pk,
                 exists (select 1 from information_schema.key_column_usage k
                         where k.table_schema = c.table_schema and k.table_name = c.table_name
-                          and k.column_name = c.column_name and k.referenced_table_name is not null) as fk
+                          and k.column_name = c.column_name and k.referenced_table_name is not null) as fk,
+                ref.constraint_name as ref_constraint,
+                nullif(ref.referenced_table_schema, database()) as ref_schema,
+                ref.referenced_table_name as ref_table,
+                ref.referenced_column_name as ref_column
          from information_schema.columns c
+         left join information_schema.key_column_usage ref
+           on ref.table_schema = c.table_schema and ref.table_name = c.table_name
+          and ref.column_name = c.column_name and ref.referenced_table_name is not null
+          and not exists (select 1 from information_schema.key_column_usage earlier
+                          where earlier.table_schema = ref.table_schema and earlier.table_name = ref.table_name
+                            and earlier.column_name = ref.column_name
+                            and earlier.referenced_table_name is not null
+                            and earlier.constraint_name < ref.constraint_name)
          where c.table_schema = database()
          order by c.table_name, c.ordinal_position`,
         [],
@@ -527,6 +558,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           nullable: !!row.nullable,
           primaryKey: !!row.pk,
           foreignKey: !!row.fk,
+          ...columnReference(row.ref_schema, row.ref_table, row.ref_column, row.ref_constraint),
         }),
       )
     },

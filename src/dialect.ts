@@ -20,6 +20,10 @@ export type Dialect = {
   applyOrderBy(sql: string, sort: QuerySort, mode?: SqlModeFlags): string
   /** A small browse query for a table, using this engine's row-limit syntax. */
   browseTable(qualifiedTable: string, limit: number): string
+  /** The same browse, narrowed to one column's value — following a foreign key.
+   * The value is bound, never interpolated, so it stays correct for every type
+   * and cannot be mis-escaped; `placeholder` is this engine's bind marker. */
+  browseTableWhere(qualifiedTable: string, quotedColumn: string, placeholder: string, limit: number): string
   /** Whether this engine has native column comments — drives whether the inspector
    *  shows a Comment column at all (shown even when every value is empty). */
   supportsColumnComments: boolean
@@ -194,6 +198,14 @@ const makeDialect = (engine: Engine): Dialect => {
       engine === 'sqlserver'
         ? `SELECT TOP ${Math.max(1, Math.trunc(limit))} * FROM ${qualifiedTable}`
         : `SELECT * FROM ${qualifiedTable} LIMIT ${Math.max(1, Math.trunc(limit))}`,
+    browseTableWhere: (qualifiedTable, quotedColumn, placeholder, limit) => {
+      const rows = Math.max(1, Math.trunc(limit))
+      const where = `WHERE ${quotedColumn} = ${placeholder}`
+      // T-SQL caps rows before the projection; the others append a LIMIT tail.
+      return engine === 'sqlserver'
+        ? `SELECT TOP ${rows} * FROM ${qualifiedTable} ${where}`
+        : `SELECT * FROM ${qualifiedTable} ${where} LIMIT ${rows}`
+    },
     supportsColumnComments: columnCommentsFor[engine],
     bindBoolean: (value) => (engine === 'sqlite' ? (value ? 1 : 0) : value),
     columnEdits: columnEditsFor[engine],

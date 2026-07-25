@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile, QueryResponse } from '../electron'
 import type { HistoryItem } from '../components/history-view'
+import type { QueryRun } from '../components/results-panel'
 import { QueriesController, capHistoryPerContext } from './queries'
 
 const historyItem = (contextKey: string, id: string): HistoryItem =>
@@ -742,5 +743,237 @@ describe('QueriesController paging', () => {
 
     await controller.loadMore('t1') // now a no-op (loaded === buffered)
     expect(api.fetchRows).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Following a foreign key shows another table's rows in the same tab, so results
+// form a browser-style trail. Re-running the editor must replace what is on
+// screen rather than extend that trail, or back/forward fills with duplicates.
+describe('QueriesController result trail', () => {
+  const pushed = (n: number): QueryRun =>
+    ({ phase: 'done', result: { columns: ['n'], rows: [[n]], rowCount: 1, durationMs: 1 } })
+
+  it('starts with nowhere to go', () => {
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('t1', pushed(1))
+    expect(controller.canGoBack('t1')).toBe(false)
+    expect(controller.canGoForward('t1')).toBe(false)
+  })
+
+  it('steps back and forward over pushed entries', () => {
+    const controller = new QueriesController(host(), () => true)
+    stubSqlkit()
+    controller.setRun('t1', pushed(1))
+    controller.pushRun('t1', pushed(2))
+    controller.pushRun('t1', pushed(3))
+
+    expect(controller.runFor('t1')).toMatchObject({ result: { rows: [[3]] } })
+    expect(controller.canGoForward('t1')).toBe(false)
+
+    expect(controller.goBack('t1')).toBe(true)
+    expect(controller.runFor('t1')).toMatchObject({ result: { rows: [[2]] } })
+    expect(controller.canGoBack('t1')).toBe(true)
+    expect(controller.canGoForward('t1')).toBe(true)
+
+    expect(controller.goBack('t1')).toBe(true)
+    expect(controller.runFor('t1')).toMatchObject({ result: { rows: [[1]] } })
+    expect(controller.goBack('t1')).toBe(false)
+
+    expect(controller.goForward('t1')).toBe(true)
+    expect(controller.runFor('t1')).toMatchObject({ result: { rows: [[2]] } })
+  })
+
+  it('drops the forward branch when a new entry is pushed after stepping back', () => {
+    const controller = new QueriesController(host(), () => true)
+    stubSqlkit()
+    controller.setRun('t1', pushed(1))
+    controller.pushRun('t1', pushed(2))
+    controller.pushRun('t1', pushed(3))
+    controller.goBack('t1')
+    controller.goBack('t1')
+    controller.pushRun('t1', pushed(9))
+
+    expect(controller.runFor('t1')).toMatchObject({ result: { rows: [[9]] } })
+    // 2 and 3 are gone, so forward leads nowhere and back returns to 1.
+    expect(controller.canGoForward('t1')).toBe(false)
+    controller.goBack('t1')
+    expect(controller.runFor('t1')).toMatchObject({ result: { rows: [[1]] } })
+    expect(controller.canGoBack('t1')).toBe(false)
+  })
+
+  it('frees the buffers of a discarded forward branch', () => {
+    const api = stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    const withSession = (id: string): QueryRun =>
+      ({ phase: 'done', result: { columns: ['n'], rows: [[1]], rowCount: 9, durationMs: 1, sessionId: id, bufferedRowCount: 9 } })
+
+    controller.setRun('t1', withSession('keep'))
+    controller.pushRun('t1', withSession('branch-a'))
+    controller.pushRun('t1', withSession('branch-b'))
+    controller.goBack('t1')
+    controller.goBack('t1')
+    expect(api.closeSession).not.toHaveBeenCalled()
+
+    controller.pushRun('t1', withSession('fresh'))
+    // Unreachable entries must not keep main-process row buffers alive.
+    expect(api.closeSession).toHaveBeenCalledWith('branch-a')
+    expect(api.closeSession).toHaveBeenCalledWith('branch-b')
+    expect(api.closeSession).not.toHaveBeenCalledWith('keep')
+  })
+
+  it('stepping the trail frees nothing, since every entry stays reachable', () => {
+    const api = stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('t1', pushed(1))
+    controller.pushRun('t1', pushed(2))
+    controller.goBack('t1')
+    controller.goForward('t1')
+    expect(api.closeSession).not.toHaveBeenCalled()
+  })
+
+  // The response of an in-flight run lands at the visible index. Stepping away
+  // mid-run would drop that result onto a history entry — and would let a second
+  // run start while the first is still in flight.
+  it('refuses to step while the visible entry is running', () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('t1', pushed(1))
+    controller.pushRun('t1', { phase: 'running', executionId: 'x', profileId: 'p1' })
+
+    expect(controller.canGoBack('t1')).toBe(false)
+    expect(controller.goBack('t1')).toBe(false)
+    // The response replaces the running entry, and the trail opens up again.
+    controller.setRun('t1', pushed(2))
+    expect(controller.canGoBack('t1')).toBe(true)
+    controller.goBack('t1')
+    expect(controller.runFor('t1')).toMatchObject({ result: { rows: [[1]] } })
+  })
+
+  // "Discard and continue" must truly discard: staged work is row-indexed
+  // against the result being left, so restoring it later (even via ⌘Z) would
+  // retarget writes at whatever result is visible then.
+  it('discardStaged drops drafts, edits and deletions along with their undo history', () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('t1', pushed(1))
+    controller.addDraft('t1', 1)
+    controller.setEdit('t1', 0, 0, '9')
+    controller.stagePendingDeletes('t1', [0])
+    expect(controller.hasStaged('t1')).toBe(true)
+
+    controller.discardStaged('t1')
+
+    expect(controller.hasStaged('t1')).toBe(false)
+    expect(controller.undoStaged('t1')).toBe(false)
+  })
+
+  it('caps the trail depth, freeing the oldest entry that falls off', () => {
+    const api = stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    const withSession = (id: string): QueryRun =>
+      ({ phase: 'done', result: { columns: ['n'], rows: [[1]], rowCount: 9, durationMs: 1, sessionId: id, bufferedRowCount: 9 } })
+
+    controller.setRun('t1', withSession('s0'))
+    for (let i = 1; i <= 12; i += 1) controller.pushRun('t1', withSession(`s${i}`))
+
+    // Depth is bounded, so the earliest entries were dropped and freed.
+    expect(api.closeSession).toHaveBeenCalledWith('s0')
+    expect(api.closeSession).toHaveBeenCalledWith('s1')
+    expect(api.closeSession).not.toHaveBeenCalledWith('s12')
+    let depth = 1
+    while (controller.goBack('t1')) depth += 1
+    expect(depth).toBe(10)
+  })
+
+  it('a re-run replaces the visible entry instead of extending the trail', async () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('t1', pushed(1))
+    controller.pushRun('t1', pushed(2))
+
+    await controller.execute(runArgs)
+    // Still two entries: the re-run took the place of the one on screen.
+    expect(controller.canGoForward('t1')).toBe(false)
+    expect(controller.goBack('t1')).toBe(true)
+    expect(controller.runFor('t1')).toMatchObject({ result: { rows: [[1]] } })
+    expect(controller.goBack('t1')).toBe(false)
+  })
+
+  it('frees every entry of a trail when its tab closes', () => {
+    const api = stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    const withSession = (id: string): QueryRun =>
+      ({ phase: 'done', result: { columns: ['n'], rows: [[1]], rowCount: 9, durationMs: 1, sessionId: id, bufferedRowCount: 9 } })
+
+    controller.setRun('t1', withSession('first'))
+    controller.pushRun('t1', withSession('second'))
+    controller.dropTab('t1')
+
+    // Closing a tab must not leak the buffers of entries behind the visible one.
+    expect(api.closeSession).toHaveBeenCalledWith('first')
+    expect(api.closeSession).toHaveBeenCalledWith('second')
+    expect(controller.runFor('t1')).toEqual({ phase: 'idle' })
+  })
+
+  it('clears staged deletions with the rest of a closed tab', () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('t1', pushed(1))
+    controller.stagePendingDeletes('t1', [0, 1])
+    expect(controller.hasStaged('t1')).toBe(true)
+
+    controller.dropTab('t1')
+    // A tab id is its file path, so reopening the same file must not inherit
+    // deletions staged before it closed.
+    expect(controller.pendingDeletesFor('t1').size).toBe(0)
+    expect(controller.hasAnyStaged()).toBe(false)
+  })
+})
+
+// `deletions` is keyed by tab id like drafts/edits, so it has to take part in
+// every lifecycle hook. Tab ids are file paths, so a missed hook leaks staged
+// deletes onto whatever reopens at the same id.
+describe('QueriesController staged deletions follow the tab lifecycle', () => {
+  const done: QueryRun = { phase: 'done', result: { columns: ['n'], rows: [[1]], rowCount: 1, durationMs: 1 } }
+
+  it('migrates staged deletions when a tab is renamed', () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('old.sql', done)
+    controller.stagePendingDeletes('old.sql', [2])
+
+    controller.renameTab('old.sql', 'new.sql')
+
+    expect([...controller.pendingDeletesFor('new.sql')]).toEqual([2])
+    expect(controller.pendingDeletesFor('old.sql').size).toBe(0)
+  })
+
+  it('sweeps staged deletions of tabs that no longer exist', () => {
+    stubSqlkit()
+    const live = new Set(['keep'])
+    const controller = new QueriesController(host(), (id) => live.has(id))
+    controller.setRun('keep', done)
+    controller.stagePendingDeletes('keep', [0])
+    live.add('gone')
+    controller.setRun('gone', done)
+    controller.stagePendingDeletes('gone', [1])
+    live.delete('gone')
+
+    controller.sweepOrphans()
+
+    expect(controller.pendingDeletesFor('gone').size).toBe(0)
+    expect([...controller.pendingDeletesFor('keep')]).toEqual([0])
+  })
+
+  it('drops staged deletions on a workspace switch', () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('t1', done)
+    controller.stagePendingDeletes('t1', [0])
+
+    controller.reset()
+
+    expect(controller.pendingDeletesFor('t1').size).toBe(0)
+    expect(controller.hasAnyStaged()).toBe(false)
   })
 })

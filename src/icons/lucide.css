@@ -92,3 +92,8 @@
 .icon-package::before { content: "\e129"; }
 .icon-boxes::before { content: "\e2d0"; }
 .icon-table::before { content: "\e17d"; }
+.icon-code::before { content: "\e093"; }
+/* Lucide renamed the *-square family to square-* after this font was built, so
+   the glyph ships under its old name `arrow-up-right-from-square`. Classed by
+   the current name, which is what a regenerated subset would emit. */
+.icon-square-arrow-out-up-right::before { content: "\e5a4"; }

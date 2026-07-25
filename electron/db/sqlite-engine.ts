@@ -4,6 +4,7 @@ import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, Qu
 import { createExportSerializer, type ExportFormat } from '../../src/result-export'
 import { t } from '../../src/i18n'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
+import { columnReference } from './column-reference'
 import { assertSelfContainedTransaction, containsSqliteTrigger } from './sql-script'
 
 // The synchronous SQLite core, factored out of any process/threading concern:
@@ -160,8 +161,10 @@ export function listColumns(db: DatabaseSync): ColumnRef[] {
     pk: number
     fk: number
   }>
-  return rows.map(
-    (row): ColumnRef => ({
+  const targets = foreignKeyTargets(db)
+  return rows.map((row): ColumnRef => {
+    const target = targets.get(targetKey(row.table_name, row.column_name))
+    return {
       schema: null,
       table: row.table_name,
       name: row.column_name,
@@ -169,8 +172,68 @@ export function listColumns(db: DatabaseSync): ColumnRef[] {
       nullable: !row.not_null,
       primaryKey: row.pk > 0,
       foreignKey: row.fk > 0,
-    }),
-  )
+      ...columnReference(null, target?.table, target?.column, target?.constraint),
+    }
+  })
+}
+
+// NUL-separated, so a name containing the separator can't collide two different
+// (table, column) pairs onto one key.
+const targetKey = (table: string, column: string | number) => `${table}\0${column}`
+
+// FK target per "table\0column", merged in JS rather than SQL: pragma_table_info
+// has to be consulted for a *second* table (the referenced one) to resolve an
+// implicit target, and nesting correlated pragmas inside a join is fragile.
+//
+// Two SQLite-specific quirks are handled here. `to` is NULL when the key targets
+// the parent's primary key implicitly (REFERENCES parent without a column list),
+// so it falls back to the parent's PK column at the matching key position —
+// pragma_table_info.pk is 1-based within the PK and foreign_key_list.seq is
+// 0-based within the key, so a composite implicit target still pairs correctly.
+// And SQLite exposes no FK constraint names, only a per-table `id`; that id is
+// synthesized into a label, which is all `constraint` is used for (grouping the
+// columns of one composite key).
+function foreignKeyTargets(db: DatabaseSync): Map<string, { table: string; column: string; constraint: string }> {
+  const keys = db
+    .prepare(
+      `select m.name as table_name, f.id as id, f.seq as seq, f."table" as ref_table,
+              f."from" as from_col, f."to" as to_col
+       from sqlite_master m
+       join pragma_foreign_key_list(m.name) f
+       where m.type in ('table', 'view') and m.name not like 'sqlite_%'
+       order by m.name, f.id, f.seq`,
+    )
+    // The handle is opened with readBigInts, so integer columns arrive as BigInt;
+    // they are converted explicitly below rather than mixed into arithmetic.
+    .all() as Array<{ table_name: string; id: bigint; seq: bigint; ref_table: string; from_col: string; to_col: string | null }>
+  if (!keys.length) return new Map()
+
+  // Primary-key columns of every table, keyed by "table\0pkPosition", for the
+  // implicit-target fallback above.
+  const primaryKeys = new Map<string, string>()
+  const pkRows = db
+    .prepare(
+      `select m.name as table_name, p.name as column_name, p.pk as pk
+       from sqlite_master m
+       join pragma_table_info(m.name) p
+       where m.type = 'table' and p.pk > 0`,
+    )
+    .all() as Array<{ table_name: string; column_name: string; pk: bigint }>
+  for (const row of pkRows) primaryKeys.set(targetKey(row.table_name, Number(row.pk)), row.column_name)
+
+  const targets = new Map<string, { table: string; column: string; constraint: string }>()
+  for (const key of keys) {
+    const mapKey = targetKey(key.table_name, key.from_col)
+    // Rows arrive ordered by id, so the first entry for a column wins — the same
+    // "lowest/first constraint" rule the server drivers apply.
+    if (targets.has(mapKey)) continue
+    const column = key.to_col ?? primaryKeys.get(targetKey(key.ref_table, Number(key.seq) + 1))
+    // An unresolvable target (referenced table missing, or a rowid-only parent)
+    // leaves the column a foreign key with nothing to navigate to.
+    if (!column) continue
+    targets.set(mapKey, { table: key.ref_table, column, constraint: `fk_${Number(key.id)}` })
+  }
+  return targets
 }
 
 export function inspectTable(db: DatabaseSync, table: TableRef): TableInspection {

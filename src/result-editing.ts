@@ -78,7 +78,10 @@ function columnSourceIndex(
 export function singleTableEditContext(input: ResultEditInput): SingleTableEditContext | null {
   const { tab, profileId, run } = input
   if (!tab || !profileId || run.phase !== 'done') return null
-  const table = tab.table ?? inferEditableTable(run.sql ?? '', input.tables, input.engine ?? undefined)
+  // The run's own table wins over the tab's: a result reached by following a
+  // foreign key belongs to another table while the tab still names the one it
+  // was opened for, and writing to the tab's table would target the wrong rows.
+  const table = run.table ?? tab.table ?? inferEditableTable(run.sql ?? '', input.tables, input.engine ?? undefined)
   if (!table) return null
   if (run.result.columnSources?.some((source) => source.table !== null && !tableMatchesSource(table, source))) return null
   const columns = columnsForTable(input.columns, table)

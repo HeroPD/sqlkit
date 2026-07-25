@@ -1,8 +1,8 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { icons, scrollbars, tooltip, typography } from '../shared-styles'
+import { icons, popover, scrollbars, sqlHighlight, tooltip, typography } from '../shared-styles'
 import { isMac } from '../platform'
-import type { Engine, QueryResult, QuerySort } from '../electron'
+import type { ColumnReference, Engine, QueryResult, QuerySort, TableRef } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { MAX_FETCH_ROWS } from '../result-limits'
 import { aggregateCells } from '../result-aggregate'
@@ -18,15 +18,33 @@ import './sql-expression-editor'
 import type { SqlExpressionEditor } from './sql-expression-editor'
 import './ui-select'
 import { formatInteger, rowWord, t } from '../i18n'
+import { previewSql, sqlPreviewParts } from '../sql-preview'
 
 /** What the results panel is currently showing. */
 export type QueryRun =
   | { phase: 'idle' }
   | { phase: 'running'; executionId: string; profileId: string; note?: string }
-  | { phase: 'done'; result: QueryResult; sql?: string; params?: unknown[] }
-  | { phase: 'error'; error: string; sql?: string; params?: unknown[]; errorLine?: number }
+  // `table` is the editable source of *this* result, which is not always the
+  // tab's table: a result reached by following a foreign key shows another
+  // table's rows in the same tab, and the tab's own table would be a stale
+  // write target. Set it whenever the result's source is known; editing prefers
+  // it over the tab's, so the two can diverge safely.
+  | { phase: 'done'; result: QueryResult; sql?: string; params?: unknown[]; table?: TableRef }
+  // Errors keep `table` too: a failed filter/sort attempt on a followed result
+  // must not strip the source its next re-run needs.
+  | { phase: 'error'; error: string; sql?: string; params?: unknown[]; errorLine?: number; table?: TableRef }
 
 export type CellCoord = { row: number; col: number }
+
+/** Which way a back/forward button asks the owner to step the result trail. */
+export type ResultNavigateDetail = { direction: 'back' | 'forward' }
+
+/** A request to follow the foreign key in one result cell to the row it names. */
+export type FollowForeignKeyDetail = { row: number; col: number }
+
+// Stable empty, like the other shared empties below: a fresh Map per render
+// would read as "the data changed" to anything memoising on identity.
+const NO_FOREIGN_KEYS: ReadonlyMap<number, ColumnReference> = new Map()
 
 // A header sort button click: re-sort by `column`, or clear the sort (null).
 export type SortColumnDetail = { columnIndex: number; direction: SortDir | null }
@@ -137,6 +155,19 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   canCancel = false
 
+  /** Whether the tab's result trail can step back/forward. The buttons only
+   * appear once there is somewhere to go, so an untravelled tab stays uncluttered. */
+  @property({ attribute: false })
+  canGoBack = false
+
+  @property({ attribute: false })
+  canGoForward = false
+
+  /** Result columns that can be followed to the row they reference, by column
+   * index. Only single-column keys appear here (see src/foreign-keys.ts). */
+  @property({ attribute: false })
+  foreignKeys: ReadonlyMap<number, ColumnReference> = NO_FOREIGN_KEYS
+
   /** When true, double-clicking a cell opens inline editing for text selection/copy.
    * The owner may reject impossible writes after a changed value is submitted. */
   @property({ attribute: false })
@@ -206,6 +237,8 @@ export class ResultsPanel extends LitElement {
 
   @state() private _filterOpen = false
   @state() private _filterDraft = ''
+  @state() private _queryInfoOpen = false
+  @state() private _queryInfoPos: { left: number; top: number; maxWidth: number; maxHeight: number } | null = null
   private _filterFocusPending = false
   private _filterColumns: string[] = []
 
@@ -322,6 +355,9 @@ export class ResultsPanel extends LitElement {
     const key = this.run.phase === 'done' ? (this.run.result.sessionId ?? this.run.result) : this.run.phase
     if (key === this._lastKey) return // an append to the same result, not a new one
     this._lastKey = key
+    // The popover shows the query behind the result that just went away; left
+    // open it would silently reattach to whichever result lands next.
+    if (this._queryInfoOpen) this._closeQueryInfo()
     this._resultSetIndex = this.run.phase === 'done' ? Math.max(0, (this.run.result.resultSets?.length ?? 1) - 1) : 0
     const shown = this._shownResult()
     if (shown) this._filterColumns = shown.columns
@@ -357,6 +393,7 @@ export class ResultsPanel extends LitElement {
 
   protected updated() {
     this._publishSelectionStats()
+    if (this._queryInfoOpen && !this._queryInfoPos) this._placeQueryInfo()
     if (this._resetScroll) {
       this._resetScroll = false
       const body = this._bodyEl()
@@ -402,6 +439,8 @@ export class ResultsPanel extends LitElement {
     super.disconnectedCallback()
     this._resizeObs?.disconnect()
     if (this._scrollRaf) cancelAnimationFrame(this._scrollRaf)
+    // The popover's Escape handler lives on window, so it would outlive the panel.
+    window.removeEventListener('keydown', this._onQueryInfoKeydown)
     this._endDrag()
     this._endColResize()
   }
@@ -672,6 +711,71 @@ export class ResultsPanel extends LitElement {
     return { results, drafts }
   }
 
+  private _toggleQueryInfo = () => {
+    if (this._queryInfoOpen) {
+      this._closeQueryInfo()
+      return
+    }
+    // Measured after the popover renders (see updated), so it opens hidden for
+    // one frame rather than flashing at the wrong place.
+    this._queryInfoPos = null
+    this._queryInfoOpen = true
+    window.addEventListener('keydown', this._onQueryInfoKeydown)
+  }
+
+  private _closeQueryInfo = () => {
+    this._queryInfoOpen = false
+    this._queryInfoPos = null
+    window.removeEventListener('keydown', this._onQueryInfoKeydown)
+  }
+
+  private _onQueryInfoKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') this._closeQueryInfo()
+  }
+
+  // Anchors under the query-info button, flipping above when there is more room
+  // there, and never wider than the panel — a long query scrolls inside it.
+  private _placeQueryInfo() {
+    const anchor = this.renderRoot.querySelector('.query-info')
+    const pop = this.renderRoot.querySelector('.query-pop')
+    if (!anchor || !pop) return
+    const rect = anchor.getBoundingClientRect()
+    const height = pop.getBoundingClientRect().height
+    const below = window.innerHeight - rect.bottom - 12
+    const above = rect.top - 12
+    const openUp = below < height && above > below
+    const maxWidth = Math.min(720, window.innerWidth - 24)
+    this._queryInfoPos = {
+      left: Math.max(6, Math.min(rect.left, window.innerWidth - maxWidth - 6)),
+      top: openUp ? Math.max(6, rect.top - Math.min(height, above) - 4) : rect.bottom + 4,
+      maxWidth,
+      maxHeight: Math.max(80, (openUp ? above : below) - 4),
+    }
+  }
+
+  // Stops the click reaching the cell handlers (which would move the selection)
+  // and asks the owner to navigate — the panel neither builds the query nor owns
+  // the trail.
+  private _followForeignKey(event: Event, row: number, col: number) {
+    event.preventDefault()
+    event.stopPropagation()
+    this.dispatchEvent(new CustomEvent<FollowForeignKeyDetail>('follow-foreign-key', {
+      detail: { row, col },
+      bubbles: true,
+      composed: true,
+    }))
+  }
+
+  // The owner holds the trail (QueriesController), so stepping is a request, not
+  // something the panel can do to itself.
+  private _navigate(direction: 'back' | 'forward') {
+    this.dispatchEvent(new CustomEvent<{ direction: 'back' | 'forward' }>('result-navigate', {
+      detail: { direction },
+      bubbles: true,
+      composed: true,
+    }))
+  }
+
   private _toggleFilter = () => {
     this._filterOpen = !this._filterOpen
     if (this._filterOpen) {
@@ -716,12 +820,27 @@ export class ResultsPanel extends LitElement {
     const showWriteTools = exportable && canEditResult && (this.rowEditable || pendingCount > 0)
     const canToggleRecord = exportable && (this._record !== null || (this._sel ? this._refAt(this._sel.r1) !== null : false))
     const runSql = this.run.phase === 'done' || this.run.phase === 'error' ? this.run.sql : undefined
+    // Bound values are substituted for display only — the run itself stayed
+    // parameterized, which is what keeps it correct across engines and types.
+    const runParams = this.run.phase === 'done' || this.run.phase === 'error' ? (this.run.params ?? []) : []
     const canFilter = !!runSql && isFilterableQuery(runSql, this.engine)
     const selected = this.rowEditable && canEditResult ? this._selectedRefs() : { results: [], drafts: [] }
     const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
       <div class="head">
-        <span>${t('results.title')}</span>
+        ${runSql
+          ? html`
+              <button
+                class="head-action query-info ${this._queryInfoOpen ? 'active' : ''}"
+                data-tooltip=${this._queryInfoOpen ? t('results.queryInfoHide') : t('results.queryInfo')}
+                aria-label=${this._queryInfoOpen ? t('results.queryInfoHide') : t('results.queryInfo')}
+                aria-expanded=${this._queryInfoOpen}
+                @click=${this._toggleQueryInfo}
+              >
+                <i class="icon icon-code" aria-hidden="true"></i>
+              </button>
+            `
+          : html`<span>${t('results.title')}</span>`}
         ${this.run.phase === 'done' && (this.run.result.resultSets?.length ?? 0) > 1
           ? html`
               <ui-select
@@ -830,6 +949,30 @@ export class ResultsPanel extends LitElement {
             `
           : ''}
         <span class="status">${this._status()}</span>
+        ${this.canGoBack || this.canGoForward
+          ? html`
+              <div class="toolbar" aria-label=${t('results.navActions')}>
+                <button
+                  class="head-action"
+                  data-tooltip=${t('results.back')}
+                  aria-label=${t('results.back')}
+                  ?disabled=${!this.canGoBack}
+                  @click=${() => this._navigate('back')}
+                >
+                  <i class="icon icon-chevron-left" aria-hidden="true"></i>
+                </button>
+                <button
+                  class="head-action"
+                  data-tooltip=${t('results.forward')}
+                  aria-label=${t('results.forward')}
+                  ?disabled=${!this.canGoForward}
+                  @click=${() => this._navigate('forward')}
+                >
+                  <i class="icon icon-chevron-right" aria-hidden="true"></i>
+                </button>
+              </div>
+            `
+          : ''}
         ${exportable
           ? html`
               <button
@@ -843,6 +986,23 @@ export class ResultsPanel extends LitElement {
             `
           : ''}
       </div>
+      ${this._queryInfoOpen && runSql
+        ? html`
+            <div class="pop-backdrop" @mousedown=${this._closeQueryInfo}></div>
+            <div
+              class="pop query-pop"
+              role="dialog"
+              aria-label=${t('results.queryInfoHeading')}
+              style=${this._queryInfoPos
+                ? `left: ${this._queryInfoPos.left}px; top: ${this._queryInfoPos.top}px; max-width: ${this._queryInfoPos.maxWidth}px; max-height: ${this._queryInfoPos.maxHeight}px`
+                : 'visibility: hidden'}
+            >
+              <pre class="query-pop-sql"><code>${sqlPreviewParts(previewSql(runSql, runParams)).map((part) =>
+                part.kind ? html`<span class=${part.kind}>${part.text}</span>` : part.text,
+              )}</code></pre>
+            </div>
+          `
+        : ''}
       ${this._filterOpen && canFilter
         ? html`
             <div class="filter-bar">
@@ -1894,6 +2054,28 @@ export class ResultsPanel extends LitElement {
                     return pending === '' ? html`<td class=${cls}></td>` : html`<td class=${cls} title=${pending}>${pending}</td>`
                   }
                   if (cell === null || cell === undefined) return html`<td class=${sel}><span class="null">NULL</span></td>`
+                  // A followable cell wraps its text so the affordance can sit
+                  // beside it. Only this branch wraps: the plain path stays
+                  // untouched so the grid's layout is unchanged everywhere else.
+                  // Skipped while an edit is staged on the cell — the staged value
+                  // is not in the database yet, so following it would look up a
+                  // row that does not exist.
+                  const target = this.foreignKeys.get(col)
+                  if (target) {
+                    return html`<td class="${sel} fk" title=${original}>
+                      <span class="fk-value">${original}</span>
+                      <button
+                        class="fk-follow"
+                        tabindex="-1"
+                        data-tooltip=${t('results.followForeignKey', { table: target.table, column: target.column })}
+                        aria-label=${t('results.followForeignKey', { table: target.table, column: target.column })}
+                        @pointerdown=${(event: Event) => event.stopPropagation()}
+                        @click=${(event: Event) => this._followForeignKey(event, absRow, col)}
+                      >
+                        <i class="icon icon-square-arrow-out-up-right" aria-hidden="true"></i>
+                      </button>
+                    </td>`
+                  }
                   return html`<td class=${sel} title=${original}>${original}</td>`
                 })}
               </tr>
@@ -2077,6 +2259,8 @@ export class ResultsPanel extends LitElement {
     icons,
     scrollbars,
     tooltip,
+    popover,
+    sqlHighlight,
     css`
       :host {
         position: relative;
@@ -2160,6 +2344,75 @@ export class ResultsPanel extends LitElement {
         text-transform: none;
         letter-spacing: normal;
         color: var(--text-3);
+      }
+
+      /* Stands where the old static "RESULTS" label was; the statement itself
+         lives in the popover, so the head keeps just the affordance. */
+      .query-info {
+        align-items: center;
+      }
+
+      /* The shared popover surface, widened for code: its 320px default would
+         wrap almost every statement. Anchored in _placeQueryInfo. */
+      .query-pop {
+        min-width: 0;
+        padding: 8px 10px;
+        overflow: auto;
+        cursor: auto;
+      }
+
+      .query-pop-sql code {
+        font: inherit;
+      }
+
+      .query-pop-sql {
+        margin: 0;
+        font-family: var(--mono-font);
+        font-size: var(--font-size-sm);
+        line-height: 1.5;
+        color: var(--text);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        user-select: text;
+      }
+
+      /* A followable cell keeps its value on one truncating line and reveals the
+         affordance on hover/focus, so a dense grid is not peppered with icons. */
+      td.fk {
+        position: relative;
+      }
+
+      td.fk .fk-value {
+        display: block;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        padding-right: 16px;
+      }
+
+      .fk-follow {
+        position: absolute;
+        top: 0;
+        right: 2px;
+        display: inline-flex;
+        align-items: center;
+        height: 100%;
+        padding: 0 2px;
+        color: var(--text-3);
+        background: transparent;
+        border: none;
+        border-radius: 3px;
+        opacity: 0;
+        cursor: pointer;
+      }
+
+      td.fk:hover .fk-follow,
+      .fk-follow:focus-visible {
+        opacity: 1;
+      }
+
+      .fk-follow:hover {
+        color: var(--accent);
       }
 
       .filter-bar {

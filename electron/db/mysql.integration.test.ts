@@ -426,6 +426,47 @@ DELIMITER ;`)
     }
   })
 
+  it('resolves the foreign-key target so a result cell can be followed', async () => {
+    const driver = await connectDriver()
+    try {
+      const columns = await driver.listColumns()
+      const find = (table: string, name: string) => columns.find((column) => column.table === table && column.name === name)
+      // schema stays null for a target in the active database, matching the flat
+      // TableRefs listTables returns; a cross-database FK would keep its schema.
+      expect(find('books', 'author_id')?.references).toEqual({
+        schema: null,
+        table: 'authors',
+        column: 'id',
+        constraint: expect.any(String),
+      })
+      expect(find('books', 'title')?.references).toBeUndefined()
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('pairs a composite foreign key and groups it under one constraint', async () => {
+    await admin.query('drop table if exists fk_child')
+    await admin.query('drop table if exists fk_parent')
+    await admin.query('create table fk_parent (a int, b int, primary key (a, b)) engine=InnoDB')
+    await admin.query(
+      `create table fk_child (id int auto_increment primary key, pa int, pb int,
+         constraint fk_child_comp foreign key (pa, pb) references fk_parent(a, b)) engine=InnoDB`,
+    )
+    const driver = await connectDriver()
+    try {
+      const columns = await driver.listColumns()
+      const find = (name: string) => columns.find((column) => column.table === 'fk_child' && column.name === name)
+      expect(find('pa')?.references).toMatchObject({ table: 'fk_parent', column: 'a', constraint: 'fk_child_comp' })
+      expect(find('pb')?.references).toMatchObject({ table: 'fk_parent', column: 'b', constraint: 'fk_child_comp' })
+      expect(find('pa')?.references?.constraint).toBe(find('pb')?.references?.constraint)
+    } finally {
+      await driver.disconnect()
+      await admin.query('drop table if exists fk_child')
+      await admin.query('drop table if exists fk_parent')
+    }
+  })
+
   it('lists routines with their parameters via listObjects', async () => {
     const driver = await connectDriver()
     try {

@@ -390,6 +390,49 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  it('resolves the foreign-key target so a result cell can be followed', async () => {
+    const driver = await connectDriver()
+    try {
+      const columns = await driver.listColumns()
+      const find = (table: string, name: string) =>
+        columns.find((column) => column.schema === 'sqlkit_it' && column.table === table && column.name === name)
+      expect(find('books', 'author_id')?.references).toEqual({
+        schema: 'sqlkit_it',
+        table: 'authors',
+        column: 'id',
+        constraint: expect.any(String),
+      })
+      // A plain column gains no target, so a caller can't navigate from one.
+      expect(find('books', 'title')?.references).toBeUndefined()
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('pairs a composite foreign key positionally and groups it under one constraint', async () => {
+    await admin.query('drop table if exists sqlkit_it.fk_child, sqlkit_it.fk_parent cascade')
+    await admin.query('create table sqlkit_it.fk_parent (a int, b int, primary key (a, b))')
+    await admin.query(
+      `create table sqlkit_it.fk_child (id serial primary key, pa int, pb int,
+         constraint fk_child_comp foreign key (pa, pb) references sqlkit_it.fk_parent(a, b))`,
+    )
+    const driver = await connectDriver()
+    try {
+      const columns = await driver.listColumns()
+      const find = (name: string) =>
+        columns.find((column) => column.schema === 'sqlkit_it' && column.table === 'fk_child' && column.name === name)
+      // conkey and confkey are positionally paired: pa must land on a, pb on b.
+      expect(find('pa')?.references).toMatchObject({ table: 'fk_parent', column: 'a', constraint: 'fk_child_comp' })
+      expect(find('pb')?.references).toMatchObject({ table: 'fk_parent', column: 'b', constraint: 'fk_child_comp' })
+      // Sharing a constraint is what lets a caller recognise a composite key and
+      // refuse to navigate half of it.
+      expect(find('pa')?.references?.constraint).toBe(find('pb')?.references?.constraint)
+    } finally {
+      await driver.disconnect()
+      await admin.query('drop table if exists sqlkit_it.fk_child, sqlkit_it.fk_parent cascade')
+    }
+  })
+
   it('lists user-defined types via listObjects', async () => {
     const driver = await connectDriver()
     try {

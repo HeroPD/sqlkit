@@ -25,7 +25,7 @@ const columns = [
   column(companies, 'name'),
 ]
 
-function input(result: QueryResult, sql: string, tabTable?: TableRef): ResultEditInput {
+function input(result: QueryResult, sql: string, tabTable?: TableRef, runTable?: TableRef): ResultEditInput {
   return {
     tab: {
       id: 'tab-1',
@@ -38,7 +38,7 @@ function input(result: QueryResult, sql: string, tabTable?: TableRef): ResultEdi
     },
     profileId: 'profile-1',
     engine: 'postgresql',
-    run: { phase: 'done', result, sql },
+    run: { phase: 'done', result, sql, ...(runTable ? { table: runTable } : {}) },
     tables: [accounts, companies],
     columns,
   }
@@ -158,5 +158,48 @@ describe('result edit context', () => {
 
     expect(singleTableEditContext(editInput)).toBeNull()
     expect(buildEditSpecs(editInput, [{ row: 0, col: 1 }], 'Grace')).toMatchObject({ ok: false })
+  })
+})
+
+// A result reached by following a foreign key shows another table's rows in the
+// tab it was opened from, so the tab's table is a stale write target. The run
+// carries the real source and must win.
+describe('result edit context: the run outranks the tab', () => {
+  const companiesResult: QueryResult = {
+    columns: ['id', 'name'],
+    columnSources: [source(companies, 'id'), source(companies, 'name')],
+    rows: [[7, 'Initech']],
+    rowCount: 1,
+    durationMs: 1,
+  }
+
+  it('edits the run table, not the tab it was opened from', () => {
+    const editInput = input(companiesResult, 'select * from public.companies where id = 7', accounts, companies)
+
+    expect(singleTableEditContext(editInput)?.table).toEqual(companies)
+    expect(buildEditSpecs(editInput, [{ row: 0, col: 1 }], 'Initrode')).toMatchObject({
+      ok: true,
+      value: { table: companies },
+    })
+  })
+
+  it('still falls back to the tab table when the run names none', () => {
+    const editInput = input(companiesResult, 'select * from public.companies where id = 7', companies)
+
+    expect(singleTableEditContext(editInput)?.table).toEqual(companies)
+  })
+
+  // Without column sources there is nothing to contradict a stale tab table, so
+  // a wrong run table would silently retarget writes. Engines that report no
+  // sources must therefore still be protected by the run carrying its own table.
+  it('uses the run table even when the engine reports no column sources', () => {
+    const sourceless: QueryResult = { columns: ['id', 'name'], rows: [[7, 'Initech']], rowCount: 1, durationMs: 1 }
+    const editInput = input(sourceless, 'select * from public.companies where id = 7', accounts, companies)
+
+    expect(singleTableEditContext(editInput)?.table).toEqual(companies)
+    expect(buildEditSpecs(editInput, [{ row: 0, col: 1 }], 'Initrode')).toMatchObject({
+      ok: true,
+      value: { table: companies },
+    })
   })
 })

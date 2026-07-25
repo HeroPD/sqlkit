@@ -53,10 +53,11 @@ import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
 import { isFilterableQuery } from '../sql-filter'
 import { isReadOnlyQuery, isReorderableQuery } from '../sql-order'
+import { foreignKeyTargets } from '../foreign-keys'
 import type { ExportFormat } from '../result-export'
-import type { SortColumnDetail } from './results-panel'
+import type { FollowForeignKeyDetail, ResultNavigateDetail, SortColumnDetail } from './results-panel'
 import type { SelectionStats } from '../result-aggregate'
-import type { QuerySort } from '../electron'
+import type { ColumnRef, ColumnReference, QueryResult, QuerySort } from '../electron'
 import { stripExplain } from '../sql-types'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
@@ -113,6 +114,14 @@ const childFolderSegment = (name: string) => {
 }
 
 // Commands offered by the ⌘⇧P palette; ids are dispatched to _runCommand.
+// Rows a browse query loads: the Explorer's double-click browse and the
+// follow-a-foreign-key navigation both cap at this.
+const BROWSE_ROW_LIMIT = 200
+
+// Stable empty, so a render that offers no followable columns hands the grid the
+// same reference every time.
+const NO_FOREIGN_KEYS: ReadonlyMap<number, ColumnReference> = new Map()
+
 const COMMANDS: ReadonlyArray<{ id: string; label: string; keybind?: string }> = [
   { id: 'new-query', label: t('action.newQuery'), keybind: mod('N') },
   { id: 'new-window', label: t('action.newWindow'), keybind: `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}N` },
@@ -296,6 +305,9 @@ export class WorkbenchScreen extends LitElement {
     onDatabaseDropped: (profileId, database) => this._onDatabaseDropped(profileId, database),
   })
 
+  /** Memo for _resultForeignKeys, keyed on the identities it derives from. */
+  private _foreignKeyCache: { result: QueryResult; columns: ColumnRef[]; map: ReadonlyMap<number, ColumnReference> } | null = null
+
   private _unsubscribeMenu: (() => void) | null = null
 
   connectedCallback() {
@@ -341,7 +353,9 @@ export class WorkbenchScreen extends LitElement {
     const tabId = this._ctx.activeTabId
     const run = this._queries.runFor(tabId)
     if (run.phase !== 'done' || !run.sql) return
-    void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, this._queries.filterFor(tabId))
+    // Carry the run's own table: a followed result re-run without it would fall
+    // back to the tab's table and retarget (or disarm) grid editing.
+    void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, this._queries.filterFor(tabId), undefined, run.table ? { table: run.table } : undefined)
   }
 
   private _saveActive() {
@@ -619,7 +633,14 @@ export class WorkbenchScreen extends LitElement {
   // Runs against the in-use context (⌘K), connecting it first if needed.
   // `filter`/`sort` re-run with grid-injected clauses; omitting them clears both.
   // `baseLine` is the editor line the SQL starts on, for error-line mapping.
-  private async _runSql(sqlText: string, sort?: QuerySort | null, suppliedParams?: unknown[], filter?: string | null, baseLine?: number) {
+  private async _runSql(
+    sqlText: string,
+    sort?: QuerySort | null,
+    suppliedParams?: unknown[],
+    filter?: string | null,
+    baseLine?: number,
+    trail?: { push?: boolean; table?: TableRef },
+  ) {
     // The run belongs to the tab it started from, even if the user switches
     // tabs or contexts before it finishes.
     const tabId = this._ctx.activeTabId
@@ -661,7 +682,13 @@ export class WorkbenchScreen extends LitElement {
     // and be logged under the context Run was pressed in, not the current one.
     const executionId = crypto.randomUUID()
     const phase = this._live.phase(profile.id)
-    this._queries.beginRun(tabId, executionId, profile.id, phase === 'connected' ? undefined : t('workbench.connectingTo', { name: profile.name }))
+    this._queries.beginRun(
+      tabId,
+      executionId,
+      profile.id,
+      phase === 'connected' ? undefined : t('workbench.connectingTo', { name: profile.name }),
+      trail?.push ?? false,
+    )
 
     // The tab is already in phase 'running'; a rejection escaping here would
     // leave it spinning forever (the in-flight guard above blocks every rerun).
@@ -695,6 +722,7 @@ export class WorkbenchScreen extends LitElement {
       filter,
       executionId,
       baseLine,
+      ...(trail?.table ? { table: trail.table } : {}),
     })
     // A run that could have changed the schema updates what the tree,
     // completions and grid editability believe — same as the Inspect apply
@@ -719,7 +747,7 @@ export class WorkbenchScreen extends LitElement {
   // Re-browsing reuses the tab and runs its first statement, so trailing half-written SQL doesn't error.
   private _browseTable(profile: ConnectionProfile, table: TableRef) {
     const dialect = dialectFor(profile.engine)
-    const sqlText = dialect.browseTable(quoteQualified(table, dialect), 200)
+    const sqlText = dialect.browseTable(quoteQualified(table, dialect), BROWSE_ROW_LIMIT)
 
     const id = `browse:${tableContextKey(profile.id, this._ctx.activeChildDb, table)}`
     // Capture the existing tab's content before addTab activates it: re-browse
@@ -1159,6 +1187,9 @@ export class WorkbenchScreen extends LitElement {
             .run=${this._queries.runFor(this._ctx.activeTabId)}
             .engine=${this._config.activeProfile()?.engine ?? 'postgresql'}
             .canCancel=${this._config.activeProfile()?.engine !== 'sqlite'}
+            .canGoBack=${this._queries.canGoBack(this._ctx.activeTabId)}
+            .canGoForward=${this._queries.canGoForward(this._ctx.activeTabId)}
+            .foreignKeys=${this._resultForeignKeys()}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
             .drafts=${this._queries.draftsFor(this._ctx.activeTabId)}
@@ -1169,6 +1200,8 @@ export class WorkbenchScreen extends LitElement {
             .columnWidths=${this._resultColumnWidths()}
             .streamExportAvailable=${this._canStreamExport()}
             @cancel-query=${this._onCancelQuery}
+            @result-navigate=${this._onResultNavigate}
+            @follow-foreign-key=${this._onFollowForeignKey}
             @goto-error-line=${this._onGotoErrorLine}
             @stream-export=${this._onStreamExport}
             @load-more=${this._onLoadMore}
@@ -1566,6 +1599,87 @@ export class WorkbenchScreen extends LitElement {
     if (run.phase === 'running') void this._cancelQuery(run.profileId, run.executionId)
   }
 
+  // Staged edits, new rows and deletions are aligned to the visible result by row
+  // index, so they cannot follow the user to another result. Leaving with unsaved
+  // work therefore has to be a decision rather than a silent discard.
+  private _guardStagedLeave(tabId: string, leave: () => void) {
+    if (!this._queries.hasStaged(tabId)) {
+      leave()
+      return
+    }
+    this._dialogs.confirm = {
+      message: t('results.leaveStagedPrompt'),
+      detail: t('results.leaveStagedDetail'),
+      confirmLabel: t('results.discardAndLeave'),
+      // Discard for real before leaving: nothing on the navigation path realigns
+      // staged state, and stale row-indexed edits would arm writes against
+      // whatever result appears next.
+      action: () => {
+        this._queries.discardStaged(tabId)
+        leave()
+      },
+    }
+  }
+
+  /** Steps the active tab's result trail. */
+  private _onResultNavigate(event: Event) {
+    const { direction } = (event as CustomEvent<ResultNavigateDetail>).detail
+    const tabId = this._ctx.activeTabId
+    if (!tabId) return
+    // Refuse before prompting: confirming a discard for a step that will not
+    // happen (mid-run, or nowhere to go) would throw staged work away for nothing.
+    if (!(direction === 'back' ? this._queries.canGoBack(tabId) : this._queries.canGoForward(tabId))) return
+    this._guardStagedLeave(tabId, () => {
+      if (direction === 'back') this._queries.goBack(tabId)
+      else this._queries.goForward(tabId)
+    })
+  }
+
+  /** Result columns of the visible result that can be followed, by column index.
+   * Memoised on the result and metadata identities: the grid reads this every
+   * render, and a fresh Map each time would read as changed data. */
+  private _resultForeignKeys(): ReadonlyMap<number, ColumnReference> {
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    const columns = this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? []) : []
+    // Column sources are per result set, while this map is per column index, so a
+    // multi-set run could point a column at the wrong table. Offer nothing there.
+    if (run.phase !== 'done' || (run.result.resultSets?.length ?? 0) > 1) return NO_FOREIGN_KEYS
+    const cached = this._foreignKeyCache
+    if (cached && cached.result === run.result && cached.columns === columns) return cached.map
+    const map = foreignKeyTargets(run.result, columns)
+    this._foreignKeyCache = { result: run.result, columns, map }
+    return map
+  }
+
+  // Follows one cell's foreign key: opens the referenced row as a new trail entry
+  // in this tab, so back returns to where the user came from. The value is bound,
+  // never interpolated — it can be any type the column holds.
+  private _onFollowForeignKey(event: Event) {
+    const { row, col } = (event as CustomEvent<FollowForeignKeyDetail>).detail
+    const tabId = this._ctx.activeTabId
+    const profile = this._config.activeProfile()
+    const run = this._queries.runFor(tabId)
+    if (!tabId || !profile || run.phase !== 'done') return
+    const target = this._resultForeignKeys().get(col)
+    const value = run.result.rows[row]?.[col]
+    // A null foreign key references nothing, and an unresolved column cannot be
+    // followed; the grid hides the affordance in both cases, but the event is
+    // untrusted input like any other.
+    if (!target || value === null || value === undefined) return
+
+    const dialect = dialectFor(profile.engine)
+    const table: TableRef = { schema: target.schema, name: target.table, kind: 'table' }
+    const sql = dialect.browseTableWhere(
+      quoteQualified(table, dialect),
+      dialect.quoteIdent(target.column),
+      dialect.placeholder(1),
+      BROWSE_ROW_LIMIT,
+    )
+    this._guardStagedLeave(tabId, () => {
+      void this._runSql(sql, null, [value], null, undefined, { push: true, table })
+    })
+  }
+
   // Stop is best-effort: a query still spinning up has no backend PID to target
   // yet, so the cancel reports why instead of looking like a silent no-op.
   private async _cancelQuery(profileId: string, executionId: string) {
@@ -1734,6 +1848,9 @@ export class WorkbenchScreen extends LitElement {
       direction ? { columnIndex, direction } : undefined,
       run.params,
       this._queries.filterFor(this._ctx.activeTabId),
+      undefined,
+      // Same as _refreshResults: the re-run must keep the run's editable source.
+      run.table ? { table: run.table } : undefined,
     )
   }
 
@@ -1742,7 +1859,8 @@ export class WorkbenchScreen extends LitElement {
     const tabId = this._ctx.activeTabId
     const run = this._queries.runFor(tabId)
     if ((run.phase !== 'done' && run.phase !== 'error') || !run.sql || !isFilterableQuery(run.sql, this._config.activeProfile()?.engine)) return
-    void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, condition)
+    // Same as _refreshResults: the re-run must keep the run's editable source.
+    void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, condition, undefined, run.table ? { table: run.table } : undefined)
   }
 
   private _onStageDelete(event: Event) {

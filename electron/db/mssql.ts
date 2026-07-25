@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
+import { columnReference } from './column-reference'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -205,6 +206,64 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
   const dialect = dialectFor(profile.engine)
 
+  // TDS carries a column's source table only for the deprecated text/ntext/image
+  // types (tedious reads it when `hasTableName`), so unlike MySQL's field packets
+  // there is nothing on the wire to map an ordinary result column back to its
+  // origin. This DMV is the server-side equivalent: with browse information on it
+  // reports source schema/table/column per column, for one extra round trip.
+  //
+  // Browse mode appends hidden key columns that are not in the real result, so
+  // is_hidden must be filtered or every source would be shifted onto the wrong
+  // column. A statement the DMV cannot describe (temp tables, dynamic SQL) comes
+  // back as a single row with column_ordinal 0 rather than an error, so ordinals
+  // are filtered too; either way the caller degrades to no sources, as before.
+  const describeColumnSources = async (
+    sqlText: string,
+    paramCount: number,
+    childDb: string | null,
+  ): Promise<QueryResult['columnSources']> => {
+    try {
+      // A parameterized statement only describes alongside a declaration of its
+      // parameters. Their real types are unknown here, but sql_variant accepts an
+      // implicit conversion from every type the driver binds, so the equality
+      // predicates this app generates (follow-FK, grid filters) compile; a usage
+      // sql_variant cannot satisfy (LIKE, TOP) fails the describe and degrades.
+      const declaration = Array.from({ length: paramCount }, (_, i) => `@p${i + 1} sql_variant`).join(', ')
+      const rows = await metaRows<{ source_schema: string | null; source_table: string | null; source_column: string | null }>(
+        `select source_schema, source_table, source_column
+         from sys.dm_exec_describe_first_result_set(@p1, @p2, 1)
+         where is_hidden = 0 and column_ordinal > 0
+         order by column_ordinal`,
+        [sqlText, paramCount ? declaration : null],
+        childDb,
+      )
+      return rows.length
+        ? rows.map((row) => ({ schema: row.source_schema, table: row.source_table, column: row.source_column }))
+        : undefined
+    } catch {
+      // Undescribable statement, or the metadata pool was saturated. Sources are
+      // an enhancement; losing them only costs grid editing, never correctness.
+      return undefined
+    }
+  }
+
+  // Attaches column sources to a result, but only when they provably line up.
+  // The DMV describes the FIRST result set of a single statement, so a GO-split
+  // script or a multi-statement batch is left alone, and a count mismatch is
+  // discarded outright: mapping a column to the wrong origin is worse than
+  // having no origin, because the grid would build writes against that table.
+  const withColumnSources = async (
+    selected: QueryResultSet,
+    batches: string[],
+    resultSetCount: number,
+    paramCount: number,
+    childDb: string | null,
+  ): Promise<QueryResultSet> => {
+    if (batches.length !== 1 || resultSetCount !== 1 || !selected.columns.length) return selected
+    const sources = await describeColumnSources(batches[0]!, paramCount, childDb)
+    return sources && sources.length === selected.columns.length ? { ...selected, columnSources: sources } : selected
+  }
+
   return {
     async connect() {
       const discovery = profile.database.trim() || 'master'
@@ -275,7 +334,13 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             result = await streamTediousBatch(conn, batch, started, budget)
             collect(result, resultSets)
           }
-          const selected = resultSets[resultSets.length - 1] ?? result
+          const selected = await withColumnSources(
+            resultSets[resultSets.length - 1] ?? result,
+            plan.batches,
+            resultSets.length,
+            0,
+            childDb,
+          )
           return { ...selected, durationMs: result.durationMs, ...(resultSets.length > 1 ? { resultSets } : {}) }
         } catch (error) {
           throw isCancelled(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
@@ -304,7 +369,16 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           result = await streamQuery(entry.request, batch, started, budget)
           collect(result, resultSets)
         }
-        const selected = resultSets[resultSets.length - 1] ?? result
+        // A followed foreign key runs through here (its value is bound), so the
+        // parameterized path needs sources too or the followed result could
+        // neither be edited safely nor followed further.
+        const selected = await withColumnSources(
+          resultSets[resultSets.length - 1] ?? result,
+          plan.batches,
+          resultSets.length,
+          plan.params.length,
+          childDb,
+        )
         return {
           ...selected,
           durationMs: result.durationMs,
@@ -504,7 +578,15 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         nullable: boolean
         pk: number
         fk: number
+        ref_constraint: string | null
+        ref_schema: string | null
+        ref_table: string | null
+        ref_column: string | null
       }>(
+        // The FK target comes from the same sys.foreign_key_columns row the fk
+        // flag is derived from. A column can sit in several foreign keys, so the
+        // apply takes the first constraint by name — the same stable rule the
+        // postgres and mysql drivers use.
         `select s.name as table_schema, t.name as table_name, c.name as name,
                 ${mssqlTypeExpression} as data_type,
                 c.is_nullable as nullable,
@@ -512,11 +594,22 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
                             join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
                             where i.is_primary_key = 1 and ic.object_id = c.object_id and ic.column_id = c.column_id), 1, 0) as pk,
                 iif(exists (select 1 from sys.foreign_key_columns fkc
-                            where fkc.parent_object_id = c.object_id and fkc.parent_column_id = c.column_id), 1, 0) as fk
+                            where fkc.parent_object_id = c.object_id and fkc.parent_column_id = c.column_id), 1, 0) as fk,
+                ref.ref_constraint, ref.ref_schema, ref.ref_table, ref.ref_column
          from sys.columns c
          join sys.objects t on t.object_id = c.object_id and t.type in ('U', 'V')
          join sys.schemas s on s.schema_id = t.schema_id
          join sys.types ty on ty.user_type_id = c.user_type_id
+         outer apply (
+           select top 1 fk.name as ref_constraint,
+                  object_schema_name(fkc.referenced_object_id) as ref_schema,
+                  object_name(fkc.referenced_object_id) as ref_table,
+                  col_name(fkc.referenced_object_id, fkc.referenced_column_id) as ref_column
+           from sys.foreign_key_columns fkc
+           join sys.foreign_keys fk on fk.object_id = fkc.constraint_object_id
+           where fkc.parent_object_id = c.object_id and fkc.parent_column_id = c.column_id
+           order by fk.name
+         ) ref
          order by s.name, t.name, c.column_id`,
         [],
         childDb,
@@ -530,6 +623,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           nullable: !!row.nullable,
           primaryKey: !!row.pk,
           foreignKey: !!row.fk,
+          ...columnReference(row.ref_schema, row.ref_table, row.ref_column, row.ref_constraint),
         }),
       )
     },

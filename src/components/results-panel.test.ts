@@ -1099,3 +1099,235 @@ describe('results-panel keyboard scroll-into-view', () => {
     el.remove()
   })
 })
+
+// The head's old static "RESULTS" label conveyed nothing. It now shows the query
+// that produced the visible result, which matters once a result can come from
+// following a foreign key rather than from the editor's own SQL.
+describe('results-panel query info', () => {
+  const mountWithSql = async (sql?: string, params?: unknown[]) => {
+    const el = document.createElement('results-panel')
+    el.run = sql === undefined
+      ? { phase: 'idle' }
+      : { phase: 'done', sql, ...(params ? { params } : {}), result: { columns: ['id'], rows: [[1]], rowCount: 1, durationMs: 1 } }
+    document.body.append(el)
+    await el.updateComplete
+    return el
+  }
+  const head = (el: HTMLElement) => el.shadowRoot!.querySelector('.head')!
+
+  it('falls back to the plain label when no query is known', async () => {
+    const el = await mountWithSql()
+    expect(head(el).textContent).toContain('Results')
+    expect(el.shadowRoot!.querySelector('.query-info')).toBeNull()
+  })
+
+  it('keeps the head to the affordance alone, with the statement in the popover', async () => {
+    const el = await mountWithSql('SELECT * FROM customers WHERE id = 42')
+    const button = el.shadowRoot!.querySelector('.query-info')!
+    // No inline preview: the icon is the whole control.
+    expect(button.textContent?.trim()).toBe('')
+    expect(button.querySelector('.icon-code')).not.toBeNull()
+  })
+
+  // A followed foreign key runs a bound query, so the raw text carries a marker
+  // where the value belongs. Showing "= ?" tells the user nothing about which row
+  // they are looking at.
+  it('substitutes bound values so the statement reads as what was run', async () => {
+    const el = await mountWithSql('SELECT * FROM `customers` WHERE `id` = ? LIMIT 200', [3])
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.query-info')!.click()
+    await el.updateComplete
+
+    expect(el.shadowRoot!.querySelector('.query-pop-sql')?.textContent)
+      .toBe('SELECT * FROM `customers` WHERE `id` = 3 LIMIT 200')
+  })
+
+  it('substitutes the numbered and named markers the other engines bind with', async () => {
+    for (const [sql, expected] of [
+      ['SELECT * FROM t WHERE id = $1 LIMIT 200', 'SELECT * FROM t WHERE id = 42 LIMIT 200'],
+      ['SELECT TOP 200 * FROM t WHERE id = @p1', 'SELECT TOP 200 * FROM t WHERE id = 42'],
+    ] as const) {
+      const el = await mountWithSql(sql, [42])
+      el.shadowRoot!.querySelector<HTMLButtonElement>('.query-info')!.click()
+      await el.updateComplete
+      expect(el.shadowRoot!.querySelector('.query-pop-sql')?.textContent).toBe(expected)
+      el.remove()
+    }
+  })
+
+  it('quotes a substituted string and renders a null key as NULL', async () => {
+    const el = await mountWithSql('SELECT * FROM t WHERE code = ? AND parent = ?', ["O'Hara", null])
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.query-info')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.query-pop-sql')?.textContent)
+      .toBe("SELECT * FROM t WHERE code = 'O''Hara' AND parent = NULL")
+  })
+
+  it('colours keywords and string literals in the popover', async () => {
+    const el = await mountWithSql("SELECT * FROM customers WHERE name = 'Ada'")
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.query-info')!.click()
+    await el.updateComplete
+
+    const pop = el.shadowRoot!.querySelector('.query-pop-sql')!
+    const keywords = [...pop.querySelectorAll('.keyword')].map((node) => node.textContent)
+    expect(keywords).toContain('SELECT')
+    expect(keywords).toContain('FROM')
+    expect(keywords).toContain('WHERE')
+    expect([...pop.querySelectorAll('.string')].map((node) => node.textContent)).toEqual(["'Ada'"])
+    // Colouring must not alter the statement itself.
+    expect(pop.textContent).toBe("SELECT * FROM customers WHERE name = 'Ada'")
+  })
+
+  it('reveals the full query in a popover, and closes on a second click', async () => {
+    const sql = 'SELECT *\nFROM customers\nWHERE id = 42'
+    const el = await mountWithSql(sql)
+    expect(el.shadowRoot!.querySelector('.query-pop')).toBeNull()
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.query-info')!.click()
+    await el.updateComplete
+    // The popover keeps the original formatting, unlike the collapsed head line.
+    expect(el.shadowRoot!.querySelector('.query-pop-sql')?.textContent).toBe(sql)
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.query-info')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.query-pop')).toBeNull()
+  })
+
+  it('closes when a different result takes over, instead of reattaching to it', async () => {
+    const el = await mountWithSql('SELECT 1')
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.query-info')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.query-pop')).not.toBeNull()
+
+    el.run = { phase: 'done', sql: 'SELECT 2', result: { columns: ['id'], rows: [[2]], rowCount: 1, durationMs: 1 } }
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.query-pop')).toBeNull()
+    el.remove()
+  })
+
+  it('closes on the backdrop and on Escape, and leaves no window listener behind', async () => {
+    const el = await mountWithSql('SELECT 1')
+    const open = () => el.shadowRoot!.querySelector<HTMLButtonElement>('.query-info')!.click()
+
+    open()
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLElement>('.pop-backdrop')!.dispatchEvent(new MouseEvent('mousedown'))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.query-pop')).toBeNull()
+
+    open()
+    await el.updateComplete
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.query-pop')).toBeNull()
+
+    // Escape after teardown must not reach a detached panel.
+    open()
+    await el.updateComplete
+    el.remove()
+    expect(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))).not.toThrow()
+  })
+})
+
+// Back/forward only exist once a tab has a trail, so an untravelled tab keeps a
+// clean toolbar. The panel does not own the trail: it asks its owner to step.
+describe('results-panel result navigation', () => {
+  const mountNav = async (canGoBack: boolean, canGoForward: boolean) => {
+    const el = document.createElement('results-panel')
+    el.run = { phase: 'done', sql: 'SELECT 1', result: { columns: ['id'], rows: [[1]], rowCount: 1, durationMs: 1 } }
+    el.canGoBack = canGoBack
+    el.canGoForward = canGoForward
+    document.body.append(el)
+    await el.updateComplete
+    return el
+  }
+  const navButtons = (el: HTMLElement) =>
+    [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('[aria-label^="Back to"], [aria-label^="Forward to"]')]
+
+  it('hides both buttons when there is nowhere to go', async () => {
+    expect(navButtons(await mountNav(false, false))).toHaveLength(0)
+  })
+
+  it('shows both, disabling the direction that leads nowhere', async () => {
+    const el = await mountNav(true, false)
+    const [back, forward] = navButtons(el)
+    expect(back?.disabled).toBe(false)
+    expect(forward?.disabled).toBe(true)
+  })
+
+  it('asks the owner to step rather than stepping itself', async () => {
+    const el = await mountNav(true, true)
+    const directions: string[] = []
+    el.addEventListener('result-navigate', (event) =>
+      directions.push((event as CustomEvent<{ direction: string }>).detail.direction))
+
+    const [back, forward] = navButtons(el)
+    back!.click()
+    forward!.click()
+    expect(directions).toEqual(['back', 'forward'])
+  })
+})
+
+// The affordance appears only on cells the owner marked followable, and asks the
+// owner to navigate rather than acting on its own.
+describe('results-panel foreign-key affordance', () => {
+  const target = { schema: 'public', table: 'authors', column: 'id', constraint: 'fk' }
+
+  const mountFk = async (over: { foreignKeys?: Map<number, typeof target>; edits?: Map<string, string> } = {}) => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT title, author_id FROM books',
+      result: { columns: ['title', 'author_id'], rows: [['Dune', 7], ['Emma', null]], rowCount: 2, durationMs: 1 },
+    }
+    el.foreignKeys = over.foreignKeys ?? new Map([[1, target]])
+    if (over.edits) el.edits = over.edits
+    document.body.append(el)
+    await el.updateComplete
+    return el
+  }
+  const followButtons = (el: HTMLElement) => [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.fk-follow')]
+
+  it('marks only the followable column, and skips its null cells', async () => {
+    const el = await mountFk()
+    // Row 0 has a value; row 1 is NULL and references nothing.
+    expect(followButtons(el)).toHaveLength(1)
+    const cell = el.shadowRoot!.querySelector('td.fk')
+    expect(cell?.querySelector('.fk-value')?.textContent).toBe('7')
+  })
+
+  it('offers nothing when no column is followable', async () => {
+    expect(followButtons(await mountFk({ foreignKeys: new Map() }))).toHaveLength(0)
+  })
+
+  it('names the referenced table and column so the destination is knowable', async () => {
+    const el = await mountFk()
+    expect(followButtons(el)[0]?.getAttribute('aria-label')).toContain('authors')
+    expect(followButtons(el)[0]?.getAttribute('aria-label')).toContain('id')
+  })
+
+  it('asks the owner to follow, reporting the cell it came from', async () => {
+    const el = await mountFk()
+    const seen: Array<{ row: number; col: number }> = []
+    el.addEventListener('follow-foreign-key', (event) =>
+      seen.push((event as CustomEvent<{ row: number; col: number }>).detail))
+
+    followButtons(el)[0]!.click()
+    expect(seen).toEqual([{ row: 0, col: 1 }])
+  })
+
+  // A staged value is not in the database yet, so following it would look up a
+  // row that does not exist.
+  it('withdraws the affordance while an edit is staged on the cell', async () => {
+    const el = await mountFk({ edits: new Map([['0:1', '99']]) })
+    expect(followButtons(el)).toHaveLength(0)
+  })
+
+  it('leaves cells of non-followable columns structurally untouched', async () => {
+    const el = await mountFk()
+    const cells = [...el.shadowRoot!.querySelectorAll('tbody tr[data-row="0"] td')]
+    // The title cell keeps its plain text node, with no wrapper span.
+    expect(cells[1]?.querySelector('.fk-value')).toBeNull()
+    expect(cells[1]?.textContent).toBe('Dune')
+  })
+})

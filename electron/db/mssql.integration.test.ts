@@ -521,6 +521,113 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
+  it('resolves the foreign-key target so a result cell can be followed', async () => {
+    const driver = await connectDriver()
+    try {
+      const columns = await driver.listColumns()
+      const find = (table: string, name: string) =>
+        columns.find((column) => column.schema === 'dbo' && column.table === table && column.name === name)
+      expect(find('books', 'author_id')?.references).toEqual({
+        schema: 'dbo',
+        table: 'authors',
+        column: 'id',
+        constraint: expect.any(String),
+      })
+      expect(find('books', 'title')?.references).toBeUndefined()
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('pairs a composite foreign key and groups it under one constraint', async () => {
+    await fixtures.request().batch("if object_id('fk_child') is not null drop table fk_child")
+    await fixtures.request().batch("if object_id('fk_parent') is not null drop table fk_parent")
+    await fixtures.request().batch('create table fk_parent (a int not null, b int not null, primary key (a, b))')
+    await fixtures.request().batch(
+      `create table fk_child (id int identity primary key, pa int, pb int,
+         constraint fk_child_comp foreign key (pa, pb) references fk_parent(a, b))`,
+    )
+    const driver = await connectDriver()
+    try {
+      const columns = await driver.listColumns()
+      const find = (name: string) =>
+        columns.find((column) => column.schema === 'dbo' && column.table === 'fk_child' && column.name === name)
+      expect(find('pa')?.references).toMatchObject({ table: 'fk_parent', column: 'a', constraint: 'fk_child_comp' })
+      expect(find('pb')?.references).toMatchObject({ table: 'fk_parent', column: 'b', constraint: 'fk_child_comp' })
+      expect(find('pa')?.references?.constraint).toBe(find('pb')?.references?.constraint)
+    } finally {
+      await driver.disconnect()
+      await fixtures.request().batch('drop table fk_child')
+      await fixtures.request().batch('drop table fk_parent')
+    }
+  })
+
+  // TDS reports a source table only for the deprecated text/ntext/image types, so
+  // these come from sys.dm_exec_describe_first_result_set rather than the wire.
+  // Without them the grid cannot tell which table a result column belongs to, and
+  // a stale editable target would go unnoticed.
+  it('reports column sources for a single-statement read', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query('select id, title, author_id from books')
+      expect(result.columnSources).toEqual([
+        { schema: 'dbo', table: 'books', column: 'id' },
+        { schema: 'dbo', table: 'books', column: 'title' },
+        { schema: 'dbo', table: 'books', column: 'author_id' },
+      ])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  // A followed foreign key binds its value, so the parameterized path must
+  // describe too; the DMV needs the parameters declared, with sql_variant
+  // standing in for their unknown types.
+  it('reports column sources for a parameterized read', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query('select id, title, author_id from books where id = @p1', [1])
+      expect(result.columnSources).toEqual([
+        { schema: 'dbo', table: 'books', column: 'id' },
+        { schema: 'dbo', table: 'books', column: 'title' },
+        { schema: 'dbo', table: 'books', column: 'author_id' },
+      ])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('maps each joined column to its own table and leaves expressions unsourced', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query(
+        'select b.title, a.name, len(b.title) as title_length from books b join authors a on a.id = b.author_id',
+      )
+      expect(result.columnSources).toEqual([
+        { schema: 'dbo', table: 'books', column: 'title' },
+        { schema: 'dbo', table: 'authors', column: 'name' },
+        { schema: null, table: null, column: null },
+      ])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('omits column sources when they cannot be aligned to the result', async () => {
+    const driver = await connectDriver()
+    try {
+      // The DMV describes only the FIRST result set, so attaching it to a
+      // multi-statement batch would map columns onto the wrong origin.
+      const multi = await driver.query('select 1 as a; select id, title from books')
+      expect(multi.columnSources).toBeUndefined()
+      // A statement it cannot describe at all degrades to no sources, not an error.
+      const undescribable = await driver.query('select * into #probe from books; select id from #probe')
+      expect(undescribable.columnSources).toBeUndefined()
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('lists routines with their parameters via listObjects', async () => {
     const driver = await connectDriver()
     try {
