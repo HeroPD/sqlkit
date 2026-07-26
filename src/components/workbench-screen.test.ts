@@ -703,3 +703,59 @@ describe('WorkbenchScreen per-tab scroll memory', () => {
     expect(workbench._tabScroll.size).toBe(0)
   })
 })
+
+// _requestCloseTab (the ⌘W / ✕ path) cleaned up inspect state itself, so closes
+// that bypass it — a removed connection, a deleted file, a cancelled config tab
+// — used to leave the draft and the dirty dot behind.
+describe('WorkbenchScreen inspect state follows any close path', () => {
+  const setup = () => {
+    const screen = new WorkbenchScreen()
+    Object.defineProperty(screen, 'renderRoot', { value: { querySelector: () => null } })
+    return screen as never as {
+      _ctx: {
+        switchInstance(profileId: string | null, childDb: string | null): void
+        addTab(tab: unknown): void
+        closeTab(id: string): void
+        activeTabId: string | null
+      }
+      _inspectDirtyTabIds: Set<string>
+      _onInspectDirty(event: Event): void
+      _sweepOrphanTabState(): void
+    }
+  }
+
+  const inspectTab = (id: string) => ({
+    id,
+    kind: 'inspect' as const,
+    profileId: 'p1',
+    table: { schema: 'public', name: 'users', kind: 'table' as const },
+  })
+
+  const markDirty = (workbench: ReturnType<typeof setup>, tabId: string) =>
+    workbench._onInspectDirty(new CustomEvent('inspect-dirty', { detail: { tabId, dirty: true } }))
+
+  it('clears the dirty flag when the tab closes without the confirm path', () => {
+    const workbench = setup()
+    workbench._ctx.switchInstance('p1', null)
+    workbench._ctx.addTab(inspectTab('inspect:users'))
+    markDirty(workbench, 'inspect:users')
+    expect(workbench._inspectDirtyTabIds.has('inspect:users')).toBe(true)
+
+    workbench._ctx.closeTab('inspect:users')
+
+    expect(workbench._inspectDirtyTabIds.has('inspect:users')).toBe(false)
+  })
+
+  it('sweeps dirty flags of tabs removed in bulk', () => {
+    const workbench = setup()
+    workbench._ctx.switchInstance('p1', null)
+    workbench._ctx.addTab(inspectTab('inspect:kept'))
+    markDirty(workbench, 'inspect:kept')
+    markDirty(workbench, 'inspect:vanished') // never a real tab, as a bulk drop leaves it
+
+    workbench._sweepOrphanTabState()
+
+    expect(workbench._inspectDirtyTabIds.has('inspect:kept')).toBe(true)
+    expect(workbench._inspectDirtyTabIds.has('inspect:vanished')).toBe(false)
+  })
+})

@@ -42,7 +42,7 @@ import './status-bar'
 import type { StatusConnection } from './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
-import { clearInspectDraftCache, dropInspectDraft, type ColumnAlterEventDetail } from './table-inspect'
+import { clearInspectDraftCache, dropInspectDraft, sweepInspectDrafts, type ColumnAlterEventDetail } from './table-inspect'
 import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectEditDetail, ObjectInspectDetail, TableBrowseDetail, TableCreateDetail, TableSelectDetail } from './explorer-view'
@@ -260,9 +260,13 @@ export class WorkbenchScreen extends LitElement {
   // inactive contexts. Query results follow their tab via the QueriesController.
   private _ctx = new ContextsController(this, {
     contextKey,
+    // The one funnel every tab close reaches, so per-tab state is dropped no
+    // matter which path removed the tab.
     dropQuery: (tabId) => {
       this._queries.dropTab(tabId)
       this._tabScroll.delete(tabId)
+      dropInspectDraft(tabId)
+      this._forgetInspectDirty(tabId)
     },
   })
 
@@ -279,6 +283,7 @@ export class WorkbenchScreen extends LitElement {
     files: this._workspaceFiles,
     queries: this._queries,
     dialogs: this._dialogs,
+    sweepOrphanTabState: () => this._sweepOrphanTabState(),
     contextFolder: () => this._contextFolder(),
   })
 
@@ -622,16 +627,10 @@ export class WorkbenchScreen extends LitElement {
         message: t('workbench.closeTabPrompt', { title }),
         detail,
         confirmLabel: fileDirty ? t('workbench.closeWithoutSaving') : t('workbench.discardAndClose'),
-        action: () => {
-          dropInspectDraft(id)
-          this._inspectDirtyTabIds = new Set([...this._inspectDirtyTabIds].filter((tabId) => tabId !== id))
-          this._ctx.closeTab(id)
-        },
+        action: () => this._ctx.closeTab(id),
       }
       return
     }
-    dropInspectDraft(id)
-    this._inspectDirtyTabIds = new Set([...this._inspectDirtyTabIds].filter((tabId) => tabId !== id))
     this._ctx.closeTab(id)
   }
 
@@ -1311,7 +1310,7 @@ export class WorkbenchScreen extends LitElement {
   private _onDatabaseDropped(id: string, database: string) {
     // The dropped child's working context is gone with it.
     this._ctx.dropInstance(contextKey(id, database))
-    this._queries.sweepOrphans()
+    this._sweepOrphanTabState()
     if (this._config.clearLastChildDb(id, database)) this._config.persist()
     // If the user was working in the dropped child, follow the driver's
     // in-use child instead of pointing at a database that no longer exists.
@@ -1345,7 +1344,7 @@ export class WorkbenchScreen extends LitElement {
 
     // Drop the profile's stashed contexts and its config tab wherever it's open.
     this._ctx.removeProfile(id)
-    this._queries.sweepOrphans()
+    this._sweepOrphanTabState()
 
     this._workspaceFiles.setFolder(this._contextFolder())
     this._config.persist()
@@ -1490,6 +1489,26 @@ export class WorkbenchScreen extends LitElement {
     if (dirty) next.add(tabId)
     else next.delete(tabId)
     this._inspectDirtyTabIds = next
+  }
+
+  private _forgetInspectDirty(tabId: string) {
+    if (!this._inspectDirtyTabIds.has(tabId)) return
+    const next = new Set(this._inspectDirtyTabIds)
+    next.delete(tabId)
+    this._inspectDirtyTabIds = next
+  }
+
+  // Bulk tab removals (a removed connection, a dropped child database, a deleted
+  // file) drop tabs without closing them one by one, so every per-tab store
+  // needs a pass for owners that no longer exist.
+  private _sweepOrphanTabState() {
+    this._queries.sweepOrphans()
+    sweepInspectDrafts((tabId) => this._ctx.tabExists(tabId))
+    const stale = [...this._inspectDirtyTabIds].filter((tabId) => !this._ctx.tabExists(tabId))
+    if (stale.length) this._inspectDirtyTabIds = new Set([...this._inspectDirtyTabIds].filter((tabId) => this._ctx.tabExists(tabId)))
+    for (const tabId of [...this._tabScroll.keys()]) {
+      if (!this._ctx.tabExists(tabId)) this._tabScroll.delete(tabId)
+    }
   }
 
   // Inspect opens (or revisits) the table's structure tab — columns,

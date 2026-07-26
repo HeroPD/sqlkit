@@ -119,11 +119,18 @@ export class ContextsController {
     const toKey = this.deps.contextKey(profileId, childDb)
     if (fromKey === toKey) return
 
-    this._instances.set(fromKey, {
-      tabs: this._tabs,
-      activeTabId: this._activeTabId,
-      selectedTable: this._selectedTable,
-    })
+    // An instance with nothing in it restores identically to a missing one, so
+    // don't stash it — otherwise merely browsing databases leaves an entry per
+    // context visited, forever.
+    if (this._tabs.length || this._activeTabId || this._selectedTable) {
+      this._instances.set(fromKey, {
+        tabs: this._tabs,
+        activeTabId: this._activeTabId,
+        selectedTable: this._selectedTable,
+      })
+    } else {
+      this._instances.delete(fromKey)
+    }
 
     this._activeDbId = profileId
     this._activeChildDb = childDb

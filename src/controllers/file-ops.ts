@@ -11,6 +11,8 @@ type Deps = {
   queries: QueriesController
   dialogs: DialogsController
   contextFolder: () => string | null
+  // Deleting a file closes its tabs in bulk, which skips the per-tab close path.
+  sweepOrphanTabState: () => void
 }
 
 // Tabs for workspace files are keyed by absolute path, so same-named files in
@@ -147,7 +149,7 @@ export class FileOpsController {
       return
     }
     this.deps.ctx.closeFilesUnder(targetPath)
-    this.deps.queries.sweepOrphans()
+    this.deps.sweepOrphanTabState()
     void this.deps.files.reload()
   }
 }

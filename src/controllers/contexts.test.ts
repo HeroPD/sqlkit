@@ -41,6 +41,46 @@ describe('ContextsController.switchInstance', () => {
     ctrl.switchInstance(null, null) // same key as the initial context
     expect(ctrl.tabs).toBe(before)
   })
+
+  // Browsing databases must not leave a stash entry per context visited: an
+  // empty instance restores identically to none at all.
+  it('does not stash a context that has nothing open', () => {
+    const { ctrl } = make()
+    const internals = ctrl as never as { _instances: Map<string, unknown> }
+
+    for (let i = 0; i < 50; i += 1) ctrl.switchInstance('p1', `child-${i}`)
+
+    expect(internals._instances.size).toBe(0)
+  })
+
+  it('still stashes a context whose only state is an Explorer selection', () => {
+    const { ctrl } = make()
+    const internals = ctrl as never as { _instances: Map<string, unknown> }
+    ctrl.switchInstance('p1', 'db_a')
+    ctrl.selectedTable = 'public.users'
+
+    ctrl.switchInstance('p1', 'db_b')
+    expect(internals._instances.size).toBe(1)
+
+    ctrl.switchInstance('p1', 'db_a')
+    expect(ctrl.selectedTable).toBe('public.users')
+  })
+
+  it('forgets a stashed context once its last tab closes', () => {
+    const { ctrl } = make()
+    const internals = ctrl as never as { _instances: Map<string, unknown> }
+    ctrl.switchInstance('p1', 'db_a')
+    ctrl.newQuery()
+    const id = ctrl.activeTabId!
+    ctrl.switchInstance('p1', 'db_b')
+    expect(internals._instances.size).toBe(1)
+
+    ctrl.switchInstance('p1', 'db_a')
+    ctrl.closeTab(id)
+    ctrl.switchInstance('p1', 'db_b')
+
+    expect(internals._instances.size).toBe(0)
+  })
 })
 
 describe('ContextsController.closeTab', () => {

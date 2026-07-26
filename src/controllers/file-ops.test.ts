@@ -35,14 +35,16 @@ const make = (over: { contextFolder?: string | null; listing?: FileInfo[] } = {}
   }
   const queries = { renameTab: vi.fn(), sweepOrphans: vi.fn() } as unknown as QueriesController
   const dialogs = new DialogsController(host())
+  const sweepOrphanTabState = vi.fn()
   const ctrl = new FileOpsController({
     ctx,
     files: files as unknown as FilesController,
     queries,
     dialogs,
     contextFolder: () => folder,
+    sweepOrphanTabState,
   })
-  return { ctrl, ctx, files, queries, dialogs }
+  return { ctrl, ctx, files, queries, dialogs, sweepOrphanTabState }
 }
 
 function stubSqlkit(over: Record<string, unknown> = {}) {
@@ -223,9 +225,9 @@ describe('FileOpsController.rename', () => {
 })
 
 describe('FileOpsController delete', () => {
-  it('confirms, then closes the file tab, sweeps queries, and refreshes', async () => {
+  it('confirms, then closes the file tab, sweeps orphaned tab state, and refreshes', async () => {
     const api = stubSqlkit()
-    const { ctrl, ctx, queries, files, dialogs } = make()
+    const { ctrl, ctx, sweepOrphanTabState, files, dialogs } = make()
     await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
 
     ctrl.requestDelete('/ws/ctx/q.sql', 'q.sql')
@@ -234,7 +236,9 @@ describe('FileOpsController delete', () => {
     dialogs.acceptConfirm()
     await vi.waitFor(() => expect(api.deleteFile).toHaveBeenCalledWith('/ws/ctx/q.sql'))
     await vi.waitFor(() => expect(ctx.tabs).toEqual([]))
-    expect(queries.sweepOrphans).toHaveBeenCalled()
+    // Closing tabs in bulk skips the per-tab close path, so the workbench's
+    // sweep is what reclaims query results, inspect drafts and scroll state.
+    expect(sweepOrphanTabState).toHaveBeenCalled()
     expect(files.reload).toHaveBeenCalled()
   })
 })

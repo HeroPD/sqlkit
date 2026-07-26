@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import type { InspectColumn, InspectResult, TableInspection, TableRef } from '../electron'
-import { clearInspectDraftCache, dropInspectDraft, TableInspect, type ColumnAlterEventDetail } from './table-inspect'
+import { clearInspectDraftCache, dropInspectDraft, sweepInspectDrafts, TableInspect, type ColumnAlterEventDetail } from './table-inspect'
 import type { AddObjectDetail } from './inspect-add-dialog'
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
@@ -771,6 +771,56 @@ describe('TableInspect undo/redo and reset', () => {
 
     expect(internals(second)._edits.size).toBe(0)
     second.remove()
+    clearInspectDraftCache()
+  })
+
+  // A removed connection or dropped child database takes its Inspect tabs with
+  // it without closing them one at a time, so the drafts need a sweep.
+  it('sweeps drafts whose Inspect tab no longer exists', async () => {
+    clearInspectDraftCache()
+    const column = inspectCol({ name: 'age' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: { columns: [column], sections: [] },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const stage = async (tabId: string) => {
+      const view = new TableInspect()
+      view.tabId = tabId
+      view.profileId = 'p1'
+      view.engine = 'postgresql'
+      view.table = { schema: 'public', name: 'users', kind: 'table' }
+      document.body.append(view)
+      await internals(view)._load()
+      internals(view)._commitText(column, 'name', 'age_years')
+      view.remove() // unmount stashes the draft, as a bulk removal would
+    }
+    await stage('inspect:gone')
+    await stage('inspect:kept')
+
+    sweepInspectDrafts((tabId) => tabId === 'inspect:kept')
+
+    // The surviving tab's draft comes back; the vanished one's is released.
+    const revived = new TableInspect()
+    revived.tabId = 'inspect:kept'
+    revived.profileId = 'p1'
+    revived.engine = 'postgresql'
+    revived.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(revived)
+    await internals(revived)._load()
+    expect(internals(revived)._edits.get('age')).toEqual({ name: 'age_years' })
+    revived.remove()
+
+    const orphaned = new TableInspect()
+    orphaned.tabId = 'inspect:gone'
+    orphaned.profileId = 'p1'
+    orphaned.engine = 'postgresql'
+    orphaned.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(orphaned)
+    await internals(orphaned)._load()
+    expect(internals(orphaned)._edits.size).toBe(0)
+    orphaned.remove()
     clearInspectDraftCache()
   })
 

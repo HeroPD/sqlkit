@@ -36,6 +36,12 @@ const draftCache = new Map<string, { snapshot: DraftSnapshot; history: DraftSnap
 export const clearInspectDraftCache = () => draftCache.clear()
 export const dropInspectDraft = (tabId: string) => draftCache.delete(tabId)
 
+// Drafts of tabs that vanished in bulk (a removed connection, a dropped child
+// database) never see a close, so they need sweeping like query state does.
+export const sweepInspectDrafts = (exists: (tabId: string) => boolean) => {
+  for (const tabId of [...draftCache.keys()]) if (!exists(tabId)) draftCache.delete(tabId)
+}
+
 // Right-click menu state. `col`/`field` are set for the columns table (they
 // gate the reset items); the section tables leave them undefined.
 type RowMenu = {
