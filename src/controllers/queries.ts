@@ -15,6 +15,23 @@ const MAX_HISTORY = 200
 // (and the write-through IPC) stays small. The view never renders more anyway.
 const MAX_HISTORY_SQL = 10_000
 
+// Collapses repeats of the same SQL in the same context to their newest run.
+// Re-running one query twenty times says nothing the newest entry doesn't, and it
+// pushes everything else out of view. Keyed per context, since the same SQL
+// against another database is a different thing to re-run. Input is newest-first,
+// so the first occurrence seen is the one to keep.
+export const dedupeHistory = (items: HistoryItem[]): HistoryItem[] => {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    // Trimmed, so an edit that only added trailing whitespace isn't a new entry;
+    // the stored SQL itself is left exactly as it ran.
+    const key = `${item.contextKey}\u0000${item.sql.trim()}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 // Caps each context's entries to `max`, keeping the newest. Input is newest-first.
 export const capHistoryPerContext = (items: HistoryItem[], max: number): HistoryItem[] => {
   const seen = new Map<string, number>()
@@ -668,7 +685,7 @@ export class QueriesController implements ReactiveController {
     )
     this.finishTask(task.id, response, task.startedAt)
     this.history = capHistoryPerContext(
-      [
+      dedupeHistory([
         {
           id: crypto.randomUUID(),
           contextKey,
@@ -680,7 +697,7 @@ export class QueriesController implements ReactiveController {
           createdAt: new Date().toISOString(),
         },
         ...this.history,
-      ],
+      ]),
       MAX_HISTORY,
     )
     this.persistHistory()
@@ -764,7 +781,7 @@ export class QueriesController implements ReactiveController {
     // A workspace switch happened while reading: this history belongs to the
     // old workspace and must not leak into the new one's list.
     if (this.generation !== gen || !items.length) return
-    this.history = capHistoryPerContext([...this.history, ...items], MAX_HISTORY)
+    this.history = capHistoryPerContext(dedupeHistory([...this.history, ...items]), MAX_HISTORY)
     this.host.requestUpdate()
   }
 

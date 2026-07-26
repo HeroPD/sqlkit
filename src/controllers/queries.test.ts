@@ -4,7 +4,7 @@ import type { ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile, QueryResponse } from '../electron'
 import type { HistoryItem } from '../components/history-view'
 import type { QueryRun } from '../components/results-panel'
-import { QueriesController, capHistoryPerContext } from './queries'
+import { QueriesController, capHistoryPerContext, dedupeHistory } from './queries'
 
 const historyItem = (contextKey: string, id: string): HistoryItem =>
   ({ id, contextKey, sql: id, success: true, durationMs: 0, rowCount: 0, error: '', createdAt: '' })
@@ -21,6 +21,32 @@ describe('capHistoryPerContext', () => {
     const capped = capHistoryPerContext([...busy, historyItem('B', 'b0')], 3)
     expect(capped.filter((item) => item.contextKey === 'A')).toHaveLength(3)
     expect(capped.filter((item) => item.contextKey === 'B')).toHaveLength(1)
+  })
+})
+
+describe('dedupeHistory', () => {
+  const entry = (contextKey: string, sql: string, id: string): HistoryItem =>
+    ({ id, contextKey, sql, success: true, durationMs: 0, rowCount: 0, error: '', createdAt: '' })
+
+  it('keeps only the newest run of a repeated query', () => {
+    // Newest-first in; the newest run of "a" survives and the older ones drop.
+    const items = [entry('A', 'select 1', 'new'), entry('A', 'select 2', 'other'), entry('A', 'select 1', 'old')]
+    expect(dedupeHistory(items).map((item) => item.id)).toEqual(['new', 'other'])
+  })
+
+  it('treats the same SQL in another context as its own entry', () => {
+    const items = [entry('A', 'select 1', 'a'), entry('B', 'select 1', 'b')]
+    expect(dedupeHistory(items).map((item) => item.id)).toEqual(['a', 'b'])
+  })
+
+  it('ignores surrounding whitespace, which reads as the same query', () => {
+    const items = [entry('A', 'select 1', 'new'), entry('A', '  select 1\n', 'old')]
+    expect(dedupeHistory(items).map((item) => item.id)).toEqual(['new'])
+  })
+
+  it('keeps queries that differ in more than whitespace', () => {
+    const items = [entry('A', 'select 1', 'one'), entry('A', 'select  1', 'two'), entry('A', 'SELECT 1', 'three')]
+    expect(dedupeHistory(items)).toHaveLength(3)
   })
 })
 
@@ -97,6 +123,33 @@ describe('QueriesController.execute', () => {
     expect(controller.runFor('t1')).toEqual({ phase: 'done', result, sql: 'SELECT 1' })
     expect(controller.history).toHaveLength(1)
     expect(controller.tasks[0]?.status).toBe('done')
+  })
+
+  it('replaces the previous history entry when the same query runs again', async () => {
+    const api = stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+
+    await controller.execute(runArgs)
+    await controller.execute({ ...runArgs, sql: 'SELECT 2' })
+    await controller.execute(runArgs) // the repeat
+    await controller.execute(runArgs) // and again
+
+    // One entry per distinct query, the repeat back at the top as the newest run.
+    expect(controller.history.map((item) => item.sql)).toEqual(['SELECT 1', 'SELECT 2'])
+    // Every run still persists, so the file follows the collapsed list.
+    const writeHistory = api.writeHistory as ReturnType<typeof vi.fn<(items: HistoryItem[]) => unknown>>
+    expect(writeHistory).toHaveBeenCalledTimes(4)
+    expect(writeHistory.mock.calls.at(-1)?.[0].map((entry) => entry.sql)).toEqual(['SELECT 1', 'SELECT 2'])
+  })
+
+  it('keeps the same query separate per context', async () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+
+    await controller.execute(runArgs)
+    await controller.execute({ ...runArgs, contextKey: 'p1:other' })
+
+    expect(controller.history).toHaveLength(2)
   })
 
   it('maps a driver error line to a document line via baseLine', async () => {
