@@ -7,6 +7,18 @@
 // SqlKit is identifiable in server logs and other DBAs' process lists.
 export const APP_CONNECTION_NAME = 'SqlKit Studio'
 
+// The whole connection budget for one profile, across every database it can
+// reach. A GUI sitting on a shared server should be close to invisible in
+// pg_stat_activity, so the drivers keep ONE live pool (the database in use) and
+// let this be its ceiling — not a per-database allowance. Cancels dial a
+// separate out-of-band connection, so a cancel can briefly make it this + 1.
+export const MAX_POOL_CONNECTIONS = 3
+
+// Idle connections are handed back this long after their last use. Set
+// explicitly rather than inherited from each client library's default, so the
+// budget above decays predictably instead of at three different rates.
+export const POOL_IDLE_MS = 10_000
+
 // Sessions the server panel lists. A busy server can hold thousands; the panel
 // shows the interesting ones (active first) rather than paging through all.
 export const MAX_SESSIONS = 50

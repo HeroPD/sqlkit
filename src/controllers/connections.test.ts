@@ -60,11 +60,18 @@ function stubSqlkit() {
   ;(window as unknown as { sqlkit: unknown }).sqlkit = api
 
   const emit = (statuses: ConnectionStatus[]) => listener?.(statuses)
+  // The three reads are issued one after another (they share a single database
+  // connection), so each call only exists once the previous one has settled.
+  const settle = async <T>(calls: Array<Deferred<T>>, index: number, value: T) => {
+    for (let i = 0; i < 50 && !calls[index]; i += 1) await Promise.resolve()
+    calls[index]!.resolve(value)
+    await calls[index]!.promise
+    await Promise.resolve()
+  }
   const resolveMetadata = async (index: number, functionName: string) => {
-    tableCalls[index]!.resolve({ success: true, tables: [] })
-    columnCalls[index]!.resolve({ success: true, columns: [] })
-    objectCalls[index]!.resolve({ success: true, objects: objectsWith(functionName) })
-    await Promise.all([tableCalls[index]!.promise, columnCalls[index]!.promise, objectCalls[index]!.promise])
+    await settle(tableCalls, index, { success: true, tables: [] })
+    await settle(columnCalls, index, { success: true, columns: [] })
+    await settle(objectCalls, index, { success: true, objects: objectsWith(functionName) })
     await Promise.resolve()
   }
 
@@ -139,13 +146,13 @@ describe('ConnectionsController metadata', () => {
     controller.hostConnected()
 
     emit([status('db_a')])
-    expect(api.listObjects).toHaveBeenCalledTimes(1)
+    expect(api.listTables).toHaveBeenCalledTimes(1)
     await resolveMetadata(0, 'fn_only_in_a')
     expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_a'])
 
     emit([status('db_b')])
     expect(controller.objects.p1).toBeUndefined()
-    expect(api.listObjects).toHaveBeenCalledTimes(2)
+    expect(api.listTables).toHaveBeenCalledTimes(2)
 
     await resolveMetadata(1, 'fn_only_in_b')
     expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_b'])
@@ -161,11 +168,11 @@ describe('ConnectionsController metadata', () => {
     expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_a'])
 
     controller.refresh('p1')
-    expect(api.listObjects).toHaveBeenCalledTimes(2)
+    expect(api.listTables).toHaveBeenCalledTimes(2)
 
     emit([status('db_b')])
     expect(controller.objects.p1).toBeUndefined()
-    expect(api.listObjects).toHaveBeenCalledTimes(3)
+    expect(api.listTables).toHaveBeenCalledTimes(3)
 
     await resolveMetadata(1, 'fn_only_in_a_refreshed')
     expect(controller.objects.p1).toBeUndefined()

@@ -162,12 +162,13 @@ export class ConnectionsController implements ReactiveController {
     let tables: Awaited<ReturnType<typeof window.sqlkit.listTables>>
     let columns: Awaited<ReturnType<typeof window.sqlkit.listColumns>>
     let objects: Awaited<ReturnType<typeof window.sqlkit.listObjects>>
+    // Sequential, not Promise.all: three concurrent reads made the driver open
+    // three connections for what is otherwise a one-connection job, and a GUI on
+    // a shared server should not spend its whole budget listing tables.
     try {
-      ;[tables, columns, objects] = await Promise.all([
-        window.sqlkit.listTables(profileId, childDb),
-        window.sqlkit.listColumns(profileId, childDb),
-        window.sqlkit.listObjects(profileId, childDb),
-      ])
+      tables = await window.sqlkit.listTables(profileId, childDb)
+      columns = await window.sqlkit.listColumns(profileId, childDb)
+      objects = await window.sqlkit.listObjects(profileId, childDb)
     } catch {
       return
     }

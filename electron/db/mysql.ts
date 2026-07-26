@@ -2,7 +2,7 @@ import mysql from 'mysql2/promise'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { columnReference } from './column-reference'
-import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_SESSIONS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -68,9 +68,11 @@ export function sqlModeFlags(mode: string): SqlModeFlags {
   }
 }
 
-// MySQL with all-databases support, mirroring the postgres driver: one pool per
-// child database (a MySQL "database" and "schema" are the same thing), queries
-// and metadata always target the active child via the pool's default schema.
+// MySQL with all-databases support, mirroring the postgres driver: only the
+// database in use holds a pool (a MySQL "database" and "schema" are the same
+// thing), so the connection budget is spent on one database rather than every
+// child. Queries and metadata target the active child via the pool's default
+// schema; switching child retires the outgoing pool.
 // Dials the endpoint — the transport layer may have rewritten host/port to an
 // SSH tunnel's local end.
 type RunningEntry = { executionId?: string; threadId: number | null; cancelRequested: boolean }
@@ -100,7 +102,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // Identifies the app in processlist / session_connect_attrs, so the Tasks
       // dashboard can tell its own sessions from everyone else's.
       connectAttributes: { program_name: APP_CONNECTION_NAME },
-      connectionLimit: 4,
+      connectionLimit: MAX_POOL_CONNECTIONS,
+      idleTimeout: POOL_IDLE_MS,
       connectTimeout: 8000,
       // mysql2 queues checkouts without bound by default; cap the backlog so a
       // saturated pool errors instead of growing a queue nobody drains.
@@ -125,17 +128,28 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     return pool
   }
 
-  const activePool = () => {
-    const pool = pools?.get(active)
-    if (!pool) throw new Error(t('connection.notConnected'))
+  // The pool for `database`, opening it on demand and retiring whichever other
+  // one was live. end() drains rather than severs, so work already in flight on
+  // the outgoing database finishes; the next call for it opens a fresh pool.
+  const poolFor = (database: string) => {
+    if (!pools) throw new Error(t('connection.notConnected'))
+    const existing = pools.get(database)
+    if (existing) return existing
+    for (const [name, pool] of pools) {
+      pools.delete(name)
+      void pool.end().catch(() => {})
+    }
+    const pool = makePool(database)
+    pools.set(database, pool)
     return pool
   }
 
+  const activePool = () => poolFor(active)
+
   const poolForQuery = (childDb?: string | null) => {
     if (!childDb) return activePool()
-    const pool = pools?.get(childDb)
-    if (!pool) throw new Error(t('connection.databaseUnavailable', { database: childDb ?? '' }))
-    return pool
+    if (!childNames.includes(childDb)) throw new Error(t('connection.databaseUnavailable', { database: childDb }))
+    return poolFor(childDb)
   }
 
   // mysql2's pool has no acquire timeout (pg bounds the wait with
@@ -221,9 +235,6 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       if (profile.databaseMode === 'all') {
         childNames = await userSchemas()
         if (!childNames.length) childNames = discovery ? [discovery] : []
-        for (const name of childNames) {
-          if (!pools.has(name)) pools.set(name, makePool(name))
-        }
         if (!childNames.length) throw new Error(t('connection.mysqlNoDatabase'))
       } else if (discovery) {
         childNames = [discovery]
@@ -426,8 +437,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       if (options?.charset) sql += ` character set ${sqlOptionToken(options.charset)}`
       if (options?.collation) sql += ` collate ${sqlOptionToken(options.collation)}`
       await activePool().query(sql)
-      if (profile.databaseMode === 'all' && pools && !pools.has(name)) {
-        pools.set(name, makePool(name))
+      // Browsable straight away; its pool opens when the user switches to it.
+      if (profile.databaseMode === 'all' && pools && !childNames.includes(name)) {
         childNames = [...childNames, name].sort()
       }
     },
@@ -442,13 +453,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         pools.delete(name)
         await pool.end().catch(() => {})
       }
-      try {
-        await activePool().query(`drop database ${dialect.quoteIdent(name)}`)
-      } catch (error) {
-        // Drop refused: keep it browsable.
-        if (pool) pools.set(name, makePool(name))
-        throw error
-      }
+      // A refused drop propagates: the database stays in childNames, so it
+      // remains browsable and re-opens its pool on demand.
+      await activePool().query(`drop database ${dialect.quoteIdent(name)}`)
       childNames = childNames.filter((child) => child !== name)
     },
 

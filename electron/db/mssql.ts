@@ -6,7 +6,7 @@ import path from 'node:path'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { columnReference } from './column-reference'
-import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_SESSIONS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -151,7 +151,11 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   }>()
   const tls = mssqlTls(profile)
 
-  const makePool = (database: string, max = 4) => {
+  // Metadata pool size. User SQL runs on its own throwaway connection (see
+  // openUserPool), so this leaves one of the budget free for a running query.
+  const METADATA_POOL_MAX = Math.max(1, MAX_POOL_CONNECTIONS - 1)
+
+  const makePool = (database: string, max = METADATA_POOL_MAX) => {
     const pool = new sql.ConnectionPool({
       server: endpoint.host,
       port: endpoint.port,
@@ -161,7 +165,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       connectionTimeout: 8000,
       // No statement timeout: user queries legitimately run long; Stop cancels.
       requestTimeout: 0,
-      pool: { max },
+      pool: { max, idleTimeoutMillis: POOL_IDLE_MS },
       options: {
         // program_name in sys.dm_exec_sessions, so the Tasks dashboard can tell
         // the app's own sessions from everyone else's.
@@ -175,9 +179,21 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     return pool
   }
 
+  // The pool for `database`, opening it on demand and retiring whichever other
+  // one was live, so only the database in use spends the connection budget.
   const connectedPool = async (database: string) => {
-    const pool = pools?.get(database)
-    if (!pool) throw new Error(database ? t('connection.databaseUnavailable', { database }) : t('connection.notConnected'))
+    if (!pools) throw new Error(t('connection.notConnected'))
+    if (!database) throw new Error(t('connection.notConnected'))
+    let pool = pools.get(database)
+    if (!pool) {
+      if (!childNames.includes(database)) throw new Error(t('connection.databaseUnavailable', { database }))
+      for (const [name, live] of pools) {
+        pools.delete(name)
+        void live.close().catch(() => {})
+      }
+      pool = makePool(database)
+      pools.set(database, pool)
+    }
     // connect() is a no-op when already connected; pools open lazily.
     return pool.connected ? pool : pool.connect()
   }
@@ -186,7 +202,10 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
   const databaseForQuery = (childDb?: string | null) => {
     const database = childDb ?? active
-    if (!pools?.has(database)) throw new Error(database ? t('connection.databaseUnavailable', { database }) : t('connection.notConnected'))
+    if (!pools) throw new Error(t('connection.notConnected'))
+    if (!database || !childNames.includes(database)) {
+      throw new Error(database ? t('connection.databaseUnavailable', { database }) : t('connection.notConnected'))
+    }
     return database
   }
 
@@ -284,9 +303,6 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         )
         childNames = listed.map((row) => row.name)
         if (!childNames.length) childNames = [discovery]
-        for (const name of childNames) {
-          if (!pools.has(name)) pools.set(name, makePool(name))
-        }
       } else {
         childNames = [discovery]
       }
@@ -494,8 +510,8 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const collate = options?.collation ? ` collate ${sqlOptionToken(options.collation)}` : ''
       // CREATE DATABASE refuses transactions and sp_executesql; plain batch.
       await pool.request().batch(`create database ${dialect.quoteIdent(name)}${collate}`)
-      if (profile.databaseMode === 'all' && pools && !pools.has(name)) {
-        pools.set(name, makePool(name))
+      // Browsable straight away; its pool opens when the user switches to it.
+      if (profile.databaseMode === 'all' && pools && !childNames.includes(name)) {
         childNames = [...childNames, name].sort()
       }
     },
@@ -510,14 +526,10 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         pools.delete(name)
         await pool.close().catch(() => {})
       }
-      try {
-        const activeDb = await poolForQuery()
-        await activeDb.request().batch(`drop database ${dialect.quoteIdent(name)}`)
-      } catch (error) {
-        // Drop refused (e.g. other sessions): keep it browsable.
-        if (pool) pools.set(name, makePool(name))
-        throw error
-      }
+      // A refused drop (e.g. other sessions) propagates: the database stays in
+      // childNames, so it remains browsable and re-opens its pool on demand.
+      const activeDb = await poolForQuery()
+      await activeDb.request().batch(`drop database ${dialect.quoteIdent(name)}`)
       childNames = childNames.filter((child) => child !== name)
     },
 

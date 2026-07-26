@@ -10,7 +10,7 @@ import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
 import { columnReference } from './column-reference'
-import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_SESSIONS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -46,9 +46,11 @@ export function sslOptions(profile: ConnectionProfile): boolean | ConnectionOpti
 }
 
 // PostgreSQL with all-databases support (reference behavior): connect to a
-// discovery database, optionally list every database on the server, and keep
-// one pg.Pool per child — pools open connections lazily, so unused children
-// cost nothing. Queries and table listings always target the active child.
+// discovery database and optionally list every database on the server. Only the
+// database in use holds a pool: a connection cannot switch database, so each one
+// needs its own, and keeping every child's alive spent the connection budget
+// many times over on a server shared with real traffic. Switching child retires
+// the outgoing pool and opens the incoming one on demand.
 // Dials the endpoint, not the profile — the transport layer may have
 // rewritten host/port to an SSH tunnel's local end.
 type RunningEntry = { executionId?: string; pid: number | null; secret: number | null; cancelRequested: boolean }
@@ -106,7 +108,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       ssl,
       types: losslessTypes,
       application_name: APP_CONNECTION_NAME,
-      max: 4,
+      max: MAX_POOL_CONNECTIONS,
+      idleTimeoutMillis: POOL_IDLE_MS,
       connectionTimeoutMillis: 8000,
       // TCP keepalive (on by default in mysql2/tedious, off in pg): a dead peer
       // self-terminates, so an abandoned pool.end() can't hold sockets forever.
@@ -120,17 +123,28 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     return pool
   }
 
-  const activePool = () => {
-    const pool = pools?.get(active)
-    if (!pool) throw new Error(t('connection.notConnected'))
+  // The pool for `database`, opening it on demand and retiring whichever other
+  // one was live. end() drains rather than severs, so a query already in flight
+  // on the outgoing database finishes; the next call for it opens a fresh pool.
+  const poolFor = (database: string) => {
+    if (!pools) throw new Error(t('connection.notConnected'))
+    const existing = pools.get(database)
+    if (existing) return existing
+    for (const [name, pool] of pools) {
+      pools.delete(name)
+      void pool.end().catch(() => {})
+    }
+    const pool = makePool(database)
+    pools.set(database, pool)
     return pool
   }
 
+  const activePool = () => poolFor(active)
+
   const poolForQuery = (childDb?: string | null) => {
     if (!childDb) return activePool()
-    const pool = pools?.get(childDb)
-    if (!pool) throw new Error(t('connection.databaseUnavailable', { database: childDb ?? '' }))
-    return pool
+    if (!childNames.includes(childDb)) throw new Error(t('connection.databaseUnavailable', { database: childDb }))
+    return poolFor(childDb)
   }
 
   const dialect = dialectFor(profile.engine)
@@ -242,9 +256,6 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         )
         childNames = listed.rows.map((row: { datname: string }) => row.datname)
         if (!childNames.length) childNames = [discovery]
-        for (const name of childNames) {
-          if (!pools.has(name)) pools.set(name, makePool(name))
-        }
       } else {
         childNames = [discovery]
       }
@@ -441,8 +452,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       if (options?.ctype) parts.push(`lc_ctype ${literal(options.ctype)}`)
       const withClause = parts.length ? ` with ${parts.join(' ')}` : ''
       await activePool().query(`create database ${dialect.quoteIdent(name)}${withClause}`)
-      if (profile.databaseMode === 'all' && pools && !pools.has(name)) {
-        pools.set(name, makePool(name))
+      // Browsable straight away; its pool opens when the user switches to it.
+      if (profile.databaseMode === 'all' && pools && !childNames.includes(name)) {
         childNames = [...childNames, name].sort()
       }
     },
@@ -458,13 +469,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         pools.delete(name)
         await pool.end().catch(() => {})
       }
-      try {
-        await activePool().query(`drop database ${dialect.quoteIdent(name)}`)
-      } catch (error) {
-        // Drop refused (e.g. someone else is connected): keep it browsable.
-        if (pool) pools.set(name, makePool(name))
-        throw error
-      }
+      // A refused drop (someone else is connected) propagates: the database stays
+      // in childNames, so it remains browsable and re-opens its pool on demand.
+      await activePool().query(`drop database ${dialect.quoteIdent(name)}`)
       childNames = childNames.filter((child) => child !== name)
       sourceCaches.delete(name)
     },
