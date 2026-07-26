@@ -185,6 +185,52 @@ describe('ContextsController.openPermanent', () => {
     expect(ctrl.activeSqlTab()?.content).toBe('select 42')
     expect(ctrl.activeSqlTab()?.preview).toBeFalsy()
   })
+
+  // Double-clicking the same history row repeatedly used to stack one identical
+  // History.sql tab per click, because only *preview* tabs were considered.
+  it('refocuses the already-pinned tab instead of stacking copies', () => {
+    const { ctrl } = make()
+    ctrl.openPermanent('select 7')
+    const id = ctrl.activeTabId
+
+    for (let i = 0; i < 4; i += 1) ctrl.openPermanent('select 7')
+
+    expect(ctrl.tabs).toHaveLength(1)
+    expect(ctrl.activeTabId).toBe(id)
+  })
+
+  it('still opens a separate tab per distinct sql', () => {
+    const { ctrl } = make()
+    ctrl.openPermanent('select 7')
+    ctrl.openPermanent('select 8')
+    expect(ctrl.tabs).toHaveLength(2)
+  })
+
+  it('focuses a pinned tab rather than previewing the same sql again', () => {
+    const { ctrl } = make()
+    ctrl.openPermanent('select 7')
+    const id = ctrl.activeTabId
+
+    ctrl.openPreview('select 7')
+
+    expect(ctrl.tabs).toHaveLength(1)
+    expect(ctrl.activeTabId).toBe(id)
+    expect(ctrl.activeSqlTab()?.preview).toBeFalsy() // stays pinned
+  })
+
+  // Reuse is keyed on an untouched tab, so a draft the user typed into is safe
+  // even when its text happens to match the history entry.
+  it('does not hijack an edited Untitled tab with matching text', () => {
+    const { ctrl } = make()
+    ctrl.newQuery()
+    const untitled = ctrl.activeTabId
+    ctrl.setActiveContent('select 7')
+
+    ctrl.openPermanent('select 7')
+
+    expect(ctrl.tabs).toHaveLength(2)
+    expect(ctrl.activeTabId).not.toBe(untitled)
+  })
 })
 
 describe('ContextsController.removeProfile', () => {

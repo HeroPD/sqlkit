@@ -222,14 +222,28 @@ export class ContextsController {
     this.addTab({ id: profile.id, kind: 'config', profile: { ...profile } })
   }
 
+  // A tab already holding exactly this history SQL, untouched since it opened.
+  // Requiring content === savedContent keeps an Untitled tab the user happens to
+  // have typed the same SQL into from being hijacked.
+  private _historyTabFor(sql: string) {
+    return this._tabs.find((tab) =>
+      tab.kind === 'sql' && tab.path === null && tab.content === sql && tab.savedContent === sql)
+  }
+
   // History double-click: pin the SQL. A preceding single-click recycles the
   // preview tab to this SQL, so if that preview is still open just clear its
-  // flag; otherwise open a fresh permanent tab.
+  // flag; otherwise reuse an already-pinned tab for the same SQL, and only open
+  // a fresh one when there is none — re-picking an entry must not stack copies.
   openPermanent(sql: string) {
     const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview && tab.content === sql)
     if (preview) {
       this.tabs = this._tabs.map((tab) => (tab.id === preview.id ? { ...tab, preview: false } : tab))
       this.activeTabId = preview.id
+      return
+    }
+    const open = this._historyTabFor(sql)
+    if (open) {
+      this.activeTabId = open.id
       return
     }
     this.addTab({ id: crypto.randomUUID(), kind: 'sql', name: 'History.sql', path: null, content: sql, savedContent: sql })
@@ -367,6 +381,13 @@ export class ContextsController {
   // History single-click: recycle the open preview tab to this SQL, else open
   // a fresh preview tab.
   openPreview(sql: string) {
+    // Already open from an earlier pick (including the pinned tab a double-click
+    // left behind): focus it rather than opening the same SQL a second time.
+    const open = this._historyTabFor(sql)
+    if (open) {
+      this.activeTabId = open.id
+      return
+    }
     const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview)
     if (preview) {
       this.tabs = this._tabs.map((tab) =>
