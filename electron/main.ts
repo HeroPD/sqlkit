@@ -17,6 +17,7 @@ import { t } from '../src/i18n'
 import { createConnectionManager, type ConnectionManager } from './db/manager'
 import { stopWorkspaceWatcher } from './files'
 import { registerDbIpc } from './ipc-db'
+import { inspectionSwitch } from './hardening'
 import { registerWorkspaceIpc } from './ipc-workspace'
 import { readGlobalConfig, readTheme, writeTheme } from './workspace'
 
@@ -24,6 +25,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 app.setName(t('app.name'))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
 const smokeTest = process.argv.includes('--smoke-test')
+// Only unpackaged runs may be inspected; see hardening.ts for why. A release
+// build refuses to start rather than come up debuggable.
+const inspectable = !app.isPackaged
+if (!inspectable) {
+  const offending = inspectionSwitch(process.argv, process.env.NODE_OPTIONS)
+  if (offending) {
+    console.error(`${t('app.name')} does not run with ${offending}.`)
+    app.exit(1)
+  }
+}
 // Dev runs get their own profile: two Electron processes sharing one userData
 // fight over the localStorage LevelDB lock (~4s renderer stall on first read)
 // and the loser silently falls back to empty storage.
@@ -190,6 +201,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: inspectable,
     },
   })
 
@@ -214,6 +226,11 @@ function createWindow() {
   }
   pendingShows.set(contentsId, show)
   window.once('ready-to-show', () => setTimeout(show, SHOW_FALLBACK_MS))
+  // devTools: false already refuses this; closing on the event covers anything
+  // that reaches openDevTools() by another route (an extension, a future menu).
+  if (!inspectable) {
+    window.webContents.on('devtools-opened', () => window.webContents.closeDevTools())
+  }
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalSafely(url)
     return { action: 'deny' }
@@ -315,7 +332,7 @@ function buildAppMenu() {
         },
         { type: 'separator' },
         { role: 'forceReload' },
-        { role: 'toggleDevTools' },
+        ...(inspectable ? [{ role: 'toggleDevTools' } as MenuItemConstructorOptions] : []),
         { type: 'separator' },
         { role: 'resetZoom' },
         { role: 'zoomIn' },

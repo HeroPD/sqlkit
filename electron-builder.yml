@@ -16,6 +16,17 @@ files:
   - dist/**
   - dist-electron/**
 
+# A release binary must not be inspectable: the main process decrypts saved
+# database passwords into memory. These are baked into the binary, so unlike the
+# argv checks in electron/hardening.ts they cannot be worked around by a flag.
+# The app spawns its SQLite worker with utilityProcess.fork, not
+# ELECTRON_RUN_AS_NODE, so disabling runAsNode costs nothing.
+electronFuses:
+  runAsNode: false
+  enableNodeCliInspectArguments: false
+  enableNodeOptionsEnvironmentVariable: false
+  onlyLoadAppFromAsar: true
+
 # Strip Chromium locale files for languages the app does not ship.
 electronLanguages:
   - en
