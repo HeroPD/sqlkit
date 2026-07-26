@@ -1308,15 +1308,21 @@ export class WorkbenchScreen extends LitElement {
 
   // Workbench cleanup after a child database is dropped on the server.
   private _onDatabaseDropped(id: string, database: string) {
-    // The dropped child's working context is gone with it.
-    this._ctx.dropInstance(contextKey(id, database))
-    this._sweepOrphanTabState()
+    // Forget the remembered child before redirecting: it still names the dropped
+    // database, and defaultChild() would resolve straight back to it.
     if (this._config.clearLastChildDb(id, database)) this._config.persist()
     // If the user was working in the dropped child, follow the driver's
     // in-use child instead of pointing at a database that no longer exists.
+    // This has to happen before the context is dropped: while the dropped child
+    // is active its tabs are live rather than stashed, so clearing the stash
+    // first would leave them untouched and the switch would stash them back.
     if (this._ctx.activeDbId === id && this._ctx.activeChildDb === database) {
       this._setActiveDb(id, this._config.inUseChild(id) ?? undefined)
     }
+    // The dropped child's working context is gone with it, including whatever
+    // the switch above just stashed.
+    this._ctx.dropInstance(contextKey(id, database))
+    this._sweepOrphanTabState()
   }
 
   private _onDbRemove(event: Event) {

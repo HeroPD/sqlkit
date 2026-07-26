@@ -759,3 +759,73 @@ describe('WorkbenchScreen inspect state follows any close path', () => {
     expect(workbench._inspectDirtyTabIds.has('inspect:vanished')).toBe(false)
   })
 })
+
+// Dropping the child database the user is *in* is the awkward case: its tabs are
+// live rather than stashed, so the context has to be left before it is cleared.
+describe('WorkbenchScreen drop of the active child database', () => {
+  const setup = () => {
+    // _setActiveDb persists the remembered child through this channel.
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })) }
+    const screen = new WorkbenchScreen()
+    Object.defineProperty(screen, 'renderRoot', { value: { querySelector: () => null } })
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _live: { statuses: unknown }
+      _ctx: {
+        activeDbId: string | null
+        activeChildDb: string | null
+        tabs: unknown[]
+        addTab(tab: unknown): void
+        _instances: Map<string, { tabs: unknown[] }>
+      }
+      _inspectDirtyTabIds: Set<string>
+      _tabScroll: Map<string, unknown>
+      _onInspectDirty(event: Event): void
+      _setActiveDb(profileId: string, childDb?: string | null): void
+      _onDatabaseDropped(id: string, database: string): void
+    }
+    workbench._config.connections = [{ ...profile, databaseMode: 'all', database: 'db_a' }]
+    workbench._live.statuses = {
+      p1: { profileId: 'p1', phase: 'connected', children: [{ name: 'db_a', inUse: true }, { name: 'doomed', inUse: false }] },
+    }
+    return workbench
+  }
+
+  it('leaves no trace of the dropped child once it was the active context', () => {
+    const workbench = setup()
+    workbench._setActiveDb('p1', 'doomed')
+    workbench._ctx.addTab({
+      id: 'inspect:doomed',
+      kind: 'inspect',
+      profileId: 'p1',
+      table: { schema: null, name: 'events', kind: 'table' },
+    })
+    workbench._onInspectDirty(new CustomEvent('x', { detail: { tabId: 'inspect:doomed', dirty: true } }))
+    workbench._tabScroll.set('inspect:doomed', { inspectTop: 120 })
+    expect(workbench._ctx.activeChildDb).toBe('doomed')
+
+    workbench._onDatabaseDropped('p1', 'doomed')
+
+    // Moved off the dropped child, and nothing of it stashed back.
+    expect(workbench._ctx.activeChildDb).not.toBe('doomed')
+    expect(workbench._ctx._instances.has('p1:doomed')).toBe(false)
+    expect(workbench._inspectDirtyTabIds.has('inspect:doomed')).toBe(false)
+    expect(workbench._tabScroll.has('inspect:doomed')).toBe(false)
+  })
+
+  it('does not hand a recreated same-named database the old tabs', () => {
+    const workbench = setup()
+    workbench._setActiveDb('p1', 'doomed')
+    workbench._ctx.addTab({
+      id: 'inspect:doomed',
+      kind: 'inspect',
+      profileId: 'p1',
+      table: { schema: null, name: 'events', kind: 'table' },
+    })
+
+    workbench._onDatabaseDropped('p1', 'doomed')
+    workbench._setActiveDb('p1', 'doomed') // same name created again
+
+    expect(workbench._ctx.tabs).toEqual([])
+  })
+})
