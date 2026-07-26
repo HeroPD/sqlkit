@@ -263,3 +263,73 @@ describe('ContextsController.tabExists', () => {
     expect(ctrl.tabExists('nope')).toBe(false)
   })
 })
+
+// Browse tabs and object-DDL tabs are also unsaved with content === savedContent,
+// so reuse keyed on text alone sent a history pick into one of them — the pick
+// silently focused another tab instead of opening its own.
+describe('ContextsController history picks keep to their own tab', () => {
+  const browseTab = (sql: string) => ({
+    id: 'browse:events',
+    kind: 'sql' as const,
+    name: 'events.sql',
+    path: null,
+    content: sql,
+    savedContent: sql,
+    table: { schema: null, name: 'events', kind: 'table' as const },
+  })
+
+  it('opens a History tab rather than focusing a browse tab with the same sql', () => {
+    const { ctrl } = make()
+    const sql = 'SELECT * FROM "events" LIMIT 200'
+    ctrl.addTab(browseTab(sql))
+
+    ctrl.openPreview(sql)
+
+    expect(ctrl.tabs).toHaveLength(2)
+    const active = ctrl.activeSqlTab()
+    expect(active?.name).toBe('History.sql')
+    expect(active?.history).toBe(true)
+    expect(active?.table).toBeUndefined()
+  })
+
+  it('does the same for a double-click', () => {
+    const { ctrl } = make()
+    const sql = 'SELECT * FROM "events" LIMIT 200'
+    ctrl.addTab(browseTab(sql))
+
+    ctrl.openPermanent(sql)
+
+    expect(ctrl.tabs).toHaveLength(2)
+    expect(ctrl.activeSqlTab()?.history).toBe(true)
+    expect(ctrl.activeSqlTab()?.preview).toBeFalsy()
+  })
+
+  it('leaves an object-DDL tab alone too', () => {
+    const { ctrl } = make()
+    const sql = 'CREATE FUNCTION f() RETURNS void AS $$ $$;'
+    // Same shape as the object-DDL tab the workbench opens: unsaved, untouched.
+    ctrl.addTab({ id: 'ddl:f', kind: 'sql', name: 'f.sql', path: null, content: sql, savedContent: sql })
+
+    ctrl.openPreview(sql)
+
+    expect(ctrl.tabs).toHaveLength(2)
+    expect(ctrl.activeSqlTab()?.history).toBe(true)
+  })
+
+  it('recycles only the History tab, never a browse tab', () => {
+    const { ctrl } = make()
+    ctrl.addTab(browseTab('SELECT * FROM "events" LIMIT 200'))
+    ctrl.openPreview('select 1')
+    const historyId = ctrl.activeTabId
+
+    ctrl.openPreview('select 2')
+
+    expect(ctrl.tabs).toHaveLength(2)
+    expect(ctrl.activeTabId).toBe(historyId)
+    expect(ctrl.activeSqlTab()?.content).toBe('select 2')
+    // The browse tab kept its own sql.
+    expect(ctrl.tabs.find((tab) => tab.id === 'browse:events')).toMatchObject({
+      content: 'SELECT * FROM "events" LIMIT 200',
+    })
+  })
+})

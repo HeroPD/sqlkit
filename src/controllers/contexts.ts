@@ -17,6 +17,11 @@ export type SqlTabState = {
   // Source table of a double-click "browse" tab — its result is editable
   // (cell edits build an UPDATE against this table). Absent for hand-written SQL.
   table?: TableRef
+  // The app-opened "History.sql" scratch tab — history picks, right-click
+  // Explain, and the schema-ops DDL previews. Only these are reused or recycled
+  // by a later pick: browse and object-DDL tabs are also unsaved with
+  // content === savedContent, so matching on text alone sent picks into those.
+  history?: boolean
 }
 
 export type EditorTabState =
@@ -222,12 +227,19 @@ export class ContextsController {
     this.addTab({ id: profile.id, kind: 'config', profile: { ...profile } })
   }
 
-  // A tab already holding exactly this history SQL, untouched since it opened.
-  // Requiring content === savedContent keeps an Untitled tab the user happens to
-  // have typed the same SQL into from being hijacked.
+  // The History tab already holding exactly this SQL, untouched since it opened.
+  // Requiring content === savedContent keeps a tab the user has since typed in
+  // from being reused.
   private _historyTabFor(sql: string) {
     return this._tabs.find((tab) =>
-      tab.kind === 'sql' && tab.path === null && tab.content === sql && tab.savedContent === sql)
+      tab.kind === 'sql' && tab.history && tab.content === sql && tab.savedContent === sql)
+  }
+
+  // The recyclable History tab: a pick replaces its contents rather than opening
+  // another tab. Pinned or edited History tabs are excluded — they are tabs the
+  // user chose to keep.
+  private _historyPreviewTab() {
+    return this._tabs.find((tab) => tab.kind === 'sql' && tab.history && tab.preview)
   }
 
   // History double-click: pin the SQL. A preceding single-click recycles the
@@ -235,8 +247,8 @@ export class ContextsController {
   // flag; otherwise reuse an already-pinned tab for the same SQL, and only open
   // a fresh one when there is none — re-picking an entry must not stack copies.
   openPermanent(sql: string) {
-    const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview && tab.content === sql)
-    if (preview) {
+    const preview = this._historyPreviewTab()
+    if (preview?.kind === 'sql' && preview.content === sql) {
       this.tabs = this._tabs.map((tab) => (tab.id === preview.id ? { ...tab, preview: false } : tab))
       this.activeTabId = preview.id
       return
@@ -246,7 +258,7 @@ export class ContextsController {
       this.activeTabId = open.id
       return
     }
-    this.addTab({ id: crypto.randomUUID(), kind: 'sql', name: 'History.sql', path: null, content: sql, savedContent: sql })
+    this.addTab({ id: crypto.randomUUID(), kind: 'sql', name: 'History.sql', path: null, content: sql, savedContent: sql, history: true })
   }
 
   newQuery() {
@@ -388,7 +400,7 @@ export class ContextsController {
       this.activeTabId = open.id
       return
     }
-    const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.preview)
+    const preview = this._historyPreviewTab()
     if (preview) {
       this.tabs = this._tabs.map((tab) =>
         tab.id === preview.id && tab.kind === 'sql' ? { ...tab, content: sql, savedContent: sql } : tab,
@@ -396,6 +408,6 @@ export class ContextsController {
       this.activeTabId = preview.id
       return
     }
-    this.addTab({ id: crypto.randomUUID(), kind: 'sql', name: 'History.sql', path: null, content: sql, savedContent: sql, preview: true })
+    this.addTab({ id: crypto.randomUUID(), kind: 'sql', name: 'History.sql', path: null, content: sql, savedContent: sql, preview: true, history: true })
   }
 }
