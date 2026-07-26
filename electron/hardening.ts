@@ -30,6 +30,11 @@ const matches = (argument: string) =>
  * `argv` is passed whole (the leading executable path is skipped) and
  * `nodeOptions` is NODE_OPTIONS, which smuggles the same --inspect flags in
  * through the environment.
+ *
+ * The NODE_OPTIONS arm only bites in a build whose fuses were not applied: with
+ * enableNodeOptionsEnvironmentVariable off, Electron has already discarded the
+ * variable by the time this runs, so the app simply starts with no inspector
+ * rather than refusing. Verified on a packaged build — nothing listens on 9229.
  */
 export function inspectionSwitch(argv: readonly string[], nodeOptions?: string): string | null {
   for (const argument of argv.slice(1)) {

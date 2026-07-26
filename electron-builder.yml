@@ -26,6 +26,13 @@ electronFuses:
   enableNodeCliInspectArguments: false
   enableNodeOptionsEnvironmentVariable: false
   onlyLoadAppFromAsar: true
+  # Flipping a fuse rewrites bytes inside the Electron Framework, which
+  # invalidates its signature. electron-builder re-signs afterwards only when it
+  # finds a signing identity; without one it logs "skipped macOS application code
+  # signing" and the stale signature makes the kernel SIGKILL the app on first
+  # read of the fuse (CODESIGNING / Invalid Page). This re-applies an ad-hoc
+  # signature so an unsigned local build still runs.
+  resetAdHocDarwinSignature: true
 
 # Strip Chromium locale files for languages the app does not ship.
 electronLanguages:
