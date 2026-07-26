@@ -352,6 +352,9 @@ export type SqlkitApi = {
   /** Reveals the open workspace root in the OS file manager (Finder/Explorer). */
   revealWorkspace: () => Promise<void>
   newWindow: () => Promise<void>
+  /** Reports the renderer's first real frame; main keeps the window hidden
+   * until then so opening the app never flashes a blank page. */
+  notifyRendered: () => Promise<void>
   getRecentWorkspaces: () => Promise<RecentWorkspace[]>
   getTheme: () => Promise<ThemeId>
   getWorkspaceConfig: () => Promise<WorkspaceConfigResult>

@@ -24,6 +24,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 app.setName(t('app.name'))
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
 const smokeTest = process.argv.includes('--smoke-test')
+// Dev runs get their own profile: two Electron processes sharing one userData
+// fight over the localStorage LevelDB lock (~4s renderer stall on first read)
+// and the loser silently falls back to empty storage.
+if (devServerUrl) app.setPath('userData', `${app.getPath('userData')}-dev`)
+// For the same reason a second launch of the same flavour joins the running
+// instance (second-instance below) instead of starting a contending process.
+// Smoke tests skip the lock so they can run alongside a normal instance.
+const primaryInstance = smokeTest || app.requestSingleInstanceLock()
+if (!primaryInstance) app.quit()
 const devParentPid = Number(process.env.SQLKIT_DEV_PARENT_PID)
 if (devServerUrl && Number.isInteger(devParentPid) && devParentPid > 0) {
   const parentMonitor = setInterval(() => {
@@ -154,6 +163,12 @@ function dbManagerFor(contents: WebContents) {
 
 const MAX_WINDOWS = 8
 
+// Windows waiting for their renderer's first real frame, by webContents id.
+const pendingShows = new Map<number, () => void>()
+// Backstop so a renderer that breaks before its first render still gets a
+// window; matching the old show-on-first-paint timing, just delayed.
+const SHOW_FALLBACK_MS = 1_000
+
 function createWindow() {
   if (BrowserWindow.getAllWindows().length >= MAX_WINDOWS) return
   const theme = readTheme()
@@ -179,7 +194,10 @@ function createWindow() {
   })
 
   const contentsId = window.webContents.id
-  window.on('closed', () => cleanupWindow(contentsId))
+  window.on('closed', () => {
+    pendingShows.delete(contentsId)
+    cleanupWindow(contentsId)
+  })
   if (smokeTest) {
     window.webContents.once('did-finish-load', () => app.exit(0))
     window.webContents.once('did-fail-load', (_event, code, description) => {
@@ -187,7 +205,15 @@ function createWindow() {
       app.exit(1)
     })
   }
-  window.once('ready-to-show', () => { if (!smokeTest) window.show() })
+  // Shown on the renderer's app:rendered signal, not ready-to-show — that fires
+  // on the first paint of the still-empty document, flashing a blank window the
+  // welcome screen then pops over.
+  const show = () => {
+    pendingShows.delete(contentsId)
+    if (!smokeTest && !window.isDestroyed() && !window.isVisible()) window.show()
+  }
+  pendingShows.set(contentsId, show)
+  window.once('ready-to-show', () => setTimeout(show, SHOW_FALLBACK_MS))
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalSafely(url)
     return { action: 'deny' }
@@ -206,6 +232,7 @@ function createWindow() {
 }
 
 function registerIpc() {
+  ipcMain.handle('app:rendered', (event) => { pendingShows.get(event.sender.id)?.() })
   ipcMain.handle('clipboard:read-text', () => clipboard.readText())
   ipcMain.handle('clipboard:write-text', (_event, text: unknown) => {
     if (typeof text !== 'string') throw new Error('Clipboard text must be a string')
@@ -310,6 +337,7 @@ function buildAppMenu() {
 }
 
 void app.whenReady().then(() => {
+  if (!primaryInstance) return
   installContentSecurityPolicy()
   buildAppMenu()
   registerIpc()
@@ -317,6 +345,11 @@ void app.whenReady().then(() => {
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+  app.on('second-instance', () => {
+    const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    if (window) focusWindow(window)
+    else createWindow()
   })
 }).catch((error: unknown) => {
   console.error('SqlKit Studio failed to start:', error)

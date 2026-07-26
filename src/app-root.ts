@@ -37,6 +37,12 @@ export class AppRoot extends LitElement {
     this._unsubscribeMenu = null
   }
 
+  protected firstUpdated() {
+    // The frame carrying this render is what the window should first show;
+    // signalling from its rAF keeps main from showing an earlier, blank one.
+    requestAnimationFrame(() => void window.sqlkit.notifyRendered())
+  }
+
   private _onMenuAction(action: MenuAction) {
     if (action.startsWith('theme:')) this._applyTheme(action.slice('theme:'.length) as ThemeId)
   }

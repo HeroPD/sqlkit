@@ -9,6 +9,7 @@ const api: SqlkitApi = {
   closeWorkspace: () => ipcRenderer.invoke('workspace:close'),
   revealWorkspace: () => ipcRenderer.invoke('workspace:reveal'),
   newWindow: () => ipcRenderer.invoke('app:new-window'),
+  notifyRendered: () => ipcRenderer.invoke('app:rendered'),
   getRecentWorkspaces: () => ipcRenderer.invoke('workspace:get-recent'),
   getTheme: () => ipcRenderer.invoke('app:get-theme'),
   getWorkspaceConfig: () => ipcRenderer.invoke('workspace:get-config'),
