@@ -171,6 +171,19 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     return error ? { success: false, error } : { success: true }
   })
 
+  // Selects a workspace file or folder in the OS file manager. Unlike
+  // open-external this needs no extension allowlist: showItemInFolder only
+  // highlights the item, so there is nothing for the OS to launch.
+  ipcMain.handle('file:reveal', (event, filePath: string) => {
+    const resolved = resolveWorkspaceItem(
+      context.workspaceFor(event.sender),
+      stringValue(filePath, 'File path', IPC_PATH_LIMIT),
+    )
+    if ('error' in resolved) return { success: false, error: resolved.error }
+    shell.showItemInFolder(resolved.path)
+    return { success: true }
+  })
+
   ipcMain.handle('file:save-as', async (event, folder: string, suggestedName: string, content: string) => {
     folder = stringValue(folder, 'Folder', IPC_PATH_LIMIT)
     suggestedName = stringValue(suggestedName, 'Suggested file name', 1_000)

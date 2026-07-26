@@ -154,6 +154,7 @@ const enUS = {
   'file.moveToTrash': 'Move to Trash',
   'file.deleteFailed': 'Could not delete file',
   'file.openFailed': 'Could not open file',
+  'file.revealFailed': 'Could not reveal file',
   'file.saveFailed': 'Could not save file',
   'file.createFailed': 'Could not create file',
   'file.renameFailed': 'Could not rename file',

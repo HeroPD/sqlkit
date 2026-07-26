@@ -60,7 +60,7 @@ import type { SelectionStats } from '../result-aggregate'
 import type { ColumnRef, ColumnReference, QueryResult, QuerySort } from '../electron'
 import { stripExplain } from '../sql-types'
 import type { SearchOpenDetail } from './search-view'
-import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail } from './file-tree'
+import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail, FileRevealDetail } from './file-tree'
 import type { ImportColumn, ImportConfirmDetail } from './import-dialog'
 import { bindParameterValues, queryParameters, type QueryParameter } from '../query-parameters'
 import type { ParametersConfirmDetail } from './parameter-dialog'
@@ -810,6 +810,7 @@ export class WorkbenchScreen extends LitElement {
         @file-create=${this._onFileCreate}
         @file-rename=${this._onFileRename}
         @file-delete=${this._onFileDelete}
+        @file-reveal=${this._onFileReveal}
         @config-change=${this._onConfigChange}
         @config-save=${this._onConfigSave}
         @config-cancel=${this._onConfigCancel}
@@ -1606,6 +1607,10 @@ export class WorkbenchScreen extends LitElement {
   private _onFileDelete(event: Event) {
     const { path, name } = (event as CustomEvent<FileDeleteDetail>).detail
     this._fileOps.requestDelete(path, name)
+  }
+
+  private _onFileReveal(event: Event) {
+    this._fileOps.reveal((event as CustomEvent<FileRevealDetail>).detail.path)
   }
 
   private _onEditorChange(event: Event) {

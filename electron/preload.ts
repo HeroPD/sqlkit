@@ -59,6 +59,7 @@ const api: SqlkitApi = {
   renameFile: (path, newName) => ipcRenderer.invoke('file:rename', path, newName),
   deleteFile: (path) => ipcRenderer.invoke('file:delete', path),
   openExternal: (path) => ipcRenderer.invoke('file:open-external', path),
+  revealFile: (path) => ipcRenderer.invoke('file:reveal', path),
   onFilesChanged: (listener) => {
     const handler = () => listener()
     ipcRenderer.on('workspace:files-changed', handler)

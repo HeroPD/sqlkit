@@ -71,6 +71,13 @@ export class FileOpsController {
     })
   }
 
+  /** Selects a workspace file or folder in the OS file manager. */
+  reveal(path: string) {
+    void window.sqlkit.revealFile(path).then((result) => {
+      if (!result.success) this.deps.dialogs.notice(t('file.revealFailed'), result.error ?? t('common.unknownError'))
+    })
+  }
+
   // Untitled queries go through the native dialog, defaulting into the active
   // context's folder; saved files write in place.
   async saveActive() {

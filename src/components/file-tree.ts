@@ -18,6 +18,7 @@ export type FileRenameDetail = { file: FileInfo; newName: string }
 /** parent is ''-rooted, '/'-separated, relative to the context folder. */
 export type FileCreateDetail = { parent: string; name: string }
 export type FileDeleteDetail = { path: string; name: string }
+export type FileRevealDetail = { path: string }
 
 type Editing = { mode: 'rename'; relativePath: string } | { mode: 'create'; parent: string }
 
@@ -195,6 +196,7 @@ export class FileTree extends LitElement {
     const node = menu.node
     const items: MenuItem[] = [{ id: 'new', label: t('file.new') }]
     if (node?.type === 'file') items.push({ id: 'rename', label: t('file.rename'), shortcut: isMac ? '↵' : 'F2' })
+    if (node) items.push({ id: 'reveal', label: isMac ? t('action.revealInFinder') : t('action.revealInExplorer') })
     if (node) items.push({ id: 'delete', label: t('file.delete'), danger: true, separatorBefore: true })
 
     return html`
@@ -262,6 +264,7 @@ export class FileTree extends LitElement {
       return
     }
     if (id === 'rename' && node?.type === 'file') this._startRename(node)
+    if (id === 'reveal' && node) this._requestReveal(node)
     if (id === 'delete' && node) this._requestDelete(node)
   }
 
@@ -269,9 +272,25 @@ export class FileTree extends LitElement {
     this._editing = { mode: 'rename', relativePath: node.relativePath }
   }
 
+  // Folder nodes carry no FileInfo; their absolute path is in the flat list.
+  private _infoFor(node: FileNode) {
+    return this.files.find((file) => file.relativePath === node.relativePath && file.type === node.type)
+  }
+
+  private _requestReveal(node: FileNode) {
+    const info = this._infoFor(node)
+    if (!info) return
+    this.dispatchEvent(
+      new CustomEvent<FileRevealDetail>('file-reveal', {
+        detail: { path: info.path },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+  }
+
   private _requestDelete(node: FileNode) {
-    // Folder nodes carry no FileInfo; their absolute path is in the flat list.
-    const info = this.files.find((file) => file.relativePath === node.relativePath && file.type === node.type)
+    const info = this._infoFor(node)
     if (!info) return
     this.dispatchEvent(
       new CustomEvent<FileDeleteDetail>('file-delete', {

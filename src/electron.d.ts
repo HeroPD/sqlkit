@@ -458,6 +458,8 @@ export type SqlkitApi = {
   deleteFile: (path: string) => Promise<FileDeleteResult>
   /** Opens a workspace file with the system default app (non-.sql files). */
   openExternal: (path: string) => Promise<{ success: boolean; error?: string }>
+  /** Selects a workspace file or folder in the OS file manager. */
+  revealFile: (path: string) => Promise<{ success: boolean; error?: string }>
   /** Fires when .sql files in the workspace change on disk; returns unsubscribe. */
   onFilesChanged: (listener: () => void) => () => void
   /** Fires on app-menu items (File > New Query / Save / …); returns unsubscribe. */
