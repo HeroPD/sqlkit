@@ -174,8 +174,12 @@ export class WorkbenchScreen extends LitElement {
 
   private _tabScroll = new Map<string, { inspectTop?: number; resultsTop?: number; resultsLeft?: number }>()
 
+  // Closing a tab reaches here via the switch-away that follows it, so skip any
+  // tab that no longer exists — otherwise its entry is re-added after dropQuery
+  // pruned it and the map grows with every tab ever opened. A tab stashed in
+  // another context still exists, and its scroll is still worth keeping.
   private _captureTabScroll(tabId: string | null) {
-    if (!tabId) return
+    if (!tabId || !this._ctx.tabExists(tabId)) return
     const current = this._tabScroll.get(tabId) ?? {}
     const inspect = this.renderRoot.querySelector('table-inspect')?.shadowRoot?.querySelector<HTMLElement>('.scroll')
     const results = this.renderRoot.querySelector('results-panel')?.shadowRoot?.querySelector<HTMLElement>('.body')
@@ -256,7 +260,10 @@ export class WorkbenchScreen extends LitElement {
   // inactive contexts. Query results follow their tab via the QueriesController.
   private _ctx = new ContextsController(this, {
     contextKey,
-    dropQuery: (tabId) => this._queries.dropTab(tabId),
+    dropQuery: (tabId) => {
+      this._queries.dropTab(tabId)
+      this._tabScroll.delete(tabId)
+    },
   })
 
   // Saved connection profiles and the workspace config file (.sqlkit/config.json).

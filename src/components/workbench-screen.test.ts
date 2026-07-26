@@ -203,21 +203,24 @@ describe('WorkbenchScreen tab scroll state', () => {
     const inspectHost = { updateComplete: Promise.resolve(true), shadowRoot: { querySelector: () => inspectScroll } }
     const resultsHost = { updateComplete: Promise.resolve(true), shadowRoot: { querySelector: () => resultsScroll } }
     const workbench = screen as never as {
-      _ctx: { activeTabId: string | null }
+      _ctx: { activeTabId: string | null; switchInstance(profileId: string | null, childDb: string | null): void; newQuery(): void }
       renderRoot: { querySelector(selector: string): unknown }
       _captureTabScroll(tabId: string): void
       _restoreTabScroll(tabId: string): Promise<void>
     }
-    workbench._ctx.activeTabId = 'tab-a'
+    // A real open tab: capture skips ids that no longer exist.
+    workbench._ctx.switchInstance('p1', null)
+    workbench._ctx.newQuery()
+    const tabId = workbench._ctx.activeTabId!
     workbench.renderRoot = {
       querySelector: (selector) => selector === 'table-inspect' ? inspectHost : selector === 'results-panel' ? resultsHost : null,
     }
 
-    workbench._captureTabScroll('tab-a')
+    workbench._captureTabScroll(tabId)
     inspectScroll.scrollTop = 0
     resultsScroll.scrollTop = 0
     resultsScroll.scrollLeft = 0
-    await workbench._restoreTabScroll('tab-a')
+    await workbench._restoreTabScroll(tabId)
 
     expect(inspectScroll.scrollTop).toBe(140)
     expect(resultsScroll).toEqual({ scrollTop: 260, scrollLeft: 90 })
@@ -655,5 +658,48 @@ describe('WorkbenchScreen undo/redo shortcut', () => {
     workbench._onGlobalKeydown(z)
     expect(undoStaged).not.toHaveBeenCalled()
     expect(z.defaultPrevented).toBe(false)
+  })
+})
+
+describe('WorkbenchScreen per-tab scroll memory', () => {
+  // The map is keyed by tab id and only cleared wholesale on workspace close,
+  // so a closed tab's entry must be pruned — and must not come back via the
+  // capture that the follow-on tab switch triggers.
+  const setup = () => {
+    const screen = new WorkbenchScreen()
+    // _captureTabScroll reaches into renderRoot; an unmounted element has none.
+    Object.defineProperty(screen, 'renderRoot', { value: { querySelector: () => null } })
+    return screen as never as {
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void; newQuery(): void; activeTabId: string | null; closeTab(id: string): void }
+      _tabScroll: Map<string, unknown>
+      _captureTabScroll(tabId: string | null): void
+    }
+  }
+
+  it('records scroll for a live tab', () => {
+    const workbench = setup()
+    workbench._ctx.switchInstance('p1', null)
+    workbench._ctx.newQuery()
+    const id = workbench._ctx.activeTabId!
+
+    workbench._captureTabScroll(id)
+
+    expect(workbench._tabScroll.has(id)).toBe(true)
+  })
+
+  it('forgets a tab\'s scroll when it closes, and does not re-record it', () => {
+    const workbench = setup()
+    workbench._ctx.switchInstance('p1', null)
+    workbench._ctx.newQuery()
+    const id = workbench._ctx.activeTabId!
+    workbench._captureTabScroll(id)
+
+    workbench._ctx.closeTab(id)
+    expect(workbench._tabScroll.has(id)).toBe(false)
+
+    // The switch-away that follows a close captures the outgoing tab id.
+    workbench._captureTabScroll(id)
+    expect(workbench._tabScroll.has(id)).toBe(false)
+    expect(workbench._tabScroll.size).toBe(0)
   })
 })
