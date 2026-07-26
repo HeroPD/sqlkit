@@ -16,7 +16,7 @@ import { SchemaOpsController } from '../controllers/schema-ops'
 import { ConfigController } from '../controllers/config'
 import { FileOpsController } from '../controllers/file-ops'
 import { ContextsController, type EditorTabState } from '../controllers/contexts'
-import type { ConnectionProfile, Engine, FileInfo, MenuAction, TableRef } from '../electron'
+import type { ConnectionProfile, Engine, FileInfo, MenuAction, SessionEndMode, TableRef } from '../electron'
 import { buildInsertBatches, type CellInput } from '../sql-write'
 import './activity-button'
 import './command-palette'
@@ -47,7 +47,7 @@ import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectEditDetail, ObjectInspectDetail, TableBrowseDetail, TableCreateDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
-import type { TaskStopDetail } from './tasks-view'
+import type { SessionEndDetail, TaskStopDetail } from './tasks-view'
 import { dialectForEngine } from '../codemirror/dialects'
 import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
@@ -1086,7 +1086,17 @@ export class WorkbenchScreen extends LitElement {
       `
     }
     if (view.id === 'tasks') {
-      return html`<tasks-view .items=${this._queries.tasks} @task-stop=${this._onTaskStop}></tasks-view>`
+      const profile = this._connectedProfile()
+      return html`
+        <tasks-view
+          .items=${this._queries.tasks}
+          .profileId=${profile?.id ?? null}
+          .childDb=${this._ctx.activeChildDb}
+          .engine=${profile?.engine ?? null}
+          @task-stop=${this._onTaskStop}
+          @session-end=${this._onSessionEnd}
+        ></tasks-view>
+      `
     }
     // Every view id is handled above; 'server' is the last one.
     return html`<server-view .profileId=${this._connectedProfile()?.id ?? null} .childDb=${this._ctx.activeChildDb}></server-view>`
@@ -1915,6 +1925,35 @@ export class WorkbenchScreen extends LitElement {
   private _onTaskStop(event: Event) {
     const { profileId, taskId } = (event as CustomEvent<TaskStopDetail>).detail
     void this._cancelQuery(profileId, taskId)
+  }
+
+  // Cancelling a statement is recoverable, so it runs straight away. Ending a
+  // session is not: it rolls back whatever that connection was doing, and it may
+  // belong to someone else, so it always asks first.
+  private _onSessionEnd(event: Event) {
+    const { profileId, session, mode } = (event as CustomEvent<SessionEndDetail>).detail
+    if (mode === 'cancel') {
+      void this._endSession(profileId, session.id, mode)
+      return
+    }
+    this._dialogs.confirm = {
+      message: t('tasks.endSessionPrompt', { id: session.id }),
+      detail: session.self
+        ? t('tasks.endSessionOwn')
+        : t('tasks.endSessionDetail', { user: session.user || t('tasks.sessionIdle') }),
+      confirmLabel: t('tasks.endSessionConfirm'),
+      action: () => void this._endSession(profileId, session.id, mode),
+    }
+  }
+
+  private async _endSession(profileId: string, sessionId: string, mode: SessionEndMode) {
+    const result = await window.sqlkit.endSession(profileId, sessionId, mode)
+    if (!result.success) {
+      this._dialogs.notice(t('tasks.sessionEndFailed'), result.error ?? t('common.unknownError'))
+      return
+    }
+    // Reflect it now rather than waiting out the poll interval.
+    this.renderRoot.querySelector('tasks-view')?.refresh()
   }
 
   private _onTabSelect(event: Event) {

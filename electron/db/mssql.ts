@@ -719,7 +719,8 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
          from sys.dm_exec_sessions s
          left join sys.dm_exec_requests r on r.session_id = s.session_id
          outer apply sys.dm_exec_sql_text(r.sql_handle) t
-         where s.is_user_process = 1
+         -- Exclude the reader itself, which would otherwise head its own list.
+         where s.is_user_process = 1 and s.session_id <> @@spid
          order by case when r.session_id is not null then 0 else 1 end, s.last_request_start_time desc`,
         [APP_CONNECTION_NAME],
         childDb,

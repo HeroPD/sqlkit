@@ -695,50 +695,59 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
     async serverActivity(childDb = null) {
       const pool = poolForQuery(childDb)
-      // backend_type filters out the checkpointer/autovacuum workers, which are
-      // not sessions anyone can act on.
-      const [connections, stats, sessions] = await Promise.all([
-        pool.query<{ used: number; max: number }>(
-          `select count(*)::int as used, current_setting('max_connections')::int as max
-           from pg_stat_activity where backend_type = 'client backend'`,
-        ),
-        pool.query<{ uptime_seconds: string; cache_hit: string | null }>(
-          `select extract(epoch from (now() - pg_postmaster_start_time()))::bigint as uptime_seconds,
-                  round(100.0 * sum(blks_hit) / nullif(sum(blks_hit + blks_read), 0), 1)::text as cache_hit
-           from pg_stat_database`,
-        ),
-        // elapsed_ms arrives as text (bigint), hence the Number() below.
-        pool.query<{ id: string; user: string; database: string | null; state: string; elapsed_ms: string | null; sql: string | null; self: boolean }>(
-          `select pid::text as id,
-                  coalesce(usename, '') as "user",
-                  datname as database,
-                  coalesce(state, '') as state,
-                  (extract(epoch from (clock_timestamp() - state_change)) * 1000)::bigint as elapsed_ms,
-                  nullif(btrim(query), '') as sql,
-                  coalesce(application_name = $1, false) as self
-           from pg_stat_activity
-           where backend_type = 'client backend'
-           order by (state = 'active') desc nulls last, state_change desc nulls last
-           limit ${MAX_SESSIONS}`,
-          [APP_CONNECTION_NAME],
-        ),
-      ])
-      const summary = stats.rows[0]
-      return {
-        connections: { used: connections.rows[0]?.used ?? 0, max: connections.rows[0]?.max ?? null },
-        stats: [
-          ...(summary?.uptime_seconds ? [{ label: 'Uptime', value: formatUptime(Number(summary.uptime_seconds)) }] : []),
-          ...(summary?.cache_hit ? [{ label: 'Cache hit', value: `${summary.cache_hit}%` }] : []),
-        ],
-        sessions: sessions.rows.map((row) => ({
-          id: row.id,
-          user: row.user,
-          database: row.database,
-          state: row.state,
-          elapsedMs: row.elapsed_ms === null ? null : Number(row.elapsed_ms),
-          sql: row.sql,
-          self: row.self,
-        })),
+      // All three reads share one connection, sequentially. Running them in
+      // parallel took three pooled connections, which both inflated the
+      // connection gauge the panel is reporting and left the other two visible
+      // in its own session list — pg_backend_pid() only excludes the one.
+      const client = await pool.connect()
+      try {
+        const [connections, stats, sessions] = [
+          await client.query<{ used: number; max: number }>(
+            `select count(*)::int as used, current_setting('max_connections')::int as max
+             from pg_stat_activity where backend_type = 'client backend'`,
+          ),
+          await client.query<{ uptime_seconds: string; cache_hit: string | null }>(
+            `select extract(epoch from (now() - pg_postmaster_start_time()))::bigint as uptime_seconds,
+                    round(100.0 * sum(blks_hit) / nullif(sum(blks_hit + blks_read), 0), 1)::text as cache_hit
+             from pg_stat_database`,
+          ),
+          // elapsed_ms arrives as text (bigint), hence the Number() below.
+          await client.query<{ id: string; user: string; database: string | null; state: string; elapsed_ms: string | null; sql: string | null; self: boolean }>(
+            `select pid::text as id,
+                    coalesce(usename, '') as "user",
+                    datname as database,
+                    coalesce(state, '') as state,
+                    (extract(epoch from (clock_timestamp() - state_change)) * 1000)::bigint as elapsed_ms,
+                    nullif(btrim(query), '') as sql,
+                    coalesce(application_name = $1, false) as self
+             from pg_stat_activity
+             -- Exclude the reader itself: the polling query would otherwise sit at
+             -- the top of its own list on every refresh.
+             where backend_type = 'client backend' and pid <> pg_backend_pid()
+             order by (state = 'active') desc nulls last, state_change desc nulls last
+             limit ${MAX_SESSIONS}`,
+            [APP_CONNECTION_NAME],
+          ),
+        ]
+        const summary = stats.rows[0]
+        return {
+          connections: { used: connections.rows[0]?.used ?? 0, max: connections.rows[0]?.max ?? null },
+          stats: [
+            ...(summary?.uptime_seconds ? [{ label: 'Uptime', value: formatUptime(Number(summary.uptime_seconds)) }] : []),
+            ...(summary?.cache_hit ? [{ label: 'Cache hit', value: `${summary.cache_hit}%` }] : []),
+          ],
+          sessions: sessions.rows.map((row) => ({
+            id: row.id,
+            user: row.user,
+            database: row.database,
+            state: row.state,
+            elapsedMs: row.elapsed_ms === null ? null : Number(row.elapsed_ms),
+            sql: row.sql,
+            self: row.self,
+          })),
+        }
+      } finally {
+        client.release()
       }
     },
 

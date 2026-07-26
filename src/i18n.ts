@@ -211,6 +211,32 @@ const enUS = {
   'tasks.rowCount': '{count} {rows}',
   'tasks.durationShort': '{seconds} s',
   'tasks.durationMinutes': '{minutes}m {seconds}s',
+  'tasks.session': 'This session',
+  'tasks.runs': 'Runs',
+  'tasks.errors': 'Errors',
+  'tasks.rowsRead': 'Rows',
+  'tasks.durationTrend': 'Duration',
+  'tasks.trendPeak': 'peak {peak}',
+  'tasks.trendSummary': 'Last {count} runs — fastest {min}, slowest {max}, latest {last}',
+  'tasks.noRuns': 'No queries run yet.',
+  'tasks.runningNow': 'Running',
+  'tasks.slowest': 'Slowest',
+  'tasks.server': 'Server',
+  'tasks.connections': 'Connections',
+  'tasks.connectionsOf': '{used} of {max}',
+  'tasks.sessions': 'Sessions',
+  'tasks.refresh': 'Refresh now',
+  'tasks.serverUnavailable': 'Could not read server activity',
+  'tasks.noSessions': 'No sessions reported.',
+  'tasks.sessionSelf': 'Opened by SqlKit Studio',
+  'tasks.sessionIdle': 'idle',
+  'tasks.cancelStatement': 'Cancel this statement',
+  'tasks.endSession': 'End this session',
+  'tasks.endSessionPrompt': 'End session {id}?',
+  'tasks.endSessionDetail': "This drops the connection and rolls back whatever it was doing. It belongs to {user}, who will see their work fail.",
+  'tasks.endSessionOwn': 'This is one of SqlKit Studio\u2019s own connections; ending it will fail the work it is running.',
+  'tasks.endSessionConfirm': 'End session',
+  'tasks.sessionEndFailed': 'Could not end that session',
   'export.title': 'Export Results',
   'export.received': '{count} {rows} received{capped}.',
   'export.capped': ' (the query returned more; the result was capped)',
@@ -715,6 +741,12 @@ export function t(key: MessageKey, values: Record<string, MessageValue> = {}): s
 }
 
 export const formatInteger = (value: number) => new Intl.NumberFormat(activeLocale).format(value)
+
+/** Headline figures stay short enough for a sidebar tile: 1,284 → 1,284; 12,900 → 12.9K. */
+export const formatCompact = (value: number) =>
+  value < 10_000
+    ? formatInteger(value)
+    : new Intl.NumberFormat(activeLocale, { notation: 'compact', maximumFractionDigits: 1 }).format(value)
 
 export const formatTime = (value: string | number | Date) =>
   new Intl.DateTimeFormat(activeLocale, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })

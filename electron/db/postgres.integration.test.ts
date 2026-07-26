@@ -593,15 +593,17 @@ describeDb('postgres driver (integration)', () => {
   // threads) differ enough per engine to be worth pinning.
   it('reports connection usage, uptime and its own session', async () => {
     const driver = await connectDriver()
+    // A second connection from the app, so there is a self session to find: the
+    // reader excludes itself from the list it produces.
+    const other = await connectDriver()
     try {
       const activity = await driver.serverActivity!()
+      expect(activity.sessions.some((session) => session.self)).toBe(true)
 
       expect(activity.connections.used).toBeGreaterThan(0)
       expect(activity.connections.max === null || activity.connections.max > 0).toBe(true)
       expect(activity.stats.some((stat) => stat.label === 'Uptime' && stat.value !== '')).toBe(true)
 
-      const mine = activity.sessions.filter((session) => session.self)
-      expect(mine.length).toBeGreaterThan(0)
       for (const session of activity.sessions) {
         expect(typeof session.id).toBe('string')
         expect(session.id).not.toBe('')
@@ -610,6 +612,7 @@ describeDb('postgres driver (integration)', () => {
         expect(typeof session.self).toBe('boolean')
       }
     } finally {
+      await other.disconnect()
       await driver.disconnect()
     }
   })

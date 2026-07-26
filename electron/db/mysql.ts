@@ -623,8 +623,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         self: number
       }
       // Daemon threads (the event scheduler) are not sessions anyone can act on,
-      // and counting them would inflate the connection gauge.
-      const notDaemon = `coalesce(p.command, '') <> 'Daemon'`
+      // and the reader excludes itself so the polling query doesn't head its own
+      // list on every refresh.
+      const notDaemon = `coalesce(p.command, '') <> 'Daemon' and p.id <> connection_id()`
       const columns = `cast(p.id as char) as id,
                        coalesce(p.user, '') as user,
                        p.db as \`database\`,
