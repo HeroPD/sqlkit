@@ -1,6 +1,8 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { icons, controls, typography } from '../shared-styles'
+import { unsafeHTML } from 'lit/directives/unsafe-html.js'
+import { APP_ICONS } from '../icons/app-icons'
+import { controls, typography } from '../shared-styles'
 import type { RecentWorkspace } from '../electron'
 import { t } from '../i18n'
 
@@ -16,7 +18,7 @@ export class WelcomeScreen extends LitElement {
     return html`
       <div class="inner">
         <div class="brand">
-          <i class="icon icon-database logo" aria-hidden="true"></i>
+          <span class="logo">${unsafeHTML(APP_ICONS.appicon)}</span>
           <h1>${t('app.name')}</h1>
           <p class="muted">${t('app.tagline')}</p>
         </div>
@@ -58,7 +60,6 @@ export class WelcomeScreen extends LitElement {
   static styles = [
     typography,
     controls,
-    icons,
     css`
       :host {
         align-items: center;
@@ -80,10 +81,18 @@ export class WelcomeScreen extends LitElement {
         text-align: center;
       }
 
-      .icon.logo {
-        font-size: 56px;
-        color: var(--accent);
+      /* The mark carries a viewBox but no intrinsic size, so the wrapper sets it. */
+      .logo {
+        display: block;
+        width: 56px;
+        height: 56px;
         margin-bottom: 4px;
+      }
+
+      .logo svg {
+        display: block;
+        width: 100%;
+        height: 100%;
       }
 
       .section h3 {
