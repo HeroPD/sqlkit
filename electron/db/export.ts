@@ -1,6 +1,6 @@
 import { createWriteStream, type WriteStream } from 'node:fs'
 import { once } from 'node:events'
-import { createExportSerializer, type ExportFormat, type ExportSerializer } from '../../src/result-export'
+import { createExportSerializer, type ExportFormat, type ExportSerializer, type SqlExportTarget } from '../../src/result-export'
 import { t } from '../../src/i18n'
 
 // Writes a streamed result to disk with real backpressure: each chunk of rows is
@@ -14,7 +14,7 @@ export type ExportWriter = {
   close(): Promise<{ rowCount: number }>
 }
 
-export function openExportWriter(filePath: string, format: ExportFormat): ExportWriter {
+export function openExportWriter(filePath: string, format: ExportFormat, sqlTarget?: SqlExportTarget): ExportWriter {
   const stream: WriteStream = createWriteStream(filePath, { encoding: 'utf8' })
   // A stream 'error' (disk full, permission) may arrive between writes; capture
   // it so the next call throws instead of hanging on a drain that never comes.
@@ -41,7 +41,7 @@ export function openExportWriter(filePath: string, format: ExportFormat): Export
 
   return {
     columns(names) {
-      serializer = createExportSerializer(names, format)
+      serializer = createExportSerializer(names, format, sqlTarget)
     },
     async rows(chunk) {
       if (!serializer) throw new Error(t('export.columnsMissing'))

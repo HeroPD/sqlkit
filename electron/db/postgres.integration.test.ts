@@ -115,6 +115,43 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  // The point of the sql format: the exported statements must load back into the
+  // database unchanged, so the escaping in result-sql is checked against the real
+  // server rather than an expected string.
+  it('exports INSERT statements that round-trip through the server', async () => {
+    const driver = await connectDriver()
+    const file = exportFile('rows.sql')
+    try {
+      await admin.query('drop table if exists sqlkit_it.trip_src, sqlkit_it.trip_dst')
+      await admin.query(`create table sqlkit_it.trip_src (
+        id bigint, note text, amount numeric(20,4), flag boolean, blob bytea, doc jsonb, missing text)`)
+      await admin.query(`insert into sqlkit_it.trip_src values
+        (9007199254740993, 'O''Brien said "hi"', 0.10000000000000000001, true, '\\xdead00beef'::bytea, '{"a":[1,2]}', null),
+        (-1, e'back\\\\slash and \\nnewline', -12345678901234.5678, false, '\\x'::bytea, '[]', 'x')`)
+      await admin.query('create table sqlkit_it.trip_dst (like sqlkit_it.trip_src)')
+
+      const result = await driver.exportQuery!({
+        sql: 'select * from sqlkit_it.trip_src order by id',
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'sql',
+        sqlTarget: { engine: 'postgresql', table: { schema: 'sqlkit_it', name: 'trip_dst', kind: 'table' } },
+      })
+      expect(result.rowCount).toBe(2)
+      await admin.query(readFileSync(file, 'utf8'))
+      const diff = await admin.query(`select count(*)::int as n from (
+        (select * from sqlkit_it.trip_src except select * from sqlkit_it.trip_dst)
+        union all
+        (select * from sqlkit_it.trip_dst except select * from sqlkit_it.trip_src)) d`)
+      expect(diff.rows[0].n).toBe(0)
+    } finally {
+      await admin.query('drop table if exists sqlkit_it.trip_src, sqlkit_it.trip_dst').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('exports past the in-memory row cap', async () => {
     const driver = await connectDriver()
     const file = exportFile('series.csv')

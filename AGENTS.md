@@ -49,6 +49,7 @@ SqlKit Studio is an Electron + Lit desktop SQL workbench supporting PostgreSQL, 
 - `npm run build`
 - `npm test`
 - CI provisions PostgreSQL, MySQL, SQL Server, and MariaDB services and runs the real-engine integration suites.
+- Locally, integration suites read `TEST_DATABASE_URL` / `TEST_MYSQL_URL` / `TEST_MSSQL_URL` from `.env` and skip when absent.
 - If a sandbox blocks local TCP connections or listeners, do not report resulting integration failures as application defects.
 - `electron/ipc-contract.test.ts` checks `main.ts`, `ipc-workspace.ts`, and `ipc-db.ts` against the preload channels.
 
@@ -57,5 +58,4 @@ SqlKit Studio is an Electron + Lit desktop SQL workbench supporting PostgreSQL, 
 - Preserve existing user changes and avoid unrelated rewrites.
 - Keep main, preload, renderer types, validation, and IPC contract tests synchronized when changing a channel.
 - Keep comments concise and focused on non-obvious behavior.
-- Use `apply_patch` for source edits.
 - Run lint and TypeScript after changes; run focused tests plus the broader non-network suite when practical.

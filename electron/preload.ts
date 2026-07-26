@@ -33,8 +33,8 @@ const api: SqlkitApi = {
   runBatch: (profileId, childDb, statements) => ipcRenderer.invoke('db:run-batch', profileId, childDb, statements),
   runDdl: (profileId, childDb, statements) => ipcRenderer.invoke('db:run-ddl', profileId, childDb, statements),
   fetchRows: (sessionId, offset, limit) => ipcRenderer.invoke('db:fetch-rows', sessionId, offset, limit),
-  exportQuery: (profileId, childDb, sql, params, sort, filter, format, suggestedName, executionId) =>
-    ipcRenderer.invoke('db:export-query', profileId, childDb, sql, params, sort, filter, format, suggestedName, executionId),
+  exportQuery: (profileId, childDb, sql, params, sort, filter, format, suggestedName, executionId, sqlTable) =>
+    ipcRenderer.invoke('db:export-query', profileId, childDb, sql, params, sort, filter, format, suggestedName, executionId, sqlTable),
   closeSession: (sessionId) => ipcRenderer.invoke('db:close-session', sessionId),
   cancelQuery: (profileId, executionId) => ipcRenderer.invoke('db:cancel', profileId, executionId),
   databaseCreateMeta: (profileId) => ipcRenderer.invoke('db:database-create-meta', profileId),

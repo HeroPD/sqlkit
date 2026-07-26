@@ -2,6 +2,10 @@
 // renderer-only; the rows here are whatever the panel holds (capped at the
 // IPC boundary), never a re-run of the query.
 
+import type { Engine, TableRef } from './electron'
+import { insertStatementForRow } from './result-sql'
+import { t } from './i18n'
+
 const bigintReplacer = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value
 
 const cellText = (value: unknown): string => {
@@ -132,7 +136,11 @@ export function toJson(columns: string[], rows: unknown[][]): string {
   )
 }
 
-export type ExportFormat = 'csv' | 'tsv' | 'json'
+export type ExportFormat = 'csv' | 'tsv' | 'json' | 'sql'
+
+/** What the SQL format needs beyond the rows: literals are spelled per engine,
+ * and every statement names a target table (null → a placeholder name). */
+export type SqlExportTarget = { engine: Engine; table: TableRef | null }
 
 // Emits an export one piece at a time (header, then a line per row, then a
 // footer) so a full result can be streamed straight to disk without ever
@@ -145,7 +153,18 @@ export type ExportSerializer = {
   footer(): string
 }
 
-export function createExportSerializer(columns: string[], format: ExportFormat): ExportSerializer {
+export function createExportSerializer(columns: string[], format: ExportFormat, sqlTarget?: SqlExportTarget): ExportSerializer {
+  if (format === 'sql') {
+    if (!sqlTarget) throw new Error(t('export.sqlTargetMissing'))
+    // One INSERT per row rather than a packed VALUES list: the serializer sees a
+    // row at a time and never holds a chunk to group, which is what keeps a
+    // streamed export flat in memory. Statements stay independently runnable.
+    return {
+      header: () => '',
+      row: (cells) => insertStatementForRow(cells, { columns, engine: sqlTarget.engine, table: sqlTarget.table }),
+      footer: () => '',
+    }
+  }
   if (format === 'json') {
     const keys = jsonKeys(columns)
     let first = true

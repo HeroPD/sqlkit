@@ -51,6 +51,21 @@ describe('openExportWriter', () => {
     expect(JSON.parse(readFileSync(jsonFile, 'utf8'))).toEqual([])
   })
 
+  it('writes a runnable INSERT per row for the sql format', async () => {
+    const file = tmpFile('out.sql')
+    const writer = openExportWriter(file, 'sql', { engine: 'mysql', table: { schema: null, name: 'users', kind: 'table' } })
+    writer.columns(['id', 'note'])
+    await writer.rows([[1, "it's"], [2, null]])
+    const { rowCount } = await writer.close()
+    expect(rowCount).toBe(2)
+    expect(readFileSync(file, 'utf8')).toBe(
+      'INSERT INTO `users` (`id`, `note`)\n' +
+        "VALUES (1, 'it''s');\n" +
+        'INSERT INTO `users` (`id`, `note`)\n' +
+        'VALUES (2, NULL);\n',
+    )
+  })
+
   it('rejects rows() when columns were never provided', async () => {
     const writer = openExportWriter(tmpFile('bad.csv'), 'csv')
     await expect(writer.rows([[1]])).rejects.toThrow(/columns/i)

@@ -40,7 +40,7 @@ const handle = (request: SqliteRequest): SqliteResultByRequest[SqliteRequestType
     case 'runDdl':
       return runDdl(requireDb(), request.statements)
     case 'exportQuery':
-      return exportQuery(requireDb(), request.sql, request.params, request.filePath, request.format)
+      return exportQuery(requireDb(), request.sql, request.params, request.filePath, request.format, request.sqlTarget)
     case 'listTables':
       return listTables(requireDb())
     case 'listColumns':

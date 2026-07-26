@@ -1,7 +1,7 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { closeSync, openSync, writeSync } from 'node:fs'
 import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, QueryResultSet, TableInspection, TableRef } from '../../src/electron'
-import { createExportSerializer, type ExportFormat } from '../../src/result-export'
+import { createExportSerializer, type ExportFormat, type SqlExportTarget } from '../../src/result-export'
 import { t } from '../../src/i18n'
 import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
 import { columnReference } from './column-reference'
@@ -102,13 +102,14 @@ export function exportQuery(
   params: SqliteParam[],
   filePath: string,
   format: ExportFormat,
+  sqlTarget?: SqlExportTarget,
 ): { rowCount: number } {
   const statements = splitStatements(sql, maskSqlite(sql))
   if (statements.length !== 1) throw new Error(t('export.singleStatement'))
   const statement = db.prepare(statements[0]!)
   const columns = statement.columns().map((column) => column.name)
   if (!columns.length) throw new Error(t('export.resultOnly'))
-  const serializer = createExportSerializer(columns, format)
+  const serializer = createExportSerializer(columns, format, sqlTarget)
   statement.setReturnArrays(true)
   const fd = openSync(filePath, 'w')
   let rowCount = 0

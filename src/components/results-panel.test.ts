@@ -332,7 +332,7 @@ describe('results-panel draft rows', () => {
     el.remove()
   })
 
-  it('selects every cell in a row when Copy Row is chosen', async () => {
+  it('copies a whole row on Copy Row without moving the selection', async () => {
     const writeClipboardText = vi.fn(() => Promise.resolve())
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }
     const el = await mountGrid(2)
@@ -344,8 +344,62 @@ describe('results-panel draft rows', () => {
     await el.updateComplete
 
     expect(writeClipboardText).toHaveBeenCalledWith('a1\tb1')
-    expect(el.shadowRoot!.querySelectorAll('tr[data-row="1"] td.selected')).toHaveLength(2)
+    // Both columns were copied, but only the right-clicked cell stays highlighted.
+    expect(el.shadowRoot!.querySelectorAll('tr[data-row="1"] td.selected')).toHaveLength(1)
     expect(el.shadowRoot!.querySelectorAll('tr[data-row="0"] td.selected')).toHaveLength(0)
+    el.remove()
+  })
+
+  it('copies a row as an INSERT naming the result source table', async () => {
+    const writeClipboardText = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }
+    const el = await mountGrid(2)
+    el.insertTable = { schema: 'public', name: 'users', kind: 'table' }
+    await el.updateComplete
+    const cell = el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="1"] td:nth-child(2)')!
+    cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('context-menu')!.items).toContainEqual(
+      expect.objectContaining({ id: 'copy-insert', label: 'Copy Row as INSERT' }),
+    )
+
+    el.shadowRoot!.querySelector('context-menu')!.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'copy-insert' } }))
+    await el.updateComplete
+
+    expect(writeClipboardText).toHaveBeenCalledWith(
+      'INSERT INTO "public"."users" ("a", "b")\n' + `VALUES ('a1', 'b1');\n`,
+    )
+    // The copy took the whole row but left the right-clicked cell selected —
+    // widening the highlight would read as the grid moving on its own.
+    expect(el.shadowRoot!.querySelectorAll('td.selected')).toHaveLength(1)
+    el.remove()
+  })
+
+  // A partial column selection still yields whole rows: an INSERT missing a
+  // row's other columns is not a statement worth emitting.
+  it('widens a column selection to whole rows when copying as INSERT', async () => {
+    const writeClipboardText = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }
+    const el = await mountGrid(2)
+    key(el, { key: 'ArrowRight' })
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    await el.updateComplete
+    const cell = el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="1"] td:nth-child(3)')!
+    cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('context-menu')!.items).toContainEqual(
+      expect.objectContaining({ id: 'copy-insert', label: 'Copy Selected Rows as INSERT' }),
+    )
+
+    el.shadowRoot!.querySelector('context-menu')!.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'copy-insert' } }))
+    await el.updateComplete
+
+    // No source table: the statement names the placeholder for the user to replace.
+    expect(writeClipboardText).toHaveBeenCalledWith(
+      'INSERT INTO "table_name" ("a", "b")\n' + `VALUES ('a0', 'b0'),\n       ('a1', 'b1');\n`,
+    )
+    // Both rows were copied in full, yet the one-column selection is intact.
+    expect(el.shadowRoot!.querySelectorAll('td.selected')).toHaveLength(2)
     el.remove()
   })
 
@@ -366,8 +420,9 @@ describe('results-panel draft rows', () => {
     await el.updateComplete
 
     expect(writeClipboardText).toHaveBeenCalledWith('a0\tb0\na1\tb1')
-    expect(el.shadowRoot!.querySelectorAll('tr[data-row="0"] td.selected')).toHaveLength(2)
-    expect(el.shadowRoot!.querySelectorAll('tr[data-row="1"] td.selected')).toHaveLength(2)
+    // Every column of both rows was copied; the column selection is left as it was.
+    expect(el.shadowRoot!.querySelectorAll('tr[data-row="0"] td.selected')).toHaveLength(1)
+    expect(el.shadowRoot!.querySelectorAll('tr[data-row="1"] td.selected')).toHaveLength(1)
     el.remove()
   })
 

@@ -486,14 +486,14 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
-    async exportQuery({ sql, params, childDb, sort, filter, filePath, format, executionId }) {
+    async exportQuery({ sql, params, childDb, sort, filter, filePath, format, sqlTarget, executionId }) {
       const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort, filter })
       // Registered like query() so Stop (and disconnect) can interrupt a
       // runaway export instead of it streaming to completion unstoppably.
       const entry = { executionId, pid: null as number | null, secret: null as number | null, cancelRequested: false }
       running.add(entry)
       let client: pg.PoolClient | null = null
-      const writer = openExportWriter(filePath, format)
+      const writer = openExportWriter(filePath, format, sqlTarget)
       try {
         client = await poolForQuery(childDb).connect()
         entry.pid = backendPid(client)

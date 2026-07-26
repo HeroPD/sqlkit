@@ -1192,6 +1192,7 @@ export class WorkbenchScreen extends LitElement {
             .foreignKeys=${this._resultForeignKeys()}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
+            .insertTable=${this._resultEditing.resultTable()}
             .drafts=${this._queries.draftsFor(this._ctx.activeTabId)}
             .edits=${this._queries.editsFor(this._ctx.activeTabId)}
             .pendingDeletes=${this._queries.pendingDeletesFor(this._ctx.activeTabId)}
@@ -1777,6 +1778,9 @@ export class WorkbenchScreen extends LitElement {
       format,
       `${base || 'results'}.${format}`,
       executionId,
+      // Only the sql format uses it; the main process names its INSERTs after
+      // this table (null → a placeholder the user replaces).
+      this._resultEditing.resultTable(),
     )
     this._queries.finishExport(executionId, result)
     // A stop the user asked for is not a failure; the task already shows it.

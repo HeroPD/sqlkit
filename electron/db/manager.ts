@@ -291,6 +291,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     filter: string | null,
     filePath: string,
     format: ExportFormat,
+    sqlTable: TableRef | null,
     executionId?: string,
   ): Promise<{ success: boolean; rowCount?: number; error?: string; cancelled?: boolean }> {
     const active = connections.get(profileId)
@@ -298,8 +299,11 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     const driver = active.driver
     if (!driver.exportQuery) return { success: false, error: t('connection.exportUnsupported') }
     if (!isReadOnlyQuery(sql, active.engine)) return { success: false, error: t('export.readOnlyOnly') }
+    // The engine comes from the live connection, never the renderer, so exported
+    // literals are always spelled for the database they were read from.
+    const sqlTarget = format === 'sql' ? { engine: active.engine, table: sqlTable } : undefined
     try {
-      const { rowCount } = await driver.exportQuery({ sql, params: params ?? [], childDb, sort, filter, filePath, format, executionId })
+      const { rowCount } = await driver.exportQuery({ sql, params: params ?? [], childDb, sort, filter, filePath, format, sqlTarget, executionId })
       return { success: true, rowCount }
     } catch (error) {
       await unlink(filePath).catch(() => {})

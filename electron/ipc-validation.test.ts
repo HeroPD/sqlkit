@@ -7,6 +7,7 @@ import {
   exportFormat,
   historyItems,
   nonNegativeInteger,
+  optionalTableReference,
   queryPayload,
   querySort,
   tableReference,
@@ -44,6 +45,11 @@ describe('IPC validation', () => {
     expect(databaseObject({ schema: null, name: 'status', detail: 'enum' })).toEqual({ schema: null, name: 'status', detail: 'enum' })
     expect(databaseObjectKind('function')).toBe('function')
     expect(() => tableReference({ schema: null, name: 'users', kind: 'procedure' })).toThrow(/kind/i)
+    // A SQL export target is optional (a join has none) but still validated when sent.
+    expect(optionalTableReference(undefined)).toBeNull()
+    expect(optionalTableReference(null)).toBeNull()
+    expect(optionalTableReference({ schema: null, name: 'users', kind: 'table' })).toEqual({ schema: null, name: 'users', kind: 'table' })
+    expect(() => optionalTableReference({ name: 'users' })).toThrow(/kind/i)
     expect(() => databaseObject({ schema: [], name: 'x', detail: '' })).toThrow(/schema/i)
     expect(() => databaseObjectKind('procedure')).toThrow(/kind/i)
   })
@@ -54,6 +60,7 @@ describe('exportFormat', () => {
     expect(exportFormat('csv')).toBe('csv')
     expect(exportFormat('tsv')).toBe('tsv')
     expect(exportFormat('json')).toBe('json')
+    expect(exportFormat('sql')).toBe('sql')
   })
 
   it('rejects anything else', () => {

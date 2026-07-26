@@ -75,13 +75,23 @@ function columnSourceIndex(
   return sources.findIndex((source) => tableMatchesSource(table, source) && source.column?.toLowerCase() === columnName.toLowerCase())
 }
 
-export function singleTableEditContext(input: ResultEditInput): SingleTableEditContext | null {
-  const { tab, profileId, run } = input
-  if (!tab || !profileId || run.phase !== 'done') return null
+/** The table a result's rows came from, or null when the query has no single
+ * source. Unlike singleTableEditContext this asks nothing about primary keys or
+ * writability — it answers "which table are these rows of", which is also what
+ * naming an INSERT target needs. */
+export function resultSourceTable(input: ResultEditInput): TableRef | null {
+  const { tab, run } = input
+  if (run.phase !== 'done') return null
   // The run's own table wins over the tab's: a result reached by following a
   // foreign key belongs to another table while the tab still names the one it
   // was opened for, and writing to the tab's table would target the wrong rows.
-  const table = run.table ?? tab.table ?? inferEditableTable(run.sql ?? '', input.tables, input.engine ?? undefined)
+  return run.table ?? tab?.table ?? inferEditableTable(run.sql ?? '', input.tables, input.engine ?? undefined)
+}
+
+export function singleTableEditContext(input: ResultEditInput): SingleTableEditContext | null {
+  const { tab, profileId, run } = input
+  if (!tab || !profileId || run.phase !== 'done') return null
+  const table = resultSourceTable(input)
   if (!table) return null
   if (run.result.columnSources?.some((source) => source.table !== null && !tableMatchesSource(table, source))) return null
   const columns = columnsForTable(input.columns, table)

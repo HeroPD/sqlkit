@@ -17,7 +17,7 @@ import type {
   TableInspection,
   TableRef,
 } from '../../src/electron'
-import type { ExportFormat } from '../../src/result-export'
+import type { ExportFormat, SqlExportTarget } from '../../src/result-export'
 import type { Endpoint } from './transport'
 import { createMssqlDriver } from './mssql'
 import { createMysqlDriver } from './mysql'
@@ -72,6 +72,9 @@ export type Driver = {
     filter?: string | null
     filePath: string
     format: ExportFormat
+    /** Present only for the `sql` format: the engine whose literal syntax the
+     * values take, and the table the INSERTs name. */
+    sqlTarget?: SqlExportTarget
     executionId?: string
   }): Promise<{ rowCount: number }>
   // Metadata methods target `childDb` when given, else the active child — same

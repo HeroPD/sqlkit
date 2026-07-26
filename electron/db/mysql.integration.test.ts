@@ -89,6 +89,49 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
+  // MySQL is the engine where a backslash escapes inside a string literal, so the
+  // exported statements are loaded back into the server to prove the doubling in
+  // result-sql holds against the real parser.
+  it('exports INSERT statements that round-trip through the server', async () => {
+    const driver = await connectDriver()
+    const file = join(mkdtempSync(join(tmpdir(), 'sqlkit-mysql-export-')), 'rows.sql')
+    try {
+      await admin.query('drop table if exists trip_src, trip_dst')
+      await admin.query(`create table trip_src (
+        id bigint, note text, amount decimal(20,4), flag boolean, blob_col blob, doc json, missing text)`)
+      await admin.query(`insert into trip_src values
+        (9007199254740993, 'O''Brien said "hi"', 0.1000, 1, x'dead00beef', '{"a":[1,2]}', null),
+        (-1, 'back\\\\slash and \\nnewline and trailing\\\\', -12345678901234.5678, 0, x'', '[]', 'x')`)
+      await admin.query('create table trip_dst like trip_src')
+
+      const result = await driver.exportQuery!({
+        sql: 'select * from trip_src order by id',
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'sql',
+        sqlTarget: { engine: 'mysql', table: { schema: null, name: 'trip_dst', kind: 'table' } },
+      })
+      expect(result.rowCount).toBe(2)
+      // Each statement runs on its own: this connection is not multipleStatements.
+      for (const statement of readFileSync(file, 'utf8').split(';\n').filter((part) => part.trim())) {
+        await admin.query(statement)
+      }
+      const [rows] = await admin.query(`select
+        (select count(*) from trip_src) = (select count(*) from trip_dst)
+        and not exists (
+          select 1 from trip_src s join trip_dst d using (id)
+          where not (s.note <=> d.note and s.amount <=> d.amount and s.flag <=> d.flag
+            and s.blob_col <=> d.blob_col and cast(s.doc as char) <=> cast(d.doc as char) and s.missing <=> d.missing)
+        ) as same`)
+      expect((rows as Array<{ same: unknown }>)[0]?.same).toBeTruthy()
+    } finally {
+      await admin.query('drop table if exists trip_src, trip_dst').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('connects and reports the server version', async () => {
     const profile = profileFromUrl(dbUrl, { engine: 'mysql' })
     const driver = createMysqlDriver(profile, endpointFor(profile), { onError: () => {} })

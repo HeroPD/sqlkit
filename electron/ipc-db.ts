@@ -16,6 +16,7 @@ import {
   nullableStringValue,
   nonNegativeInteger,
   objectDdlReference,
+  optionalTableReference,
   queryPayload,
   stringValue,
   tableReference,
@@ -120,7 +121,7 @@ export function registerDbIpc(context: DbIpcContext) {
     ) ?? { success: false as const, error: t('connection.noActiveSession') })
   ipcMain.handle('db:close-session', (event, sessionId: unknown) =>
     existingManager(event)?.closeSession(stringValue(sessionId, 'Session id', 200)))
-  ipcMain.handle('db:export-query', async (event, profileId: unknown, childDb: unknown, sql: unknown, params: unknown, sort: unknown, filter: unknown, format: unknown, suggestedName: unknown, executionId?: unknown) => {
+  ipcMain.handle('db:export-query', async (event, profileId: unknown, childDb: unknown, sql: unknown, params: unknown, sort: unknown, filter: unknown, format: unknown, suggestedName: unknown, executionId?: unknown, sqlTable?: unknown) => {
     let parsed
     try {
       const payload = queryPayload(sql, params, sort, filter, executionId)
@@ -131,6 +132,7 @@ export function registerDbIpc(context: DbIpcContext) {
         format: exportFormat(format),
         name: stringValue(suggestedName, 'Suggested file name', 1_000),
         executionId: executionId === undefined ? undefined : stringValue(executionId, 'Execution id', 200),
+        sqlTable: optionalTableReference(sqlTable),
       }
     } catch (error) {
       return { success: false as const, error: (error as Error).message }
@@ -145,7 +147,7 @@ export function registerDbIpc(context: DbIpcContext) {
       filters: [{ name: parsed.format.toUpperCase(), extensions: [parsed.format] }],
     })
     if (result.canceled || !result.filePath) return { success: false as const, canceled: true }
-    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.params, parsed.sort ?? null, parsed.filter ?? null, result.filePath, parsed.format, parsed.executionId)
+    return activeManager.exportQuery(parsed.profileId, parsed.childDb, parsed.sql, parsed.params, parsed.sort ?? null, parsed.filter ?? null, result.filePath, parsed.format, parsed.sqlTable, parsed.executionId)
   })
   ipcMain.handle('db:cancel', (event, profileId: unknown, executionId?: unknown) =>
     manager(event).cancelQuery(

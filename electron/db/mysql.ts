@@ -461,7 +461,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { running: entries.length, cancelled: queued.length + sent.filter(Boolean).length }
     },
 
-    async exportQuery({ sql, params, childDb, sort, filter, filePath, format, executionId }) {
+    async exportQuery({ sql, params, childDb, sort, filter, filePath, format, sqlTarget, executionId }) {
       const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode })
       // The manager's read-only gate masks with default flags; recheck with the
       // session's real sql_mode — NO_BACKSLASH_ESCAPES can hide a second
@@ -472,7 +472,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
       running.add(entry)
       let conn: mysql.PoolConnection | null = null
-      const writer = openExportWriter(filePath, format)
+      const writer = openExportWriter(filePath, format, sqlTarget)
       try {
         conn = await acquire(poolForQuery(childDb))
         entry.threadId = rawOf(conn).threadId ?? null

@@ -9,6 +9,7 @@ import {
   buildInsertRows,
   buildPendingUpdate,
   hasResultCells,
+  resultSourceTable,
   rowKeysForDelete,
   singleTableEditContext,
   type DraftRow,
@@ -53,6 +54,12 @@ export class ResultEditingController {
 
   rowEditable() {
     return singleTableEditContext(this.input()) !== null
+  }
+
+  /** The table the shown rows came from, for naming an INSERT the result is
+   * copied/exported as. Null for a join or expression-only query. */
+  resultTable() {
+    return resultSourceTable(this.input())
   }
 
   /** Whether there is anything staged to save (cell edits, new rows, or deletes). */

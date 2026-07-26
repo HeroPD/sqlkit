@@ -229,8 +229,16 @@ export function historyItems(value: unknown): HistoryItem[] {
 }
 
 export function exportFormat(value: unknown): ExportFormat {
-  if (value !== 'csv' && value !== 'tsv' && value !== 'json') throw new IpcValidationError('Export format is invalid')
+  if (value !== 'csv' && value !== 'tsv' && value !== 'json' && value !== 'sql') throw new IpcValidationError('Export format is invalid')
   return value
+}
+
+// The INSERT target of a SQL export. Absent for every other format, and absent
+// for a result with no single source table — the statements then name a
+// placeholder. Validated as a table reference, not taken as a SQL fragment, so
+// the name is quoted main-side by the connection's own dialect.
+export function optionalTableReference(value: unknown): TableRef | null {
+  return value === null || value === undefined ? null : tableReference(value)
 }
 
 export function querySort(value: unknown): QuerySort | null {

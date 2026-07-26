@@ -13,6 +13,7 @@ const FORMATS: Array<{ id: ExportFormat; label: string }> = [
   { id: 'csv', label: 'CSV' },
   { id: 'tsv', label: 'TSV' },
   { id: 'json', label: 'JSON' },
+  { id: 'sql', label: 'SQL' },
 ]
 
 // Export options modal for the results panel: pick a format and how many of

@@ -177,4 +177,25 @@ describe('createExportSerializer', () => {
     const json = createExportSerializer(['a'], 'json')
     expect(JSON.parse(json.header() + json.footer())).toEqual([])
   })
+
+  it('streams one self-contained INSERT per row, with no header or footer', () => {
+    const serializer = createExportSerializer(['id', 'name'], 'sql', {
+      engine: 'postgresql',
+      table: { schema: 'public', name: 'users', kind: 'table' },
+    })
+    expect(serializer.header()).toBe('')
+    expect(serializer.row([1, "O'Brien"])).toBe(
+      `INSERT INTO "public"."users" ("id", "name")\nVALUES (1, 'O''Brien');\n`,
+    )
+    expect(serializer.footer()).toBe('')
+  })
+
+  it('names a placeholder table when the result has no single source', () => {
+    const serializer = createExportSerializer(['v'], 'sql', { engine: 'sqlite', table: null })
+    expect(serializer.row([null])).toBe('INSERT INTO "table_name" ("v")\nVALUES (NULL);\n')
+  })
+
+  it('refuses a SQL export with no engine/table target', () => {
+    expect(() => createExportSerializer(['a'], 'sql')).toThrow(/engine and table/i)
+  })
 })

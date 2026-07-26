@@ -405,6 +405,9 @@ export type SqlkitApi = {
     format: ExportFormat,
     suggestedName: string,
     executionId?: string,
+    /** `sql` format only: the table the emitted INSERTs name. Null (or omitted)
+     * for a result with no single source table — a placeholder is used. */
+    sqlTable?: TableRef | null,
   ) => Promise<ExportQueryResult>
   /** Releases a result's main-process buffer (tab closed / superseded). */
   closeSession: (sessionId: string) => Promise<void>

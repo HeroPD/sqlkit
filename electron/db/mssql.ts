@@ -528,7 +528,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return { running: entries.length, cancelled: entries.length }
     },
 
-    async exportQuery({ sql: sqlText, params, childDb, sort, filter, filePath, format, executionId }) {
+    async exportQuery({ sql: sqlText, params, childDb, sort, filter, filePath, format, sqlTarget, executionId }) {
       const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort, filter })
       if (plan.batches.length !== 1) {
         throw new Error(t('export.sqlServerSingleBatch'))
@@ -541,7 +541,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       let writer: ExportWriter | null = null
       try {
         userPool = await openUserPool(childDb)
-        writer = openExportWriter(filePath, format)
+        writer = openExportWriter(filePath, format, sqlTarget)
         const request = bind(userPool.request(), plan.params)
         entry.request = request
         if (entry.cancelRequested) throw new Error(t('query.cancelled'))

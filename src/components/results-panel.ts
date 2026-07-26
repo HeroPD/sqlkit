@@ -7,6 +7,7 @@ import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { MAX_FETCH_ROWS } from '../result-limits'
 import { aggregateCells } from '../result-aggregate'
 import { cellToTsv, cellsToTsv, parseClipboardTsv, toDelimited, toJson, type ExportFormat } from '../result-export'
+import { toInsertStatements } from '../result-sql'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
 import { uuidv4, uuidv7 } from '../uuid'
 import { isFilterableQuery } from '../sql-filter'
@@ -212,6 +213,13 @@ export class ResultsPanel extends LitElement {
    * streamed export (re-runs past the buffered rows). The owner handles it. */
   @property({ attribute: false })
   streamExportAvailable = false
+
+  /** Source table the result's rows came from, used as the INSERT target when
+   * copying/exporting rows as SQL. Null when the result has no single source (a
+   * join, an expression-only select); the statements then name a placeholder
+   * table for the user to replace. */
+  @property({ attribute: false })
+  insertTable: TableRef | null = null
 
   /** The cell being edited inline, by row reference. `seed` is the character that
    * started a type-to-edit (replaces the value); null edits the existing value.
@@ -1073,7 +1081,11 @@ export class ResultsPanel extends LitElement {
     if (!result) return
     const slice = (await this._allRows(result, rows)).slice(0, rows)
     const content =
-      format === 'json' ? toJson(result.columns, slice) : toDelimited(result.columns, slice, format === 'tsv' ? '\t' : ',')
+      format === 'sql'
+        ? toInsertStatements({ columns: result.columns, rows: slice, engine: this.engine, table: this.insertTable })
+        : format === 'json'
+          ? toJson(result.columns, slice)
+          : toDelimited(result.columns, slice, format === 'tsv' ? '\t' : ',')
     void window.sqlkit.exportFile(`results.${format}`, content)
   }
 
@@ -1124,7 +1136,7 @@ export class ResultsPanel extends LitElement {
     const dataRow = cell.closest('tr')?.getAttribute('data-row')
     const row = cell.tagName === 'TH' || dataRow === null || dataRow === undefined ? -1 : Number(dataRow)
     if (row >= 0 && col < 0) {
-      this._selectRowsForCopy(row)
+      this._selectWholeRows(row)
     } else if (row >= 0) {
       const display = this._displayIndexOfRef({ kind: 'result', row })
       if (!this._isSelectedDisplay(display, col)) this._sel = { r0: display, c0: col, r1: display, c1: col }
@@ -1132,20 +1144,24 @@ export class ResultsPanel extends LitElement {
     this._menu = { x: event.clientX, y: event.clientY, row, col }
   }
 
-  private _selectRowsForCopy(row: number) {
-    const lastCol = (this._shownResult()?.columns.length ?? 0) - 1
-    if (lastCol < 0) return
+  // Display rows a row-level action covers: the whole selected row range when the
+  // clicked row falls inside it, else just that row. Read-only, so a copy can use
+  // it without moving the selection.
+  private _rowRangeForCopy(row: number): { r0: number; r1: number } {
     const display = this._displayIndexOfRef({ kind: 'result', row })
     const selection = this._sel
-    const selectedStart = selection ? Math.min(selection.r0, selection.r1) : display
-    const selectedEnd = selection ? Math.max(selection.r0, selection.r1) : display
-    const insideSelection = display >= selectedStart && display <= selectedEnd
-    this._sel = {
-      r0: insideSelection ? selectedStart : display,
-      c0: 0,
-      r1: insideSelection ? selectedEnd : display,
-      c1: lastCol,
-    }
+    const start = selection ? Math.min(selection.r0, selection.r1) : display
+    const end = selection ? Math.max(selection.r0, selection.r1) : display
+    return display >= start && display <= end ? { r0: start, r1: end } : { r0: display, r1: display }
+  }
+
+  // Right-clicking the # column selects whole rows, the way left-clicking it
+  // would. This is the click's own doing — no copy action moves the selection.
+  private _selectWholeRows(row: number) {
+    const lastCol = (this._shownResult()?.columns.length ?? 0) - 1
+    if (lastCol < 0) return
+    const { r0, r1 } = this._rowRangeForCopy(row)
+    this._sel = { r0, c0: 0, r1, c1: lastCol }
   }
 
   private _renderMenu() {
@@ -1202,12 +1218,19 @@ export class ResultsPanel extends LitElement {
         ? [{ id: 'copy-cell', label: t('results.copyCell'), shortcut: isMac ? '⌘C' : 'Ctrl+C', separatorBefore: canEdit }]
         : []),
       ...(menu.row >= 0
-        ? [{ id: 'copy-row', label: t(selectedRowCount > 1 ? 'results.copySelectedRows' : 'results.copyRow') }]
+        ? [
+            { id: 'copy-row', label: t(selectedRowCount > 1 ? 'results.copySelectedRows' : 'results.copyRow') },
+            {
+              id: 'copy-insert',
+              label: t(selectedRowCount > 1 ? 'results.copySelectedRowsAsInsert' : 'results.copyRowAsInsert'),
+            },
+          ]
         : []),
       ...(menu.col >= 0 ? [{ id: 'copy-column-name', label: t('results.copyColumnName'), separatorBefore: sortItems.length > 0 }] : []),
       { id: 'copy-csv', label: t('results.copyAllCsv'), separatorBefore: true },
       { id: 'copy-tsv', label: t('results.copyAllTsv') },
       { id: 'copy-json', label: t('results.copyAllJson') },
+      { id: 'copy-all-insert', label: t('results.copyAllInsert') },
       { id: 'export', label: t('results.export'), separatorBefore: true },
       ...(canDeleteRows
         ? [
@@ -1234,10 +1257,10 @@ export class ResultsPanel extends LitElement {
   private async _onMenuPick(action: string, result: QueryResult, at: { row: number; col: number }) {
     const copy = (text: string) => void window.sqlkit.writeClipboardText(text)
     if (action === 'copy-cell') copy(cellToTsv(this._recordValue({ kind: 'result', row: at.row }, at.col)))
-    if (action === 'copy-row') {
-      this._selectRowsForCopy(at.row)
-      this._copySelection()
-    }
+    if (action === 'copy-row') this._copyRows(at.row)
+    // Always whole rows: an INSERT of part of a row omits the rest of its
+    // columns, which is rarely a statement anyone wants.
+    if (action === 'copy-insert') this._copyRowsAsInsert(at.row)
     if (action === 'copy-column-name') copy(cellToTsv(result.columns[at.col] ?? ''))
     if (action === 'sort-asc') this._setSort(at.col, 'asc')
     if (action === 'sort-desc') this._setSort(at.col, 'desc')
@@ -1246,6 +1269,14 @@ export class ResultsPanel extends LitElement {
     if (action === 'copy-csv') copy(toDelimited(result.columns, await this._allRows(result), ','))
     if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
     if (action === 'copy-json') copy(toJson(result.columns, await this._allRows(result)))
+    if (action === 'copy-all-insert') {
+      copy(toInsertStatements({
+        columns: result.columns,
+        rows: await this._allRows(result),
+        engine: this.engine,
+        table: this.insertTable,
+      }))
+    }
     if (action === 'export') this._exportOpen = true
     if (action === 'view-record' && at.row >= 0 && at.col >= 0) this._openRecord({ kind: 'result', row: at.row }, at.col)
     // Edit opens the inline editor on the clicked cell; if it's inside a
@@ -1648,25 +1679,68 @@ export class ResultsPanel extends LitElement {
     else if (right > body.scrollLeft + body.clientWidth) body.scrollLeft = right - body.clientWidth
   }
 
-  private _copySelection() {
-    if (!this._sel || this.run.phase !== 'done') return
+  // A rectangle of display rows/columns as values plus the column names it spans,
+  // so a copy that has to name its values (INSERT) reads the same block a plain
+  // TSV copy does. Bounds come in explicitly: a row-level copy passes the full
+  // column range without having to widen the selection to say so.
+  private _blockAt(r0: number, r1: number, c0: number, c1: number): { columns: string[]; rows: unknown[][] } | null {
+    if (this.run.phase !== 'done') return null
     const { order } = this._display()
-    const r0 = Math.max(0, Math.min(this._sel.r0, this._sel.r1))
-    const r1 = Math.min(order.length - 1, Math.max(this._sel.r0, this._sel.r1))
-    const c0 = Math.min(this._sel.c0, this._sel.c1)
-    const c1 = Math.max(this._sel.c0, this._sel.c1)
-    const selected: unknown[][] = []
-    for (let d = r0; d <= r1; d += 1) {
+    const first = Math.max(0, r0)
+    const last = Math.min(order.length - 1, r1)
+    const names = this._shownResult()?.columns ?? []
+    const rows: unknown[][] = []
+    for (let d = first; d <= last; d += 1) {
       const ref = order[d]
       if (!ref) continue
       const values = this._rowValuesAt(ref)
       const cells: unknown[] = []
       for (let c = c0; c <= c1; c += 1) cells.push(values[c])
-      selected.push(cells)
+      rows.push(cells)
     }
+    return { columns: names.slice(c0, c1 + 1), rows }
+  }
+
+  private _selectedBlock(): { columns: string[]; rows: unknown[][] } | null {
+    const sel = this._sel
+    if (!sel) return null
+    return this._blockAt(
+      Math.min(sel.r0, sel.r1),
+      Math.max(sel.r0, sel.r1),
+      Math.min(sel.c0, sel.c1),
+      Math.max(sel.c0, sel.c1),
+    )
+  }
+
+  private _copySelection() {
+    const block = this._selectedBlock()
+    if (!block) return
     // cellsToTsv applies full TSV field escaping: an embedded tab/newline is
     // quoted (stays one cell) and a formula-leading cell is neutralized.
-    void window.sqlkit.writeClipboardText(cellsToTsv(selected))
+    void window.sqlkit.writeClipboardText(cellsToTsv(block.rows))
+  }
+
+  // The full-width block a row-level copy takes. Read rather than selected: a
+  // copy that expanded the highlight to what it took would look like the grid had
+  // jumped on its own.
+  private _rowBlockForCopy(row: number): { columns: string[]; rows: unknown[][] } | null {
+    const lastCol = (this._shownResult()?.columns.length ?? 0) - 1
+    if (lastCol < 0) return null
+    const { r0, r1 } = this._rowRangeForCopy(row)
+    return this._blockAt(r0, r1, 0, lastCol)
+  }
+
+  private _copyRows(row: number) {
+    const block = this._rowBlockForCopy(row)
+    if (block) void window.sqlkit.writeClipboardText(cellsToTsv(block.rows))
+  }
+
+  private _copyRowsAsInsert(row: number) {
+    const block = this._rowBlockForCopy(row)
+    if (!block) return
+    void window.sqlkit.writeClipboardText(
+      toInsertStatements({ columns: block.columns, rows: block.rows, engine: this.engine, table: this.insertTable }),
+    )
   }
 
   private _onGridPaste = (event: ClipboardEvent) => {
