@@ -20,7 +20,7 @@ import {
 // a value this machine produced, so a blob from elsewhere fails to decrypt the
 // same way a real cross-machine config would. `state` is mutable so tests can
 // flip encryption availability and point app.getPath at a temp dir.
-const state = vi.hoisted(() => ({ encryptionAvailable: true, userData: '' }))
+const state = vi.hoisted(() => ({ encryptionAvailable: true, userData: '', decryptCalls: 0 }))
 
 vi.mock('electron', () => ({
   app: { getPath: () => state.userData },
@@ -28,6 +28,7 @@ vi.mock('electron', () => ({
     isEncryptionAvailable: () => state.encryptionAvailable,
     encryptString: (value: string) => Buffer.from(`SEALED:${value}`, 'utf8'),
     decryptString: (buffer: Buffer) => {
+      state.decryptCalls += 1
       const text = buffer.toString('utf8')
       if (!text.startsWith('SEALED:')) throw new Error('cannot decrypt on this machine')
       return text.slice('SEALED:'.length)
@@ -93,7 +94,7 @@ afterEach(() => {
 })
 
 describe('workspace config: credential round-trip', () => {
-  it('encrypts every secret at rest and decrypts them back on read', () => {
+  it('encrypts every secret at rest and unseals them only when a connection is dialled', () => {
     const config = {
       version: 1,
       connections: [
@@ -124,12 +125,35 @@ describe('workspace config: credential round-trip', () => {
     expect(stored.connections[0]?.ssh.passphrase).toMatch(/^enc:v1:/)
     if (process.platform !== 'win32') expect(fs.statSync(configPath()).mode & 0o777).toBe(0o600)
 
+    // A plain read leaves them sealed — it must not touch the OS keychain, or
+    // opening a workspace would prompt for credentials nothing has asked for yet.
     const readBack = readWorkspaceConfig(workspaceDir)
     expect(readBack.error).toBeUndefined()
-    const connection = readBack.config.connections[0]
-    expect(connection?.password).toBe('pg-password-1')
-    expect(connection?.ssh?.password).toBe('ssh-password-2')
-    expect(connection?.ssh?.passphrase).toBe('key-passphrase-3')
+    expect(readBack.config.connections[0]?.password).toMatch(/^enc:v1:/)
+
+    // hydrate is the dial path, and it unseals all three.
+    const dialled = hydrateConnectionProfile(workspaceDir, readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!)
+    expect(dialled.password).toBe('pg-password-1')
+    expect(dialled.ssh?.password).toBe('ssh-password-2')
+    expect(dialled.ssh?.passphrase).toBe('key-passphrase-3')
+  })
+
+  // Every safeStorage call is a potential OS keychain prompt ("SqlKit Studio
+  // wants to use your confidential information"). Opening a workspace, listing
+  // connections and handing them to the renderer must cost none of them; only
+  // dialling a connection may.
+  it('does not touch the keychain to open a workspace or read its config', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'quiet' })] })
+
+    state.decryptCalls = 0
+    expect(openWorkspace(workspaceDir).success).toBe(true)
+    readWorkspaceConfig(workspaceDir)
+    const renderer = readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!
+    expect(state.decryptCalls).toBe(0)
+
+    // And the password is still there when something actually needs it.
+    expect(hydrateConnectionProfile(workspaceDir, renderer).password).toBe('quiet')
+    expect(state.decryptCalls).toBeGreaterThan(0)
   })
 
   it('never returns saved secret values to the renderer and restores them only in main', () => {
@@ -167,13 +191,13 @@ describe('workspace config: credential round-trip', () => {
     writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'old-secret' })] })
     const renderer = readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!
     writeWorkspaceConfig(workspaceDir, { version: 1, connections: [renderer] })
-    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('old-secret')
+    expect(hydrateConnectionProfile(workspaceDir, renderer).password).toBe('old-secret')
 
     writeWorkspaceConfig(workspaceDir, {
       version: 1,
       connections: [{ ...renderer, password: 'new-secret', passwordSaved: false }],
     })
-    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('new-secret')
+    expect(hydrateConnectionProfile(workspaceDir, renderer).password).toBe('new-secret')
   })
 
   it('does not forward a saved secret to a renderer-modified host', () => {
@@ -182,13 +206,18 @@ describe('workspace config: credential round-trip', () => {
     expect(hydrateConnectionProfile(workspaceDir, { ...renderer, host: 'attacker.example' }).password).toBe('')
   })
 
-  it('decrypts a config sealed on another machine to empty rather than leaking it', () => {
+  it('turns a config sealed on another machine into no password rather than leaking it', () => {
     const foreign = `enc:v1:${Buffer.from('from-another-keychain').toString('base64')}`
     writeRawConfig({ version: 1, connections: [{ ...profile(), password: foreign }] })
 
     const result = readWorkspaceConfig(workspaceDir)
     expect(result.error).toBeUndefined()
-    expect(result.config.connections[0]?.password).toBe('')
+    // Still sealed on read, and the undecryptable blob never reaches a driver as
+    // if it were the password.
+    expect(result.config.connections[0]?.password).toBe(foreign)
+    const renderer = readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!
+    expect(renderer.password).toBe('')
+    expect(hydrateConnectionProfile(workspaceDir, renderer).password).toBe('')
   })
 
   it('does not overwrite undecryptable encrypted secrets when opening the workspace', () => {
@@ -208,7 +237,7 @@ describe('workspace config: credential round-trip', () => {
     // Save the stored (already-encrypted) form again — it must pass through untouched.
     writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: encrypted })] })
     expect((JSON.parse(rawConfig()) as { connections: { password: string }[] }).connections[0]?.password).toBe(encrypted)
-    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('twice')
+    expect(hydrateConnectionProfile(workspaceDir, readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!).password).toBe('twice')
   })
 
   it('stores secrets as plaintext and flags them unencrypted when the OS keychain is unavailable', () => {
@@ -314,7 +343,7 @@ describe('workspace open: legacy migration', () => {
     expect(openWorkspace(workspaceDir).success).toBe(true)
     const stored = JSON.parse(rawConfig()) as { connections: { password: string }[] }
     expect(stored.connections[0]?.password).toMatch(/^enc:v1:/)
-    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('legacy-plain')
+    expect(hydrateConnectionProfile(workspaceDir, readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!).password).toBe('legacy-plain')
   })
 
   it('preserves a legacy plaintext password when opened without a keychain (no silent wipe)', () => {

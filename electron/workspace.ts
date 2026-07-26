@@ -82,6 +82,21 @@ const encryptSecret = (value: string): string => {
   return SECRET_PREFIX + safeStorage.encryptString(value).toString('base64')
 }
 
+// Reading the config never needs plaintext, so stored values stay sealed until
+// something is about to dial a connection. Touching safeStorage is what makes
+// macOS ask for keychain access, and asking the moment a workspace opens — for
+// credentials the user may not even use this session — is a poor trade.
+const decryptSecret = (value: string): string => {
+  if (!value.startsWith(SECRET_PREFIX)) return value
+  try {
+    return safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), 'base64'))
+  } catch {
+    // Unreadable (different machine, rotated OS key): behave as "no password
+    // saved" so the connection prompts instead of failing obscurely.
+    return ''
+  }
+}
+
 const isPlaintextSecret = (value: string | undefined) => !!value && !value.startsWith(SECRET_PREFIX)
 
 const connectionHasPlaintextSecret = (connection: ConnectionProfile) =>
@@ -190,7 +205,7 @@ const restoreSavedSecrets = (incoming: ConnectionProfile, saved: ConnectionProfi
 })
 
 type ConfigOutcome =
-  | { status: 'ok'; config: WorkspaceConfig; decryptFailed: boolean }
+  | { status: 'ok'; config: WorkspaceConfig }
   | { status: 'missing' }
   | { status: 'error'; error: string }
 
@@ -229,23 +244,13 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
         }
       : decoded
     const parsed = validateWorkspaceConfig(migrated)
-    let decryptFailed = false
-    const decryptTracked = (value: string): string => {
-      if (!value.startsWith(SECRET_PREFIX)) return value
-      try {
-        return safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), 'base64'))
-      } catch {
-        decryptFailed = true
-        return ''
-      }
-    }
-    const connections = normalizeConnections(parsed.connections).map((connection) => mapSecrets(connection, decryptTracked))
+    // Secrets stay as stored. encryptSecret passes an already-sealed value
+    // through untouched, so a later save round-trips them without a decrypt.
     return {
       status: 'ok',
-      decryptFailed,
       config: {
         ...parsed,
-        connections,
+        connections: normalizeConnections(parsed.connections),
       },
     }
   } catch (error) {
@@ -282,7 +287,8 @@ export function readWorkspaceConfigForRenderer(workspacePath: string | null): Wo
 export function hydrateConnectionProfile(workspacePath: string | null, incoming: ConnectionProfile): ConnectionProfile {
   if (!workspacePath) return stripSecretMarkers(incoming)
   const saved = readWorkspaceConfig(workspacePath).config.connections.find((connection) => connection.id === incoming.id)
-  return stripSecretMarkers(restoreSavedSecrets(incoming, saved))
+  // Unsealed here, at the last moment before the driver dials.
+  return stripSecretMarkers(mapSecrets(restoreSavedSecrets(incoming, saved), decryptSecret))
 }
 
 export function writeWorkspaceConfig(workspacePath: string | null, config: WorkspaceConfig): SaveResult {
@@ -410,7 +416,7 @@ export function openWorkspace(wsPath: string): WorkspaceResult {
     // Bring a readable config up to date (re-encrypt secrets where a key store
     // exists, create per-connection folders). An undecryptable one is left as-is
     // so a missing keychain can't wipe it.
-    if (outcome.status === 'ok' && !outcome.decryptFailed) writeWorkspaceConfig(workspacePath, outcome.config)
+    if (outcome.status === 'ok') writeWorkspaceConfig(workspacePath, outcome.config)
   }
 
   const name = path.basename(workspacePath)
