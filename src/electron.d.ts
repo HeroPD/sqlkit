@@ -293,6 +293,40 @@ export type InspectResult = { success: true; inspection: TableInspection } | { s
 
 export type ServerInfoResult = { success: true; sections: InspectSection[] } | { success: false; error: string }
 
+// --- Server activity (the Tasks dashboard's server panel) -----------------
+
+/** One live session on the server, as the engine reports it. */
+export type ServerSession = {
+  /** Engine session/process id — the cancel/terminate target, as text. */
+  id: string
+  user: string
+  database: string | null
+  /** The engine's own state word, lowercased ('active', 'sleeping', 'idle', …). */
+  state: string
+  /** Time in the current state/request; null when the engine doesn't say. */
+  elapsedMs: number | null
+  /** Current statement, or null when idle or hidden by permissions. */
+  sql: string | null
+  /** Opened by this app, so ending it only affects the user's own work. */
+  self: boolean
+}
+
+export type ServerActivity = {
+  /** `max` is null when the server sets no limit (SQL Server's default), so the
+   * gauge shows a count rather than a ratio. */
+  connections: { used: number; max: number | null }
+  /** Pre-formatted one-line stats — each engine picks what it can report. */
+  stats: Array<{ label: string; value: string }>
+  sessions: ServerSession[]
+}
+
+export type ServerActivityResult = { success: true; activity: ServerActivity } | { success: false; error: string }
+
+/** `cancel` stops the running statement; `terminate` drops the whole session. */
+export type SessionEndMode = 'cancel' | 'terminate'
+
+export type SessionEndResult = { success: boolean; error?: string }
+
 // --- Workspace files ------------------------------------------------------
 
 export type FileInfo = {
@@ -438,6 +472,10 @@ export type SqlkitApi = {
   getObjectDdl: (profileId: string, childDb: string | null, ref: ObjectDdlRef) => Promise<ObjectDdlResult>
   /** Server/cluster-scoped reference: extensions, roles, tablespaces, settings. */
   inspectServer: (profileId: string, childDb: string | null) => Promise<ServerInfoResult>
+  /** Live server load for the Tasks dashboard; polled while that view is open. */
+  serverActivity: (profileId: string, childDb: string | null) => Promise<ServerActivityResult>
+  /** Interrupts a session's statement, or drops the session outright. */
+  endSession: (profileId: string, sessionId: string, mode: SessionEndMode) => Promise<SessionEndResult>
   pickSqliteFile: () => Promise<string | null>
   /** Lists the .sql files of one database context's workspace subfolder. */
   listFiles: (folder: string) => Promise<FilesResult>

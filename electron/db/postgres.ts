@@ -10,7 +10,8 @@ import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
 import { columnReference } from './column-reference'
-import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_SESSIONS } from './limits'
+import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 import { openExportWriter, type ExportWriter } from './export'
@@ -104,6 +105,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       database,
       ssl,
       types: losslessTypes,
+      application_name: APP_CONNECTION_NAME,
       max: 4,
       connectionTimeoutMillis: 8000,
       // TCP keepalive (on by default in mysql2/tedious, off in pg): a dead peer
@@ -689,6 +691,65 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         { title: 'Tablespaces', rows: tablespaces.rows },
         { title: 'Settings (non-default)', rows: settings.rows },
       ].filter((section) => section.rows.length)
+    },
+
+    async serverActivity(childDb = null) {
+      const pool = poolForQuery(childDb)
+      // backend_type filters out the checkpointer/autovacuum workers, which are
+      // not sessions anyone can act on.
+      const [connections, stats, sessions] = await Promise.all([
+        pool.query<{ used: number; max: number }>(
+          `select count(*)::int as used, current_setting('max_connections')::int as max
+           from pg_stat_activity where backend_type = 'client backend'`,
+        ),
+        pool.query<{ uptime_seconds: string; cache_hit: string | null }>(
+          `select extract(epoch from (now() - pg_postmaster_start_time()))::bigint as uptime_seconds,
+                  round(100.0 * sum(blks_hit) / nullif(sum(blks_hit + blks_read), 0), 1)::text as cache_hit
+           from pg_stat_database`,
+        ),
+        // elapsed_ms arrives as text (bigint), hence the Number() below.
+        pool.query<{ id: string; user: string; database: string | null; state: string; elapsed_ms: string | null; sql: string | null; self: boolean }>(
+          `select pid::text as id,
+                  coalesce(usename, '') as "user",
+                  datname as database,
+                  coalesce(state, '') as state,
+                  (extract(epoch from (clock_timestamp() - state_change)) * 1000)::bigint as elapsed_ms,
+                  nullif(btrim(query), '') as sql,
+                  coalesce(application_name = $1, false) as self
+           from pg_stat_activity
+           where backend_type = 'client backend'
+           order by (state = 'active') desc nulls last, state_change desc nulls last
+           limit ${MAX_SESSIONS}`,
+          [APP_CONNECTION_NAME],
+        ),
+      ])
+      const summary = stats.rows[0]
+      return {
+        connections: { used: connections.rows[0]?.used ?? 0, max: connections.rows[0]?.max ?? null },
+        stats: [
+          ...(summary?.uptime_seconds ? [{ label: 'Uptime', value: formatUptime(Number(summary.uptime_seconds)) }] : []),
+          ...(summary?.cache_hit ? [{ label: 'Cache hit', value: `${summary.cache_hit}%` }] : []),
+        ],
+        sessions: sessions.rows.map((row) => ({
+          id: row.id,
+          user: row.user,
+          database: row.database,
+          state: row.state,
+          elapsedMs: row.elapsed_ms === null ? null : Number(row.elapsed_ms),
+          sql: row.sql,
+          self: row.self,
+        })),
+      }
+    },
+
+    async endSession(sessionId, mode) {
+      const pid = Number(sessionId)
+      if (!Number.isInteger(pid)) throw new Error(t('server.sessionUnknown'))
+      // pg_cancel_backend interrupts the statement; pg_terminate_backend drops
+      // the connection. Both return false when the backend is already gone.
+      const fn = mode === 'terminate' ? 'pg_terminate_backend' : 'pg_cancel_backend'
+      const result = await activePool().query<{ ok: boolean }>(`select ${fn}($1) as ok`, [pid])
+      if (result.rows[0]?.ok !== true) throw new Error(t('server.sessionEndFailed'))
     },
 
     async inspectObject(object, objectKind, childDb = null) {

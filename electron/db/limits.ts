@@ -2,6 +2,15 @@
 // demand (see result-sessions.ts) instead of receiving them all at once.
 // `truncated` flags a result larger than these caps. Kept in its own module so
 // the SQLite worker can import it without pulling in the rest of the driver graph.
+// Announced to the server on connect (application_name / program name), so the
+// Tasks dashboard can tell the app's own sessions from everyone else's — and so
+// SqlKit is identifiable in server logs and other DBAs' process lists.
+export const APP_CONNECTION_NAME = 'SqlKit Studio'
+
+// Sessions the server panel lists. A busy server can hold thousands; the panel
+// shows the interesting ones (active first) rather than paging through all.
+export const MAX_SESSIONS = 50
+
 export const MAX_BUFFERED_ROWS = 50_000
 export const MAX_BUFFERED_BYTES = 32 * 1024 * 1024
 export const MAX_CELL_BYTES = 1024 * 1024

@@ -2,7 +2,8 @@ import mysql from 'mysql2/promise'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { columnReference } from './column-reference'
-import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_SESSIONS } from './limits'
+import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 import { openExportWriter, type ExportWriter } from './export'
@@ -96,6 +97,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       password: profile.password,
       database: database || undefined,
       ssl,
+      // Identifies the app in processlist / session_connect_attrs, so the Tasks
+      // dashboard can tell its own sessions from everyone else's.
+      connectAttributes: { program_name: APP_CONNECTION_NAME },
       connectionLimit: 4,
       connectTimeout: 8000,
       // mysql2 queues checkouts without bound by default; cap the backlog so a
@@ -606,6 +610,93 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // MySQL has no CREATE OR REPLACE for functions (and SHOW CREATE VIEW omits
       // it), so drop-then-create makes the statement re-runnable.
       return `DROP ${objectType} IF EXISTS ${target};\n\n${create}`
+    },
+
+    async serverActivity(childDb = null) {
+      type SessionRow = {
+        id: string
+        user: string
+        database: string | null
+        state: string
+        elapsed_ms: number | null
+        sql: string | null
+        self: number
+      }
+      // Daemon threads (the event scheduler) are not sessions anyone can act on,
+      // and counting them would inflate the connection gauge.
+      const notDaemon = `coalesce(p.command, '') <> 'Daemon'`
+      const columns = `cast(p.id as char) as id,
+                       coalesce(p.user, '') as user,
+                       p.db as \`database\`,
+                       lower(coalesce(p.command, '')) as state,
+                       p.time * 1000 as elapsed_ms,
+                       nullif(trim(coalesce(p.info, '')), '') as \`sql\``
+      const order = `order by (coalesce(p.command, '') <> 'Sleep') desc, p.time desc limit ${MAX_SESSIONS}`
+      const sessions = await metaRows<SessionRow>(
+        // program_name comes from the connect attributes, which live in
+        // performance_schema — absent when it is disabled, hence the fallback.
+        `select ${columns},
+                coalesce(a.attr_value = ?, 0) as self
+         from information_schema.processlist p
+         left join performance_schema.session_connect_attrs a
+           on a.processlist_id = p.id and a.attr_name = 'program_name'
+         where ${notDaemon} ${order}`,
+        [APP_CONNECTION_NAME],
+        childDb,
+      ).catch(() => metaRows<SessionRow>(
+        `select ${columns}, (p.id = connection_id()) as self
+         from information_schema.processlist p where ${notDaemon} ${order}`,
+        [],
+        childDb,
+      ))
+
+      const [counts] = await metaRows<{ used: number; max: number }>(
+        `select (select count(*) from information_schema.processlist p where ${notDaemon}) as used,
+                @@max_connections as max`,
+        [],
+        childDb,
+      )
+      // SHOW GLOBAL STATUS is available whether or not performance_schema is,
+      // but names its columns Variable_name/Value — MariaDB included.
+      const status = await metaRows<Record<string, string>>(
+        `show global status where variable_name in
+           ('Uptime', 'Innodb_buffer_pool_read_requests', 'Innodb_buffer_pool_reads')`,
+        [],
+        childDb,
+      ).catch(() => [])
+      const value = (name: string) => {
+        const row = status.find((entry) => String(entry.Variable_name ?? '').toLowerCase() === name.toLowerCase())
+        return Number(row?.Value ?? NaN)
+      }
+      const requests = value('Innodb_buffer_pool_read_requests')
+      const reads = value('Innodb_buffer_pool_reads')
+      const uptime = value('Uptime')
+
+      return {
+        connections: { used: counts?.used ?? 0, max: counts?.max ?? null },
+        stats: [
+          ...(Number.isFinite(uptime) ? [{ label: 'Uptime', value: formatUptime(uptime) }] : []),
+          ...(Number.isFinite(requests) && requests > 0 && Number.isFinite(reads)
+            ? [{ label: 'Buffer pool hit', value: `${(100 * (1 - reads / requests)).toFixed(1)}%` }]
+            : []),
+        ],
+        sessions: sessions.map((row) => ({
+          id: String(row.id),
+          user: row.user,
+          database: row.database,
+          state: row.state,
+          elapsedMs: row.elapsed_ms === null ? null : Number(row.elapsed_ms),
+          sql: row.sql,
+          self: Number(row.self) === 1,
+        })),
+      }
+    },
+
+    async endSession(sessionId, mode) {
+      // KILL takes a bare integer, so the id is validated rather than quoted.
+      const id = Number(sessionId)
+      if (!Number.isInteger(id) || id <= 0) throw new Error(t('server.sessionUnknown'))
+      await metaRows(`KILL ${mode === 'terminate' ? 'CONNECTION' : 'QUERY'} ${id}`)
     },
 
     async inspectServer(childDb = null) {

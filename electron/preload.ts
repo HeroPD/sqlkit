@@ -49,6 +49,8 @@ const api: SqlkitApi = {
     ipcRenderer.invoke('db:inspect-object', profileId, childDb, object, objectKind),
   getObjectDdl: (profileId, childDb, ref) => ipcRenderer.invoke('db:object-ddl', profileId, childDb, ref),
   inspectServer: (profileId, childDb) => ipcRenderer.invoke('db:inspect-server', profileId, childDb),
+  serverActivity: (profileId, childDb) => ipcRenderer.invoke('db:server-activity', profileId, childDb),
+  endSession: (profileId, sessionId, mode) => ipcRenderer.invoke('db:end-session', profileId, sessionId, mode),
   pickSqliteFile: () => ipcRenderer.invoke('db:pick-sqlite-file'),
   listFiles: (folder) => ipcRenderer.invoke('file:list', folder),
   readFile: (path) => ipcRenderer.invoke('file:read', path),

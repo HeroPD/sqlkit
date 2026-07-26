@@ -8,6 +8,7 @@ import { testSshTunnel } from './db/transport'
 import {
   batchStatements,
   connectionProfile,
+  IpcValidationError,
   databaseCreateOptions,
   databaseObject,
   databaseObjectKind,
@@ -191,6 +192,18 @@ export function registerDbIpc(context: DbIpcContext) {
     ))
   ipcMain.handle('db:inspect-server', (event, profileId: unknown, childDb: unknown) =>
     manager(event).inspectServer(stringValue(profileId, 'Profile id', 200), nullableStringValue(childDb, 'Database name', 2_000)))
+
+  ipcMain.handle('db:server-activity', (event, profileId: unknown, childDb: unknown) =>
+    manager(event).serverActivity(stringValue(profileId, 'Profile id', 200), nullableStringValue(childDb, 'Database name', 2_000)))
+
+  ipcMain.handle('db:end-session', (event, profileId: unknown, sessionId: unknown, mode: unknown) => {
+    if (mode !== 'cancel' && mode !== 'terminate') throw new IpcValidationError('Session end mode is invalid')
+    return manager(event).endSession(
+      stringValue(profileId, 'Profile id', 200),
+      stringValue(sessionId, 'Session id', 200),
+      mode,
+    )
+  })
 
   ipcMain.handle('db:pick-sqlite-file', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)

@@ -8,6 +8,10 @@ export type EngineCapabilities = {
   namespaceModel: 'database-and-schema' | 'database-is-schema' | 'flat-file'
   /** Query calls intentionally do not preserve connection-scoped state. */
   persistentSession: false
+  /** Live server load for the Tasks dashboard, or false where there is no
+   * server to ask. `cancelSession` is false on engines whose only interrupt
+   * ends the whole session, so the UI offers just one destructive action. */
+  serverActivity: false | { cancelSession: boolean }
 }
 
 export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> = {
@@ -17,6 +21,8 @@ export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> =
     rowCount: 'exact-after-drain',
     namespaceModel: 'database-and-schema',
     persistentSession: false,
+    // pg_cancel_backend interrupts the statement, pg_terminate_backend drops it.
+    serverActivity: { cancelSession: true },
   },
   mysql: {
     // MySQL implicitly commits most DDL, so a later failure cannot roll back
@@ -26,6 +32,8 @@ export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> =
     rowCount: 'exact-after-drain',
     namespaceModel: 'database-is-schema',
     persistentSession: false,
+    // KILL QUERY vs KILL CONNECTION.
+    serverActivity: { cancelSession: true },
   },
   sqlserver: {
     ddlAtomicity: 'atomic',
@@ -33,6 +41,8 @@ export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> =
     rowCount: 'exact-after-drain',
     namespaceModel: 'database-and-schema',
     persistentSession: false,
+    // KILL always ends the session; there is no statement-only form.
+    serverActivity: { cancelSession: false },
   },
   sqlite: {
     ddlAtomicity: 'atomic',
@@ -40,6 +50,8 @@ export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> =
     rowCount: 'bounded-lower-bound',
     namespaceModel: 'flat-file',
     persistentSession: false,
+    // A local file has no sessions, connections or uptime to report.
+    serverActivity: false,
   },
 }
 

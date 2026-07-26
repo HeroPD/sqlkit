@@ -6,7 +6,8 @@ import path from 'node:path'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { columnReference } from './column-reference'
-import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_SESSIONS } from './limits'
+import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
 import { openExportWriter, type ExportWriter } from './export'
@@ -162,6 +163,9 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       requestTimeout: 0,
       pool: { max },
       options: {
+        // program_name in sys.dm_exec_sessions, so the Tasks dashboard can tell
+        // the app's own sessions from everyone else's.
+        appName: APP_CONNECTION_NAME,
         encrypt: tls.encrypt,
         trustServerCertificate: tls.trustServerCertificate,
         ...(tls.ca ? { cryptoCredentialsDetails: { ca: tls.ca } } : {}),
@@ -678,6 +682,74 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // stored text already uses it.
       if (/\bCREATE\s+OR\s+ALTER\b/i.test(definition)) return definition
       return definition.replace(/\bCREATE\s+(FUNCTION|VIEW|PROC|PROCEDURE|TRIGGER)\b/i, 'CREATE OR ALTER $1')
+    },
+
+    async serverActivity(childDb = null) {
+      type SessionRow = {
+        id: string
+        user: string
+        database: string | null
+        state: string
+        elapsed_ms: number | null
+        sql: string | null
+        self: number
+      }
+      const [counts] = await metaRows<{ used: number; max: number }>(
+        // 'user connections' is 0 by default, meaning no configured limit — the
+        // gauge shows a bare count rather than a ratio against zero.
+        `select (select count(*) from sys.dm_exec_sessions where is_user_process = 1) as used,
+                (select cast(value_in_use as int) from sys.configurations where name = 'user connections') as [max]`,
+        [],
+        childDb,
+      )
+      const [uptime] = await metaRows<{ uptime_seconds: number }>(
+        `select datediff(second, sqlserver_start_time, getdate()) as uptime_seconds from sys.dm_os_sys_info`,
+        [],
+        childDb,
+      )
+      const sessions = await metaRows<SessionRow>(
+        `select top ${MAX_SESSIONS}
+                cast(s.session_id as varchar(20)) as id,
+                coalesce(s.login_name, '') as [user],
+                db_name(s.database_id) as [database],
+                lower(coalesce(r.status, s.status, '')) as state,
+                r.total_elapsed_time as elapsed_ms,
+                nullif(ltrim(rtrim(coalesce(t.text, ''))), '') as sql,
+                case when s.program_name = @p1 then 1 else 0 end as self
+         from sys.dm_exec_sessions s
+         left join sys.dm_exec_requests r on r.session_id = s.session_id
+         outer apply sys.dm_exec_sql_text(r.sql_handle) t
+         where s.is_user_process = 1
+         order by case when r.session_id is not null then 0 else 1 end, s.last_request_start_time desc`,
+        [APP_CONNECTION_NAME],
+        childDb,
+      )
+      const max = counts?.max
+      return {
+        connections: { used: counts?.used ?? 0, max: max && max > 0 ? max : null },
+        stats: uptime?.uptime_seconds ? [{ label: 'Uptime', value: formatUptime(uptime.uptime_seconds) }] : [],
+        sessions: sessions.map((row) => ({
+          id: String(row.id),
+          user: row.user,
+          database: row.database,
+          state: row.state,
+          elapsedMs: row.elapsed_ms === null ? null : Number(row.elapsed_ms),
+          sql: row.sql,
+          self: Number(row.self) === 1,
+        })),
+      }
+    },
+
+    async endSession(sessionId, mode) {
+      // SQL Server has no statement-level cancel for another session: KILL always
+      // ends the session and rolls it back. Refuse rather than quietly terminate
+      // something the caller asked to merely interrupt — engine-capabilities
+      // reports cancelSession: false so the UI never offers it here.
+      if (mode === 'cancel') throw new Error(t('server.cancelUnsupported'))
+      // KILL takes a literal spid, so validate rather than quote.
+      const spid = Number(sessionId)
+      if (!Number.isInteger(spid) || spid <= 0) throw new Error(t('server.sessionUnknown'))
+      await metaRows(`KILL ${spid}`)
     },
 
     async inspectServer(childDb = null) {

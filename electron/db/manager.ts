@@ -18,7 +18,10 @@ import type {
   ObjectsResult,
   QueryResponse,
   QuerySort,
+  ServerActivityResult,
   ServerInfoResult,
+  SessionEndMode,
+  SessionEndResult,
   TableRef,
   TablesResult,
   TestConnectionResult,
@@ -442,6 +445,29 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  async function serverActivity(profileId: string, childDb: string | null = null): Promise<ServerActivityResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.serverActivity) return { success: false, error: t('connection.noServerActivity') }
+    try {
+      return { success: true, activity: await driver.serverActivity(childDb) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
+  async function endSession(profileId: string, sessionId: string, mode: SessionEndMode): Promise<SessionEndResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.endSession) return { success: false, error: t('connection.noServerActivity') }
+    try {
+      await driver.endSession(sessionId, mode)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
   async function inspectTable(profileId: string, table: TableRef, childDb: string | null = null): Promise<InspectResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
@@ -482,6 +508,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     inspectObject,
     objectDdl,
     inspectServer,
+    serverActivity,
+    endSession,
     setActiveChild,
     createDatabase,
     databaseCreateMeta,

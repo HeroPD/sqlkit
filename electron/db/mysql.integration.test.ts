@@ -618,4 +618,40 @@ DELIMITER ;`)
       await driver.disconnect()
     }
   })
+
+  // Verifies the serverActivity SQL against the real catalogs — the shapes it
+  // reads (bigint-as-text elapsed, unlimited connection caps, non-client
+  // threads) differ enough per engine to be worth pinning.
+  it('reports connection usage, uptime and its own session', async () => {
+    const driver = await connectDriver()
+    try {
+      const activity = await driver.serverActivity!()
+
+      expect(activity.connections.used).toBeGreaterThan(0)
+      expect(activity.connections.max === null || activity.connections.max > 0).toBe(true)
+      expect(activity.stats.some((stat) => stat.label === 'Uptime' && stat.value !== '')).toBe(true)
+
+      const mine = activity.sessions.filter((session) => session.self)
+      expect(mine.length).toBeGreaterThan(0)
+      for (const session of activity.sessions) {
+        expect(typeof session.id).toBe('string')
+        expect(session.id).not.toBe('')
+        // elapsedMs must be a real number, never a bigint string.
+        expect(session.elapsedMs === null || Number.isFinite(session.elapsedMs)).toBe(true)
+        expect(typeof session.self).toBe('boolean')
+      }
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('rejects an unusable session id rather than building bad SQL', async () => {
+    const driver = await connectDriver()
+    try {
+      await expect(driver.endSession!('7; drop table x', 'terminate')).rejects.toThrow()
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
 })

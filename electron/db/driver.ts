@@ -14,6 +14,8 @@ import type {
   InspectSection,
   QueryResult,
   QuerySort,
+  ServerActivity,
+  SessionEndMode,
   TableInspection,
   TableRef,
 } from '../../src/electron'
@@ -93,6 +95,14 @@ export type Driver = {
   objectDdl?(ref: ObjectDdlRef, childDb?: string | null): Promise<string>
   /** Server-scoped reference (extensions, roles, …) for the Server view. */
   inspectServer?(childDb?: string | null): Promise<InspectSection[]>
+  /** Live server load for the Tasks dashboard: connection usage, headline stats,
+   * and the session list. Undefined for engines with no server to ask (SQLite),
+   * which is what `serverActivity` in engine-capabilities reflects. Polled while
+   * the view is open, so it must stay a handful of cheap catalog reads. */
+  serverActivity?(childDb?: string | null): Promise<ServerActivity>
+  /** Ends someone's work: `cancel` interrupts the running statement, `terminate`
+   * drops the session outright. Paired with serverActivity. */
+  endSession?(sessionId: string, mode: SessionEndMode): Promise<void>
   /** Child databases; undefined for engines without all-databases support. */
   children?(): ChildDb[]
   /** Engine-specific option values (collations, charsets, …) for the create dialog. */
