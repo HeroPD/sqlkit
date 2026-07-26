@@ -377,6 +377,7 @@ export class SqlEditor extends LitElement {
   private _tablesKey = ''
   private _lastEmittedValue = ''
   private _syncingFromEditor = false
+  private _applyingHostValue = false
 
   // Built once per component: captures `this` for the change events.
   private _changeListener = EditorView.updateListener.of((update) => {
@@ -384,6 +385,10 @@ export class SqlEditor extends LitElement {
 
     const nextValue = update.state.doc.toString()
     this._lastEmittedValue = nextValue
+    // Loading the host's own value into the view is not a user edit. Reporting
+    // it as one makes the host treat a programmatic load like typing — which
+    // promoted a recycled preview tab out of preview on every history pick.
+    if (this._applyingHostValue) return
     this._syncingFromEditor = true
 
     this.dispatchEvent(
@@ -514,13 +519,18 @@ export class SqlEditor extends LitElement {
       this.value !== this._lastEmittedValue &&
       this.value !== view.state.doc.toString()
     ) {
-      view.dispatch({
-        changes: {
-          from: 0,
-          to: view.state.doc.length,
-          insert: this.value,
-        },
-      })
+      this._applyingHostValue = true
+      try {
+        view.dispatch({
+          changes: {
+            from: 0,
+            to: view.state.doc.length,
+            insert: this.value,
+          },
+        })
+      } finally {
+        this._applyingHostValue = false
+      }
 
       this._lastEmittedValue = this.value
     }

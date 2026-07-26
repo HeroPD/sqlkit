@@ -202,3 +202,28 @@ test('run-query and editor-change fire on the remounted element', async () => {
   expect(events).toContain('change')
   second.remove()
 })
+
+// Regression: the host swapping `value` on a live tab (the History list
+// recycling its preview tab to another entry) dispatched the new doc into the
+// view, which fired the change listener — so the host saw a programmatic load
+// as typing and pinned the preview tab on every pick.
+test('a host value swap does not report an editor-change', async () => {
+  const el = await mount('host-swap', 'select 1 as alpha;')
+  const changes: string[] = []
+  el.addEventListener('editor-change', (event) => changes.push((event as CustomEvent<{ value: string }>).detail.value))
+
+  el.value = 'select 2 as beta;'
+  await el.updateComplete
+  await sleep(25)
+
+  // The doc followed the host, but no edit was reported.
+  expect(text(el)).toContain('select 2 as beta;')
+  expect(changes).toEqual([])
+
+  // A real edit still reports.
+  const view = (el as unknown as { _view: EditorView })._view
+  view.dispatch({ changes: { from: view.state.doc.length, insert: ' -- typed' } })
+  expect(changes).toHaveLength(1)
+  expect(changes[0]).toContain('-- typed')
+  el.remove()
+})
