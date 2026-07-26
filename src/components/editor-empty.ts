@@ -1,6 +1,8 @@
 import { LitElement, css, html } from 'lit'
 import { customElement } from 'lit/decorators.js'
-import { icons, controls, typography } from '../shared-styles'
+import { unsafeHTML } from 'lit/directives/unsafe-html.js'
+import { APP_ICONS } from '../icons/app-icons'
+import { controls, typography } from '../shared-styles'
 import { isMac, mod } from '../platform'
 import { t } from '../i18n'
 
@@ -28,7 +30,7 @@ const ACTIONS: { action: EmptyAction; label: string; kbd?: string }[] = [
 export class EditorEmpty extends LitElement {
   render() {
     return html`
-      <div class="mark"><i class="icon icon-database" aria-hidden="true"></i></div>
+      <div class="mark">${unsafeHTML(APP_ICONS.appicon)}</div>
       <h2>${t('app.name')}</h2>
       <p>${t('empty.noEditor')}</p>
       <div class="actions">
@@ -51,7 +53,6 @@ export class EditorEmpty extends LitElement {
   static styles = [
     typography,
     controls,
-    icons,
     css`
       :host {
         display: block;
@@ -61,21 +62,18 @@ export class EditorEmpty extends LitElement {
         color: var(--text-2);
       }
 
+      /* The app mark is its own rounded tile, so it needs no frame of its own —
+         just a size, since the SVG carries a viewBox and no intrinsic one. */
       .mark {
         width: 54px;
         height: 54px;
         margin: 0 auto 14px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border: 1px solid var(--border-subtle);
-        border-radius: 12px;
-        background: var(--sidebar-bg);
-        color: var(--accent);
       }
 
-      .mark .icon {
-        font-size: 26px;
+      .mark svg {
+        display: block;
+        width: 100%;
+        height: 100%;
       }
 
       h2 {
