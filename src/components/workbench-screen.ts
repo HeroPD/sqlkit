@@ -2,7 +2,7 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { keyed } from 'lit/directives/keyed.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
-import { icons, controls, scrollbars, typography } from '../shared-styles'
+import { icons, controls, scrollbars, tooltip, typography } from '../shared-styles'
 import { ACTIVITY_ICONS } from '../icons/activity-icons'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
@@ -824,7 +824,9 @@ export class WorkbenchScreen extends LitElement {
             (view) => html`
               <activity-button
                 view=${view.id}
-                title=${`${view.title} (${isMac ? '⇧⌘' : 'Shift+Ctrl+'}${view.shortcutKey})`}
+                class="tooltip-right"
+                data-tooltip=${`${view.title} (${isMac ? '⇧⌘' : 'Shift+Ctrl+'}${view.shortcutKey})`}
+                aria-label=${view.title}
                 .active=${view.id === this._activeView}
                 .badge=${view.id === 'tasks' ? this._queries.longRunningCount() : 0}
               >
@@ -2015,6 +2017,7 @@ export class WorkbenchScreen extends LitElement {
     controls,
     icons,
     scrollbars,
+    tooltip,
     css`
       :host {
         flex-direction: column;

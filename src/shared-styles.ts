@@ -334,6 +334,14 @@ export const tooltip = css`
     left: auto;
   }
 
+  /* Side placement for the activity bar: too narrow to open below without
+     covering the next icon, so the label opens rightwards off the icon. */
+  .tooltip-right[data-tooltip]::after {
+    top: 50%;
+    left: calc(100% + 7px);
+    translate: -2px -50%;
+  }
+
   .tooltip-up[data-tooltip]:hover::after,
   .tooltip-up[data-tooltip]:focus-visible::after {
     translate: -50% 0;
@@ -342,6 +350,11 @@ export const tooltip = css`
   :is(.tooltip-start, .tooltip-end)[data-tooltip]:hover::after,
   :is(.tooltip-start, .tooltip-end)[data-tooltip]:focus-visible::after {
     translate: 0 0;
+  }
+
+  .tooltip-right[data-tooltip]:hover::after,
+  .tooltip-right[data-tooltip]:focus-visible::after {
+    translate: 0 -50%;
   }
 `
 
