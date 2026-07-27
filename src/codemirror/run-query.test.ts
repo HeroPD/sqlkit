@@ -211,6 +211,75 @@ describe('queryToRun', () => {
     })
   })
 
+  describe('statement-keyword separation', () => {
+    // Reported: `SELECT ... LIMIT 200` with no `;` directly above DDL. The
+    // parser merges them into one statement (it splits on `;` alone) and there
+    // is no blank line to clip on, so both used to run — and the server
+    // answered `syntax error at or near "ALTER"`.
+    const scratch =
+      'SELECT * FROM "public"."pos_terminals" LIMIT 200\nALTER TABLE segments ADD COLUMN IF NOT EXISTS custom_type TEXT;\nALTER TABLE segments ADD COLUMN c2 TEXT;'
+
+    it('ends an unterminated query at the next statement keyword', () => {
+      expect(queryAtCaret(scratch.replace('LIMIT 200', 'LIMIT| 200'))).toBe(
+        'SELECT * FROM "public"."pos_terminals" LIMIT 200',
+      )
+    })
+
+    it('runs the statement the cursor is on, not the one it was merged with', () => {
+      expect(queryAtCaret(scratch.replace('ALTER TABLE segments ADD COLUMN IF', 'ALTER| TABLE segments ADD COLUMN IF'))).toBe(
+        'ALTER TABLE segments ADD COLUMN IF NOT EXISTS custom_type TEXT;',
+      )
+    })
+
+    it('leaves indented continuation clauses attached', () => {
+      // MERGE's UPDATE/INSERT branches are clauses, not statements: they are
+      // indented, and only a flush-left keyword opens a query.
+      const doc =
+        'MERGE INTO t USING s ON s.id = t.id\nWHEN MATCHED THEN\n  UPDATE SET x = 1\nWHEN NOT MATCHED THEN\n  INSERT VALUES (s.id);'
+      expect(queryAtCaret(doc.replace('MERGE INTO', 'MERGE| INTO'))).toBe(doc)
+    })
+
+    it('keeps a multi-line ALTER TABLE with its ALTER COLUMN action', () => {
+      const doc = 'ALTER TABLE t\nALTER COLUMN c TYPE int;'
+      expect(queryAtCaret(doc.replace('ALTER TABLE', 'ALTER TABLE|'))).toBe(doc)
+      expect(queryAtCaret(doc.replace('ALTER COLUMN', 'ALTER| COLUMN'))).toBe(doc)
+    })
+
+    it('still ends an unterminated query at an explicit transaction start', () => {
+      expect(queryAtCaret('SELECT 1|\nBEGIN TRANSACTION;')).toBe('SELECT 1')
+      expect(queryAtCaret('SELECT 1|\nBEGIN;')).toBe('SELECT 1')
+    })
+
+    it('keeps a T-SQL block and its body attached', () => {
+      const doc = 'IF @x = 1\nBEGIN\nUPDATE t SET y = 2\nEND'
+      expect(queryAtCaret(doc.replace('IF', 'IF|'), MSSQL)).toBe(doc)
+      expect(queryAtCaret(doc.replace('UPDATE', 'UPDATE|'), MSSQL)).toBe(doc)
+    })
+
+    it('keeps a bare statement under T-SQL control flow attached', () => {
+      const doc = 'IF @x = 1\nUPDATE t SET y = 2;'
+      expect(queryAtCaret(doc.replace('IF', 'IF|'), MSSQL)).toBe(doc)
+    })
+
+    it('keeps flush-left MERGE branches attached', () => {
+      const doc = 'MERGE INTO t USING s ON s.id = t.id\nWHEN MATCHED THEN\nUPDATE SET x = 1;'
+      expect(queryAtCaret(doc.replace('MERGE', 'MERGE|'))).toBe(doc)
+    })
+
+    it('ignores a statement keyword inside parentheses', () => {
+      const doc = 'WITH d AS (\nDELETE FROM t RETURNING *\n)\nSELECT * |FROM d;'
+      expect(queryAtCaret(doc)).toBe(doc.replace('|', ''))
+    })
+
+    it('ignores a statement keyword inside a string or a dollar-quoted body', () => {
+      const inString = "SELECT 'x\nALTER TABLE t'| AS a;"
+      expect(queryAtCaret(inString)).toBe("SELECT 'x\nALTER TABLE t' AS a;")
+
+      const body = 'CREATE FUNCTION f() RETURNS void AS $$\nBEGIN\nUPDATE t SET x = 1;|\nEND\n$$ LANGUAGE plpgsql;'
+      expect(queryAtCaret(body)).toBe(body.replace('|', ''))
+    })
+  })
+
   describe('selection handling', () => {
     it('falls back to the nearest block when the selection is only whitespace', () => {
       const doc = 'SELECT 1;  \n  SELECT 2;'

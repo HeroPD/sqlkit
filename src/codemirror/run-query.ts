@@ -56,6 +56,51 @@ const isSeparatorLine = (tree: Tree, spans: DollarSpan[], line: Line) => {
   return context.name === 'Script' || context.name === 'Statement'
 }
 
+/**
+ * Keywords that can only open a statement, never continue one. The parser
+ * splits on `;` alone, so an unterminated query swallows everything up to the
+ * next semicolon — `SELECT … LIMIT 200` followed by `ALTER TABLE …;` parses as
+ * one statement and runs as one, which the server rejects. A flush-left
+ * statement keyword ends the query above it.
+ *
+ * Absent on purpose: keywords that legally continue a statement — SELECT
+ * (INSERT … SELECT, UNION SELECT), WITH, SET (UPDATE … SET), VALUES, and DROP
+ * (ALTER TABLE t / DROP COLUMN c, which people do write across two lines).
+ * ALTER counts only when what follows can head a statement — ALTER COLUMN and
+ * ALTER CONSTRAINT/CHECK continue an ALTER TABLE the same way DROP does — and
+ * BEGIN only with an explicit transaction tail: bare BEGIN opens a T-SQL block.
+ */
+const STATEMENT_START =
+  /^(?:(?:create|insert|update|delete|merge|truncate|copy|grant|revoke|vacuum|reindex|refresh|explain|commit|rollback|savepoint|call|do|show|use|describe|pragma)\b|alter\s+(?!column\b|constraint\b|check\b)|begin(?:\s*;|\s+(?:transaction|tran|work|isolation|deferred|immediate|exclusive|read)\b))/i
+
+/**
+ * A keyword line can still be the body of the construct above it: T-SQL
+ * control flow takes a bare statement (IF @x = 1 / WHILE … / ELSE), a bare
+ * BEGIN opens a block, and a MERGE branch hands off with THEN.
+ */
+const continuesPreviousLine = (doc: Text, line: Line) => {
+  if (line.number === 1) return false
+  const prev = doc.line(line.number - 1).text
+  return /^\s*(?:if|while|else)\b/i.test(prev) || /^\s*begin\s*$/i.test(prev) || /\bthen\s*$/i.test(prev)
+}
+
+/**
+ * Whether `line` opens a new statement: the keyword must be flush left (a
+ * continuation clause of a well-formed statement is indented — MERGE's WHEN
+ * MATCHED THEN / UPDATE SET), must not be the body the previous line expects,
+ * and must sit at the top level of the script. Inside parens (a CTE's DELETE),
+ * a string, or a comment the parser gives a different context; dollar-quoted
+ * bodies parse as plain SQL, so — as with blank lines — they need the span
+ * check instead.
+ */
+const startsStatement = (tree: Tree, spans: DollarSpan[], doc: Text, line: Line) => {
+  if (!STATEMENT_START.test(line.text)) return false
+  if (spanAt(spans, line.from)) return false
+  if (continuesPreviousLine(doc, line)) return false
+  const keyword = tree.resolveInner(line.from, 1)
+  return keyword.name === 'Keyword' && keyword.parent?.name === 'Statement' && keyword.parent.parent?.name === 'Script'
+}
+
 /** An empty statement (a bare `;`) is never worth running. */
 const isRunnable = (doc: Text, node: SyntaxNode) =>
   node.name === 'Statement' &&
@@ -129,8 +174,12 @@ const paragraphBlock = (tree: Tree, spans: DollarSpan[], doc: Text, cursor: numb
     line = !below || (above && cursor - above.to <= below.from - cursor) ? above! : below
   }
 
+  // A statement keyword bounds the block from whichever side it is met: the
+  // line that opens a statement is the block's first line, and the next one to
+  // open a statement is where the block stops.
   let first = line
   while (first.number > 1 && first.from > lo) {
+    if (startsStatement(tree, spans, doc, first)) break
     const candidate = doc.line(first.number - 1)
     if (isSeparatorLine(tree, spans, candidate)) break
     first = candidate
@@ -139,7 +188,7 @@ const paragraphBlock = (tree: Tree, spans: DollarSpan[], doc: Text, cursor: numb
   let last = line
   while (last.number < doc.lines && last.to < hi) {
     const candidate = doc.line(last.number + 1)
-    if (isSeparatorLine(tree, spans, candidate)) break
+    if (isSeparatorLine(tree, spans, candidate) || startsStatement(tree, spans, doc, candidate)) break
     last = candidate
   }
 
