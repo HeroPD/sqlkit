@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mysqlSessionIdentificationAvailable, mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
+import { jsonValidColumn, mysqlSessionIdentificationAvailable, mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
 
 describe('mysqlVersion', () => {
   it('labels plain MySQL versions', () => {
@@ -28,6 +28,22 @@ describe('mysqlSessionIdentificationAvailable', () => {
     expect(mysqlSessionIdentificationAvailable(0, -1)).toBe(false)
     expect(mysqlSessionIdentificationAvailable(1, 0)).toBe(false)
     expect(mysqlSessionIdentificationAvailable(undefined, undefined)).toBe(false)
+  })
+})
+
+describe('jsonValidColumn', () => {
+  it('reads the column out of a MariaDB JSON alias check', () => {
+    expect(jsonValidColumn('json_valid(`doc`)')).toBe('doc')
+    expect(jsonValidColumn(' JSON_VALID(`Payload`) ')).toBe('Payload')
+    expect(jsonValidColumn('json_valid(`we``ird`)')).toBe('we`ird')
+  })
+
+  it('leaves every other check expression alone', () => {
+    expect(jsonValidColumn('`age` > 0')).toBeNull()
+    expect(jsonValidColumn('json_valid(doc)')).toBeNull()
+    // MySQL wraps its clauses in parens; MariaDB's alias never does.
+    expect(jsonValidColumn('(json_valid(`doc`))')).toBeNull()
+    expect(jsonValidColumn('json_valid(`doc`) or `doc` is null')).toBeNull()
   })
 })
 

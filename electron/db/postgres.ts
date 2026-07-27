@@ -94,7 +94,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   // reason; callers can inspect them without a lossy intermediate conversion.
   // numeric[] (1231) is included: pg-types runs its elements through parseFloat,
   // silently rounding past 2^53, while scalar numeric already arrives as text.
-  for (const oid of [1082, 1083, 1114, 1184, 1186, 1266, 1115, 1182, 1183, 1185, 1187, 1270, 1231]) {
+  // JSON/JSONB (114/3802) must also stay text: JSON.parse would round numeric
+  // literals before the result-cell editor has a chance to preserve them.
+  for (const oid of [1082, 1083, 1114, 1184, 1186, 1266, 1115, 1182, 1183, 1185, 1187, 1270, 1231, 114, 3802]) {
     losslessTypes.setTypeParser(oid, (value) => value)
   }
 
@@ -1127,7 +1129,12 @@ function streamPgExport(
     let failed = false
     const setColumns = (fields?: pg.FieldDef[]) => {
       if (columnsSet) return
-      writer.columns((fields ?? []).map((field) => field.name))
+      const list = fields ?? []
+      // json/jsonb by result position, straight off the row description — these
+      // cells go into a JSON export as raw documents rather than quoted text.
+      const jsonColumns = new Set(list.flatMap((field, index) =>
+        field.dataTypeID === 114 || field.dataTypeID === 3802 ? [index] : []))
+      writer.columns(list.map((field) => field.name), jsonColumns)
       columnsSet = true
     }
     const fail = (error: unknown) => {

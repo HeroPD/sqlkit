@@ -17,6 +17,9 @@ import './export-dialog'
 import type { ExportConfirmDetail } from './export-dialog'
 import './sql-expression-editor'
 import type { SqlExpressionEditor } from './sql-expression-editor'
+import './json-cell-editor'
+import type { JsonProblemAt } from './json-cell-editor'
+import { formatJson, jsonError, minifyJson } from '../json-text'
 import './ui-select'
 import { formatInteger, rowWord, t } from '../i18n'
 import { previewSql, sqlPreviewParts } from '../sql-preview'
@@ -46,6 +49,7 @@ export type FollowForeignKeyDetail = { row: number; col: number }
 // Stable empty, like the other shared empties below: a fresh Map per render
 // would read as "the data changed" to anything memoising on identity.
 const NO_FOREIGN_KEYS: ReadonlyMap<number, ColumnReference> = new Map()
+const NO_JSON_COLUMNS: ReadonlySet<number> = new Set()
 
 // A header sort button click: re-sort by `column`, or clear the sort (null).
 export type SortColumnDetail = { columnIndex: number; direction: SortDir | null }
@@ -54,6 +58,9 @@ export type SortColumnDetail = { columnIndex: number; direction: SortDir | null 
 // (by draft array index). The grid lays these out in one interleaved sequence,
 // so selection/navigation work in a single "display row" coordinate space.
 type RowRef = { kind: 'result'; row: number } | { kind: 'draft'; index: number }
+
+/** Selected rectangle in display-row space: anchor (r0,c0) → focus (r1,c1). */
+type CellRect = { r0: number; c0: number; r1: number; c1: number }
 
 // Selected cells whose values are worth walking for the status-bar readout.
 // Past this only the count goes out, so a huge drag can't cost a repaint.
@@ -169,6 +176,11 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   foreignKeys: ReadonlyMap<number, ColumnReference> = NO_FOREIGN_KEYS
 
+  /** Result columns declared json/jsonb, by column index (see src/json-columns.ts).
+   * Their cells open in the JSON editor instead of the one-line inline input. */
+  @property({ attribute: false })
+  jsonColumns: ReadonlySet<number> = NO_JSON_COLUMNS
+
   /** When true, double-clicking a cell opens inline editing for text selection/copy.
    * The owner may reject impossible writes after a changed value is submitted. */
   @property({ attribute: false })
@@ -243,6 +255,29 @@ export class ResultsPanel extends LitElement {
   @state()
   private _record: { ref: RowRef; col: number } | null = null
 
+  /** The JSON cell opened for editing, with the text as it was when it opened —
+   * the comparison the toolbar's Save/Revert use while the draft is unstaged. */
+  @state()
+  private _jsonCell: { ref: RowRef; col: number; original: string } | null = null
+
+  @state()
+  private _jsonDraft = ''
+
+  /** What the open document fails to parse as, reported by the editor. */
+  @state()
+  private _jsonProblem: JsonProblemAt | null = null
+
+  /** Whether to show it: a save that had to refuse asks for the strip, and it
+   * goes away once the document parses. Until then the mark and its hover are
+   * report enough — a strip that never leaves would just be furniture. */
+  @state()
+  private _jsonProblemShown = false
+
+  /** The editor Back just closed, kept whole (draft text included) so Forward
+   * reopens it exactly as it was — including text too invalid to have staged. */
+  @state()
+  private _jsonForward: { ref: RowRef; col: number; original: string; draft: string } | null = null
+
   @state() private _filterOpen = false
   @state() private _filterDraft = ''
   @state() private _queryInfoOpen = false
@@ -271,6 +306,21 @@ export class ResultsPanel extends LitElement {
   private _resizeObs: ResizeObserver | null = null
   private _dragging = false
   private _editFocusPending = false
+  private _jsonFocusPending = false
+  // Where the grid was scrolled to when the JSON editor took over the body —
+  // both axes: a wide result is as easily scrolled sideways as down.
+  private _gridScroll = { top: 0, left: 0 }
+  private _restoreGridScroll = false
+  // Column shape of the result a save was started from. A successful save
+  // re-runs the tab's query, and landing back at row 1 loses the row the user
+  // was working on — the columns tell a refresh apart from a new query.
+  private _keepScrollColumns: readonly string[] | null = null
+  // Where the reader was in each result this tab has shown. The trail keeps its
+  // entries by identity, so following a foreign key and coming back can return
+  // to the rows (and the cell) the user left instead of the top. Weak so a
+  // dropped result takes its bookmark with it.
+  private _viewStates = new WeakMap<QueryResult, { scroll: { top: number; left: number }; sel: CellRect | null }>()
+  private _shownRunResult: QueryResult | null = null
 
   // Widths measured once per result, keyed by session so appends don't reflow.
   private _widthsCache: { key: unknown; widths: number[] } | null = null
@@ -346,6 +396,13 @@ export class ResultsPanel extends LitElement {
         this._focusGridPending = true
       }
       if (this._record?.ref.kind === 'draft' && !this.drafts[this._record.ref.index]) this._record = null
+      if (this._jsonCell?.ref.kind === 'draft' && !this.drafts[this._jsonCell.ref.index]) {
+        this._jsonCell = null
+        this._jsonDraft = ''
+        this._jsonProblem = null
+        this._jsonProblemShown = false
+      }
+      if (this._jsonForward?.ref.kind === 'draft' && !this.drafts[this._jsonForward.ref.index]) this._jsonForward = null
       // After a mixed delete, re-anchor the selection on the surviving result
       // rows — their display indices shifted when the drafts were dropped.
       if (this._pendingSelectResults) {
@@ -361,8 +418,24 @@ export class ResultsPanel extends LitElement {
     }
     if (!changed.has('run')) return
     const key = this.run.phase === 'done' ? (this.run.result.sessionId ?? this.run.result) : this.run.phase
-    if (key === this._lastKey) return // an append to the same result, not a new one
+    if (key === this._lastKey) {
+      // An append to the same result, not a new one — but a new result object,
+      // so keep tracking it: the bookmark below must file under the object the
+      // trail holds, not a superseded snapshot.
+      if (this.run.phase === 'done') this._shownRunResult = this.run.result
+      return
+    }
     this._lastKey = key
+    // Bookmark the result that is leaving before anything below resets the
+    // selection or the scroll — the body still shows it at this point, unless
+    // the JSON editor took the body over, in which case the grid's own offset is
+    // the one kept when it opened. Honoured further down if that result comes
+    // back, which is what makes returning from a followed foreign key land on
+    // the row the user left.
+    if (this._shownRunResult) {
+      this._viewStates.set(this._shownRunResult, { scroll: this._currentGridScroll(), sel: this._sel })
+    }
+    this._shownRunResult = this.run.phase === 'done' ? this.run.result : null
     // The popover shows the query behind the result that just went away; left
     // open it would silently reattach to whichever result lands next.
     if (this._queryInfoOpen) this._closeQueryInfo()
@@ -381,6 +454,38 @@ export class ResultsPanel extends LitElement {
         : null
     this._editing = null
     this._record = null
+    // The open cell belongs to the result that just went away; a trail step or
+    // a re-run would leave the editor pointing at a row that no longer exists.
+    this._jsonCell = null
+    this._jsonDraft = ''
+    this._jsonProblem = null
+    this._jsonProblemShown = false
+    this._jsonForward = null
+    // The refresh a save triggers keeps the same columns, so the rows the user
+    // was working on are still there — stay where they were rather than
+    // snapping to row 1. Any other result (a new query, a trail step) starts at
+    // the top as before. Only a landed result answers this: the refresh passes
+    // through `running` first, and judging the flag there would spend it before
+    // the rows arrive.
+    if (this.run.phase === 'done') {
+      const bookmark = this._viewStates.get(this.run.result)
+      if (bookmark) {
+        this._keepScrollColumns = null
+        this._sel = bookmark.sel
+        this._gridScroll = bookmark.scroll
+        this._restoreGridScroll = true
+        return
+      }
+      const keepScroll =
+        this._keepScrollColumns !== null &&
+        shown?.columns.length === this._keepScrollColumns.length &&
+        shown.columns.every((column, index) => column === this._keepScrollColumns?.[index])
+      this._keepScrollColumns = null
+      if (keepScroll) {
+        this._restoreGridScroll = true
+        return
+      }
+    }
     this._scrollTop = 0
     this._resetScroll = true
   }
@@ -416,6 +521,25 @@ export class ResultsPanel extends LitElement {
         // a plain edit selects all so the first keystroke replaces.
         if (this._editing?.seed != null) input.setSelectionRange(input.value.length, input.value.length)
         else input.select()
+      }
+    }
+    if (this._jsonFocusPending) {
+      const editor = this.shadowRoot?.querySelector('json-cell-editor')
+      if (editor) {
+        this._jsonFocusPending = false
+        editor.focusEditor()
+      }
+    }
+    // Back from the editor lands on the row the user left, not at the top. The
+    // virtualizer reads scrollTop, so writing it here also restores which rows
+    // are in the DOM (the scroll handler picks the change up).
+    if (this._restoreGridScroll) {
+      const body = this._bodyEl()
+      if (body && this.shadowRoot?.querySelector('table')) {
+        this._restoreGridScroll = false
+        body.scrollTop = this._gridScroll.top
+        body.scrollLeft = this._gridScroll.left
+        this._scrollTop = this._gridScroll.top
       }
     }
     if (this._focusGridPending) {
@@ -455,6 +579,14 @@ export class ResultsPanel extends LitElement {
 
   private _bodyEl() {
     return this.shadowRoot?.querySelector<HTMLElement>('.body') ?? null
+  }
+
+  // The grid's current offsets, or the ones kept when the JSON editor took the
+  // body over (it scrolls the body to the top, so reading it then is useless).
+  private _currentGridScroll() {
+    if (this._jsonCell) return this._gridScroll
+    const body = this._bodyEl()
+    return body ? { top: body.scrollTop, left: body.scrollLeft } : { top: this._scrollTop, left: 0 }
   }
 
   // Rows are uniform height; measure one real row, then reuse it.
@@ -660,8 +792,36 @@ export class ResultsPanel extends LitElement {
   }
 
   private _saveRows = () => {
-    if (!this._hasPending()) return
+    // The JSON editor holds its text until a flush point, and this is one —
+    // otherwise ⌘S while typing would save everything except what is on screen.
+    // What the flush just staged is in the owner's state but not yet back in
+    // `edits`, so a save driven only by the editor has to count it directly:
+    // asking _hasPending() alone would silently need a second click.
+    const flushed = this._flushJson()
+    // A document the parser rejects is never staged. The strip under the editor
+    // already says what is wrong; put the cursor on it so it is findable.
+    if (!flushed && this._jsonCell && this._jsonDirty() && jsonError(this._jsonDraft.trim())) {
+      this._revealJsonError()
+      return
+    }
+    if (!flushed && !this._hasPending()) return
+    // A save that lands re-runs the query; remember where to come back to. With
+    // the editor open the body shows it, so the grid's position is the one
+    // captured when it opened.
+    if (!this._jsonCell) this._gridScroll = this._currentGridScroll()
+    this._keepScrollColumns = this._shownResult()?.columns ?? null
     this.dispatchEvent(new CustomEvent('save-rows', { bubbles: true, composed: true }))
+    // Keyboard activation (Tab + Enter) leaves focus on the button, and the
+    // review dialog hands focus back to whatever held it — put it in the editor
+    // first, so cancelling the dialog returns the user to the document. Mouse
+    // clicks never focus the button (see _onHeadPointerDown), so this is a no-op there.
+    if (this._jsonCell) this.shadowRoot?.querySelector('json-cell-editor')?.focusEditor()
+  }
+
+  /** The save this panel armed a scroll-keep for never ran — the review was
+   * cancelled — so the next result must not inherit the stale restore. */
+  saveNotRun() {
+    this._keepScrollColumns = null
   }
 
   private _hasPending() {
@@ -671,6 +831,19 @@ export class ResultsPanel extends LitElement {
   // Throws away every staged edit and new row (no DB write to undo).
   private _discardChanges = () => {
     this._escArmed = false
+    // Revert throws away the unstaged draft too. The staged value is about to
+    // go, so the editor resets to the row as stored — read here rather than
+    // through _editCellText, which would hand back the edit being discarded.
+    const open = this._jsonCell
+    if (open?.ref.kind === 'result') {
+      const stored = this._shownResult()?.rows[open.ref.row]?.[open.col]
+      this._setJsonText(open, stored === null || stored === undefined ? '' : formatCell(stored))
+    } else if (open) {
+      // The draft row itself is going away; there is nothing left to edit.
+      this._jsonCell = null
+      this._jsonDraft = ''
+      this._focusGridPending = true
+    }
     if (!this._hasPending()) return
     this._editing = null
     this.dispatchEvent(new CustomEvent('discard-changes', { bubbles: true, composed: true }))
@@ -717,6 +890,15 @@ export class ResultsPanel extends LitElement {
       else if (ref?.kind === 'draft') drafts.push(ref.index)
     }
     return { results, drafts }
+  }
+
+  // A toolbar click acts on the grid or the editor; letting it also focus the
+  // button parks keyboard focus there, and the next keypress (Esc closing the
+  // query popover) paints the browser's focus ring on it. Cancelling pointerdown
+  // keeps focus where it was — Tab still reaches and rings the buttons. Only
+  // buttons: ui-select retargets to its host, and the filter input needs focus.
+  private _onHeadPointerDown = (event: Event) => {
+    if ((event.target as HTMLElement).closest('button')) event.preventDefault()
   }
 
   private _toggleQueryInfo = () => {
@@ -767,6 +949,9 @@ export class ResultsPanel extends LitElement {
   private _followForeignKey(event: Event, row: number, col: number) {
     event.preventDefault()
     event.stopPropagation()
+    // Select the cell being followed from, so the bookmark this result leaves
+    // behind brings the user back to it.
+    this._selectCell({ kind: 'result', row }, col)
     this.dispatchEvent(new CustomEvent<FollowForeignKeyDetail>('follow-foreign-key', {
       detail: { row, col },
       bubbles: true,
@@ -775,8 +960,22 @@ export class ResultsPanel extends LitElement {
   }
 
   // The owner holds the trail (QueriesController), so stepping is a request, not
-  // something the panel can do to itself.
+  // something the panel can do to itself. The JSON editor is the exception: it
+  // is a view of the current result rather than a trail entry, so back closes it
+  // — one back affordance, wherever the user came from.
   private _navigate(direction: 'back' | 'forward') {
+    if (direction === 'back' && this._jsonCell) {
+      this._closeJson()
+      return
+    }
+    // A dirty closed document could not be staged (valid text is rebased by the
+    // close flush), so it must be reopened before a trail step can clear it.
+    // Once fixed or reverted, Forward belongs to result history again.
+    const closedJsonDirty = this._jsonForward && this._jsonForward.draft !== this._jsonForward.original
+    if (direction === 'forward' && this._jsonForward && (!this.canGoForward || closedJsonDirty)) {
+      this._reopenJson(this._jsonForward)
+      return
+    }
     this.dispatchEvent(new CustomEvent<{ direction: 'back' | 'forward' }>('result-navigate', {
       detail: { direction },
       bubbles: true,
@@ -825,8 +1024,22 @@ export class ResultsPanel extends LitElement {
     const exportable = !!result?.columns.length
     const canEditResult = this._canEditShownResult()
     const pendingCount = this.drafts.length + this.edits.size + this.pendingDeletes.size
-    const showWriteTools = exportable && canEditResult && (this.rowEditable || pendingCount > 0)
-    const canToggleRecord = exportable && (this._record !== null || (this._sel ? this._refAt(this._sel.r1) !== null : false))
+    // The JSON editor's text is not staged until a flush point, so Save and
+    // Revert have to see it too — otherwise they read as dead while the user is
+    // looking at unsaved work. Row-shaped actions go the other way: the editor
+    // is showing one cell, so adding and deleting rows has nothing to act on.
+    const jsonOpen = this._jsonCell !== null
+    const jsonDirty = this._jsonDirty()
+    // An unstaged closed document takes precedence so result navigation cannot
+    // clear the only copy of the user's invalid in-progress text.
+    const closedJsonDirty = this._jsonForward !== null && this._jsonForward.draft !== this._jsonForward.original
+    const reopensJson = !jsonOpen && this._jsonForward !== null && (!this.canGoForward || closedJsonDirty)
+    const showWriteTools = exportable && canEditResult && (this.rowEditable || pendingCount > 0 || jsonDirty)
+    const canSave = pendingCount > 0 || jsonDirty
+    // The editor's unstaged document is a change the user can see, so the count
+    // has to include it — "Save 0 pending changes" on a live button reads broken.
+    const savableCount = pendingCount + (jsonDirty ? 1 : 0)
+    const canToggleRecord = !jsonOpen && exportable && (this._record !== null || (this._sel ? this._refAt(this._sel.r1) !== null : false))
     const runSql = this.run.phase === 'done' || this.run.phase === 'error' ? this.run.sql : undefined
     // Bound values are substituted for display only — the run itself stayed
     // parameterized, which is what keeps it correct across engines and types.
@@ -835,7 +1048,7 @@ export class ResultsPanel extends LitElement {
     const selected = this.rowEditable && canEditResult ? this._selectedRefs() : { results: [], drafts: [] }
     const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
-      <div class="head">
+      <div class="head" @pointerdown=${this._onHeadPointerDown}>
         ${runSql
           ? html`
               <button
@@ -873,14 +1086,20 @@ export class ResultsPanel extends LitElement {
               <div class="toolbar" aria-label=${t('results.editActions')}>
                 ${this.rowEditable && canEditResult
                   ? html`
-                      <button class="head-action" data-tooltip=${t('results.addRow')} aria-label=${t('results.addRow')} @click=${this._addRow}>
+                      <button
+                        class="head-action"
+                        data-tooltip=${t('results.addRow')}
+                        aria-label=${t('results.addRow')}
+                        ?disabled=${jsonOpen}
+                        @click=${this._addRow}
+                      >
                         <i class="icon icon-plus" aria-hidden="true"></i>
                       </button>
                       <button
                         class="head-action danger"
                         data-tooltip=${t('results.deleteRows')}
                         aria-label=${t('results.deleteRows')}
-                        ?disabled=${!hasDeletable}
+                        ?disabled=${jsonOpen || !hasDeletable}
                         @click=${() => this._deleteSelection()}
                       >
                         <i class="icon icon-minus" aria-hidden="true"></i>
@@ -889,7 +1108,7 @@ export class ResultsPanel extends LitElement {
                         class="head-action"
                         data-tooltip=${t('results.duplicateRowsShortcut', { shortcut: isMac ? '⌘D' : 'Ctrl+D' })}
                         aria-label=${t('results.duplicateRows')}
-                        ?disabled=${selected.results.length === 0 || !!result?.truncated}
+                        ?disabled=${jsonOpen || selected.results.length === 0 || !!result?.truncated}
                         @click=${this._duplicateSelection}
                       >
                         <i class="icon icon-copy" aria-hidden="true"></i>
@@ -899,12 +1118,12 @@ export class ResultsPanel extends LitElement {
                 <button
                   class="head-action"
                   data-tooltip=${t('results.savePending', {
-                    count: pendingCount,
-                    changes: t(pendingCount === 1 ? 'results.pendingChange' : 'results.pendingChanges'),
+                    count: savableCount,
+                    changes: t(savableCount === 1 ? 'results.pendingChange' : 'results.pendingChanges'),
                     shortcut: isMac ? '⌘S' : 'Ctrl+S',
                   })}
                   aria-label=${t('results.saveChanges')}
-                  ?disabled=${pendingCount === 0}
+                  ?disabled=${!canSave}
                   @click=${this._saveRows}
                 >
                   <i class="icon icon-save" aria-hidden="true"></i>
@@ -913,7 +1132,7 @@ export class ResultsPanel extends LitElement {
                   class="head-action"
                   data-tooltip=${t('results.discardAllShortcut', { shortcut: 'Esc Esc' })}
                   aria-label=${t('results.discardChanges')}
-                  ?disabled=${pendingCount === 0}
+                  ?disabled=${!canSave}
                   @click=${this._discardChanges}
                 >
                   <i class="icon icon-undo-2" aria-hidden="true"></i>
@@ -931,6 +1150,7 @@ export class ResultsPanel extends LitElement {
                         data-tooltip=${t('results.filter')}
                         aria-label=${t('results.filter')}
                         aria-expanded=${this._filterOpen}
+                        ?disabled=${jsonOpen}
                         @click=${this._toggleFilter}
                       >
                         <i class="icon icon-filter" aria-hidden="true"></i>
@@ -957,23 +1177,23 @@ export class ResultsPanel extends LitElement {
             `
           : ''}
         <span class="status">${this._status()}</span>
-        ${this.canGoBack || this.canGoForward
+        ${this.canGoBack || this.canGoForward || jsonOpen || this._jsonForward
           ? html`
               <div class="toolbar" aria-label=${t('results.navActions')}>
                 <button
                   class="head-action"
-                  data-tooltip=${t('results.back')}
-                  aria-label=${t('results.back')}
-                  ?disabled=${!this.canGoBack}
+                  data-tooltip=${jsonOpen ? t('results.backToGridAction') : t('results.back')}
+                  aria-label=${jsonOpen ? t('results.backToGridAction') : t('results.back')}
+                  ?disabled=${!jsonOpen && !this.canGoBack}
                   @click=${() => this._navigate('back')}
                 >
                   <i class="icon icon-chevron-left" aria-hidden="true"></i>
                 </button>
                 <button
                   class="head-action"
-                  data-tooltip=${t('results.forward')}
-                  aria-label=${t('results.forward')}
-                  ?disabled=${!this.canGoForward}
+                  data-tooltip=${reopensJson ? t('results.forwardToJson') : t('results.forward')}
+                  aria-label=${reopensJson ? t('results.forwardToJson') : t('results.forward')}
+                  ?disabled=${jsonOpen || !(this.canGoForward || reopensJson)}
                   @click=${() => this._navigate('forward')}
                 >
                   <i class="icon icon-chevron-right" aria-hidden="true"></i>
@@ -1084,7 +1304,7 @@ export class ResultsPanel extends LitElement {
       format === 'sql'
         ? toInsertStatements({ columns: result.columns, rows: slice, engine: this.engine, table: this.insertTable })
         : format === 'json'
-          ? toJson(result.columns, slice)
+          ? toJson(result.columns, slice, this.jsonColumns)
           : toDelimited(result.columns, slice, format === 'tsv' ? '\t' : ',')
     void window.sqlkit.exportFile(`results.${format}`, content)
   }
@@ -1268,7 +1488,7 @@ export class ResultsPanel extends LitElement {
     // Copy-all / export cover every buffered row, not just what's loaded on screen.
     if (action === 'copy-csv') copy(toDelimited(result.columns, await this._allRows(result), ','))
     if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
-    if (action === 'copy-json') copy(toJson(result.columns, await this._allRows(result)))
+    if (action === 'copy-json') copy(toJson(result.columns, await this._allRows(result), this.jsonColumns))
     if (action === 'copy-all-insert') {
       copy(toInsertStatements({
         columns: result.columns,
@@ -1366,6 +1586,41 @@ export class ResultsPanel extends LitElement {
   // Draft cells of the live selection — the generators only apply to new rows.
   private _draftTargets(): Array<{ ref: RowRef; col: number }> {
     return this._selectedCellTargets().filter((target) => target.ref.kind === 'draft' && target.col >= 0)
+  }
+
+  private _renderJsonView(open: { ref: RowRef; col: number; original: string }, columns: string[]) {
+    const readonly = open.ref.kind === 'result' && (!this.editable || !this._canEditShownResult())
+    const rowLabel = t(open.ref.kind === 'result' ? 'results.rowLabel' : 'results.newRowLabel', {
+      index: (open.ref.kind === 'result' ? open.ref.row : open.ref.index) + 1,
+    })
+    return html`
+      <section class="json-view" role="region" aria-label=${t('results.jsonView')}>
+        <header class="json-head">
+          <span class="json-title">${columns[open.col] ?? ''}</span>
+          <span class="json-row">${rowLabel}</span>
+          <span class="json-hint">${t('results.backToGrid', { shortcut: 'Esc' })}</span>
+        </header>
+        <json-cell-editor
+          .value=${this._jsonDraft}
+          .readonly=${readonly}
+          @json-change=${(event: CustomEvent<{ value: string }>) => (this._jsonDraft = event.detail.value)}
+          @json-problem=${this._onJsonProblem}
+          @json-flush=${() => this._flushJson()}
+          @json-close=${this._closeJson}
+          @json-save=${this._saveRows}
+        ></json-cell-editor>
+        ${this._jsonProblem && this._jsonProblemShown
+          ? html`
+              <button class="json-error" @click=${this._revealJsonError}>
+                <span class="json-error-message">${this._jsonProblem.message}</span>
+                <span class="json-error-at">
+                  ${t('results.jsonErrorAt', { line: this._jsonProblem.line, column: this._jsonProblem.column })}
+                </span>
+              </button>
+            `
+          : ''}
+      </section>
+    `
   }
 
   private _renderRecordView() {
@@ -1851,10 +2106,126 @@ export class ResultsPanel extends LitElement {
   // Opens the inline editor on a cell; `seed` (a typed char) replaces the value.
   // The current selection is snapshotted so the committed value fills all of it.
   private _beginEdit(ref: RowRef, col: number, seed: string | null) {
+    // A JSON document has no business in a one-line input: Enter and Escape
+    // there mean "commit" and "cancel", and the value it commits is whatever
+    // fits. Send every edit gesture on a JSON column to the editor instead.
+    if (this.jsonColumns.has(col)) {
+      this._openJson(ref, col)
+      return
+    }
     if (ref.kind === 'result' && (!this.editable || !this._canEditShownResult())) return
     this._editing = { ref, col, seed, sel: this._sel ? { ...this._sel } : null }
     this._editFocusPending = true
     this._scrollCellIntoView(this._displayIndexOfRef(ref), col)
+  }
+
+  // --- JSON cell editor ---------------------------------------------------------
+
+  private _openJsonCell(event: Event, ref: RowRef, col: number) {
+    event.preventDefault()
+    event.stopPropagation()
+    // The affordance swallows the click that would have selected the cell, so
+    // select it here: the editor should be editing the cell the grid shows as
+    // current, and coming back should land on it.
+    this._selectCell(ref, col)
+    this._openJson(ref, col)
+  }
+
+  // Collapses the selection onto one cell, addressed the way the grid does (by
+  // display row, so result rows and staged drafts share the numbering).
+  private _selectCell(ref: RowRef, col: number) {
+    const display = this._displayIndexOfRef(ref)
+    if (display >= 0) this._sel = { r0: display, c0: col, r1: display, c1: col }
+  }
+
+  // The document opens formatted; an unparseable value (a text column that was
+  // widened to json, a half-typed staged edit) opens exactly as it is stored,
+  // since reformatting text that is not JSON would only garble it.
+  private _openJson(ref: RowRef, col: number) {
+    this._editing = null
+    // The grid leaves the DOM while the editor is up, so the body scrolls back
+    // to the top on its own; remember where the row was to put it back.
+    this._gridScroll = this._currentGridScroll()
+    // Opening a cell by hand replaces whatever Forward was holding.
+    this._jsonForward = null
+    // The editor reports the new document's own state as it mounts.
+    this._jsonProblem = null
+    this._jsonProblemShown = false
+    this._jsonCell = { ref, col, original: '' }
+    this._setJsonText(this._jsonCell, this._editCellText(ref, col))
+    this._jsonFocusPending = true
+  }
+
+  // Loads `stored` into the editor as the new baseline, formatted when it is
+  // JSON. Text that does not parse (a half-typed staged edit, a text column
+  // widened to json) is shown exactly as stored: reformatting it would garble it.
+  private _setJsonText(open: { ref: RowRef; col: number; original: string }, stored: string) {
+    const text = stored && !jsonError(stored) ? formatJson(stored) : stored
+    this._jsonCell = { ...open, original: text }
+    this._jsonDraft = text
+  }
+
+  private _onJsonProblem = (event: CustomEvent<{ problem: JsonProblemAt | null }>) => {
+    this._jsonProblem = event.detail.problem
+    // Parsing again retires the strip, so the next refused save is what brings
+    // it back rather than every keystroke in between.
+    if (!this._jsonProblem) this._jsonProblemShown = false
+  }
+
+  private _revealJsonError = () => {
+    this._jsonProblemShown = true
+    this.shadowRoot?.querySelector('json-cell-editor')?.revealError()
+  }
+
+  private _closeJson = () => {
+    this._flushJson()
+    // Flushing rebases `original` on what it staged, so read the cell after it.
+    const open = this._jsonCell
+    if (open) this._jsonForward = { ...open, draft: this._jsonDraft }
+    this._jsonCell = null
+    this._jsonDraft = ''
+    this._jsonProblem = null
+    this._jsonProblemShown = false
+    this._focusGridPending = true
+    this._restoreGridScroll = true
+  }
+
+  private _reopenJson(closed: { ref: RowRef; col: number; original: string; draft: string }) {
+    this._gridScroll = this._currentGridScroll()
+    this._jsonForward = null
+    this._jsonCell = { ref: closed.ref, col: closed.col, original: closed.original }
+    this._jsonDraft = closed.draft
+    this._jsonFocusPending = true
+  }
+
+  /** Whether the editor holds text that differs from what it opened with. */
+  private _jsonDirty(): boolean {
+    return this._jsonCell !== null && this._jsonDraft !== this._jsonCell.original
+  }
+
+  /** Unstaged JSON editor text: an open dirty document, or the closed draft
+   * Forward still offers. The workbench folds this into its leave guard —
+   * it is unsaved work the staged-changes check cannot see, and a trail step
+   * would throw it away. */
+  hasUnstagedJson(): boolean {
+    return this._jsonDirty() || (this._jsonForward !== null && this._jsonForward.draft !== this._jsonForward.original)
+  }
+
+  // Stages the draft as one minified line. Called at flush points only — blur,
+  // close, and just before a save — so a session of typing lands as a single
+  // undoable step rather than one per keystroke.
+  private _flushJson(): boolean {
+    const open = this._jsonCell
+    if (!open || !this._jsonDirty()) return false
+    const text = this._jsonDraft.trim()
+    // Invalid text is never staged: the editor keeps showing it with the parse
+    // error until it is valid, so a save can only ever write a real document.
+    if (!text || jsonError(text)) return false
+    const change = this._classifyEdit(open.ref, open.col, minifyJson(text))
+    if (change) this.dispatchEvent(new CustomEvent(change.event, { detail: change.detail, bubbles: true, composed: true }))
+    // The staged value is now what the editor holds, so it is no longer dirty.
+    this._jsonCell = { ...open, original: this._jsonDraft }
+    return true
   }
 
   private _onEditKeydown = (event: KeyboardEvent) => {
@@ -2032,6 +2403,7 @@ export class ResultsPanel extends LitElement {
         rows: rowWord(result.rowCount),
       })}</p>`
     }
+    if (this._jsonCell) return this._renderJsonView(this._jsonCell, result.columns)
     if (this._record) return this._renderRecordView()
     // Header sort buttons re-run the query with a driver-built ORDER BY (only
     // when it's a single read statement). The active direction comes from the
@@ -2121,6 +2493,29 @@ export class ResultsPanel extends LitElement {
                         @keydown=${this._onEditKeydown}
                         @blur=${this._onEditBlur}
                       />
+                    </td>`
+                  }
+                  // A JSON column keeps its affordance whatever the cell holds —
+                  // including a staged edit (reopen to keep editing it) and NULL
+                  // (the only way to fill one is to open the editor). The column
+                  // is JSON, so the button is a property of the column, not of
+                  // the value that happens to be in the row.
+                  if (this.jsonColumns.has(col)) {
+                    const shown = pending !== undefined ? (isSqlNull(pending) ? null : pending) : cell === null || cell === undefined ? null : original
+                    return html`<td class="${cls} fk" title=${shown ?? ''}>
+                      ${shown === null
+                        ? html`<span class="null">NULL</span>`
+                        : html`<span class="fk-value">${shown}</span>`}
+                      <button
+                        class="fk-follow"
+                        tabindex="-1"
+                        data-tooltip=${t('results.editJson')}
+                        aria-label=${t('results.editJson')}
+                        @pointerdown=${(event: Event) => event.stopPropagation()}
+                        @click=${(event: Event) => this._openJsonCell(event, { kind: 'result', row: absRow }, col)}
+                      >
+                        <i class="icon icon-braces" aria-hidden="true"></i>
+                      </button>
                     </td>`
                   }
                   if (pending !== undefined) {
@@ -2309,6 +2704,30 @@ export class ResultsPanel extends LitElement {
               <input class="cell-edit" .value=${initial} @keydown=${this._onEditKeydown} @blur=${this._onEditBlur} />
             </td>`
           }
+          // Same affordance as result rows: the column is JSON, so a new row's
+          // cell opens in the editor too (labels for default/NULL kept as-is).
+          if (this.jsonColumns.has(col)) {
+            const shown = value !== null && !isSqlNull(value) && value !== '' ? value : null
+            return html`<td class="${sel} fk" title=${shown ?? ''}>
+              ${value === null
+                ? html`<span class="default">${t('results.default')}</span>`
+                : isSqlNull(value)
+                  ? html`<span class="null">NULL</span>`
+                  : shown === null
+                    ? ''
+                    : html`<span class="fk-value">${shown}</span>`}
+              <button
+                class="fk-follow"
+                tabindex="-1"
+                data-tooltip=${t('results.editJson')}
+                aria-label=${t('results.editJson')}
+                @pointerdown=${(event: Event) => event.stopPropagation()}
+                @click=${(event: Event) => this._openJsonCell(event, { kind: 'draft', index }, col)}
+              >
+                <i class="icon icon-braces" aria-hidden="true"></i>
+              </button>
+            </td>`
+          }
           if (value === null) return html`<td class=${sel}><span class="default">${t('results.default')}</span></td>`
           if (isSqlNull(value)) return html`<td class=${sel}><span class="null">NULL</span></td>`
           if (value === '') return html`<td class=${sel}></td>`
@@ -2401,8 +2820,12 @@ export class ResultsPanel extends LitElement {
         color: var(--status-dot-error);
       }
 
+      /* Dimmed by colour, not opacity: the hover tooltip is this button's own
+         ::after, and inherited opacity would make the label translucent — the
+         grid behind it reads straight through. A child cannot opt out of a
+         parent's opacity group, so the parent must never set one. */
       .head-action:disabled {
-        opacity: 0.45;
+        color: color-mix(in srgb, var(--text-3) 45%, transparent);
         cursor: default;
       }
 
@@ -2537,9 +2960,11 @@ export class ResultsPanel extends LitElement {
         background: var(--btn-secondary-hover);
       }
 
+      /* Same reason as .head-action:disabled — these carry tooltips too. */
       .filter-apply:disabled,
       .filter-clear:disabled {
-        opacity: 0.45;
+        color: color-mix(in srgb, var(--btn-secondary-fg) 45%, transparent);
+        background: color-mix(in srgb, var(--btn-secondary-bg) 45%, transparent);
         cursor: default;
       }
 
@@ -2936,6 +3361,83 @@ export class ResultsPanel extends LitElement {
         background: var(--editor-bg);
         outline: none;
       }
+
+      .json-view {
+        display: flex;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--editor-bg);
+      }
+
+      .json-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+        padding: 5px 8px;
+        border-bottom: 1px solid var(--border-subtle);
+        font-size: var(--font-size-sm);
+      }
+
+      .json-hint {
+        margin-left: auto;
+        color: var(--text-3);
+      }
+
+      .json-title {
+        color: var(--text);
+        font-family: var(--mono-font);
+      }
+
+      .json-row {
+        color: var(--text-3);
+      }
+
+      json-cell-editor {
+        flex: 1;
+        min-height: 0;
+      }
+
+      /* The parse error, in the app's voice rather than CodeMirror's: one strip
+         under the editor, and clicking it puts the cursor on the character. */
+      .json-error {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        flex-shrink: 0;
+        width: 100%;
+        padding: 6px 10px;
+        border: none;
+        border-top: 1px solid color-mix(in srgb, var(--status-dot-error) 35%, var(--border-subtle));
+        background: color-mix(in srgb, var(--status-dot-error) 10%, transparent);
+        color: color-mix(in srgb, var(--status-dot-error) 78%, var(--text));
+        font-family: var(--ui-font);
+        font-size: var(--font-size-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .json-error:hover {
+        background: color-mix(in srgb, var(--status-dot-error) 16%, transparent);
+      }
+
+      .json-error-message {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .json-error-at {
+        margin-left: auto;
+        flex-shrink: 0;
+        color: var(--text-3);
+        font-variant-numeric: tabular-nums;
+      }
+
 
       .record-grid {
         display: flex;

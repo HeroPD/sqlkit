@@ -4,6 +4,14 @@ import { controls, icons, overlay, scrollbars, sqlHighlight, typography } from '
 import { t } from '../i18n'
 import { formatPreviewParam, previewSql, sqlPreviewParts } from '../sql-preview'
 
+// The focused element, followed into shadow roots: document.activeElement stops
+// at the outermost host, which is never the editor the user was typing in.
+function deepActiveElement(): HTMLElement | null {
+  let active = document.activeElement
+  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement
+  return active instanceof HTMLElement ? active : null
+}
+
 // Re-exported so existing importers keep their path.
 export { formatPreviewParam, previewSql, sqlPreviewParts }
 
@@ -33,6 +41,7 @@ export class ReviewQueryDialog extends LitElement {
 
   @state() private _applying = false
   @state() private _error = ''
+  private _returnFocus: HTMLElement | null = null
 
   connectedCallback() {
     super.connectedCallback()
@@ -42,6 +51,19 @@ export class ReviewQueryDialog extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback()
     window.removeEventListener('keydown', this._onKeydown)
+    // Hand focus back to whatever opened the dialog, so cancelling returns the
+    // user to the editor they were in rather than to nothing.
+    this._returnFocus?.focus()
+    this._returnFocus = null
+  }
+
+  // Takes focus on open. The keydown listener is on window, so leaving focus
+  // where it was lets one Escape land twice: whatever had focus sees it first
+  // (the JSON editor closed itself and returned to the grid) and this dialog
+  // sees it on the way up.
+  protected firstUpdated() {
+    this._returnFocus = deepActiveElement()
+    this.shadowRoot?.querySelector<HTMLElement>('.panel')?.focus()
   }
 
   // A new statement (queued review) resets the transient applying/error state.
@@ -56,7 +78,7 @@ export class ReviewQueryDialog extends LitElement {
     const preview = previewSql(this.sql, this.params)
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
-        <div class="panel" role="dialog" aria-label=${t('review.title')}>
+        <div class="panel" role="dialog" aria-modal="true" aria-label=${t('review.title')} tabindex="-1">
           <h4>${t('review.title')}</h4>
           ${this.warning ? html`<p class="warning" role="alert">${this.warning}</p>` : ''}
           <pre class="sql"><code>${sqlPreviewParts(preview).map((part) =>
@@ -130,6 +152,12 @@ export class ReviewQueryDialog extends LitElement {
     css`
       :host {
         display: contents;
+      }
+
+      /* Focused on open so Escape belongs to the dialog; it is a container, not
+         a control, so it shows no ring of its own. */
+      .panel:focus {
+        outline: none;
       }
 
       .panel {

@@ -9,7 +9,9 @@ import { t } from '../../src/i18n'
 // than one chunk plus the write buffer in memory. Column names must be supplied
 // (via columns()) before the first rows() call so the header lands first.
 export type ExportWriter = {
-  columns(names: string[]): void
+  /** `jsonColumns`: result positions the driver knows hold JSON documents —
+   * the JSON format splices those cells in raw instead of quoting them. */
+  columns(names: string[], jsonColumns?: ReadonlySet<number>): void
   rows(chunk: unknown[][]): Promise<void>
   close(): Promise<{ rowCount: number }>
 }
@@ -40,8 +42,8 @@ export function openExportWriter(filePath: string, format: ExportFormat, sqlTarg
   }
 
   return {
-    columns(names) {
-      serializer = createExportSerializer(names, format, sqlTarget)
+    columns(names, jsonColumns) {
+      serializer = createExportSerializer(names, format, sqlTarget, jsonColumns)
     },
     async rows(chunk) {
       if (!serializer) throw new Error(t('export.columnsMissing'))

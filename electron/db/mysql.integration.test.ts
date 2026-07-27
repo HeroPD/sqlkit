@@ -191,6 +191,40 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
+  it('returns JSON as lossless text for result editing', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table json_precision (doc json)')
+      await driver.query(`insert into json_precision values ('{"id":9007199254740993,"n":1.10}')`)
+      const result = await driver.query('select doc from json_precision')
+      expect(typeof result.rows[0]?.[0]).toBe('string')
+      expect(result.rows[0]?.[0]).toContain('9007199254740993')
+
+      // The declared type must read back as json on both engines — MySQL names
+      // it directly, MariaDB only through its json_valid check on a LONGTEXT.
+      const columns = await driver.listColumns()
+      const doc = columns.find((column) => column.table === 'json_precision' && column.name === 'doc')
+      expect(doc?.dataType).toBe('json')
+
+      // Number literals survive a JSON export either way. Only the literal is
+      // asserted: MySQL's wire metadata lets the writer splice the document in
+      // raw, while MariaDB (LONGTEXT on the wire) keeps it as a quoted string.
+      const file = join(mkdtempSync(join(tmpdir(), 'sqlkit-mysql-export-')), 'doc.json')
+      await driver.exportQuery!({
+        sql: 'select doc from json_precision',
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'json',
+      })
+      expect(readFileSync(file, 'utf8')).toContain('9007199254740993')
+    } finally {
+      await driver.query('drop table if exists json_precision').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('reports affected rows for writes', async () => {
     const driver = await connectDriver()
     try {

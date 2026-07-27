@@ -208,6 +208,35 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  it('returns JSON as lossless text for result editing', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query(
+        `select '{"id":9007199254740993,"n":1.10}'::json as doc,
+                '{"id":9007199254740993,"n":1.10}'::jsonb as docb`,
+      )
+      expect(result.rows[0]?.every((value) => typeof value === 'string')).toBe(true)
+      expect(result.rows[0]?.every((value) => (value as string).includes('9007199254740993'))).toBe(true)
+
+      // A JSON export splices these columns in raw: structure rather than an
+      // escaped string, with the number literals untouched.
+      const file = exportFile('doc.json')
+      await driver.exportQuery!({
+        sql: `select '{"id":9007199254740993,"n":1.10}'::jsonb as doc`,
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: file,
+        format: 'json',
+      })
+      const text = readFileSync(file, 'utf8')
+      expect(text).toContain('9007199254740993')
+      expect((JSON.parse(text) as Array<{ doc: unknown }>)[0]?.doc).toBeTypeOf('object')
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('runs a write batch atomically: commits all, or rolls back all on failure', async () => {
     const driver = await connectDriver()
     try {

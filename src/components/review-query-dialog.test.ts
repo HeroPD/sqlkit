@@ -1,4 +1,6 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
+import './review-query-dialog'
 import { previewSql, sqlPreviewParts } from './review-query-dialog'
 
 describe('previewSql', () => {
@@ -46,5 +48,36 @@ describe('sqlPreviewParts', () => {
       'SET',
       'WHERE',
     ])
+  })
+})
+
+describe('review-query-dialog focus', () => {
+  // Regression: the dialog listens for Escape on window without taking focus,
+  // so one press landed twice — the JSON editor behind it closed itself and
+  // returned to the grid, and the dialog cancelled.
+  it('takes focus on open, so Escape cannot reach what was focused before', async () => {
+    const outside = document.createElement('textarea')
+    document.body.append(outside)
+    outside.focus()
+    expect(document.activeElement).toBe(outside)
+
+    const dialog = document.createElement('review-query-dialog')
+    dialog.sql = 'update t set a = 1'
+    document.body.append(dialog)
+    await dialog.updateComplete
+
+    expect(document.activeElement).toBe(dialog)
+    expect(dialog.shadowRoot!.activeElement).toBe(dialog.shadowRoot!.querySelector('.panel'))
+
+    const cancelled: string[] = []
+    dialog.addEventListener('dialog-cancel', () => cancelled.push('cancel'))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(cancelled).toEqual(['cancel'])
+
+    dialog.remove()
+    // Closing hands focus back, so the next Escape reaches the editor the user
+    // was in instead of falling on the body.
+    expect(document.activeElement).toBe(outside)
+    outside.remove()
   })
 })

@@ -347,6 +347,25 @@ describe('WorkbenchScreen leaving a result with staged work', () => {
     expect(workbench._dialogs.confirm).toBeNull()
   })
 
+  it('prompts for unstaged JSON editor text the staged check cannot see', () => {
+    const workbench = new WorkbenchScreen() as never as Guard
+    const leave = vi.fn()
+    workbench._queries.hasStaged = () => false
+    // A mounted results panel reporting text that lives only in the JSON editor
+    // (invalid mid-edit, or a closed draft only Forward still offers).
+    Object.defineProperty(workbench, 'renderRoot', {
+      configurable: true,
+      value: { querySelector: () => ({ hasUnstagedJson: () => true }) },
+    })
+
+    workbench._guardStagedLeave('tab-a', leave)
+    expect(leave).not.toHaveBeenCalled()
+    expect(workbench._dialogs.confirm).not.toBeNull()
+
+    workbench._dialogs.confirm!.action()
+    expect(leave).toHaveBeenCalledTimes(1)
+  })
+
   // Confirming the prompt must discard for real: nothing on the navigation path
   // realigns staged state, and stale row-indexed edits would arm writes against
   // whatever result appears next.

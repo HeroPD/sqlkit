@@ -150,6 +150,33 @@ describe('toJson', () => {
   })
 })
 
+describe('JSON columns export as raw documents', () => {
+  // The driver hands JSON cells over as the document's own text; quoting them
+  // would double-encode, and parsing them would round 9007199254740993 away.
+  it('splices a valid document into toJson unquoted, literals intact', () => {
+    const text = toJson(['id', 'doc'], [[1, '{"big":9007199254740993,"n":1.10}']], new Set([1]))
+    expect(text).toContain('"doc": {"big":9007199254740993,"n":1.10}')
+    expect((JSON.parse(text) as Array<{ doc: unknown }>)[0]?.doc).toBeTypeOf('object')
+  })
+
+  it('keeps NULL and unparseable text encoded normally', () => {
+    const text = toJson(['doc'], [[null], ['not json']], new Set([0]))
+    expect(JSON.parse(text)).toEqual([{ doc: null }, { doc: 'not json' }])
+  })
+
+  it('leaves columns outside the set untouched', () => {
+    const text = toJson(['a', 'doc'], [['{"x":1}', '{"y":2}']], new Set([1]))
+    expect(JSON.parse(text)).toEqual([{ a: '{"x":1}', doc: { y: 2 } }])
+  })
+
+  it('splices in the streaming serializer the same way', () => {
+    const serializer = createExportSerializer(['id', 'doc'], 'json', undefined, new Set([1]))
+    const text = serializer.header() + serializer.row([1, '{"big":9007199254740993}']) + serializer.row([2, null]) + serializer.footer()
+    expect(text).toContain('"doc":{"big":9007199254740993}')
+    expect(JSON.parse(text)).toEqual([{ id: 1, doc: { big: 9007199254740992 } }, { id: 2, doc: null }])
+  })
+})
+
 describe('createExportSerializer', () => {
   it('streams CSV header and rows with no footer', () => {
     const serializer = createExportSerializer(['a', 'b'], 'csv')

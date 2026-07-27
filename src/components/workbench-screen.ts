@@ -55,6 +55,7 @@ import { quoteQualified } from '../sql-write'
 import { isFilterableQuery } from '../sql-filter'
 import { isReadOnlyQuery, isReorderableQuery } from '../sql-order'
 import { foreignKeyTargets } from '../foreign-keys'
+import { jsonColumns } from '../json-columns'
 import type { ExportFormat } from '../result-export'
 import type { FollowForeignKeyDetail, ResultNavigateDetail, SortColumnDetail } from './results-panel'
 import type { SelectionStats } from '../result-aggregate'
@@ -122,6 +123,7 @@ const BROWSE_ROW_LIMIT = 200
 // Stable empty, so a render that offers no followable columns hands the grid the
 // same reference every time.
 const NO_FOREIGN_KEYS: ReadonlyMap<number, ColumnReference> = new Map()
+const NO_JSON_COLUMNS: ReadonlySet<number> = new Set()
 
 const COMMANDS: ReadonlyArray<{ id: string; label: string; keybind?: string }> = [
   { id: 'new-query', label: t('action.newQuery'), keybind: mod('N') },
@@ -320,6 +322,8 @@ export class WorkbenchScreen extends LitElement {
 
   /** Memo for _resultForeignKeys, keyed on the identities it derives from. */
   private _foreignKeyCache: { result: QueryResult; columns: ColumnRef[]; map: ReadonlyMap<number, ColumnReference> } | null = null
+
+  private _jsonColumnCache: { result: QueryResult; columns: ColumnRef[]; set: ReadonlySet<number> } | null = null
 
   private _unsubscribeMenu: (() => void) | null = null
 
@@ -932,7 +936,12 @@ export class WorkbenchScreen extends LitElement {
               .params=${this._dialogs.review.params}
               .warning=${this._dialogs.review.warning ?? ''}
               .run=${this._dialogs.review.run}
-              @dialog-cancel=${() => (this._dialogs.review = null)}
+              @dialog-cancel=${() => {
+                this._dialogs.review = null
+                // A cancelled save never refreshes; the panel must not keep
+                // waiting to restore its scroll into a later, unrelated result.
+                this.renderRoot.querySelector('results-panel')?.saveNotRun()
+              }}
               @dialog-done=${() => (this._dialogs.review = null)}
             ></review-query-dialog>
           `
@@ -1219,6 +1228,7 @@ export class WorkbenchScreen extends LitElement {
             .canGoBack=${this._queries.canGoBack(this._ctx.activeTabId)}
             .canGoForward=${this._queries.canGoForward(this._ctx.activeTabId)}
             .foreignKeys=${this._resultForeignKeys()}
+            .jsonColumns=${this._resultJsonColumns()}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
             .insertTable=${this._resultEditing.resultTable()}
@@ -1669,7 +1679,10 @@ export class WorkbenchScreen extends LitElement {
   // index, so they cannot follow the user to another result. Leaving with unsaved
   // work therefore has to be a decision rather than a silent discard.
   private _guardStagedLeave(tabId: string, leave: () => void) {
-    if (!this._queries.hasStaged(tabId)) {
+    // The results panel can hold JSON editor text that never staged (invalid,
+    // or reachable only through Forward) — same unsaved work, same guard.
+    const unstagedJson = this.renderRoot?.querySelector('results-panel')?.hasUnstagedJson() ?? false
+    if (!this._queries.hasStaged(tabId) && !unstagedJson) {
       leave()
       return
     }
@@ -1715,6 +1728,20 @@ export class WorkbenchScreen extends LitElement {
     const map = foreignKeyTargets(run.result, columns)
     this._foreignKeyCache = { result: run.result, columns, map }
     return map
+  }
+
+  /** Result columns declared json/jsonb, by column index. Memoised on the same
+   * identities as the foreign-key map, and silent for the same reason: column
+   * sources are per result set, so a multi-set run cannot be trusted. */
+  private _resultJsonColumns(): ReadonlySet<number> {
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    const columns = this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? []) : []
+    if (run.phase !== 'done' || (run.result.resultSets?.length ?? 0) > 1) return NO_JSON_COLUMNS
+    const cached = this._jsonColumnCache
+    if (cached && cached.result === run.result && cached.columns === columns) return cached.set
+    const set = jsonColumns(run.result, columns)
+    this._jsonColumnCache = { result: run.result, columns, set }
+    return set
   }
 
   // Follows one cell's foreign key: opens the referenced row as a new trail entry

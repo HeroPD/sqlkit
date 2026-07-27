@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { SQL_NULL } from '../sql-write'
+import { stubEditorLayout } from '../test/dom-stubs'
 import './results-panel'
 import type { SqlExpressionEditor } from './sql-expression-editor'
 
 beforeAll(() => {
+  // The panel mounts CodeMirror for JSON cells, which measures the DOM and
+  // reaches for execCommand when it takes focus.
+  stubEditorLayout()
   Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
     configurable: true,
     value: () => ({ measureText: (text: string) => ({ width: text.length * 8 }) }),
@@ -1384,5 +1388,603 @@ describe('results-panel foreign-key affordance', () => {
     // The title cell keeps its plain text node, with no wrapper span.
     expect(cells[1]?.querySelector('.fk-value')).toBeNull()
     expect(cells[1]?.textContent).toBe('Dune')
+  })
+})
+
+describe('results-panel JSON cell editor', () => {
+  const mountJson = async (over: { rows?: unknown[][]; editable?: boolean; edits?: Map<string, string> } = {}) => {
+    const el = document.createElement('results-panel')
+    el.editable = over.editable ?? true
+    el.rowEditable = true
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT id, payload FROM events',
+      result: {
+        columns: ['id', 'payload'],
+        rows: over.rows ?? [[1, { a: 1, b: [2, 3] }]],
+        rowCount: 1,
+        durationMs: 1,
+      },
+    }
+    el.jsonColumns = new Set([1])
+    if (over.edits) el.edits = over.edits
+    document.body.append(el)
+    await el.updateComplete
+    return el
+  }
+
+  const openButton = (el: HTMLElement) => el.shadowRoot!.querySelector<HTMLButtonElement>('td.fk .fk-follow')
+  const editor = (el: HTMLElement) => el.shadowRoot!.querySelector('json-cell-editor') as (HTMLElement & { value: string }) | null
+  const headAction = (el: HTMLElement, label: string) =>
+    [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.head-action')].find(
+      (button) => button.getAttribute('aria-label') === label,
+    )
+  const type = async (el: Awaited<ReturnType<typeof mountJson>>, value: string) => {
+    editor(el)!.dispatchEvent(new CustomEvent('json-change', { detail: { value }, bubbles: true, composed: true }))
+    await el.updateComplete
+  }
+
+  // Types into the editor's document rather than faking the change event, so
+  // the linter has the same text the user would have given it.
+  const typeForReal = async (el: Awaited<ReturnType<typeof mountJson>>, value: string) => {
+    const view = (editor(el) as unknown as { _view: { state: { doc: { length: number } }; dispatch: (spec: unknown) => void } })._view
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } })
+    await el.updateComplete
+  }
+
+  it('offers the affordance on the JSON column only, including its null cells', async () => {
+    const el = await mountJson({ rows: [[1, { a: 1 }], [2, null]] })
+    expect(el.shadowRoot!.querySelectorAll('td.fk .fk-follow')).toHaveLength(2)
+    // The id column keeps its plain cell.
+    const cells = [...el.shadowRoot!.querySelectorAll('tbody tr[data-row="0"] td')]
+    expect(cells[1]?.querySelector('.fk-value')).toBeNull()
+  })
+
+  it('opens the document formatted', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    expect(editor(el)?.value).toBe('{\n  "a": 1,\n  "b": [\n    2,\n    3\n  ]\n}')
+  })
+
+  it('gives the editor keyboard focus when it opens', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    // Follow activeElement through shadow roots to the editor's content node.
+    let active: Element | null = document.activeElement
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement
+    expect(active?.classList.contains('cm-content')).toBe(true)
+  })
+
+  it('stages the edit minified to one line, and only on a flush', async () => {
+    const el = await mountJson()
+    const staged: Array<{ row: number; col: number; value: string }> = []
+    el.addEventListener('cell-edit', (event) => staged.push((event as CustomEvent<{ row: number; col: number; value: string }>).detail))
+
+    openButton(el)!.click()
+    await el.updateComplete
+    await type(el, '{\n  "a": 2\n}')
+    expect(staged).toEqual([]) // typing alone stages nothing
+
+    editor(el)!.dispatchEvent(new CustomEvent('json-flush', { bubbles: true, composed: true }))
+    expect(staged).toEqual([{ row: 0, col: 1, value: '{"a":2}' }])
+  })
+
+  it('stages nothing while the text is not valid JSON', async () => {
+    const el = await mountJson()
+    const staged: unknown[] = []
+    el.addEventListener('cell-edit', (event) => staged.push((event as CustomEvent).detail))
+
+    openButton(el)!.click()
+    await el.updateComplete
+    await type(el, '{"a":')
+
+    editor(el)!.dispatchEvent(new CustomEvent('json-flush', { bubbles: true, composed: true }))
+    expect(staged).toEqual([])
+  })
+
+  // While typing, the mark and its hover are the whole report; the strip is what
+  // a refused save adds, and it names the error and where it is.
+  it('shows the error strip on a refused save, not while typing', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    await typeForReal(el, '{\n  "ok": 1,\n  "broken": ,\n  "after": 2\n}')
+    expect(el.shadowRoot!.querySelector('.json-error')).toBeNull()
+
+    headAction(el, 'Save changes')!.click()
+    await el.updateComplete
+
+    const strip = el.shadowRoot!.querySelector('.json-error')
+    expect(strip).not.toBeNull()
+    // Trimmed to the clause that names the problem — no echoed source, no
+    // "is not valid JSON" tail, no position repeated inside the message.
+    expect(strip!.querySelector('.json-error-message')?.textContent?.trim()).toBe("Unexpected token ','")
+    expect(strip!.querySelector('.json-error-at')?.textContent?.trim()).toBe('line 3, column 13')
+
+    // A list of one error needs no panel of its own, and one gutter is enough.
+    const cm = editor(el)!.shadowRoot!
+    expect(cm.querySelector('.cm-gutter-lint')).toBeNull()
+    expect(cm.querySelector('.cm-panel-lint')).toBeNull()
+  })
+
+  it('puts the cursor on the error when a save has to refuse', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    await typeForReal(el, '{\n  "ok": 1,\n  "broken": ,\n  "after": 2\n}')
+    const view = (editor(el) as unknown as { _view: { state: { selection: { main: { head: number } } } } })._view
+    expect(view.state.selection.main.head).not.toBe(25)
+
+    headAction(el, 'Save changes')!.click()
+    await el.updateComplete
+    // Character 25 is the stray comma on line 3.
+    expect(view.state.selection.main.head).toBe(25)
+  })
+
+  it('retires the strip once the document parses, so the next save re-earns it', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    await typeForReal(el, '{"a": }')
+    headAction(el, 'Save changes')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.json-error')).not.toBeNull()
+
+    await typeForReal(el, '{"a": 1}')
+    expect(el.shadowRoot!.querySelector('.json-error')).toBeNull()
+
+    // Broken again, but nothing has asked for the strip since.
+    await typeForReal(el, '{"a": 1,}')
+    expect(el.shadowRoot!.querySelector('.json-error')).toBeNull()
+  })
+
+  it('dims the row actions while it is open, and keeps save and revert live', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    expect(headAction(el, 'Add new row')?.disabled).toBe(true)
+    expect(headAction(el, 'Delete selected rows')?.disabled).toBe(true)
+    // Nothing is staged yet, so save stays dim until the text actually changes.
+    expect(headAction(el, 'Save changes')?.disabled).toBe(true)
+
+    await type(el, '{"a":2}')
+    expect(headAction(el, 'Save changes')?.disabled).toBe(false)
+    expect(headAction(el, 'Discard changes')?.disabled).toBe(false)
+  })
+
+  it('flushes before saving, so ⌘S writes what is on screen', async () => {
+    const el = await mountJson()
+    const staged: Array<{ value: string }> = []
+    const saves: unknown[] = []
+    el.addEventListener('cell-edit', (event) => staged.push((event as CustomEvent<{ value: string }>).detail))
+    el.addEventListener('save-rows', () => saves.push(true))
+
+    openButton(el)!.click()
+    await el.updateComplete
+    await type(el, '{"a":2}')
+    editor(el)!.dispatchEvent(new CustomEvent('json-save', { bubbles: true, composed: true }))
+
+    // The staged edit reaches the owner synchronously but only returns as an
+    // `edits` property on the next render, so the save must count the flush
+    // itself — reading the stale map would swallow the first click.
+    expect(staged).toEqual([{ row: 0, col: 1, value: '{"a":2}' }])
+    expect(saves).toEqual([true])
+  })
+
+  // The trail's own back button, rather than a second one inside the view: the
+  // editor is a view of the current result, not a new trail entry.
+  it('returns to the grid through the toolbar back button', async () => {
+    const el = await mountJson()
+    expect(headAction(el, 'Back to the previous result')).toBeUndefined() // no trail, no nav yet
+
+    openButton(el)!.click()
+    await el.updateComplete
+    expect(editor(el)).not.toBeNull()
+    const back = headAction(el, 'Back to the grid')
+    expect(back?.disabled).toBe(false)
+    // Forward belongs to the trail and has nowhere to go from here.
+    expect(headAction(el, 'Forward to the next result')?.disabled).toBe(true)
+
+    back!.click()
+    await el.updateComplete
+    expect(editor(el)).toBeNull()
+    expect(el.shadowRoot!.querySelector('table')).not.toBeNull()
+  })
+
+  it('reopens the editor on forward, with the text left mid-edit', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    // Invalid on purpose: it was never staged, so only Forward can bring it back.
+    await type(el, '{"a": ')
+
+    headAction(el, 'Back to the grid')!.click()
+    await el.updateComplete
+    expect(editor(el)).toBeNull()
+
+    const forward = headAction(el, 'Back to the JSON editor')
+    expect(forward?.disabled).toBe(false)
+    forward!.click()
+    await el.updateComplete
+    expect(editor(el)?.value).toBe('{"a": ')
+  })
+
+  it('lets the trail have forward when it has somewhere to go', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    headAction(el, 'Back to the grid')!.click()
+    el.canGoForward = true
+    await el.updateComplete
+
+    const steps: string[] = []
+    el.addEventListener('result-navigate', (event) =>
+      steps.push((event as CustomEvent<{ direction: string }>).detail.direction),
+    )
+    headAction(el, 'Forward to the next result')!.click()
+    await el.updateComplete
+    expect(steps).toEqual(['forward'])
+    expect(editor(el)).toBeNull()
+  })
+
+  it('reopens an invalid draft before a forward trail step can discard it', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    await type(el, '{"unfinished": ')
+    headAction(el, 'Back to the grid')!.click()
+    el.canGoForward = true
+    await el.updateComplete
+
+    const steps: string[] = []
+    el.addEventListener('result-navigate', (event) =>
+      steps.push((event as CustomEvent<{ direction: string }>).detail.direction),
+    )
+    const forward = headAction(el, 'Back to the JSON editor')
+    expect(forward).toBeDefined()
+    forward!.click()
+    await el.updateComplete
+
+    expect(steps).toEqual([])
+    expect(editor(el)?.value).toBe('{"unfinished": ')
+  })
+
+  it('reports unstaged JSON text for the workbench leave guard', async () => {
+    const el = await mountJson()
+    expect(el.hasUnstagedJson()).toBe(false)
+
+    openButton(el)!.click()
+    await el.updateComplete
+    await type(el, '{"a": ')
+    expect(el.hasUnstagedJson()).toBe(true) // open and dirty
+
+    headAction(el, 'Back to the grid')!.click()
+    await el.updateComplete
+    expect(el.hasUnstagedJson()).toBe(true) // closed, but only Forward still holds it
+  })
+
+  it('counts nothing unstaged once a valid document flushes on close', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    await type(el, '{"a":2}')
+    headAction(el, 'Back to the grid')!.click()
+    await el.updateComplete
+    // The close staged the text, so nothing is left that only the editor holds.
+    expect(el.hasUnstagedJson()).toBe(false)
+  })
+
+  it('drops the forward target once another cell is opened', async () => {
+    const el = await mountJson({ rows: [[1, { a: 1 }], [2, { b: 2 }]] })
+    const buttons = () => [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('td.fk .fk-follow')]
+    buttons()[0]!.click()
+    await el.updateComplete
+    headAction(el, 'Back to the grid')!.click()
+    await el.updateComplete
+    expect(headAction(el, 'Back to the JSON editor')).toBeDefined()
+
+    buttons()[1]!.click()
+    await el.updateComplete
+    headAction(el, 'Back to the grid')!.click()
+    await el.updateComplete
+    // Forward now points at the second cell, not the first.
+    headAction(el, 'Back to the JSON editor')!.click()
+    await el.updateComplete
+    expect(editor(el)?.value).toBe('{\n  "b": 2\n}')
+  })
+
+  it('steps the trail as usual when no editor is open', async () => {
+    const el = await mountJson()
+    el.canGoBack = true
+    await el.updateComplete
+    const steps: string[] = []
+    el.addEventListener('result-navigate', (event) =>
+      steps.push((event as CustomEvent<{ direction: string }>).detail.direction),
+    )
+    headAction(el, 'Back to the previous result')!.click()
+    expect(steps).toEqual(['back'])
+  })
+
+  it('comes back to the row the user left, not the top of the grid', async () => {
+    const el = await mountJson({ rows: Array.from({ length: 200 }, (_, i) => [i, { row: i }]) })
+    const body = el.shadowRoot!.querySelector<HTMLElement>('.body')!
+    // jsdom has no layout, so give the body a scrollable box of its own.
+    Object.defineProperty(body, 'clientHeight', { configurable: true, value: 300 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, value: 4000 })
+    let scrollTop = 0
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => (scrollTop = value),
+    })
+    body.scrollTop = 1200
+    body.scrollLeft = 300
+
+    el.shadowRoot!.querySelectorAll<HTMLButtonElement>('td.fk .fk-follow')[0]!.click()
+    await el.updateComplete
+    expect(editor(el)).not.toBeNull()
+
+    headAction(el, 'Back to the grid')!.click()
+    await el.updateComplete
+    expect(body.scrollTop).toBe(1200)
+    expect(body.scrollLeft).toBe(300)
+  })
+
+  it('offers the affordance on draft rows too', async () => {
+    const el = await mountJson()
+    el.drafts = [{ after: -1, cells: ['1', '{"a":1}'] }]
+    await el.updateComplete
+
+    const button = el.shadowRoot!.querySelector<HTMLButtonElement>('tr.draft td.fk .fk-follow')
+    expect(button).not.toBeNull()
+    button!.click()
+    await el.updateComplete
+    expect(editor(el)?.value).toBe('{\n  "a": 1\n}')
+    expect(el.shadowRoot!.querySelector('.json-row')?.textContent).toContain('New row')
+  })
+
+  it('opens read-only when the result cannot be edited', async () => {
+    const el = await mountJson({ editable: false })
+    openButton(el)!.click()
+    await el.updateComplete
+    expect((editor(el) as unknown as { readonly: boolean }).readonly).toBe(true)
+  })
+
+  it('reopens a staged value rather than the stored one', async () => {
+    const el = await mountJson({ edits: new Map([['0:1', '{"a":9}']]) })
+    openButton(el)!.click()
+    await el.updateComplete
+    expect(editor(el)?.value).toBe('{\n  "a": 9\n}')
+  })
+})
+
+describe('results-panel toolbar focus', () => {
+  // Clicking a toolbar button must not move focus onto it: focus parked there
+  // gets the browser's focus ring painted by the next keypress (Esc closing
+  // the query popover). Keyboard focus via Tab is untouched.
+  it('cancels pointerdown on toolbar buttons, and only on buttons', async () => {
+    const el = document.createElement('results-panel')
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT 1',
+      result: { columns: ['a'], rows: [[1]], rowCount: 1, durationMs: 1 },
+    }
+    document.body.append(el)
+    await el.updateComplete
+
+    const button = el.shadowRoot!.querySelector('.query-info')!
+    const onButton = new MouseEvent('pointerdown', { bubbles: true, composed: true, cancelable: true })
+    button.dispatchEvent(onButton)
+    expect(onButton.defaultPrevented).toBe(true)
+
+    const head = el.shadowRoot!.querySelector('.head')!
+    const onHead = new MouseEvent('pointerdown', { bubbles: true, composed: true, cancelable: true })
+    head.dispatchEvent(onHead)
+    expect(onHead.defaultPrevented).toBe(false)
+  })
+})
+
+describe('results-panel keeps the reader in place across a save', () => {
+  // A save re-runs the tab's query; the rows are the same ones, so the grid
+  // should not snap back to row 1 and lose what the user was working on.
+  const mountScrollable = async (columns: string[] = ['a', 'b']) => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.rowEditable = true
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT a, b FROM t',
+      result: {
+        columns,
+        rows: Array.from({ length: 200 }, (_, i) => columns.map((column) => `${column}${i}`)),
+        rowCount: 200,
+        durationMs: 1,
+      },
+    }
+    el.edits = new Map([['5:0', 'edited']])
+    document.body.append(el)
+    await el.updateComplete
+    const body = el.shadowRoot!.querySelector<HTMLElement>('.body')!
+    let scrollTop = 0
+    let scrollLeft = 0
+    Object.defineProperty(body, 'clientHeight', { configurable: true, value: 300 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, value: 4000 })
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => (scrollTop = value),
+    })
+    Object.defineProperty(body, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => (scrollLeft = value),
+    })
+    return { el, body }
+  }
+
+  // A save's refresh re-runs the query, so the panel sees `running` before the
+  // rows land — the state the first version of this fix spent its flag on.
+  const refresh = async (el: Awaited<ReturnType<typeof mountScrollable>>['el'], columns: string[]) => {
+    el.edits = new Map()
+    el.run = { phase: 'running', executionId: 'refresh', profileId: 'p' }
+    await el.updateComplete
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT a, b FROM t',
+      result: {
+        columns,
+        rows: Array.from({ length: 200 }, (_, i) => columns.map((column) => `${column}${i}`)),
+        rowCount: 200,
+        durationMs: 1,
+        sessionId: 'refreshed',
+      },
+    }
+    await el.updateComplete
+  }
+
+  const save = (el: HTMLElement) =>
+    [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.head-action')]
+      .find((button) => button.getAttribute('aria-label') === 'Save changes')!
+      .click()
+
+  it('stays where it was when the refresh brings back the same columns', async () => {
+    const { el, body } = await mountScrollable()
+    body.scrollTop = 1200
+    save(el)
+    await refresh(el, ['a', 'b'])
+    expect(body.scrollTop).toBe(1200)
+  })
+
+  it('starts at the top when the result is a different query', async () => {
+    const { el, body } = await mountScrollable()
+    body.scrollTop = 1200
+    save(el)
+    await refresh(el, ['x', 'y', 'z'])
+    expect(body.scrollTop).toBe(0)
+  })
+
+  it('starts at the top for a result that follows no save', async () => {
+    const { el, body } = await mountScrollable()
+    body.scrollTop = 1200
+    await refresh(el, ['a', 'b'])
+    expect(body.scrollTop).toBe(0)
+  })
+
+  it('forgets the armed restore when the review is cancelled', async () => {
+    const { el, body } = await mountScrollable()
+    body.scrollTop = 1200
+    save(el)
+    // The workbench relays a review-dialog cancel as saveNotRun(): the save
+    // never ran, so a later same-column result must not inherit the restore.
+    el.saveNotRun()
+    await refresh(el, ['a', 'b'])
+    expect(body.scrollTop).toBe(0)
+  })
+})
+
+describe('results-panel remembers where the reader was in each result', () => {
+  const resultOf = (columns: string[], marker: string) => ({
+    columns,
+    rows: Array.from({ length: 200 }, (_, i) => columns.map((column) => `${marker}-${column}${i}`)),
+    rowCount: 200,
+    durationMs: 1,
+  })
+
+  const mount = async () => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: resultOf(['a', 'b'], 'first') }
+    document.body.append(el)
+    await el.updateComplete
+    const body = el.shadowRoot!.querySelector<HTMLElement>('.body')!
+    let scrollTop = 0
+    let scrollLeft = 0
+    Object.defineProperty(body, 'clientHeight', { configurable: true, value: 300 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, value: 4000 })
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => (scrollTop = value),
+    })
+    Object.defineProperty(body, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => (scrollLeft = value),
+    })
+    return { el, body }
+  }
+
+  const sel = (el: HTMLElement) => (el as unknown as { _sel: unknown })._sel
+
+  it('returns to the row and cell it left when a result comes back', async () => {
+    const { el, body } = await mount()
+    const first = el.run.phase === 'done' ? el.run.result : null
+    body.scrollTop = 1500
+    body.scrollLeft = 420
+    // Pick a cell, the way clicking one does.
+    ;(el as unknown as { _sel: unknown })._sel = { r0: 42, c0: 1, r1: 42, c1: 1 }
+
+    // Follow a foreign key: a different result takes over, starting at the top.
+    const followed = resultOf(['x'], 'second')
+    el.run = { phase: 'done', sql: 'SELECT x FROM u', result: followed }
+    await el.updateComplete
+    expect(body.scrollTop).toBe(0)
+
+    // Back: the trail hands the same object back, so the bookmark applies.
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: first! }
+    await el.updateComplete
+    expect(body.scrollTop).toBe(1500)
+    // Both axes: a wide result is as easily scrolled sideways as down.
+    expect(body.scrollLeft).toBe(420)
+    expect(sel(el)).toEqual({ r0: 42, c0: 1, r1: 42, c1: 1 })
+  })
+
+  it('keeps a bookmark per result, so forward returns too', async () => {
+    const { el, body } = await mount()
+    const first = el.run.phase === 'done' ? el.run.result : null
+    body.scrollTop = 900
+    const followed = resultOf(['x'], 'second')
+    el.run = { phase: 'done', sql: 'SELECT x FROM u', result: followed }
+    await el.updateComplete
+    body.scrollTop = 600
+
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: first! }
+    await el.updateComplete
+    expect(body.scrollTop).toBe(900)
+
+    el.run = { phase: 'done', sql: 'SELECT x FROM u', result: followed }
+    await el.updateComplete
+    expect(body.scrollTop).toBe(600)
+  })
+
+  it('starts a never-seen result at the top', async () => {
+    const { el, body } = await mount()
+    body.scrollTop = 1500
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: resultOf(['a', 'b'], 'fresh') }
+    await el.updateComplete
+    expect(body.scrollTop).toBe(0)
+  })
+
+  it('keeps the bookmark through appends, which replace the result object', async () => {
+    const { el, body } = await mount()
+    // Appends deliver a new result object under the same session key; the
+    // bookmark must file under the newest object — the one the trail holds.
+    const first = { ...resultOf(['a', 'b'], 'first'), sessionId: 's1' }
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: first }
+    await el.updateComplete
+    const appended = { ...resultOf(['a', 'b'], 'first'), sessionId: 's1' }
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: appended }
+    await el.updateComplete
+    body.scrollTop = 1100
+
+    el.run = { phase: 'done', sql: 'SELECT x FROM u', result: { ...resultOf(['x'], 'second'), sessionId: 's2' } }
+    await el.updateComplete
+    expect(body.scrollTop).toBe(0)
+
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: appended }
+    await el.updateComplete
+    expect(body.scrollTop).toBe(1100)
   })
 })

@@ -31,7 +31,12 @@ type RawConnection = {
   resume(): void
 }
 
-type FieldMeta = { name: string; db?: string; schema?: string; orgTable?: string; orgName?: string }
+type FieldMeta = { name: string; db?: string; schema?: string; orgTable?: string; orgName?: string; columnType?: number; type?: number }
+
+// MYSQL_TYPE_JSON in the wire protocol's column definitions. MariaDB never
+// sends it (its JSON is LONGTEXT on the wire), so MariaDB JSON exports keep
+// their pre-detection quoting rather than guessing from cell contents.
+const MYSQL_TYPE_JSON = 245
 
 const rawOf = (conn: mysql.PoolConnection): RawConnection => (conn as unknown as { connection: RawConnection }).connection
 
@@ -73,6 +78,18 @@ export function mysqlSessionIdentificationAvailable(enabled: unknown, attrsSize:
   return Number(enabled) === 1 && Number(attrsSize) !== 0
 }
 
+/**
+ * The column a MariaDB JSON alias guards: json_valid(`doc`) → doc. MariaDB has
+ * no JSON type — declaring one makes a LONGTEXT plus exactly this check — so
+ * the constraint is the only place the declaration survives. Strict on purpose:
+ * MySQL wraps its check clauses in parens and never needs this (its columns say
+ * `json` directly), and a looser expression is a user check, not a type.
+ */
+export function jsonValidColumn(clause: string): string | null {
+  const match = /^json_valid\(`((?:``|[^`])+)`\)$/i.exec(clause.trim())
+  return match ? match[1]!.replaceAll('``', '`') : null
+}
+
 // MySQL with all-databases support, mirroring the postgres driver: only the
 // database in use holds a pool (a MySQL "database" and "schema" are the same
 // thing), so the connection budget is spent on one database rather than every
@@ -89,6 +106,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   // sql_mode flags that change how scripts must be masked (NO_BACKSLASH_ESCAPES,
   // ANSI_QUOTES); read once at connect — pooled sessions inherit the same value.
   let sqlMode: SqlModeFlags = {}
+  let isMariaDb = false
   // Thread ids of in-flight user statements, so cancel() can KILL QUERY them.
   const running = new Set<RunningEntry>()
   // The tls ConnectionOptions shape is what mysql2 forwards to tls.connect;
@@ -118,9 +136,11 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       resetOnRelease: true,
       multipleStatements: true,
       // Lossless values: temporals as strings, BIGINT past 2^53 as strings
-      // (safe-range ones stay numbers), DECIMAL as strings (mysql2 default).
+      // (safe-range ones stay numbers), DECIMAL as strings (mysql2 default),
+      // and JSON as wire text so numeric literals never pass through JSON.parse.
       dateStrings: true,
       supportBigNumbers: true,
+      jsonStrings: true,
       // affectedRows counts matched rows (like Postgres), not changed rows —
       // otherwise a no-op cell edit would trip runBatch's zero-rows gate.
       flags: ['FOUND_ROWS'],
@@ -230,6 +250,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const banner = (await metaRows<{ version: string; mode: string }>('select version() as version, @@sql_mode as mode'))[0]
       const version = mysqlVersion(banner?.version ?? '')
       sqlMode = sqlModeFlags(banner?.mode ?? '')
+      isMariaDb = version.startsWith('MariaDB')
 
       const userSchemas = async () => (await metaRows<{ name: string }>(
         `select schema_name as name from information_schema.schemata
@@ -565,12 +586,31 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         [],
         childDb,
       )
+      // MariaDB's JSON columns are LONGTEXT under a json_valid check — the type
+      // itself never says "json", so read the declaration back off the checks.
+      // check_constraints carries table_name only on MariaDB, hence the gate.
+      const jsonChecks = isMariaDb
+        ? await metaRows<{ table_name: string; clause: string }>(
+          `select table_name, check_clause as clause
+           from information_schema.check_constraints where constraint_schema = database()`,
+          [],
+          childDb,
+        ).catch(() => [])
+        : []
+      const jsonByTable = new Map<string, Set<string>>()
+      for (const check of jsonChecks) {
+        const column = jsonValidColumn(check.clause)
+        if (!column) continue
+        const set = jsonByTable.get(check.table_name) ?? new Set<string>()
+        set.add(column)
+        jsonByTable.set(check.table_name, set)
+      }
       return rows.map(
         (row): ColumnRef => ({
           schema: null,
           table: row.table_name,
           name: row.name,
-          dataType: row.data_type,
+          dataType: row.data_type === 'longtext' && jsonByTable.get(row.table_name)?.has(row.name) ? 'json' : row.data_type,
           nullable: !!row.nullable,
           primaryKey: !!row.pk,
           foreignKey: !!row.fk,
@@ -1013,7 +1053,11 @@ function streamMysqlExport(
     query.on('fields', (fields) => {
       if (columnsSet) return
       const list = Array.isArray(fields) ? (fields as FieldMeta[]) : []
-      writer.columns(list.map((field) => field.name))
+      // JSON columns by result position — spliced into a JSON export as raw
+      // documents rather than quoted text.
+      const jsonColumns = new Set(list.flatMap((field, index) =>
+        (field.columnType ?? field.type) === MYSQL_TYPE_JSON ? [index] : []))
+      writer.columns(list.map((field) => field.name), jsonColumns)
       columnsSet = true
     })
     query.on('result', (row) => {

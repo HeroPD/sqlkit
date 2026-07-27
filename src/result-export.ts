@@ -4,9 +4,23 @@
 
 import type { Engine, TableRef } from './electron'
 import { insertStatementForRow } from './result-sql'
+import { jsonError } from './json-text'
 import { t } from './i18n'
 
 const bigintReplacer = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value
+
+const NO_JSON_COLUMNS: ReadonlySet<number> = new Set()
+
+// A JSON-typed cell already holds the document's own text: JSON.stringify would
+// wrap it in quotes (a double-encoded string instead of structure), and a parse
+// round-trip would rewrite its number literals (see json-text.ts). Valid
+// documents are spliced into a JSON export raw; anything else — NULL, or text a
+// json-ish column holds that does not parse — falls back to normal encoding.
+const rawJsonDocument = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  return text && !jsonError(text) ? text : null
+}
 
 const cellText = (value: unknown): string => {
   if (value === null || value === undefined) return ''
@@ -126,14 +140,28 @@ const jsonKeys = (columns: string[]): string[] => {
   })
 }
 
-/** Array of objects; duplicate column names get numbered suffixes. */
-export function toJson(columns: string[], rows: unknown[][]): string {
+/** Array of objects; duplicate column names get numbered suffixes. Cells in
+ * `jsonColumns` are spliced in as raw documents (see rawJsonDocument). */
+export function toJson(columns: string[], rows: unknown[][], jsonColumns: ReadonlySet<number> = NO_JSON_COLUMNS): string {
   const keys = jsonKeys(columns)
-  return JSON.stringify(
-    rows.map((row) => Object.fromEntries(keys.map((key, index) => [key, row[index] ?? null]))),
-    bigintReplacer,
-    2,
-  )
+  if (!jsonColumns.size) {
+    return JSON.stringify(
+      rows.map((row) => Object.fromEntries(keys.map((key, index) => [key, row[index] ?? null]))),
+      bigintReplacer,
+      2,
+    )
+  }
+  // Assembled by hand so raw documents can go in unescaped; they stay on the
+  // one line they arrived as, everything else is encoded exactly as above.
+  if (!rows.length) return '[]'
+  const encoded = rows.map((row) => {
+    const fields = keys.map((key, index) => {
+      const raw = jsonColumns.has(index) ? rawJsonDocument(row[index]) : null
+      return `    ${JSON.stringify(key)}: ${raw ?? JSON.stringify(row[index] ?? null, bigintReplacer)}`
+    })
+    return `  {\n${fields.join(',\n')}\n  }`
+  })
+  return `[\n${encoded.join(',\n')}\n]`
 }
 
 export type ExportFormat = 'csv' | 'tsv' | 'json' | 'sql'
@@ -153,7 +181,12 @@ export type ExportSerializer = {
   footer(): string
 }
 
-export function createExportSerializer(columns: string[], format: ExportFormat, sqlTarget?: SqlExportTarget): ExportSerializer {
+export function createExportSerializer(
+  columns: string[],
+  format: ExportFormat,
+  sqlTarget?: SqlExportTarget,
+  jsonColumns: ReadonlySet<number> = NO_JSON_COLUMNS,
+): ExportSerializer {
   if (format === 'sql') {
     if (!sqlTarget) throw new Error(t('export.sqlTargetMissing'))
     // One INSERT per row rather than a packed VALUES list: the serializer sees a
@@ -171,10 +204,15 @@ export function createExportSerializer(columns: string[], format: ExportFormat, 
     return {
       header: () => '[\n',
       // One compact object per line, comma-separated — a valid JSON array that a
-      // reader can also consume line by line.
+      // reader can also consume line by line. Assembled field by field so JSON
+      // cells can be spliced in raw; for everything else this is byte-identical
+      // to stringifying the whole object.
       row: (cells) => {
-        const object = Object.fromEntries(keys.map((key, index) => [key, cells[index] ?? null]))
-        const text = `${first ? '' : ',\n'}${JSON.stringify(object, bigintReplacer)}`
+        const fields = keys.map((key, index) => {
+          const raw = jsonColumns.has(index) ? rawJsonDocument(cells[index]) : null
+          return `${JSON.stringify(key)}:${raw ?? JSON.stringify(cells[index] ?? null, bigintReplacer)}`
+        })
+        const text = `${first ? '' : ',\n'}{${fields.join(',')}}`
         first = false
         return text
       },

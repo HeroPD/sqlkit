@@ -391,9 +391,10 @@ export class StatusBar extends LitElement {
         outline: none;
       }
 
+      /* Colour, not opacity: these items carry tooltips as their own ::after,
+         which an opacity group would make translucent. */
       button.item:disabled {
-        color: var(--text-3);
-        opacity: 0.45;
+        color: color-mix(in srgb, var(--text-3) 45%, transparent);
         cursor: default;
       }
 
