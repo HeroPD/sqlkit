@@ -318,6 +318,9 @@ export type ServerActivity = {
   connections: { used: number; max: number | null }
   /** Pre-formatted one-line stats — each engine picks what it can report. */
   stats: Array<{ label: string; value: string }>
+  /** False when the server cannot expose the connection metadata used to tell
+   * SqlKit-owned sessions from other clients. Session data remains usable. */
+  selfIdentificationAvailable: boolean
   sessions: ServerSession[]
 }
 

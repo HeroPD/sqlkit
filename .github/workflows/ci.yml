@@ -141,25 +141,38 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TEST_MYSQL_URL: mysql://root:root@localhost:3306/testsqlkit
-    services:
-      mariadb:
-        image: mariadb:11
-        env:
-          MARIADB_ROOT_PASSWORD: root
-          MARIADB_DATABASE: testsqlkit
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd "healthcheck.sh --connect --innodb_initialized"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
+      # Service containers cannot pass arguments to mariadbd. Start it directly
+      # so the suite also covers SqlKit attribution via connection attributes.
+      - name: Start MariaDB with Performance Schema
+        run: |
+          docker run --detach --name sqlkit-mariadb \
+            --env MARIADB_ROOT_PASSWORD=root \
+            --env MARIADB_DATABASE=testsqlkit \
+            --publish 3306:3306 \
+            --health-cmd "healthcheck.sh --connect --innodb_initialized" \
+            --health-interval 2s \
+            --health-timeout 5s \
+            --health-retries 30 \
+            mariadb:11 --performance-schema=ON
+          for attempt in {1..30}; do
+            status="$(docker inspect --format '{{.State.Health.Status}}' sqlkit-mariadb)"
+            if [ "$status" = healthy ]; then
+              exit 0
+            fi
+            if [ "$status" = unhealthy ]; then
+              docker logs sqlkit-mariadb
+              exit 1
+            fi
+            sleep 2
+          done
+          docker logs sqlkit-mariadb
+          exit 1
       - run: npm ci
       - name: MySQL driver suite against MariaDB
         run: npx vitest run electron/db/mysql.integration.test.ts

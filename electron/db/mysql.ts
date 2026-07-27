@@ -68,6 +68,11 @@ export function sqlModeFlags(mode: string): SqlModeFlags {
   }
 }
 
+/** Whether connection attributes can identify sessions opened by SqlKit. */
+export function mysqlSessionIdentificationAvailable(enabled: unknown, attrsSize: unknown): boolean {
+  return Number(enabled) === 1 && Number(attrsSize) !== 0
+}
+
 // MySQL with all-databases support, mirroring the postgres driver: only the
 // database in use holds a pool (a MySQL "database" and "schema" are the same
 // thing), so the connection budget is spent on one database rather than every
@@ -629,6 +634,10 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         sql: string | null
         self: number
       }
+      type PerformanceSchemaRow = {
+        enabled: number | string
+        attrs_size: number | string
+      }
       // Daemon threads (the event scheduler) are not sessions anyone can act on,
       // and the reader excludes itself so the polling query doesn't head its own
       // list on every refresh.
@@ -640,23 +649,44 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
                        p.time * 1000 as elapsed_ms,
                        nullif(trim(coalesce(p.info, '')), '') as \`sql\``
       const order = `order by (coalesce(p.command, '') <> 'Sleep') desc, p.time desc limit ${MAX_SESSIONS}`
-      const sessions = await metaRows<SessionRow>(
-        // program_name comes from the connect attributes, which live in
-        // performance_schema — absent when it is disabled, hence the fallback.
-        `select ${columns},
-                coalesce(a.attr_value = ?, 0) as self
-         from information_schema.processlist p
-         left join performance_schema.session_connect_attrs a
-           on a.processlist_id = p.id and a.attr_name = 'program_name'
-         where ${notDaemon} ${order}`,
-        [APP_CONNECTION_NAME],
+      const [performanceSchema] = await metaRows<PerformanceSchemaRow>(
+        `select @@performance_schema as enabled,
+                @@performance_schema_session_connect_attrs_size as attrs_size`,
+        [],
         childDb,
-      ).catch(() => metaRows<SessionRow>(
-        `select ${columns}, (p.id = connection_id()) as self
+      ).catch(() => [])
+      let selfIdentificationAvailable = mysqlSessionIdentificationAvailable(
+        performanceSchema?.enabled,
+        performanceSchema?.attrs_size,
+      )
+      const sessionsWithoutSelf = () => metaRows<SessionRow>(
+        `select ${columns}, 0 as self
          from information_schema.processlist p where ${notDaemon} ${order}`,
         [],
         childDb,
-      ))
+      )
+      let sessions: SessionRow[]
+      if (selfIdentificationAvailable) {
+        // program_name comes from the connect attributes, which only populate
+        // when Performance Schema and its attribute buffer are enabled.
+        try {
+          sessions = await metaRows<SessionRow>(
+            `select ${columns},
+                    coalesce(a.attr_value = ?, 0) as self
+             from information_schema.processlist p
+             left join performance_schema.session_connect_attrs a
+               on a.processlist_id = p.id and a.attr_name = 'program_name'
+             where ${notDaemon} ${order}`,
+            [APP_CONNECTION_NAME],
+            childDb,
+          )
+        } catch {
+          selfIdentificationAvailable = false
+          sessions = await sessionsWithoutSelf()
+        }
+      } else {
+        sessions = await sessionsWithoutSelf()
+      }
 
       const [counts] = await metaRows<{ used: number; max: number }>(
         `select (select count(*) from information_schema.processlist p where ${notDaemon}) as used,
@@ -688,6 +718,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             ? [{ label: 'Buffer pool hit', value: `${(100 * (1 - reads / requests)).toFixed(1)}%` }]
             : []),
         ],
+        selfIdentificationAvailable,
         sessions: sessions.map((row) => ({
           id: String(row.id),
           user: row.user,

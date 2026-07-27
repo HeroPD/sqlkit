@@ -743,6 +743,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
             ...(summary?.uptime_seconds ? [{ label: 'Uptime', value: formatUptime(Number(summary.uptime_seconds)) }] : []),
             ...(summary?.cache_hit ? [{ label: 'Cache hit', value: `${summary.cache_hit}%` }] : []),
           ],
+          selfIdentificationAvailable: true,
           sessions: sessions.rows.map((row) => ({
             id: row.id,
             user: row.user,

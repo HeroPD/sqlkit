@@ -755,6 +755,7 @@ describeDb('mssql driver (integration)', () => {
     const other = await connectDriver()
     try {
       const activity = await driver.serverActivity!()
+      expect(activity.selfIdentificationAvailable).toBe(true)
       expect(activity.sessions.some((session) => session.self)).toBe(true)
 
       expect(activity.connections.used).toBeGreaterThan(0)

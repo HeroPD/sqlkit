@@ -232,6 +232,7 @@ const enUS = {
   'tasks.serverUnavailable': 'Could not read server activity',
   'tasks.noSessions': 'No sessions reported.',
   'tasks.sessionSelf': 'Opened by SqlKit Studio',
+  'tasks.selfIdentificationUnavailable': 'Identifying SqlKit Studio sessions requires Performance Schema connection attributes.',
   'tasks.sessionIdle': 'idle',
   'tasks.cancelStatement': 'Cancel this statement',
   'tasks.endSession': 'End this session',

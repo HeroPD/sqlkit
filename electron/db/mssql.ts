@@ -741,6 +741,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return {
         connections: { used: counts?.used ?? 0, max: max && max > 0 ? max : null },
         stats: uptime?.uptime_seconds ? [{ label: 'Uptime', value: formatUptime(uptime.uptime_seconds) }] : [],
+        selfIdentificationAvailable: true,
         sessions: sessions.map((row) => ({
           id: String(row.id),
           user: row.user,

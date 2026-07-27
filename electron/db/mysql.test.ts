@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
+import { mysqlSessionIdentificationAvailable, mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
 
 describe('mysqlVersion', () => {
   it('labels plain MySQL versions', () => {
@@ -18,6 +18,16 @@ describe('sqlModeFlags', () => {
     expect(sqlModeFlags('REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ANSI')).toEqual({ noBackslashEscapes: false, ansiQuotes: true })
     expect(sqlModeFlags('ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES')).toEqual({ noBackslashEscapes: false, ansiQuotes: false })
     expect(sqlModeFlags('')).toEqual({ noBackslashEscapes: false, ansiQuotes: false })
+  })
+})
+
+describe('mysqlSessionIdentificationAvailable', () => {
+  it('requires Performance Schema and a nonzero connection-attribute buffer', () => {
+    expect(mysqlSessionIdentificationAvailable(1, -1)).toBe(true)
+    expect(mysqlSessionIdentificationAvailable('1', '512')).toBe(true)
+    expect(mysqlSessionIdentificationAvailable(0, -1)).toBe(false)
+    expect(mysqlSessionIdentificationAvailable(1, 0)).toBe(false)
+    expect(mysqlSessionIdentificationAvailable(undefined, undefined)).toBe(false)
   })
 })
 

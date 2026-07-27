@@ -322,6 +322,9 @@ export class TasksView extends LitElement {
       ${activity.stats.length
         ? html`<p class="stats">${activity.stats.map((stat) => html`<span><span class="label">${stat.label}</span> ${stat.value}</span>`)}</p>`
         : nothing}
+      ${activity.selfIdentificationAvailable
+        ? nothing
+        : html`<p class="muted activity-note">${t('tasks.selfIdentificationUnavailable')}</p>`}
       <h4>${t('tasks.sessions')} <span class="count">${activity.sessions.length}</span></h4>
       ${activity.sessions.length
         ? activity.sessions.map((session) => this._renderSessionRow(session))
@@ -504,6 +507,12 @@ export class TasksView extends LitElement {
         margin: 8px 0 0;
         font-size: var(--font-size-sm);
         color: var(--text-2);
+      }
+
+      .activity-note {
+        margin: 8px 0 0;
+        font-size: var(--font-size-sm);
+        line-height: 1.35;
       }
 
       /* --- rows --- */
