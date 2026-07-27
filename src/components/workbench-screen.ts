@@ -43,7 +43,8 @@ import type { StatusConnection } from './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
 import { clearInspectDraftCache, dropInspectDraft, sweepInspectDrafts, type ColumnAlterEventDetail } from './table-inspect'
-import { clearEditorStateCache, type RunQueryDetail } from './sql-editor'
+import { clearEditorStateCache, type EditorCommandDetail, type RunQueryDetail } from './sql-editor'
+import type { SelectionCommandId } from '../codemirror/selection-commands'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectEditDetail, ObjectInspectDetail, TableBrowseDetail, TableCreateDetail, TableSelectDetail } from './explorer-view'
 import type { HistoryExplainDetail, HistoryOpenDetail } from './history-view'
@@ -356,6 +357,14 @@ export class WorkbenchScreen extends LitElement {
       case 'refresh-results':
         this._refreshResults()
         break
+      default:
+        // Selection menu: the command runs against the editor of the active tab,
+        // and no-ops when the tab shows a form or an inspector instead.
+        if (action.startsWith('selection:')) {
+          this.renderRoot
+            .querySelector('sql-editor')
+            ?.runSelectionCommand(action.slice('selection:'.length) as SelectionCommandId)
+        }
     }
   }
 
@@ -1188,6 +1197,7 @@ export class WorkbenchScreen extends LitElement {
               .tables=${tables}
               .columns=${columns}
               @editor-notice=${this._onGridNotice}
+              @editor-command=${this._onEditorCommand}
             ></sql-editor>
           </div>
           ${this._layout.panelCollapsed
@@ -1258,6 +1268,12 @@ export class WorkbenchScreen extends LitElement {
   private _onActivitySelect(event: Event) {
     const { view } = (event as CustomEvent<{ view: ViewId }>).detail
     this._activeView = this._activeView === view ? null : view
+  }
+
+  // The editor's right-click menu only asks for the palette so far.
+  private _onEditorCommand(event: Event) {
+    const { command } = (event as CustomEvent<EditorCommandDetail>).detail
+    if (command === 'command-palette') this._cmdPalette.open('commands')
   }
 
   private _onEmptyAction(event: Event) {

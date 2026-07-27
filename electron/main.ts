@@ -12,7 +12,7 @@ import {
 import { realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import type { ConnectionStatus, ThemeId } from '../src/electron'
+import type { ConnectionStatus, MenuAction, ThemeId } from '../src/electron'
 import { t } from '../src/i18n'
 import { createConnectionManager, type ConnectionManager } from './db/manager'
 import { stopWorkspaceWatcher } from './files'
@@ -289,9 +289,18 @@ function installQuitHandler() {
 function buildAppMenu() {
   const isMac = process.platform === 'darwin'
   const selectedTheme = readTheme()
-  const menuAction = (action: string) => (_item: unknown, window: unknown) => {
+  const menuAction = (action: MenuAction) => (_item: unknown, window: unknown) => {
     if (window instanceof BrowserWindow) window.webContents.send('app:menu', action)
   }
+  // Selection items display their shortcut but must NOT register it: the keys
+  // belong to CodeMirror's keymap, and a registered accelerator would swallow
+  // them app-wide — breaking ⌘D and friends in inputs and the result grid.
+  const selectionItem = (label: string, accelerator: string, action: MenuAction): MenuItemConstructorOptions => ({
+    label,
+    accelerator,
+    registerAccelerator: false,
+    click: menuAction(action),
+  })
   const selectTheme = (theme: ThemeId) => {
     writeTheme(theme)
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('app:menu', `theme:${theme}`)
@@ -317,6 +326,26 @@ function buildAppMenu() {
       ],
     },
     { role: 'editMenu' },
+    {
+      label: t('menu.selection'),
+      submenu: [
+        // Native role: it selects all in whatever is focused — editor, input, or grid.
+        { role: 'selectAll' },
+        { type: 'separator' },
+        selectionItem(t('menu.expandSelection'), 'CmdOrCtrl+I', 'selection:expand'),
+        { type: 'separator' },
+        selectionItem(t('menu.copyLineUp'), 'Shift+Alt+Up', 'selection:copy-line-up'),
+        selectionItem(t('menu.copyLineDown'), 'Shift+Alt+Down', 'selection:copy-line-down'),
+        selectionItem(t('menu.moveLineUp'), 'Alt+Up', 'selection:move-line-up'),
+        selectionItem(t('menu.moveLineDown'), 'Alt+Down', 'selection:move-line-down'),
+        { type: 'separator' },
+        selectionItem(t('menu.addCursorAbove'), 'CmdOrCtrl+Alt+Up', 'selection:add-cursor-above'),
+        selectionItem(t('menu.addCursorBelow'), 'CmdOrCtrl+Alt+Down', 'selection:add-cursor-below'),
+        selectionItem(t('menu.addCursorsToLineEnds'), 'Shift+Alt+I', 'selection:add-cursors-to-line-ends'),
+        selectionItem(t('menu.addNextOccurrence'), 'CmdOrCtrl+D', 'selection:add-next-occurrence'),
+        selectionItem(t('menu.selectAllOccurrences'), 'Shift+CmdOrCtrl+L', 'selection:select-all-occurrences'),
+      ],
+    },
     {
       label: t('menu.view'),
       submenu: [

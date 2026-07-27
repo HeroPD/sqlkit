@@ -1,8 +1,10 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
-import { customElement, property } from 'lit/decorators.js'
+import { customElement, property, state } from 'lit/decorators.js'
 import { icons, scrollbars } from '../shared-styles'
+import './context-menu'
+import type { MenuItem, MenuPickDetail } from './context-menu'
 
-import { Compartment, EditorSelection, EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import {
   EditorView,
   keymap,
@@ -38,13 +40,21 @@ import {
 } from '@codemirror/autocomplete'
 import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search'
 import { sql } from '@codemirror/lang-sql'
-import { runQuery } from '../codemirror/run-query'
+import { queryToRun, runQuery } from '../codemirror/run-query'
+import { altShiftKeys } from '../codemirror/alt-shift-keys'
 import { createFindPanel } from '../codemirror/find-panel'
+import {
+  SELECTION_COMMANDS,
+  addCursorVertically,
+  addCursorsToLineEnds,
+  type SelectionCommandId,
+} from '../codemirror/selection-commands'
 import type { ColumnRef } from '../electron'
 import { quoteStyleFor } from '../dialect'
 import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 import { softHighlightStyle } from '../codemirror/highlight'
+import { isMac, mod } from '../platform'
 import { t } from '../i18n'
 
 const FORMAT_LANGUAGE = {
@@ -178,6 +188,9 @@ const appTheme = EditorView.theme(
  * driver-reported error line back to the editor. */
 export type RunQueryDetail = { sql: string; line: number }
 
+/** Workbench-level actions the editor's right-click menu asks for. */
+export type EditorCommandDetail = { command: 'command-palette' }
+
 // One editor view serves every tab: tab switches swap immutable EditorStates
 // via setState() instead of tearing the view down and re-parsing, which also
 // preserves each tab's undo history, selection, and scroll position. States
@@ -221,24 +234,10 @@ const baseExtensions = [
 
   search({ top: true, createPanel: createFindPanel }),
   highlightSelectionMatches(),
-]
 
-// "Add cursor above/below" (Cmd/Ctrl-Alt-Up/Down): grow from the cursor furthest in the travel direction so presses stack one way; the new cursor is main, so the view follows it.
-function addCursorVertically(forward: boolean) {
-  return (view: EditorView): boolean => {
-    const ranges = view.state.selection.ranges
-    const edge = ranges.reduce((far, r) =>
-      (forward ? r.head > far.head : r.head < far.head) ? r : far,
-    )
-    const moved = view.moveVertically(edge, forward)
-    if (moved.head === edge.head) return false // already at the first/last line
-    view.dispatch({
-      selection: EditorSelection.create([...ranges, moved], ranges.length),
-      scrollIntoView: true,
-    })
-    return true
-  }
-}
+  // Shift+Alt+I, the one Selection command CodeMirror has no command for.
+  altShiftKeys({ KeyI: addCursorsToLineEnds }),
+]
 
 const baseKeymap = keymap.of([
   { key: 'Mod-Alt-ArrowUp', run: addCursorVertically(false), preventDefault: true },
@@ -371,6 +370,10 @@ export class SqlEditor extends LitElement {
   @property()
   dialect: SqlDialectName = 'postgres'
 
+  // Open right-click menu, at viewport coordinates; null when closed.
+  @state()
+  private _menu: { x: number; y: number } | null = null
+
   private _view: EditorView | null = null
 
   private _renderedTabId = ''
@@ -405,7 +408,20 @@ export class SqlEditor extends LitElement {
   })
 
   render() {
-    return html`<div class="host"></div>`
+    return html`
+      <div class="host" @contextmenu=${this._onContextMenu}></div>
+      ${this._menu
+        ? html`
+            <context-menu
+              .x=${this._menu.x}
+              .y=${this._menu.y}
+              .items=${this._menuItems()}
+              @menu-pick=${(event: CustomEvent<MenuPickDetail>) => this._onMenuPick(event.detail.id)}
+              @menu-close=${() => (this._menu = null)}
+            ></context-menu>
+          `
+        : ''}
+    `
   }
 
   /** Moves the cursor to a 1-based line, scrolls it into view, and focuses. */
@@ -451,7 +467,7 @@ export class SqlEditor extends LitElement {
   private _handlerExtensions() {
     return [
       runQuery((query, view) => this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)),
-      keymap.of([{ key: 'Shift-Alt-f', run: () => this.formatSql() }]),
+      altShiftKeys({ KeyF: () => this.formatSql() }),
       this._changeListener,
     ]
   }
@@ -504,6 +520,8 @@ export class SqlEditor extends LitElement {
     // one, and re-point its compartments at the current tables/dialect — a
     // restored state still carries the config it was created under.
     if (changed.has('tabId') && this.tabId !== this._renderedTabId) {
+      // A menu opened on the outgoing document has nothing to act on.
+      this._menu = null
       this._stashState()
       this._renderedTabId = this.tabId
       view.setState(this._restoredState())
@@ -603,6 +621,109 @@ export class SqlEditor extends LitElement {
         }))
       })
     return true
+  }
+
+  /** Runs one of the app menu's Selection commands against the editor. */
+  runSelectionCommand(id: SelectionCommandId): boolean {
+    const view = this._view
+    if (!view) return false
+    view.focus()
+    return SELECTION_COMMANDS[id](view)
+  }
+
+  // VS Code's right-click rule: a click inside a selection keeps it, a click
+  // anywhere else moves the caret there first, so the menu always acts on what
+  // was clicked. context-menu swallows mousedown on its items, so the editor
+  // keeps focus underneath and the commands land in the right view.
+  private _onContextMenu = (event: MouseEvent) => {
+    event.preventDefault()
+    const view = this._view
+    if (!view) return
+    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
+    if (pos !== null && !view.state.selection.ranges.some((range) => !range.empty && pos >= range.from && pos <= range.to)) {
+      view.dispatch({ selection: { anchor: pos } })
+    }
+    this._menu = { x: event.clientX, y: event.clientY }
+  }
+
+  // One label per item whatever the selection is: Format SQL already means
+  // selection-or-document, and Cut/Copy dim instead of disappearing so the
+  // menu keeps its shape.
+  private _menuItems(): MenuItem[] {
+    const noSelection = !this._view?.state.selection.ranges.some((range) => !range.empty)
+    return [
+      { id: 'run', label: t('action.runQuery'), shortcut: isMac ? '⌘↵' : 'Ctrl+↵' },
+      { id: 'format', label: t('action.formatSql'), shortcut: isMac ? '⇧⌥F' : 'Shift+Alt+F' },
+      { id: 'cut', label: t('action.cut'), shortcut: mod('X'), disabled: noSelection, separatorBefore: true },
+      { id: 'copy', label: t('action.copy'), shortcut: mod('C'), disabled: noSelection },
+      { id: 'paste', label: t('action.paste'), shortcut: mod('V') },
+      {
+        id: 'command-palette',
+        label: t('action.commandPalette'),
+        shortcut: isMac ? '⇧⌘P' : 'Shift+Ctrl+P',
+        separatorBefore: true,
+      },
+    ]
+  }
+
+  private _onMenuPick(id: string) {
+    const view = this._view
+    if (!view) return
+    switch (id) {
+      case 'run': {
+        const query = queryToRun(view.state)
+        if (query) this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)
+        break
+      }
+      case 'format':
+        this.formatSql()
+        break
+      case 'cut':
+      case 'copy':
+        this._copySelection(id === 'cut')
+        break
+      case 'paste':
+        void this._paste()
+        break
+      case 'command-palette':
+        this.dispatchEvent(
+          new CustomEvent<EditorCommandDetail>('editor-command', {
+            detail: { command: 'command-palette' },
+            bubbles: true,
+            composed: true,
+          }),
+        )
+        break
+    }
+  }
+
+  // The clipboard goes through the main process: the renderer is sandboxed and
+  // permission requests are denied, so navigator.clipboard.readText() is out.
+  // Multiple selections use the same newline-separated clipboard shape as
+  // CodeMirror's keyboard Cut/Copy handlers.
+  private _copySelection(cut: boolean) {
+    const view = this._view
+    if (!view) return
+    const ranges = view.state.selection.ranges.filter((range) => !range.empty)
+    if (!ranges.length) return
+    const text = ranges.map(({ from, to }) => view.state.sliceDoc(from, to)).join(view.state.lineBreak)
+    void window.sqlkit.writeClipboardText(text)
+    if (!cut) return
+    view.dispatch({ changes: ranges, userEvent: 'delete.cut', scrollIntoView: true })
+    view.focus()
+  }
+
+  private async _paste() {
+    const view = this._view
+    if (!view) return
+    const state = view.state
+    const tabId = this.tabId
+    const text = await window.sqlkit.readClipboardText()
+    // The read is async: do not target a tab or selection that changed while
+    // the renderer was waiting for the main process.
+    if (!text || this._view !== view || this.tabId !== tabId || view.state !== state) return
+    view.dispatch({ ...view.state.replaceSelection(text), userEvent: 'input.paste', scrollIntoView: true })
+    view.focus()
   }
 
   private _sqlExtension() {

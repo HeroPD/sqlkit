@@ -8,6 +8,8 @@ export type MenuItem = {
   checked?: boolean
   shortcut?: string
   separatorBefore?: boolean
+  /** Shown dimmed and unpickable — for actions the current state rules out. */
+  disabled?: boolean
 }
 export type MenuPickDetail = { id: string }
 
@@ -65,6 +67,7 @@ export class ContextMenu extends LitElement {
               class="menu-item ${item.danger ? 'danger' : ''}"
               role="menuitem"
               aria-checked=${item.checked === undefined ? undefined : item.checked ? 'true' : 'false'}
+              ?disabled=${item.disabled ?? false}
               @mousedown=${(e: Event) => e.preventDefault()}
               @click=${() => this._pick(item)}
             >
@@ -204,6 +207,15 @@ export class ContextMenu extends LitElement {
     .menu-item:focus-visible {
       background: color-mix(in srgb, var(--text) 9%, transparent);
       outline: none;
+    }
+
+    .menu-item:disabled {
+      color: var(--text-3);
+      cursor: default;
+    }
+
+    .menu-item:disabled:hover {
+      background: transparent;
     }
 
     .menu-item.danger {

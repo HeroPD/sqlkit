@@ -6,4 +6,7 @@ export function stubEditorLayout() {
   Range.prototype.getClientRects = () =>
     (({ length: 0, item: () => null, [Symbol.iterator]: [].values }))
   Element.prototype.scrollIntoView = () => {}
+  // Reading the selection of a focused editor takes CodeMirror through its
+  // Safari range hack, which calls execCommand — absent from jsdom.
+  document.execCommand ??= () => false
 }
