@@ -40,7 +40,7 @@ import {
 } from '@codemirror/autocomplete'
 import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search'
 import { sql } from '@codemirror/lang-sql'
-import { queryToRun, runQuery } from '../codemirror/run-query'
+import { explicitQueryToRun, hasExplicitQueryTarget, queryToRun, runQuery } from '../codemirror/run-query'
 import { altShiftKeys } from '../codemirror/alt-shift-keys'
 import { createFindPanel } from '../codemirror/find-panel'
 import {
@@ -381,9 +381,11 @@ export class SqlEditor extends LitElement {
   private _lastEmittedValue = ''
   private _syncingFromEditor = false
   private _applyingHostValue = false
+  private _lastRunTarget: boolean | null = null
 
   // Built once per component: captures `this` for the change events.
   private _changeListener = EditorView.updateListener.of((update) => {
+    this._emitRunTarget(update.view)
     if (!update.docChanged) return
 
     const nextValue = update.state.doc.toString()
@@ -449,6 +451,7 @@ export class SqlEditor extends LitElement {
     // The element was just (re)created: a cached state restored here is
     // bound to its previous element until rebound.
     this._rebindState(this._view)
+    this._emitRunTarget(this._view)
   }
 
   // The full extension set of a fresh document state.
@@ -631,6 +634,37 @@ export class SqlEditor extends LitElement {
     return SELECTION_COMMANDS[id](view)
   }
 
+  /** Runs the same selection-or-nearest-statement target as Mod+Enter. */
+  runCurrentQuery(): boolean {
+    const view = this._view
+    if (!view) return false
+    const query = queryToRun(view.state)
+    if (!query) return false
+    this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)
+    return true
+  }
+
+  /** Runs an explicit selection, or the statement that contains the caret. */
+  runExplicitQuery(): boolean {
+    const view = this._view
+    if (!view?.hasFocus) return false
+    const query = explicitQueryToRun(view.state)
+    if (!query) return false
+    this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)
+    return true
+  }
+
+  private _emitRunTarget(view: EditorView) {
+    const available = view.hasFocus && hasExplicitQueryTarget(view.state)
+    if (available === this._lastRunTarget) return
+    this._lastRunTarget = available
+    this.dispatchEvent(new CustomEvent('run-target-change', {
+      detail: { available },
+      bubbles: true,
+      composed: true,
+    }))
+  }
+
   // VS Code's right-click rule: a click inside a selection keeps it, a click
   // anywhere else moves the caret there first, so the menu always acts on what
   // was clicked. context-menu swallows mousedown on its items, so the editor
@@ -671,8 +705,7 @@ export class SqlEditor extends LitElement {
     if (!view) return
     switch (id) {
       case 'run': {
-        const query = queryToRun(view.state)
-        if (query) this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)
+        this.runCurrentQuery()
         break
       }
       case 'format':

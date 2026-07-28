@@ -284,6 +284,7 @@ export class ResultsPanel extends LitElement {
   @state() private _queryInfoPos: { left: number; top: number; maxWidth: number; maxHeight: number } | null = null
   private _filterFocusPending = false
   private _filterColumns: string[] = []
+  private _lastReportedDirty: boolean | null = null
 
   /** Selected cell rectangle in display-row space: anchor (r0,c0) → focus (r1,c1).
    * Rows are display indices (result rows and staged rows share one numbering),
@@ -505,6 +506,15 @@ export class ResultsPanel extends LitElement {
   }
 
   protected updated() {
+    const dirty = this.hasUnstagedJson()
+    if (dirty !== this._lastReportedDirty) {
+      this._lastReportedDirty = dirty
+      this.dispatchEvent(new CustomEvent('result-dirty-change', {
+        detail: { dirty },
+        bubbles: true,
+        composed: true,
+      }))
+    }
     this._publishSelectionStats()
     if (this._queryInfoOpen && !this._queryInfoPos) this._placeQueryInfo()
     if (this._resetScroll) {

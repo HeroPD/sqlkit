@@ -70,6 +70,7 @@ const enUS = {
   'status.oneConnected': '1 connected',
   'status.manyConnected': '{count} connected',
   'status.connections': 'Connected databases',
+  'update.available': 'Update available',
   'results.title': 'Results',
   'results.queryInfo': 'Show the query behind this result',
   'results.queryInfoHide': 'Hide the query',

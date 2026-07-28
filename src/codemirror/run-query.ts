@@ -250,13 +250,14 @@ const expandOverSpans = (tree: Tree, spans: DollarSpan[], doc: Text, node: Synta
   return [from, to]
 }
 
-const closestQueryBlock = (state: EditorState, cursor: number) => {
+const closestQueryBlock = (state: EditorState, cursor: number, allowNeighbor = true) => {
   const doc = state.doc
   const tree = treeForQuery(state, cursor)
   // One full-text scan per run; the tree can't provide these (see dollar-spans.ts).
   const spans = dollarSpans(doc.toString())
   const { covering, prev, next } = statementsAround(tree, doc, cursor)
 
+  if (!covering && !allowNeighbor) return null
   if (!covering && !prev && !next) return paragraphBlock(tree, spans, doc, cursor)
 
   const chosen = covering
@@ -312,6 +313,24 @@ export const queryToRun = (state: EditorState): QueryBlock | null => {
     if (selected) return { sql: selected, from: runFrom + raw.length - raw.trimStart().length }
   }
   return closestQueryBlock(state, head)
+}
+
+/** An explicit selection, or only the statement that actually contains the caret. */
+export const explicitQueryToRun = (state: EditorState): QueryBlock | null => {
+  const { from, to, head } = state.selection.main
+  if (from < to) {
+    const raw = state.sliceDoc(from, to)
+    const selected = raw.trim()
+    if (selected) return { sql: selected, from: from + raw.length - raw.trimStart().length }
+  }
+  return closestQueryBlock(state, head, false)
+}
+
+/** Cheap UI-state check; execution itself uses the fully parsed explicitQueryToRun path. */
+export const hasExplicitQueryTarget = (state: EditorState): boolean => {
+  const { from, to, head } = state.selection.main
+  if (from < to) return Boolean(state.sliceDoc(from, to).trim())
+  return statementsAround(syntaxTree(state), state.doc, head).covering !== null
 }
 
 // First runnable statement of a plain SQL string (same `;`/blank-line splitting as run-at-caret),

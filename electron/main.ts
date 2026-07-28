@@ -20,6 +20,7 @@ import { registerDbIpc } from './ipc-db'
 import { inspectionSwitch } from './hardening'
 import { registerWorkspaceIpc } from './ipc-workspace'
 import { readGlobalConfig, readTheme, writeTheme } from './workspace'
+import { titleBarOverlay, WINDOW_CHROME } from './window-chrome'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 app.setName(t('app.name'))
@@ -188,13 +189,9 @@ function createWindow() {
     height: 900,
     minWidth: 800,
     minHeight: 600,
-    backgroundColor: theme === 'light'
-      ? '#f4f5f7'
-      : theme === 'midnight-blue'
-        ? '#0b1420'
-        : theme === 'warm-dark'
-          ? '#161311'
-          : '#13161d',
+    backgroundColor: WINDOW_CHROME[theme].background,
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    ...(process.platform === 'darwin' ? {} : { titleBarOverlay: titleBarOverlay(theme) }),
     show: false,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
@@ -210,6 +207,15 @@ function createWindow() {
     pendingShows.delete(contentsId)
     cleanupWindow(contentsId)
   })
+
+  // macOS hides the traffic lights in fullscreen, so the renderer's title bar
+  // has to give back the gutter it reserves for them. Sent on load too: a
+  // reload of a fullscreen window starts a renderer that knows nothing.
+  const sendFullScreen = () => window.webContents.send('window:fullscreen', window.isFullScreen())
+  window.on('enter-full-screen', sendFullScreen)
+  window.on('leave-full-screen', sendFullScreen)
+  window.webContents.on('did-finish-load', sendFullScreen)
+
   if (smokeTest) {
     window.webContents.once('did-finish-load', () => app.exit(0))
     window.webContents.once('did-fail-load', (_event, code, description) => {
@@ -303,7 +309,10 @@ function buildAppMenu() {
   })
   const selectTheme = (theme: ThemeId) => {
     writeTheme(theme)
-    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('app:menu', `theme:${theme}`)
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (process.platform !== 'darwin') window.setTitleBarOverlay(titleBarOverlay(theme))
+      window.webContents.send('app:menu', `theme:${theme}`)
+    }
     // Electron updates sibling radio items itself. Rebuilding the native menu
     // inside its click callback can release the pointer into the renderer and
     // leave the window covered by a native text selection.

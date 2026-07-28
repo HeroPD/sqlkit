@@ -18,6 +18,9 @@ dist-ssr
 .env.*
 !.env.example
 
+# Local design explorations (standalone HTML previews, not part of the build)
+design/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

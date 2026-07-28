@@ -506,6 +506,8 @@ export type SqlkitApi = {
   onFilesChanged: (listener: () => void) => () => void
   /** Fires on app-menu items (File > New Query / Save / …); returns unsubscribe. */
   onMenuAction: (listener: (action: MenuAction) => void) => () => void
+  /** Fires when the window enters or leaves fullscreen, and on load; returns unsubscribe. */
+  onFullScreenChange: (listener: (fullScreen: boolean) => void) => () => void
 }
 
 /** Action ids the app menu sends over `app:menu`. */

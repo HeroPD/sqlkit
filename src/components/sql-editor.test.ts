@@ -204,6 +204,46 @@ test('run-query and editor-change fire on the remounted element', async () => {
   second.remove()
 })
 
+test('runCurrentQuery matches the selection-or-nearest-statement shortcut target', async () => {
+  const el = await mount('titlebar-run', 'select 1;\n\nselect 2;')
+  const runs: Array<{ sql: string; line: number }> = []
+  el.addEventListener('run-query', (event) =>
+    runs.push((event as CustomEvent<{ sql: string; line: number }>).detail),
+  )
+  const view = (el as unknown as { _view: EditorView })._view
+  view.dispatch({ selection: { anchor: 11, head: 20 } })
+
+  expect(el.runCurrentQuery()).toBe(true)
+  expect(runs).toEqual([{ sql: 'select 2;', line: 3 }])
+  el.remove()
+})
+
+test('runExplicitQuery runs a selection or only the statement containing the caret', async () => {
+  const el = await mount('titlebar-explicit-run', '  select 1;\n\nselect 2;  ')
+  const runs: Array<{ sql: string; line: number }> = []
+  el.addEventListener('run-query', (event) =>
+    runs.push((event as CustomEvent<{ sql: string; line: number }>).detail),
+  )
+  const view = (el as unknown as { _view: EditorView })._view
+  view.focus()
+
+  view.dispatch({ selection: { anchor: 13, head: 22 } })
+  expect(el.runExplicitQuery()).toBe(true)
+
+  view.dispatch({ selection: { anchor: 17 } })
+  expect(el.runExplicitQuery()).toBe(true)
+  view.dispatch({ selection: { anchor: 12 } })
+  expect(el.runExplicitQuery()).toBe(false)
+  expect(runs).toEqual([
+    { sql: 'select 2;', line: 3 },
+    { sql: 'select 2;', line: 3 },
+  ])
+
+  view.contentDOM.blur()
+  expect(el.runExplicitQuery()).toBe(false)
+  el.remove()
+})
+
 // Regression: the host swapping `value` on a live tab (the History list
 // recycling its preview tab to another entry) dispatched the new doc into the
 // view, which fired the change listener — so the host saw a programmatic load

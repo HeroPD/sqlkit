@@ -72,6 +72,11 @@ const api: SqlkitApi = {
     ipcRenderer.on('app:menu', handler)
     return () => ipcRenderer.off('app:menu', handler)
   },
+  onFullScreenChange: (listener) => {
+    const handler = (_event: IpcRendererEvent, fullScreen: boolean) => listener(fullScreen)
+    ipcRenderer.on('window:fullscreen', handler)
+    return () => ipcRenderer.off('window:fullscreen', handler)
+  },
 }
 
 contextBridge.exposeInMainWorld('sqlkit', api)

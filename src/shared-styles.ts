@@ -454,3 +454,34 @@ export const sqlHighlight = css`
     color: #7d9f65;
   }
 `
+
+// The custom window title bar, shared by the welcome screen and the workbench:
+// the app owns the whole strip (main runs `hiddenInset` on macOS, `hidden` plus
+// a Window Controls Overlay elsewhere), so every copy has to reserve the same
+// space for the native controls. On Windows/Linux the overlay publishes its
+// geometry as env(titlebar-area-*); on macOS the traffic lights float over the
+// left edge and app-root sets --titlebar-inset to the gutter they need (0 in
+// fullscreen, where they are hidden). Content and layout stay with the caller.
+export const titlebar = css`
+  .app-titlebar {
+    height: var(--titlebar-h);
+    flex-shrink: 0;
+    color: var(--titlebar-fg);
+    background: var(--titlebar-bg);
+    border-bottom: 1px solid var(--border-subtle);
+    box-sizing: border-box;
+    user-select: none;
+    -webkit-app-region: drag;
+  }
+
+  .titlebar-inner {
+    width: env(titlebar-area-width, 100%);
+    height: 100%;
+    margin-left: env(titlebar-area-x, 0);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    padding-left: max(12px, var(--titlebar-inset, 0px));
+    box-sizing: border-box;
+  }
+`

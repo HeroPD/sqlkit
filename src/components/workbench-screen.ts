@@ -2,7 +2,7 @@ import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { keyed } from 'lit/directives/keyed.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
-import { icons, controls, scrollbars, tooltip, typography } from '../shared-styles'
+import { icons, controls, scrollbars, titlebar, tooltip, typography } from '../shared-styles'
 import { ACTIVITY_ICONS } from '../icons/activity-icons'
 import { isMac, mod } from '../platform'
 import { ConnectionsController } from '../controllers/connections'
@@ -158,6 +158,14 @@ export class WorkbenchScreen extends LitElement {
   // Published by results-panel on selection change, not computed here.
   @state()
   private _selectionStats: SelectionStats | null = null
+  @state()
+  private _hasExplicitRunTarget = false
+
+  @state()
+  private _activeActionSurface: 'editor' | 'results' | null = null
+
+  @state()
+  private _resultHasUnstagedJson = false
 
   @state()
   private _activeView: ViewId | null = 'explorer'
@@ -406,12 +414,17 @@ export class WorkbenchScreen extends LitElement {
       clearEditorStateCache()
       clearInspectDraftCache()
       this._inspectDirtyTabIds = new Set()
+      this._activeActionSurface = null
+      this._resultHasUnstagedJson = false
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
       void this._live.disconnectAll()
       if (this.workspace) void this._loadConfig()
     }
     if (this._ctx.activeTabId !== this._lastActiveTabId) {
+      this._hasExplicitRunTarget = false
+      this._activeActionSurface = null
+      this._resultHasUnstagedJson = false
       this._captureTabScroll(this._lastActiveTabId)
       this._lastActiveTabId = this._ctx.activeTabId
       this._restoreScrollTabId = this._ctx.activeTabId
@@ -795,11 +808,134 @@ export class WorkbenchScreen extends LitElement {
     this._selectionStats = event.detail.stats
   }
 
+  private _onTitlebarAction() {
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    if (run.phase === 'running') {
+      this._onCancelQuery()
+      return
+    }
+    if (this._activeActionSurface === 'results' && run.phase === 'done' && run.sql) {
+      const unstagedJson = this.renderRoot.querySelector('results-panel')?.hasUnstagedJson() ?? false
+      if (!this._resultEditing.hasPendingChanges() && !unstagedJson) this._refreshResults()
+      return
+    }
+    this.renderRoot.querySelector('sql-editor')?.runExplicitQuery()
+  }
+
+  private _onBodyFocusIn(event: FocusEvent) {
+    const path = event.composedPath()
+    if (path.some((target) => target instanceof Element && target.tagName === 'SQL-EDITOR')) {
+      this._activeActionSurface = 'editor'
+    } else if (path.some((target) => target instanceof Element && target.tagName === 'RESULTS-PANEL')) {
+      this._activeActionSurface = 'results'
+    } else {
+      this._activeActionSurface = null
+    }
+  }
+
+  private _onBodyFocusOut() {
+    queueMicrotask(() => {
+      const active = this.shadowRoot?.activeElement
+      // Keep the source context while keyboard focus moves onto the action
+      // itself, so the toolbar remains operable without a pointer.
+      if (active?.matches('.query-action')) return
+      if (active?.tagName === 'SQL-EDITOR') this._activeActionSurface = 'editor'
+      else if (active?.tagName === 'RESULTS-PANEL') this._activeActionSurface = 'results'
+      else this._activeActionSurface = null
+    })
+  }
+
+  private _onResultDirtyChange(event: CustomEvent<{ dirty: boolean }>) {
+    this._resultHasUnstagedJson = event.detail.dirty
+  }
+
+  private _openDatabasePicker() {
+    this._cmdPalette.open('databases')
+  }
+
+  private _renderTitlebar() {
+    const profile = this._config.activeProfile()
+    const database = this._ctx.activeChildDb ?? profile?.database.trim() ?? ''
+    const context = profile ? [profile.name, database].filter(Boolean).join(' · ') : t('action.switchDatabase')
+    const phase = profile ? this._live.phase(profile.id) : null
+    const tab = this._ctx.activeSqlTab()
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    const running = run.phase === 'running'
+    const refreshing = !running && this._activeActionSurface === 'results' && run.phase === 'done' && Boolean(run.sql)
+    const runLabel = running ? t('common.stop') : refreshing ? t('menu.refreshResults') : t('action.runQuery')
+    const runDisabled = !running && (refreshing
+      ? this._resultEditing.hasPendingChanges() || this._resultHasUnstagedJson
+      : this._activeActionSurface !== 'editor' || !tab?.content.trim() || !this._hasExplicitRunTarget)
+
+    return html`
+      <header class="app-titlebar">
+        <div class="titlebar-inner">
+          <div class="titlebar-left">
+            <span class="title-product">${t('app.name')}</span>
+            ${this.workspace?.name ? html`<span class="title-workspace">— ${this.workspace.name}</span>` : ''}
+          </div>
+          <div class="titlebar-center">
+            <button
+              type="button"
+              class="database-target"
+              aria-label="${t('action.switchDatabase')}: ${context}"
+              aria-haspopup="dialog"
+              aria-expanded=${String(this._cmdPalette.mode === 'databases')}
+              @click=${this._openDatabasePicker}
+            >
+              <span class="connection-dot ${phase ?? ''}" aria-hidden="true"></span>
+              ${profile
+                ? html`
+                    <span class="target-profile">${profile.name}</span>
+                    ${database
+                      ? html`
+                          <span class="target-separator" aria-hidden="true">›</span>
+                          <strong>${database}</strong>
+                        `
+                      : ''}
+                  `
+                : html`<strong>${t('action.switchDatabase')}</strong>`}
+              <i class="icon icon-chevron-down" aria-hidden="true"></i>
+            </button>
+            <button
+              type="button"
+              class="query-action ${running ? 'running' : refreshing ? 'refreshing' : ''}"
+              data-tooltip="${runLabel}${running ? '' : refreshing ? ` (${isMac ? '⌘' : 'Ctrl+'}R)` : ` (${isMac ? '⌘' : 'Ctrl+'}Enter)`}"
+              aria-label=${runLabel}
+              ?disabled=${runDisabled}
+              @pointerdown=${(event: PointerEvent) => event.preventDefault()}
+              @click=${this._onTitlebarAction}
+            >
+              ${running
+                ? html`<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1"></rect></svg>`
+                : refreshing
+                  ? html`<i class="icon icon-refresh-cw" aria-hidden="true"></i>`
+                : html`<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 3.8 16 10 5.5 16.2Z"></path></svg>`}
+            </button>
+          </div>
+          <div class="titlebar-right">
+            ${import.meta.env.DEV
+              ? html`
+                  <button type="button" class="update-preview">
+                    <i class="icon icon-download" aria-hidden="true"></i>
+                    <span>${t('update.available')}</span>
+                  </button>
+                `
+              : ''}
+          </div>
+        </div>
+      </header>
+    `
+  }
+
   render() {
     const activeView = VIEWS.find((view) => view.id === this._activeView)
     return html`
+      ${this._renderTitlebar()}
       <div
         class="body"
+        @focusin=${this._onBodyFocusIn}
+        @focusout=${this._onBodyFocusOut}
         @db-select=${this._onDbSelect}
         @db-connect=${this._onDbConnect}
         @db-disconnect=${this._onDbDisconnect}
@@ -830,6 +966,9 @@ export class WorkbenchScreen extends LitElement {
         @tab-select=${this._onTabSelect}
         @tab-close=${this._onTabClose}
         @editor-change=${this._onEditorChange}
+        @run-target-change=${(event: CustomEvent<{ available: boolean }>) => {
+          this._hasExplicitRunTarget = event.detail.available
+        }}
         @run-query=${this._onRunQuery}
       >
         <nav class="activity-bar" @activity-select=${this._onActivitySelect}>
@@ -1246,6 +1385,7 @@ export class WorkbenchScreen extends LitElement {
             @stream-export=${this._onStreamExport}
             @load-more=${this._onLoadMore}
             @selection-stats=${this._onSelectionStats}
+            @result-dirty-change=${this._onResultDirtyChange}
             @cell-edit=${this._onCellEdit}
             @cell-edit-clear=${this._onCellEditClear}
             @cells-fill=${this._onCellsFill}
@@ -2061,10 +2201,222 @@ export class WorkbenchScreen extends LitElement {
     icons,
     scrollbars,
     tooltip,
+    titlebar,
     css`
       :host {
         flex-direction: column;
         min-height: 0;
+      }
+
+      .app-titlebar {
+        z-index: 30;
+      }
+
+      .titlebar-inner {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
+        gap: 10px;
+      }
+
+      .titlebar-left,
+      .titlebar-center,
+      .titlebar-right {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+      }
+
+      .titlebar-left {
+        gap: 5px;
+        overflow: hidden;
+        font-size: var(--font-size-sm);
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      .title-product {
+        flex-shrink: 0;
+        color: var(--text-2);
+      }
+
+      .title-workspace {
+        overflow: hidden;
+        color: var(--text-3);
+        text-overflow: ellipsis;
+      }
+
+      .titlebar-center {
+        justify-content: center;
+        gap: 5px;
+        -webkit-app-region: no-drag;
+      }
+
+      .titlebar-right {
+        justify-content: flex-end;
+        -webkit-app-region: no-drag;
+      }
+
+      .update-preview {
+        height: 24px;
+        /* Reserved for the future updater integration. */
+        display: none;
+        align-items: center;
+        gap: 6px;
+        padding: 0 8px;
+        color: color-mix(in srgb, var(--status-dot-warning) 78%, var(--text));
+        background: color-mix(in srgb, var(--status-dot-warning) 9%, transparent);
+        border: 1px solid color-mix(in srgb, var(--status-dot-warning) 28%, transparent);
+        border-radius: 4px;
+        font-size: var(--font-size-sm);
+        white-space: nowrap;
+      }
+
+      .update-preview:hover {
+        color: color-mix(in srgb, var(--status-dot-warning) 90%, var(--text));
+        background: color-mix(in srgb, var(--status-dot-warning) 14%, transparent);
+        border-color: color-mix(in srgb, var(--status-dot-warning) 40%, transparent);
+      }
+
+      .update-preview .icon {
+        font-size: 13px;
+      }
+
+      .database-target {
+        width: min(340px, 36vw);
+        height: 24px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        overflow: hidden;
+        color: var(--text-2);
+        background: var(--btn-secondary-bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        font-size: var(--font-size-sm);
+        text-align: left;
+        white-space: nowrap;
+        -webkit-app-region: no-drag;
+      }
+
+      .database-target:hover,
+      .database-target[aria-expanded='true'] {
+        color: var(--text);
+        background: var(--btn-secondary-hover);
+      }
+
+      .database-target[aria-expanded='true'] {
+        border-color: var(--focus-border);
+      }
+
+      .database-target strong {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--text);
+        font-weight: 500;
+        text-overflow: ellipsis;
+      }
+
+      .target-profile {
+        flex-shrink: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .target-separator {
+        flex-shrink: 0;
+        color: var(--text-3);
+      }
+
+      .database-target .icon {
+        flex-shrink: 0;
+        margin-left: auto;
+        font-size: 13px;
+        color: var(--text-3);
+      }
+
+      .connection-dot {
+        width: 8px;
+        height: 8px;
+        flex-shrink: 0;
+        border-radius: 50%;
+        background: var(--text-3);
+      }
+
+      .connection-dot.connected {
+        background: var(--status-dot-connected);
+      }
+
+      .connection-dot.connecting {
+        background: var(--status-dot-warning);
+      }
+
+      .connection-dot.error {
+        background: var(--status-dot-error);
+      }
+
+      .query-action {
+        position: relative;
+        width: 26px;
+        height: 24px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        padding: 0;
+        color: var(--text-2);
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        -webkit-app-region: no-drag;
+      }
+
+      .query-action:hover:not(:disabled) {
+        color: var(--text);
+        background: var(--btn-secondary-hover);
+      }
+
+      .query-action.running {
+        color: var(--status-dot-error);
+      }
+
+      .query-action.running:hover {
+        color: color-mix(in srgb, var(--status-dot-error) 82%, white);
+        background: color-mix(in srgb, var(--status-dot-error) 11%, transparent);
+      }
+
+      .query-action:disabled {
+        color: color-mix(in srgb, var(--text-3) 45%, transparent);
+        cursor: default;
+        opacity: 1;
+      }
+
+      .query-action svg {
+        width: 16px;
+        height: 16px;
+        fill: currentColor;
+      }
+
+      .query-action .icon {
+        font-size: 16px;
+      }
+
+      @media (max-width: 1000px) {
+        .titlebar-inner {
+          grid-template-columns: minmax(150px, 1fr) auto minmax(150px, 1fr);
+        }
+
+        .database-target {
+          width: min(240px, 34vw);
+        }
+
+        .target-profile {
+          display: none;
+        }
+
+        .target-profile + .target-separator {
+          display: none;
+        }
       }
 
       .body {

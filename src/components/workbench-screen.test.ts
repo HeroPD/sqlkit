@@ -591,6 +591,72 @@ describe('WorkbenchScreen result refresh shortcuts', () => {
   })
 })
 
+describe('WorkbenchScreen title-bar actions', () => {
+  it('opens the same database picker as Cmd/Ctrl+K', () => {
+    const workbench = new WorkbenchScreen() as never as {
+      _cmdPalette: { open: ReturnType<typeof vi.fn> }
+      _openDatabasePicker(): void
+    }
+    workbench._cmdPalette.open = vi.fn()
+
+    workbench._openDatabasePicker()
+
+    expect(workbench._cmdPalette.open).toHaveBeenCalledWith('databases')
+  })
+
+  it('runs the editor target when idle and cancels the active run when busy', () => {
+    const runExplicitQuery = vi.fn()
+    const cancel = vi.fn()
+    const workbench = new WorkbenchScreen() as never as {
+      _ctx: { activeTabId: string | null }
+      _queries: { runFor: ReturnType<typeof vi.fn> }
+      _onCancelQuery: typeof cancel
+      renderRoot: { querySelector: ReturnType<typeof vi.fn> }
+      _onTitlebarAction(): void
+    }
+    workbench._ctx.activeTabId = 't1'
+    workbench._queries.runFor = vi.fn(() => ({ phase: 'idle' }))
+    workbench.renderRoot = { querySelector: vi.fn(() => ({ runExplicitQuery })) }
+    workbench._onCancelQuery = cancel
+
+    workbench._onTitlebarAction()
+    expect(runExplicitQuery).toHaveBeenCalledOnce()
+
+    workbench._queries.runFor = vi.fn(() => ({ phase: 'running' }))
+    workbench._onTitlebarAction()
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(runExplicitQuery).toHaveBeenCalledOnce()
+  })
+
+  it('refreshes the completed query when the results view owns the action', () => {
+    const refresh = vi.fn()
+    const workbench = new WorkbenchScreen() as never as {
+      _ctx: { activeTabId: string | null }
+      _queries: { runFor: ReturnType<typeof vi.fn> }
+      _resultEditing: { hasPendingChanges: ReturnType<typeof vi.fn> }
+      _activeActionSurface: 'results'
+      _refreshResults: typeof refresh
+      renderRoot: { querySelector: ReturnType<typeof vi.fn> }
+      _onTitlebarAction(): void
+    }
+    workbench._ctx.activeTabId = 't1'
+    workbench._queries.runFor = vi.fn(() => ({ phase: 'done', sql: 'select 1' }))
+    workbench._resultEditing.hasPendingChanges = vi.fn(() => false)
+    workbench._activeActionSurface = 'results'
+    workbench._refreshResults = refresh
+    workbench.renderRoot = { querySelector: vi.fn(() => ({ hasUnstagedJson: () => false })) }
+
+    workbench._onTitlebarAction()
+
+    expect(refresh).toHaveBeenCalledOnce()
+
+    workbench._resultEditing.hasPendingChanges = vi.fn(() => true)
+    workbench._onTitlebarAction()
+
+    expect(refresh).toHaveBeenCalledOnce()
+  })
+})
+
 describe('WorkbenchScreen undo/redo shortcut', () => {
   const setup = (
     opts: { tabKind?: string; undoRet?: boolean; redoRet?: boolean; collapsed?: boolean; hasSqlTab?: boolean } = {},
