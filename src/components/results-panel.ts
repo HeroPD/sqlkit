@@ -62,9 +62,21 @@ type RowRef = { kind: 'result'; row: number } | { kind: 'draft'; index: number }
 /** Selected rectangle in display-row space: anchor (r0,c0) → focus (r1,c1). */
 type CellRect = { r0: number; c0: number; r1: number; c1: number }
 
+type ResultFindMatch = { display: number; col: number; from: number; to: number }
+
+type ResultFindResult = {
+  matches: ResultFindMatch[]
+  ranges: ReadonlyMap<string, ResultFindMatch[]>
+  valid: boolean
+  capped: boolean
+}
+
 // Selected cells whose values are worth walking for the status-bar readout.
 // Past this only the count goes out, so a huge drag can't cost a repaint.
 const MAX_STATS_CELLS = 100_000
+// Matches are navigated cell-by-cell. Cap the index like editor Find so a broad
+// expression cannot make every render retain an unbounded coordinate list.
+const MAX_FIND_MATCHES = 1_000
 
 const NUM_COL_MIN_WIDTH = 30
 const NUM_COL_MAX_WIDTH = 96
@@ -79,6 +91,10 @@ const OVERSCAN = 8
 // Row height used before the first real row is measured; matches the pinned
 // cell height in CSS (tbody tr td height) so rows stay uniform.
 const ESTIMATED_ROW_HEIGHT = 25
+// A record field opens at its value's height, up to six lines (the 18px
+// line-height + 6px padding of .record-value); past that it scrolls, and a
+// drag on the grabber overrides the fit for as long as that record is shown.
+const RECORD_FIELD_MAX_H = 6 * 18 + 6
 const bigintReplacer = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value
 
 const formatCell = (value: unknown): string => {
@@ -95,6 +111,9 @@ const formatCell = (value: unknown): string => {
 const inputText = (value: CellInput): string => isSqlNull(value) ? '' : value
 const sameInput = (left: CellInput, right: CellInput): boolean =>
   isSqlNull(left) ? isSqlNull(right) : !isSqlNull(right) && left === right
+
+const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const isWordChar = (char: string | undefined) => char !== undefined && /[\p{L}\p{N}_]/u.test(char)
 
 const numberColumnWidth = (result: QueryResult) => {
   const maxRow = Math.max(1, result.bufferedRowCount ?? result.rowCount ?? result.rows.length)
@@ -280,11 +299,23 @@ export class ResultsPanel extends LitElement {
 
   @state() private _filterOpen = false
   @state() private _filterDraft = ''
+  @state() private _findOpen = false
+  @state() private _findQuery = ''
+  @state() private _findCaseSensitive = false
+  @state() private _findWholeWord = false
+  @state() private _findRegex = false
+  @state() private _findIndex = -1
   @state() private _queryInfoOpen = false
   @state() private _queryInfoPos: { left: number; top: number; maxWidth: number; maxHeight: number } | null = null
   private _filterFocusPending = false
+  private _findFocusPending = false
   private _filterColumns: string[] = []
   private _lastReportedDirty: boolean | null = null
+  private _recordFieldsKey: string | null = null
+  private _findCache: {
+    inputs: readonly unknown[]
+    result: ResultFindResult
+  } | null = null
 
   /** Selected cell rectangle in display-row space: anchor (r0,c0) → focus (r1,c1).
    * Rows are display indices (result rows and staged rows share one numbering),
@@ -351,6 +382,9 @@ export class ResultsPanel extends LitElement {
   private _escArmed = false
   // Refocus the grid after a toolbar action so keyboard work keeps flowing.
   private _focusGridPending = false
+  // An FK follow removes the focused button while its destination query runs.
+  // Keep that one-shot intent until the new table actually exists.
+  private _focusLandedResultPending = false
   // Focus the record view after switching away from the grid table.
   private _recordFocusPending = false
 
@@ -371,6 +405,8 @@ export class ResultsPanel extends LitElement {
 
   private _selectResultSet = (event: CustomEvent<{ value: string }>) => {
     this._resultSetIndex = Number(event.detail.value)
+    this._findIndex = -1
+    this._findCache = null
     this._sel = null
     this._editing = null
     this._record = null
@@ -427,6 +463,8 @@ export class ResultsPanel extends LitElement {
       return
     }
     this._lastKey = key
+    this._findIndex = -1
+    this._findCache = null
     // Bookmark the result that is leaving before anything below resets the
     // selection or the scroll — the body still shows it at this point, unless
     // the JSON editor took the body over, in which case the grid's own offset is
@@ -498,8 +536,11 @@ export class ResultsPanel extends LitElement {
     this._viewportW = body.clientWidth
     // The panel height changes when the user drags the results divider.
     this._resizeObs = new ResizeObserver(() => {
+      // Narrower fields wrap into more lines, so the fitted heights are stale.
+      const rewrapped = body.clientWidth !== this._viewportW
       this._viewportH = body.clientHeight
       this._viewportW = body.clientWidth
+      if (rewrapped) this._autosizeRecordFields()
       this._maybeLoadMore()
     })
     this._resizeObs.observe(body)
@@ -559,6 +600,15 @@ export class ResultsPanel extends LitElement {
         table.focus()
       }
     }
+    if (this._focusLandedResultPending) {
+      const table = this.shadowRoot?.querySelector<HTMLElement>('table')
+      if (table) {
+        this._focusLandedResultPending = false
+        table.focus()
+      } else if (this.run.phase === 'idle' || this.run.phase === 'error') {
+        this._focusLandedResultPending = false
+      }
+    }
     if (this._recordFocusPending) {
       const record = this.shadowRoot?.querySelector<HTMLElement>('.record-view')
       if (record) {
@@ -573,7 +623,16 @@ export class ResultsPanel extends LitElement {
         editor.focusEditor()
       }
     }
+    if (this._findFocusPending) {
+      const input = this.shadowRoot?.querySelector<HTMLInputElement>('.result-find input')
+      if (input) {
+        this._findFocusPending = false
+        input.focus()
+        input.select()
+      }
+    }
     this._measureRowHeight()
+    this._fitRecordFields()
     this._maybeLoadMore()
   }
 
@@ -591,6 +650,12 @@ export class ResultsPanel extends LitElement {
     return this.shadowRoot?.querySelector<HTMLElement>('.body') ?? null
   }
 
+  /** Restores keyboard ownership after an asynchronous result navigation. */
+  focusLandedResult() {
+    this._focusLandedResultPending = true
+    this.requestUpdate()
+  }
+
   // The grid's current offsets, or the ones kept when the JSON editor took the
   // body over (it scrolls the body to the top, so reading it then is useless).
   private _currentGridScroll() {
@@ -604,6 +669,61 @@ export class ResultsPanel extends LitElement {
     if (this._rowHeight) return
     const height = this.shadowRoot?.querySelector<HTMLElement>('tbody tr[data-row]')?.offsetHeight ?? 0
     if (height > 0) this._rowHeight = height
+  }
+
+  private _recordFields() {
+    return [...(this.shadowRoot?.querySelectorAll<HTMLTextAreaElement>('textarea.record-value') ?? [])]
+  }
+
+  /**
+   * Sizes each record field to its value so a wrapped one is readable without
+   * dragging; the field grows the row, since it is what the grid row measures.
+   * A field the user dragged keeps that height — ours carry the value we set,
+   * so anything else is a manual size and is left alone.
+   */
+  private _autosizeRecordFields(only?: HTMLTextAreaElement) {
+    const fields = (only ? [only] : this._recordFields()).filter(
+      (field) => !field.style.height || field.style.height === field.dataset.autoHeight,
+    )
+    if (!fields.length) return
+    // Batched: every height cleared, then every content height read, then
+    // written — one layout pass instead of one per field.
+    for (const field of fields) field.style.height = 'auto'
+    const heights = fields.map((field) => Math.min(field.scrollHeight, RECORD_FIELD_MAX_H))
+    fields.forEach((field, index) => {
+      const height = `${heights[index]}px`
+      field.style.height = height
+      field.dataset.autoHeight = height
+    })
+  }
+
+  // A manual height belongs to the record it was dragged on, not to the column
+  // position it happens to occupy in the next one.
+  private _fitRecordFields() {
+    const ref = this._record?.ref
+    const key = ref ? (ref.kind === 'result' ? `result:${ref.row}` : `draft:${ref.index}`) : null
+    if (key !== this._recordFieldsKey) {
+      this._recordFieldsKey = key
+      for (const field of this._recordFields()) {
+        field.style.height = ''
+        delete field.dataset.autoHeight
+      }
+    }
+    this._autosizeRecordFields()
+  }
+
+  // Typing is not a render, so the field has to re-fit itself to keep a value
+  // that grows past its current height in view.
+  private _onRecordValueInput = (event: Event) => {
+    this._autosizeRecordFields(event.currentTarget as HTMLTextAreaElement)
+  }
+
+  // A field past the six-line cap scrolls, so the find overlay has to follow it
+  // or its highlights drift off the text underneath.
+  private _onRecordValueScroll = (event: Event) => {
+    const field = event.currentTarget as HTMLTextAreaElement
+    const overlay = field.parentElement?.querySelector<HTMLElement>('.record-find-overlay')
+    if (overlay) overlay.scrollTop = field.scrollTop
   }
 
   // The slice of loaded rows to render for the current scroll position.
@@ -996,6 +1116,7 @@ export class ResultsPanel extends LitElement {
   private _toggleFilter = () => {
     this._filterOpen = !this._filterOpen
     if (this._filterOpen) {
+      this._findOpen = false
       this._filterDraft = this.filter ?? ''
       this._filterFocusPending = true
     }
@@ -1027,6 +1148,243 @@ export class ResultsPanel extends LitElement {
     event.preventDefault()
     this._filterDraft = this.filter ?? ''
     this._filterOpen = false
+  }
+
+  // --- local result Find ----------------------------------------------------
+
+  private _findCellText(ref: RowRef, col: number): string {
+    if (ref.kind === 'draft') {
+      const value = this.drafts[ref.index]?.cells[col]
+      if (value === null || value === undefined) return t('results.default')
+    }
+    const value = this._recordValue(ref, col)
+    if (value === null || value === undefined || isSqlNull(value)) return 'NULL'
+    return formatCell(value)
+  }
+
+  private _findResults(): ResultFindResult {
+    const shown = this._shownResult()
+    // Find follows what is visible: the grid searches every loaded display row,
+    // while Record view searches only the one record currently on screen.
+    const recordDisplay = this._record ? this._displayIndexOfRef(this._record.ref) : null
+    const inputs: readonly unknown[] = [
+      shown?.rows,
+      shown?.rows.length,
+      shown?.columns,
+      this.drafts,
+      this.drafts.length,
+      this.edits,
+      this._resultSetIndex,
+      this._findQuery,
+      this._findCaseSensitive,
+      this._findWholeWord,
+      this._findRegex,
+      recordDisplay,
+    ]
+    const cached = this._findCache
+    if (cached && inputs.every((value, index) => value === cached.inputs[index])) return cached.result
+
+    const matches: ResultFindMatch[] = []
+    const ranges = new Map<string, ResultFindMatch[]>()
+    const search = this._findQuery
+    let valid = true
+    let capped = false
+    let expression: RegExp | null = null
+    if (search) {
+      try {
+        expression = new RegExp(this._findRegex ? search : escapeRegex(search), `gu${this._findCaseSensitive ? '' : 'i'}`)
+      } catch {
+        valid = false
+      }
+    }
+
+    const rangesInText = (text: string) => {
+      const found: Array<{ from: number; to: number }> = []
+      if (!expression) return found
+      expression.lastIndex = 0
+      for (let match = expression.exec(text); match; match = expression.exec(text)) {
+        const from = match.index
+        const to = from + match[0].length
+        // Zero-width expressions have no visible text to highlight.
+        if (to === from) {
+          expression.lastIndex += 1
+          continue
+        }
+        if (!this._findWholeWord || (!isWordChar(text[from - 1]) && !isWordChar(text[to]))) found.push({ from, to })
+        if (matches.length + found.length >= MAX_FIND_MATCHES) break
+      }
+      return found
+    }
+
+    if (valid && expression && shown) {
+      const columns = shown.columns.length
+      const firstDisplay = recordDisplay ?? 0
+      const lastDisplay = recordDisplay ?? (this._display().order.length - 1)
+      for (let display = firstDisplay; display <= lastDisplay; display += 1) {
+        const ref = this._refAt(display)
+        if (!ref) continue
+        for (let col = 0; col < columns; col += 1) {
+          const cellRanges = rangesInText(this._findCellText(ref, col))
+          if (!cellRanges.length) continue
+          const cellMatches = cellRanges.map(({ from, to }) => ({ display, col, from, to }))
+          matches.push(...cellMatches)
+          ranges.set(`${display}:${col}`, cellMatches)
+          if (matches.length >= MAX_FIND_MATCHES) {
+            capped = true
+            break
+          }
+        }
+        if (capped) break
+      }
+    }
+
+    const result = { matches, ranges, valid, capped }
+    this._findCache = { inputs, result }
+    return result
+  }
+
+  private _openFind = () => {
+    if (!this._shownResult()?.columns.length) return
+    this._filterOpen = false
+    this._findOpen = true
+    this._findFocusPending = true
+  }
+
+  private _closeFind = () => {
+    this._dismissFind()
+    if (this._record) this._recordFocusPending = true
+    else this._focusGridPending = true
+  }
+
+  private _dismissFind() {
+    this._findOpen = false
+    this._findIndex = -1
+  }
+
+  private _setFindQuery(event: Event) {
+    this._findQuery = (event.target as HTMLInputElement).value
+    this._findIndex = -1
+  }
+
+  private _toggleFindOption(option: 'case' | 'word' | 'regex') {
+    if (option === 'case') this._findCaseSensitive = !this._findCaseSensitive
+    else if (option === 'word') this._findWholeWord = !this._findWholeWord
+    else this._findRegex = !this._findRegex
+    this._findIndex = -1
+  }
+
+  private _stepFind(direction: 1 | -1) {
+    const matches = this._findResults().matches
+    if (!matches.length) return
+    const current = this._findIndex >= 0 && this._findIndex < matches.length ? this._findIndex : direction > 0 ? -1 : 0
+    const index = (current + direction + matches.length) % matches.length
+    const match = matches[index]!
+    this._findIndex = index
+    this._sel = { r0: match.display, c0: match.col, r1: match.display, c1: match.col }
+    const ref = this._refAt(match.display)
+    if (ref && this._record) {
+      this._record = { ref, col: match.col }
+      // Focus stays in the find input, so nothing scrolls natively; walk the
+      // matched field into view by hand (+1 skips the row-label header).
+      void this.updateComplete.then(() => {
+        this.shadowRoot?.querySelectorAll('.record-field')[match.col + 1]?.scrollIntoView?.({ block: 'nearest' })
+      })
+      return
+    }
+    this._scrollCellIntoView(match.display, match.col)
+  }
+
+  private _onFindKeydown(event: KeyboardEvent) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+      event.preventDefault()
+      const input = this.shadowRoot?.querySelector<HTMLInputElement>('.result-find input')
+      input?.focus()
+      input?.select()
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      this._closeFind()
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      this._stepFind(event.shiftKey ? -1 : 1)
+    }
+  }
+
+  private _renderFindText(text: string, display: number, col: number) {
+    if (!this._findOpen) return text
+    const result = this._findResults()
+    const ranges = result.ranges.get(`${display}:${col}`)
+    if (!ranges?.length) return text
+    const current = result.matches[this._findIndex]
+    let cursor = 0
+    return html`${ranges.map((range) => {
+      const before = text.slice(cursor, range.from)
+      cursor = range.to
+      return html`${before}<mark class=${range === current ? 'find-current' : 'find-hit'}>${text.slice(range.from, range.to)}</mark>`
+    })}${text.slice(cursor)}`
+  }
+
+  private _renderFind() {
+    if (!this._findOpen) return ''
+    const result = this._findResults()
+    const hasSearch = this._findQuery.length > 0
+    const noResults = hasSearch && result.valid && result.matches.length === 0
+    const current = result.matches[this._findIndex] ? this._findIndex + 1 : 0
+    const shown = this._shownResult()
+    const loadedOnly = Boolean(shown && (shown.truncated || (shown.bufferedRowCount ?? shown.rows.length) > shown.rows.length))
+    const count = !hasSearch || !result.valid
+      ? ''
+      : noResults
+        ? t('find.noResults')
+        : t('find.matchCount', {
+            index: current || '?',
+            total: result.matches.length,
+            capped: result.capped ? '+' : '',
+          })
+    const enabled = hasSearch && result.valid && result.matches.length > 0
+    const option = (name: 'case' | 'word' | 'regex', icon: string, label: string, on: boolean) => html`
+      <button
+        type="button"
+        class="find-toggle ${on ? 'on' : ''}"
+        title=${label}
+        aria-label=${label}
+        aria-pressed=${on}
+        @pointerdown=${(event: PointerEvent) => event.preventDefault()}
+        @click=${() => this._toggleFindOption(name)}
+      >
+        <i class="icon icon-${icon}" aria-hidden="true"></i>
+      </button>
+    `
+    return html`
+      <div class="find-widget result-find" role="search" aria-label=${t('results.find')} @keydown=${this._onFindKeydown}>
+        <div class="find-input-box ${hasSearch && !result.valid ? 'invalid' : ''}">
+          <input
+            aria-label=${t('results.find')}
+            placeholder=${t('results.findPlaceholder')}
+            .value=${this._findQuery}
+            spellcheck="false"
+            @input=${this._setFindQuery}
+          />
+          ${option('case', 'case-sensitive', t('find.matchCase'), this._findCaseSensitive)}
+          ${option('word', 'whole-word', t('find.matchWholeWord'), this._findWholeWord)}
+          ${option('regex', 'regex', t('find.useRegex'), this._findRegex)}
+        </div>
+        ${loadedOnly ? html`<span class="find-scope">${t('results.findLoadedOnly')}</span>` : ''}
+        <span class="find-count ${noResults ? 'no-results' : ''}" aria-live="polite">${count}</span>
+        <button type="button" class="find-btn" title=${t('find.previousMatch', { shortcut: '⇧↵' })} aria-label=${t('find.previousMatch', { shortcut: '⇧↵' })} ?disabled=${!enabled} @click=${() => this._stepFind(-1)}>
+          <i class="icon icon-arrow-up" aria-hidden="true"></i>
+        </button>
+        <button type="button" class="find-btn" title=${t('find.nextMatch', { shortcut: '↵' })} aria-label=${t('find.nextMatch', { shortcut: '↵' })} ?disabled=${!enabled} @click=${() => this._stepFind(1)}>
+          <i class="icon icon-arrow-down" aria-hidden="true"></i>
+        </button>
+        <button type="button" class="find-btn" title=${t('find.close', { shortcut: 'Esc' })} aria-label=${t('find.close', { shortcut: 'Esc' })} @click=${this._closeFind}>
+          <i class="icon icon-x" aria-hidden="true"></i>
+        </button>
+      </div>
+    `
   }
 
   render() {
@@ -1153,6 +1511,20 @@ export class ResultsPanel extends LitElement {
         ${canFilter || exportable
           ? html`
               <div class="toolbar view-toolbar" aria-label=${t('results.viewActions')}>
+                ${exportable
+                  ? html`
+                      <button
+                        class="head-action ${this._findOpen ? 'active' : ''}"
+                        data-tooltip="${t('results.find')} (${isMac ? '⌘' : 'Ctrl+'}F)"
+                        aria-label=${t('results.find')}
+                        aria-expanded=${this._findOpen}
+                        ?disabled=${jsonOpen}
+                        @click=${this._findOpen ? this._closeFind : this._openFind}
+                      >
+                        <i class="icon icon-search" aria-hidden="true"></i>
+                      </button>
+                    `
+                  : ''}
                 ${canFilter
                   ? html`
                       <button
@@ -1281,6 +1653,7 @@ export class ResultsPanel extends LitElement {
             </div>
           `
         : ''}
+      ${this._renderFind()}
       <div class="body" @scroll=${this._onScroll}>${this._renderBody()}</div>
       ${this._renderMenu()}
       ${this._exportOpen && this.run.phase === 'done'
@@ -1640,6 +2013,7 @@ export class ResultsPanel extends LitElement {
     const rowLabel = t(record.ref.kind === 'result' ? 'results.rowLabel' : 'results.newRowLabel', {
       index: (record.ref.kind === 'result' ? record.ref.row : record.ref.index) + 1,
     })
+    const display = this._displayIndexOfRef(record.ref)
     return html`
       <section
         class="record-view"
@@ -1661,16 +2035,34 @@ export class ResultsPanel extends LitElement {
             return html`
               <div class="record-field ${selected ? 'active' : ''} ${pending ? 'dirty-record' : ''}">
                 <div class="record-column" title=${column}>${column}</div>
-                <textarea
-                  class="record-value ${value === null || value === undefined || isSqlNull(value) ? 'null-value' : ''}"
-                  data-col=${col}
-                  rows="1"
-                  placeholder="NULL"
-                  .value=${this._recordEditText(value)}
-                  ?readonly=${!this._recordCellEditable(record.ref)}
-                  @focus=${() => this._focusRecordField(col)}
-                  @blur=${this._onRecordValueBlur}
-                ></textarea>
+                <div
+                  class="record-value-wrap ${this._findOpen ? 'finding' : ''}"
+                  @pointerdown=${() => {
+                    if (this._findOpen) this._dismissFind()
+                  }}
+                >
+                  <textarea
+                    class="record-value ${value === null || value === undefined || isSqlNull(value) ? 'null-value' : ''}"
+                    data-col=${col}
+                    rows="1"
+                    placeholder="NULL"
+                    .value=${this._recordEditText(value)}
+                    ?readonly=${!this._recordCellEditable(record.ref)}
+                    @focus=${() => this._focusRecordField(col)}
+                    @blur=${this._onRecordValueBlur}
+                    @input=${this._onRecordValueInput}
+                    @scroll=${this._onRecordValueScroll}
+                  ></textarea>
+                  ${this._findOpen
+                    ? // The overlay renders pre-wrap, so it must carry no
+                      // template whitespace of its own — a newline here lands
+                      // the value on a clipped second line, indented.
+                      html`<div
+                        class="record-find-overlay ${value === null || value === undefined || isSqlNull(value) ? 'null-value' : ''}"
+                        aria-hidden="true"
+                      >${this._renderFindText(this._findCellText(record.ref, col), display, col)}</div>`
+                    : ''}
+                </div>
               </div>
             `
           })}
@@ -1738,6 +2130,7 @@ export class ResultsPanel extends LitElement {
   }
 
   private _focusRecordField(col: number) {
+    if (this._findOpen) this._dismissFind()
     if (this._record) this._record = { ...this._record, col }
   }
 
@@ -1894,6 +2287,7 @@ export class ResultsPanel extends LitElement {
 
   private _openRecord(ref: RowRef, col: number) {
     this._record = { ref, col }
+    if (this._findOpen) this._findIndex = -1
     this._recordFocusPending = true
   }
 
@@ -1904,10 +2298,16 @@ export class ResultsPanel extends LitElement {
 
   private _closeRecord = () => {
     this._record = null
+    if (this._findOpen) this._findIndex = -1
     this._focusGridPending = true
   }
 
   private _onRecordKeydown = (event: KeyboardEvent) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+      event.preventDefault()
+      this._openFind()
+      return
+    }
     if (event.key === 'Tab') {
       event.preventDefault()
       if (event.target instanceof HTMLTextAreaElement) this._commitRecordEdit(event.target)
@@ -2047,6 +2447,11 @@ export class ResultsPanel extends LitElement {
 
   private _onGridKeydown = (event: KeyboardEvent) => {
     if (this.run.phase !== 'done') return
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+      event.preventDefault()
+      this._openFind()
+      return
+    }
     // A second consecutive Escape (with staged changes) discards them; the first
     // just arms it. Any other key disarms, so only a genuine double-Esc fires.
     if (event.key === 'Escape') {
@@ -2152,6 +2557,7 @@ export class ResultsPanel extends LitElement {
   // widened to json, a half-typed staged edit) opens exactly as it is stored,
   // since reformatting text that is not JSON would only garble it.
   private _openJson(ref: RowRef, col: number) {
+    this._dismissFind()
     this._editing = null
     // The grid leaves the DOM while the editor is up, so the body scrolls back
     // to the top on its own; remember where the row was to put it back.
@@ -2514,8 +2920,8 @@ export class ResultsPanel extends LitElement {
                     const shown = pending !== undefined ? (isSqlNull(pending) ? null : pending) : cell === null || cell === undefined ? null : original
                     return html`<td class="${cls} fk" title=${shown ?? ''}>
                       ${shown === null
-                        ? html`<span class="null">NULL</span>`
-                        : html`<span class="fk-value">${shown}</span>`}
+                        ? html`<span class="null">${this._renderFindText('NULL', display, col)}</span>`
+                        : html`<span class="fk-value">${this._renderFindText(String(shown), display, col)}</span>`}
                       <button
                         class="fk-follow"
                         tabindex="-1"
@@ -2529,10 +2935,10 @@ export class ResultsPanel extends LitElement {
                     </td>`
                   }
                   if (pending !== undefined) {
-                    if (isSqlNull(pending)) return html`<td class=${cls}><span class="null">NULL</span></td>`
-                    return pending === '' ? html`<td class=${cls}></td>` : html`<td class=${cls} title=${pending}>${pending}</td>`
+                    if (isSqlNull(pending)) return html`<td class=${cls}><span class="null">${this._renderFindText('NULL', display, col)}</span></td>`
+                    return pending === '' ? html`<td class=${cls}></td>` : html`<td class=${cls} title=${pending}>${this._renderFindText(pending, display, col)}</td>`
                   }
-                  if (cell === null || cell === undefined) return html`<td class=${sel}><span class="null">NULL</span></td>`
+                  if (cell === null || cell === undefined) return html`<td class=${sel}><span class="null">${this._renderFindText('NULL', display, col)}</span></td>`
                   // A followable cell wraps its text so the affordance can sit
                   // beside it. Only this branch wraps: the plain path stays
                   // untouched so the grid's layout is unchanged everywhere else.
@@ -2542,7 +2948,7 @@ export class ResultsPanel extends LitElement {
                   const target = this.foreignKeys.get(col)
                   if (target) {
                     return html`<td class="${sel} fk" title=${original}>
-                      <span class="fk-value">${original}</span>
+                      <span class="fk-value">${this._renderFindText(original, display, col)}</span>
                       <button
                         class="fk-follow"
                         tabindex="-1"
@@ -2555,7 +2961,7 @@ export class ResultsPanel extends LitElement {
                       </button>
                     </td>`
                   }
-                  return html`<td class=${sel} title=${original}>${original}</td>`
+                  return html`<td class=${sel} title=${original}>${this._renderFindText(original, display, col)}</td>`
                 })}
               </tr>
               ${draftsAfter(absRow)}
@@ -2720,12 +3126,12 @@ export class ResultsPanel extends LitElement {
             const shown = value !== null && !isSqlNull(value) && value !== '' ? value : null
             return html`<td class="${sel} fk" title=${shown ?? ''}>
               ${value === null
-                ? html`<span class="default">${t('results.default')}</span>`
+                ? html`<span class="default">${this._renderFindText(t('results.default'), display, col)}</span>`
                 : isSqlNull(value)
-                  ? html`<span class="null">NULL</span>`
+                  ? html`<span class="null">${this._renderFindText('NULL', display, col)}</span>`
                   : shown === null
                     ? ''
-                    : html`<span class="fk-value">${shown}</span>`}
+                    : html`<span class="fk-value">${this._renderFindText(shown, display, col)}</span>`}
               <button
                 class="fk-follow"
                 tabindex="-1"
@@ -2738,10 +3144,10 @@ export class ResultsPanel extends LitElement {
               </button>
             </td>`
           }
-          if (value === null) return html`<td class=${sel}><span class="default">${t('results.default')}</span></td>`
-          if (isSqlNull(value)) return html`<td class=${sel}><span class="null">NULL</span></td>`
+          if (value === null) return html`<td class=${sel}><span class="default">${this._renderFindText(t('results.default'), display, col)}</span></td>`
+          if (isSqlNull(value)) return html`<td class=${sel}><span class="null">${this._renderFindText('NULL', display, col)}</span></td>`
           if (value === '') return html`<td class=${sel}></td>`
-          return html`<td class=${sel} title=${value}>${value}</td>`
+          return html`<td class=${sel} title=${value}>${this._renderFindText(value, display, col)}</td>`
         })}
       </tr>
     `
@@ -2976,6 +3382,117 @@ export class ResultsPanel extends LitElement {
         color: color-mix(in srgb, var(--btn-secondary-fg) 45%, transparent);
         background: color-mix(in srgb, var(--btn-secondary-bg) 45%, transparent);
         cursor: default;
+      }
+
+      /* Same compact vocabulary as editor Find, without its Replace row. */
+      .find-widget {
+        position: absolute;
+        top: 28px;
+        right: 14px;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px;
+        color: var(--text);
+        background: var(--header-bg);
+        border: 1px solid var(--border-subtle);
+        border-top: none;
+        border-radius: 0 0 4px 4px;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+        font-family: var(--ui-font);
+        font-size: var(--font-size-sm);
+        text-transform: none;
+        letter-spacing: normal;
+      }
+
+      .find-input-box {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding-right: 2px;
+        background: var(--input-bg);
+        border: 1px solid var(--input-border);
+        border-radius: 3px;
+      }
+
+      .find-input-box:focus-within {
+        border-color: var(--focus-border);
+      }
+
+      .find-input-box.invalid {
+        border-color: var(--status-dot-error);
+      }
+
+      .find-input-box input {
+        width: 150px;
+        height: 22px;
+        padding: 0 6px;
+        color: var(--input-fg);
+        background: transparent;
+        border: none;
+        outline: none;
+        font: inherit;
+        font-size: var(--font-size);
+      }
+
+      .find-toggle,
+      .find-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        color: var(--text-2);
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 3px;
+        cursor: pointer;
+        --icon-size: 14px;
+      }
+
+      .find-toggle {
+        width: 20px;
+        height: 20px;
+      }
+
+      .find-toggle:hover,
+      .find-btn:hover:not(:disabled) {
+        color: var(--text);
+        background: var(--list-hover);
+      }
+
+      .find-toggle.on {
+        color: var(--text);
+        background: color-mix(in srgb, var(--accent) 35%, transparent);
+        border-color: var(--accent);
+      }
+
+      .find-btn:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+
+      .find-count,
+      .find-scope {
+        padding: 0 3px;
+        color: var(--text-2);
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .find-count:empty {
+        display: none;
+      }
+
+      .find-count.no-results {
+        color: var(--status-dot-error);
+      }
+
+      .find-scope {
+        color: var(--text-3);
       }
 
       /* Timing at a glance: green under 500 ms, orange under 2 s, red above. */
@@ -3464,6 +3981,11 @@ export class ResultsPanel extends LitElement {
         display: grid;
         grid-template-columns: var(--record-column-w) minmax(0, 1fr);
         min-height: 25px;
+        /* The grid scrolls rather than shares its height out: a record with
+           enough columns to overflow would otherwise shrink every row back to
+           min-height, leaving a fitted (or dragged) field overflowing a 25px
+           row instead of growing it. */
+        flex-shrink: 0;
         border-bottom: 1px solid var(--grid-border);
       }
 
@@ -3495,7 +4017,14 @@ export class ResultsPanel extends LitElement {
         border-right: 1px solid var(--grid-border);
       }
 
+      .record-value-wrap {
+        position: relative;
+        min-width: 0;
+        min-height: 25px;
+      }
+
       .record-value {
+        display: block;
         width: 100%;
         min-width: 0;
         height: 25px;
@@ -3528,6 +4057,49 @@ export class ResultsPanel extends LitElement {
         color: var(--text-3);
         resize: none;
         cursor: default;
+      }
+
+      .record-value-wrap.finding .record-value,
+      .record-value-wrap.finding .record-value::placeholder {
+        color: transparent;
+      }
+
+      /* An overflowing textarea reserves scrollbar width the overlay doesn't,
+         which would wrap the two at different columns. */
+      .record-value-wrap.finding .record-value {
+        scrollbar-width: none;
+      }
+
+      .record-find-overlay {
+        position: absolute;
+        inset: 0;
+        box-sizing: border-box;
+        padding: 3px 10px;
+        overflow: hidden;
+        color: var(--text);
+        font: inherit;
+        line-height: 18px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        pointer-events: none;
+      }
+
+      /* NULL keeps the placeholder's look while the overlay stands in. */
+      .record-find-overlay.null-value {
+        color: var(--text-3);
+        font-style: italic;
+      }
+
+      mark.find-hit,
+      mark.find-current {
+        padding: 0;
+        color: var(--text);
+        background: var(--find-match-bg);
+        border-radius: 1px;
+      }
+
+      mark.find-current {
+        outline: 1px solid var(--find-match-border);
       }
     `,
   ]

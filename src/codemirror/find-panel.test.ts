@@ -30,6 +30,7 @@ test('panel opens with the custom widget and typing updates the query', () => {
   const view = make('select a;\nselect b;\nselect a;')
   expect(searchPanelOpen(view.state)).toBe(true)
   expect(view.dom.querySelector('.find-widget')).toBeTruthy()
+  expect(view.dom.querySelector('.find-btn .icon-x')).toBeTruthy()
 
   type(findInput(view), 'select')
   expect(getSearchQuery(view.state).search).toBe('select')

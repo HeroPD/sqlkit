@@ -62,6 +62,140 @@ async function mountGrid(n: number) {
 const key = (el: HTMLElement, init: KeyboardEventInit) =>
   el.shadowRoot!.querySelector('table')!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }))
 
+describe('results-panel Find', () => {
+  it('opens from Ctrl/Cmd+F and navigates matching cells', async () => {
+    const el = await mountGrid(3)
+
+    key(el, { key: 'f', ctrlKey: true, cancelable: true })
+    await el.updateComplete
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.result-find input')!
+    expect(input).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.result-find .icon-x')).toBeTruthy()
+
+    input.value = 'a'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.find-count')?.textContent).toBe('? of 3')
+    expect(el.shadowRoot!.querySelectorAll('mark.find-hit')).toHaveLength(3)
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.find-count')?.textContent).toBe('1 of 3')
+    expect(el.shadowRoot!.querySelector('tr[data-row="0"] td mark.find-current')).toBeTruthy()
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.find-count')?.textContent).toBe('2 of 3')
+    expect(el.shadowRoot!.querySelector('tr[data-row="1"] td mark.find-current')).toBeTruthy()
+    el.remove()
+  })
+
+  it('searches staged display values and reports invalid regular expressions', async () => {
+    const el = await mount()
+    el.edits = new Map([['0:0', 'Changed']])
+    await el.updateComplete
+
+    key(el, { key: 'f', metaKey: true, cancelable: true })
+    await el.updateComplete
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.result-find input')!
+    input.value = 'changed'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.find-count')?.textContent).toBe('? of 1')
+    expect(el.shadowRoot!.querySelector('td.dirty mark.find-hit')).toBeTruthy()
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.find-toggle[aria-label="Use Regular Expression"]')!.click()
+    input.value = '['
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.find-input-box.invalid')).toBeTruthy()
+    el.remove()
+  })
+
+  it('labels a paged search as loaded rows only', async () => {
+    const el = await mount()
+    if (el.run.phase === 'done') el.run = { ...el.run, result: { ...el.run.result, bufferedRowCount: 20 } }
+    await el.updateComplete
+
+    key(el, { key: 'f', ctrlKey: true, cancelable: true })
+    await el.updateComplete
+
+    expect(el.shadowRoot!.querySelector('.find-scope')?.textContent).toBe('Loaded rows only')
+    el.remove()
+  })
+
+  it('follows the visible mode: all loaded grid rows, then only the visible record', async () => {
+    const el = await mountGrid(3)
+    key(el, { key: 'f', ctrlKey: true, cancelable: true })
+    await el.updateComplete
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.result-find input')!
+    input.value = 'a'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.find-count')?.textContent).toBe('? of 3')
+
+    // Tab switches the selected row into Record view while Find stays open.
+    key(el, { key: 'Tab', cancelable: true })
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.find-count')?.textContent).toBe('? of 1')
+    expect(el.shadowRoot!.querySelector('.record-view mark.find-hit')?.textContent).toBe('a')
+
+    // Returning to the grid restores loaded-grid scope without reopening Find.
+    el.shadowRoot!.querySelector('.record-view')!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }),
+    )
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('table')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.find-count')?.textContent).toBe('? of 3')
+    el.remove()
+  })
+
+  it('counts and highlights each matching text occurrence', async () => {
+    const el = await mount()
+    if (el.run.phase === 'done') el.run = { ...el.run, result: { ...el.run.result, rows: [['banana', 'locked']] } }
+    await el.updateComplete
+    key(el, { key: 'f', ctrlKey: true, cancelable: true })
+    await el.updateComplete
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.result-find input')!
+    input.value = 'an'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await el.updateComplete
+
+    const marks = [...el.shadowRoot!.querySelectorAll('mark.find-hit')]
+    expect(marks.map((mark) => mark.textContent)).toEqual(['an', 'an'])
+    expect(el.shadowRoot!.querySelector('.find-count')?.textContent).toBe('? of 2')
+    el.remove()
+  })
+
+  it('keeps Record view fields mounted and hands editing back when a value is focused', async () => {
+    const el = await mountGrid(1)
+    key(el, { key: 'Tab', cancelable: true })
+    await el.updateComplete
+    const record = el.shadowRoot!.querySelector<HTMLElement>('.record-view')!
+    record.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }))
+    await el.updateComplete
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.result-find input')!
+    input.value = 'a'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await el.updateComplete
+
+    const value = el.shadowRoot!.querySelector<HTMLTextAreaElement>('.record-value')!
+    expect(value).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.record-find-overlay mark.find-hit')?.textContent).toBe('a')
+
+    el.shadowRoot!.querySelector('.record-value-wrap')!.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true }),
+    )
+    value.focus()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.result-find')).toBeNull()
+    expect(el.shadowRoot!.querySelector('.record-value-wrap.finding')).toBeNull()
+    expect(el.shadowRoot!.querySelector('.record-value')).toBe(value)
+    el.remove()
+  })
+})
+
 describe('results-panel editability', () => {
   it('opens inline editing for any result cell', async () => {
     const el = await mount()
@@ -1159,6 +1293,28 @@ describe('results-panel keyboard scroll-into-view', () => {
   })
 })
 
+describe('results-panel navigation focus', () => {
+  it('restores grid focus when an asynchronously followed result lands', async () => {
+    const el = document.createElement('results-panel')
+    el.run = { phase: 'running', executionId: 'follow', profileId: 'p1' }
+    document.body.append(el)
+    await el.updateComplete
+
+    el.focusLandedResult()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('table')).toBeNull()
+
+    el.run = {
+      phase: 'done',
+      result: { columns: ['id'], rows: [[1]], rowCount: 1, durationMs: 1 },
+    }
+    await el.updateComplete
+
+    expect(el.shadowRoot!.activeElement?.tagName).toBe('TABLE')
+    el.remove()
+  })
+})
+
 // The head's old static "RESULTS" label conveyed nothing. It now shows the query
 // that produced the visible result, which matters once a result can come from
 // following a foreign key rather than from the editor's own SQL.
@@ -1365,14 +1521,21 @@ describe('results-panel foreign-key affordance', () => {
     expect(followButtons(el)[0]?.getAttribute('aria-label')).toContain('id')
   })
 
-  it('asks the owner to follow, reporting the cell it came from', async () => {
+  // Find survives the hop: the search continues against whatever result the
+  // follow lands on (the query recounts there — see the result-change reset).
+  it('asks the owner to follow, keeping an open Find bar for the destination', async () => {
     const el = await mountFk()
     const seen: Array<{ row: number; col: number }> = []
     el.addEventListener('follow-foreign-key', (event) =>
       seen.push((event as CustomEvent<{ row: number; col: number }>).detail))
+    el.shadowRoot!.querySelector<HTMLButtonElement>('[aria-label="Find in Results"]')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.result-find')).toBeTruthy()
 
     followButtons(el)[0]!.click()
+    await el.updateComplete
     expect(seen).toEqual([{ row: 0, col: 1 }])
+    expect(el.shadowRoot!.querySelector('.result-find')).toBeTruthy()
   })
 
   // A staged value is not in the database yet, so following it would look up a
@@ -1442,9 +1605,13 @@ describe('results-panel JSON cell editor', () => {
 
   it('opens the document formatted', async () => {
     const el = await mountJson()
+    headAction(el, 'Find in Results')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.result-find')).toBeTruthy()
     openButton(el)!.click()
     await el.updateComplete
     expect(editor(el)?.value).toBe('{\n  "a": 1,\n  "b": [\n    2,\n    3\n  ]\n}')
+    expect(el.shadowRoot!.querySelector('.result-find')).toBeNull()
   })
 
   it('gives the editor keyboard focus when it opens', async () => {
@@ -1455,6 +1622,40 @@ describe('results-panel JSON cell editor', () => {
     let active: Element | null = document.activeElement
     while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement
     expect(active?.classList.contains('cm-content')).toBe(true)
+  })
+
+  it('carries its own find: Mod-F opens it, Esc peels find before the editor', async () => {
+    const el = await mountJson()
+    openButton(el)!.click()
+    await el.updateComplete
+    const content = editor(el)!.shadowRoot!.querySelector('.cm-content')!
+    const press = (key: string, init: KeyboardEventInit = {}) =>
+      content.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init }))
+
+    press('f', { ctrlKey: true })
+    expect(editor(el)!.shadowRoot!.querySelector('.find-widget')).toBeTruthy()
+    // The document is editable here, so the widget keeps its replace chevron.
+    expect(editor(el)!.shadowRoot!.querySelector('.toggle-replace')).toBeTruthy()
+
+    press('Escape')
+    expect(editor(el)!.shadowRoot!.querySelector('.find-widget')).toBeNull()
+    expect(editor(el)).toBeTruthy() // find closed, the editor did not
+
+    press('Escape')
+    await el.updateComplete
+    expect(editor(el)).toBeNull() // now Esc reaches the editor's own close
+  })
+
+  it('hides replace in its find when the document is read-only', async () => {
+    const el = await mountJson({ editable: false })
+    openButton(el)!.click()
+    await el.updateComplete
+    editor(el)!.shadowRoot!.querySelector('.cm-content')!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }),
+    )
+    expect(editor(el)!.shadowRoot!.querySelector('.find-widget.no-replace')).toBeTruthy()
+    expect(editor(el)!.shadowRoot!.querySelector('.toggle-replace')).toBeNull()
+    expect(editor(el)!.shadowRoot!.querySelector('.replace-row')).toBeNull()
   })
 
   it('stages the edit minified to one line, and only on a flush', async () => {

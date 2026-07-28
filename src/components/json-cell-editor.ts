@@ -7,8 +7,11 @@ import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { json } from '@codemirror/lang-json'
 import { linter } from '@codemirror/lint'
+import { search, searchKeymap } from '@codemirror/search'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
+import { createFindPanel, findWidgetStyles } from '../codemirror/find-panel'
 import { softHighlightStyle } from '../codemirror/highlight'
+import { icons } from '../shared-styles'
 import { jsonProblem } from '../json-text'
 
 /** Where the document stops parsing, and what to say about it. */
@@ -79,6 +82,30 @@ const jsonTheme = EditorView.theme(
     '.cm-gutters': { backgroundColor: 'var(--editor-bg)', border: 'none', color: 'var(--text-3)' },
     '.cm-activeLine': { backgroundColor: 'transparent' },
     '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--text)' },
+
+    /* The find widget floats over the top-right corner, like sql-editor's. */
+    '.cm-panels': {
+      backgroundColor: 'transparent',
+      color: 'var(--text)',
+      zIndex: '10',
+    },
+
+    '.cm-panels-top': {
+      position: 'absolute',
+      top: '0',
+      left: 'auto',
+      right: '14px',
+      borderBottom: 'none',
+    },
+
+    '.cm-searchMatch': {
+      background: 'var(--find-match-bg)',
+    },
+
+    '.cm-searchMatch.cm-searchMatch-selected': {
+      background: 'var(--find-match-bg)',
+      outline: '1px solid var(--find-match-border)',
+    },
 
     // The mark on the offending character, in the app's error colour instead of
     // the base theme's wavy SVG.
@@ -194,6 +221,9 @@ export class JsonCellEditor extends LitElement {
           bracketMatching(),
           closeBrackets(),
           keymap.of([
+            // Before the Escape below: with the find panel open, Esc closes the
+            // panel (closeSearchPanel yields when there is none to close).
+            ...searchKeymap,
             {
               // Leaves the view. Stops here so it never reaches the grid's
               // Esc-Esc, which would discard every staged change in the tab.
@@ -218,6 +248,7 @@ export class JsonCellEditor extends LitElement {
           ]),
           json(),
           jsonDiagnostics,
+          search({ top: true, createPanel: createFindPanel }),
           jsonTheme,
           oneDarkTheme,
           syntaxHighlighting(softHighlightStyle),
@@ -269,18 +300,22 @@ export class JsonCellEditor extends LitElement {
     this._view = null
   }
 
-  static styles = css`
-    :host {
-      display: block;
-      min-height: 0;
-      height: 100%;
-    }
+  static styles = [
+    icons,
+    findWidgetStyles,
+    css`
+      :host {
+        display: block;
+        min-height: 0;
+        height: 100%;
+      }
 
-    .host,
-    .host .cm-editor {
-      height: 100%;
-    }
-  `
+      .host,
+      .host .cm-editor {
+        height: 100%;
+      }
+    `,
+  ]
 }
 
 declare global {

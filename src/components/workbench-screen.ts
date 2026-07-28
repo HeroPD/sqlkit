@@ -1909,7 +1909,9 @@ export class WorkbenchScreen extends LitElement {
       BROWSE_ROW_LIMIT,
     )
     this._guardStagedLeave(tabId, () => {
-      void this._runSql(sql, null, [value], null, undefined, { push: true, table })
+      void this._runSql(sql, null, [value], null, undefined, { push: true, table }).then(() => {
+        if (this._ctx.activeTabId === tabId) this.renderRoot.querySelector('results-panel')?.focusLandedResult()
+      })
     })
   }
 

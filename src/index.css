@@ -77,6 +77,10 @@
   --staged-delete-bg: color-mix(in srgb, var(--staged-delete-fg) 13%, var(--editor-bg));
   --staged-delete-hover-bg: color-mix(in srgb, var(--staged-delete-fg) 19%, var(--editor-bg));
   --grid-selection-bg: color-mix(in srgb, var(--accent) 34%, transparent);
+  /* Text search highlight: muted yellow, distinct from warning orange and
+     selection blue. Opaque so selected cells cannot alter its appearance. */
+  --find-match-bg: #594b2b;
+  --find-match-border: #c5a84f;
   --staged-edit-selection-bg: color-mix(in srgb, var(--staged-edit-fg) 25%, var(--editor-bg));
   --staged-add-selection-bg: color-mix(in srgb, var(--staged-add-fg) 29%, var(--editor-bg));
   --staged-delete-selection-bg: color-mix(in srgb, var(--staged-delete-fg) 29%, var(--editor-bg));
@@ -166,6 +170,8 @@
   --list-hover: #172a3d;
   --list-selection: #17466a;
   --list-selection-fg: #e5f1fa;
+  --find-match-bg: #4b492d;
+  --find-match-border: #c8b75b;
   --staged-edit-fg: #c5a36c;
   --staged-add-fg: #62b47e;
   --staged-delete-fg: #d17682;
@@ -224,6 +230,8 @@
   --list-hover: #302722;
   --list-selection: #53351f;
   --list-selection-fg: #f2e7dc;
+  --find-match-bg: #59432b;
+  --find-match-border: #d0a15d;
   --staged-edit-fg: #c39a68;
   --staged-add-fg: #78ad6d;
   --staged-delete-fg: #d17269;
@@ -286,6 +294,8 @@
   --list-hover: #e2edf5;
   --list-selection: #c7e2f5;
   --list-selection-fg: #17212a;
+  --find-match-bg: #f1dc8a;
+  --find-match-border: #987318;
   --staged-edit-fg: #855f24;
   --staged-add-fg: #337b3e;
   --staged-delete-fg: #ad3745;

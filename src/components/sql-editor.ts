@@ -42,7 +42,7 @@ import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/sea
 import { sql } from '@codemirror/lang-sql'
 import { explicitQueryToRun, hasExplicitQueryTarget, queryToRun, runQuery } from '../codemirror/run-query'
 import { altShiftKeys } from '../codemirror/alt-shift-keys'
-import { createFindPanel } from '../codemirror/find-panel'
+import { createFindPanel, findWidgetStyles } from '../codemirror/find-panel'
 import {
   SELECTION_COMMANDS,
   addCursorVertically,
@@ -121,14 +121,14 @@ const appTheme = EditorView.theme(
       borderBottom: 'none',
     },
 
-    /* VS Code dark match colors: current match vs. the rest, plus passive
-       same-as-selection highlights. */
+    /* Search yellow stays distinct from editor selection and warning states. */
     '.cm-searchMatch': {
-      background: '#ea5c0055',
+      background: 'var(--find-match-bg)',
     },
 
     '.cm-searchMatch.cm-searchMatch-selected': {
-      background: '#515c6acc',
+      background: 'var(--find-match-bg)',
+      outline: '1px solid var(--find-match-border)',
     },
 
     '.cm-selectionMatch': {
@@ -996,157 +996,13 @@ export class SqlEditor extends LitElement {
   static styles = [
     icons,
     scrollbars,
+    // The find widget (codemirror/find-panel.ts) — VS Code's find UI.
+    findWidgetStyles,
     css`
       :host {
         display: block;
         height: 100%;
         min-height: 0;
-      }
-
-      /* The find widget (codemirror/find-panel.ts) — VS Code's find UI. */
-      .find-widget {
-        display: flex;
-        align-items: stretch;
-        gap: 2px;
-        padding: 4px 4px 4px 0;
-        background: var(--header-bg);
-        border: 1px solid var(--border-subtle);
-        border-top: none;
-        border-radius: 0 0 4px 4px;
-        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
-        font-family: var(--ui-font);
-        font-size: var(--font-size-sm);
-        color: var(--text);
-      }
-
-      .toggle-replace {
-        width: 16px;
-        padding: 0;
-        border: none;
-        border-radius: 2px;
-        background: transparent;
-        color: var(--text-2);
-        cursor: pointer;
-        --icon-size: 14px;
-      }
-
-      .toggle-replace:hover {
-        background: var(--list-hover);
-      }
-
-      .find-rows {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-
-      .find-row {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-      }
-
-      .replace-row {
-        display: none;
-      }
-
-      .find-widget.replace-on .replace-row {
-        display: flex;
-      }
-
-      .find-input-box {
-        display: flex;
-        align-items: center;
-        gap: 2px;
-        padding-right: 2px;
-        background: var(--input-bg);
-        border: 1px solid var(--input-border);
-        border-radius: 3px;
-      }
-
-      .find-input-box:focus-within {
-        border-color: var(--focus-border);
-      }
-
-      .find-input-box.invalid {
-        border-color: var(--status-dot-error);
-      }
-
-      /* Standard control text size (13px), like every other input. */
-      .find-input-box input {
-        width: 150px;
-        height: 22px;
-        padding: 0 6px;
-        border: none;
-        background: transparent;
-        color: var(--input-fg);
-        font-family: inherit;
-        font-size: var(--font-size);
-        outline: none;
-      }
-
-      .find-toggle {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 20px;
-        height: 20px;
-        padding: 0;
-        border: 1px solid transparent;
-        border-radius: 3px;
-        background: transparent;
-        color: var(--text-2);
-        cursor: pointer;
-        --icon-size: 14px;
-      }
-
-      .find-toggle:hover {
-        background: var(--list-hover);
-      }
-
-      .find-toggle.on {
-        background: color-mix(in srgb, var(--accent) 35%, transparent);
-        border-color: var(--accent);
-        color: var(--text);
-      }
-
-      .find-count {
-        padding: 0 4px;
-        color: var(--text-2);
-        white-space: nowrap;
-      }
-
-      /* No reserved space before a query exists — empty counter, no gap. */
-      .find-count:empty {
-        display: none;
-      }
-
-      .find-count.no-results {
-        color: var(--status-dot-error);
-      }
-
-      .find-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 22px;
-        height: 22px;
-        padding: 0;
-        border: none;
-        border-radius: 3px;
-        background: transparent;
-        color: var(--text);
-        cursor: pointer;
-        --icon-size: 14px;
-      }
-
-      .find-btn:hover:not(:disabled) {
-        background: var(--list-hover);
-      }
-
-      .find-btn:disabled {
-        opacity: 0.35;
-        cursor: default;
       }
 
       .host {

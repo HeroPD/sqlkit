@@ -1,3 +1,4 @@
+import { css } from 'lit'
 import { runScopeHandlers, type EditorView, type Panel, type ViewUpdate } from '@codemirror/view'
 import {
   SearchQuery,
@@ -15,7 +16,8 @@ import { t } from '../i18n'
 // with the case / whole-word / regex toggles inside it, an "N of M" match
 // counter, arrow prev/next, and a replace row folded behind the left chevron.
 // Search runs as you type; Enter / Shift+Enter step matches, Escape returns
-// to the editor. Styling lives in sql-editor's shadow styles (.find-widget).
+// to the editor. A read-only editor gets no replace row and no chevron.
+// Hosts compose findWidgetStyles (below) into their shadow styles.
 
 const MAX_COUNT = 1000
 
@@ -34,9 +36,10 @@ export function createFindPanel(view: EditorView): Panel {
   let caseSensitive = initial.caseSensitive
   let wholeWord = initial.wholeWord
   let regexp = initial.regexp
+  const canReplace = !view.state.readOnly
 
   const dom = document.createElement('div')
-  dom.className = 'find-widget'
+  dom.className = canReplace ? 'find-widget' : 'find-widget no-replace'
 
   // --- DOM ----------------------------------------------------------------
   const toggleReplace = button('toggle-replace', 'chevron-right', t('find.toggleReplace'))
@@ -63,7 +66,7 @@ export function createFindPanel(view: EditorView): Panel {
   count.className = 'find-count'
   const prevBtn = button('find-btn', 'arrow-up', t('find.previousMatch', { shortcut: '⇧↵' }))
   const nextBtn = button('find-btn', 'arrow-down', t('find.nextMatch', { shortcut: '↵' }))
-  const closeBtn = button('find-btn', 'close', t('find.close', { shortcut: 'Esc' }))
+  const closeBtn = button('find-btn', 'x', t('find.close', { shortcut: 'Esc' }))
   findRow.append(findBox, count, prevBtn, nextBtn, closeBtn)
 
   const replaceRow = document.createElement('div')
@@ -79,8 +82,12 @@ export function createFindPanel(view: EditorView): Panel {
   const replaceAllBtn = button('find-btn', 'replace-all', t('find.replaceAll'))
   replaceRow.append(replaceBox, replaceBtn, replaceAllBtn)
 
-  rows.append(findRow, replaceRow)
-  dom.append(toggleReplace, rows)
+  rows.append(findRow)
+  if (canReplace) {
+    rows.append(replaceRow)
+    dom.append(toggleReplace)
+  }
+  dom.append(rows)
 
   // --- behavior -------------------------------------------------------------
   const query = () =>
@@ -209,3 +216,158 @@ export function createFindPanel(view: EditorView): Panel {
     },
   }
 }
+
+// The widget's look, composed into the shadow styles of every editor that
+// mounts it (sql-editor, json-cell-editor). The panel's floating position is
+// the host theme's business: see the .cm-panels-top override each editor sets.
+export const findWidgetStyles = css`
+  .find-widget {
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    padding: 4px 4px 4px 0;
+    background: var(--header-bg);
+    border: 1px solid var(--border-subtle);
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+    font-family: var(--ui-font);
+    font-size: var(--font-size-sm);
+    color: var(--text);
+  }
+
+  /* Read-only: no chevron column, so the find row carries the left inset. */
+  .find-widget.no-replace {
+    padding-left: 4px;
+  }
+
+  .toggle-replace {
+    width: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 2px;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    --icon-size: 14px;
+  }
+
+  .toggle-replace:hover {
+    background: var(--list-hover);
+  }
+
+  .find-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .find-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .replace-row {
+    display: none;
+  }
+
+  .find-widget.replace-on .replace-row {
+    display: flex;
+  }
+
+  .find-input-box {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding-right: 2px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 3px;
+  }
+
+  .find-input-box:focus-within {
+    border-color: var(--focus-border);
+  }
+
+  .find-input-box.invalid {
+    border-color: var(--status-dot-error);
+  }
+
+  /* Standard control text size (13px), like every other input. */
+  .find-input-box input {
+    width: 150px;
+    height: 22px;
+    padding: 0 6px;
+    border: none;
+    background: transparent;
+    color: var(--input-fg);
+    font-family: inherit;
+    font-size: var(--font-size);
+    outline: none;
+  }
+
+  .find-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    --icon-size: 14px;
+  }
+
+  .find-toggle:hover {
+    background: var(--list-hover);
+  }
+
+  .find-toggle.on {
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent);
+    color: var(--text);
+  }
+
+  .find-count {
+    padding: 0 4px;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+
+  /* No reserved space before a query exists — empty counter, no gap. */
+  .find-count:empty {
+    display: none;
+  }
+
+  .find-count.no-results {
+    color: var(--status-dot-error);
+  }
+
+  .find-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    --icon-size: 14px;
+  }
+
+  .find-btn:hover:not(:disabled) {
+    background: var(--list-hover);
+  }
+
+  .find-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+`
