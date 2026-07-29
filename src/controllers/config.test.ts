@@ -201,5 +201,6 @@ describe('ConfigController profile list', () => {
     expect(blank.engine).toBe('postgresql')
     expect(blank.id).toMatch(/[0-9a-f-]{36}/)
     expect(blank.name).toBe('')
+    expect(blank.labelColor).toBe('accent-04')
   })
 })

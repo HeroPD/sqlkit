@@ -55,6 +55,7 @@ export class ConfigController {
     return {
       id: crypto.randomUUID(),
       name: '',
+      labelColor: 'accent-04',
       engine: 'postgresql',
       host: 'localhost',
       port: '5432',

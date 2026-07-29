@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
+import { render } from 'lit'
 import type { ColumnRef, ConnectionProfile, TableRef } from '../electron'
 import { WorkbenchScreen } from './workbench-screen'
 
@@ -592,6 +593,26 @@ describe('WorkbenchScreen result refresh shortcuts', () => {
 })
 
 describe('WorkbenchScreen title-bar actions', () => {
+  it('uses the active profile label color as a title-bar underline without changing the status dot', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { phase: ReturnType<typeof vi.fn> }
+      _renderTitlebar(): unknown
+    }
+    workbench._config.connections = [{ ...profile, labelColor: 'accent-04' }]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._live.phase = vi.fn(() => 'connected')
+    const host = document.createElement('div')
+
+    render(workbench._renderTitlebar(), host)
+
+    const target = host.querySelector<HTMLElement>('.database-target')
+    expect(target?.style.getPropertyValue('--connection-label-color').trim()).toBe('#3f51b5')
+    expect(target?.querySelector('.connection-dot.connected')).toBeTruthy()
+  })
+
   it('opens the same database picker as Cmd/Ctrl+K', () => {
     const workbench = new WorkbenchScreen() as never as {
       _cmdPalette: { open: ReturnType<typeof vi.fn> }

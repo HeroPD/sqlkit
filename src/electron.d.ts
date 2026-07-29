@@ -55,6 +55,8 @@ export type SshConfig = {
 export type ConnectionProfile = {
   id: string
   name: string
+  /** Optional accent shown on the active title-bar database selector. */
+  labelColor?: ConnectionLabelColor
   engine: Engine
   /** Set when the user picked a compatible variant (Supabase, MariaDB) in the
    *  engine list; presentational only — drivers and dialects key on `engine`. */
@@ -83,6 +85,18 @@ export type ConnectionProfile = {
   /** SSH tunnel settings; absent means a direct connection. */
   ssh?: SshConfig
 }
+
+export type ConnectionLabelColor =
+  | 'accent-01'
+  | 'accent-02'
+  | 'accent-03'
+  | 'accent-04'
+  | 'accent-05'
+  | 'accent-06'
+  | 'accent-07'
+  | 'accent-08'
+  | 'accent-09'
+  | 'accent-10'
 
 export type WorkspaceConfig = {
   version: number

@@ -1,5 +1,6 @@
 import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, ObjectDdlRef, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
 import type { ExportFormat } from '../src/result-export'
+import { isConnectionLabelColor } from '../src/connection-label-colors'
 
 const MAX_ID = 200
 const MAX_TEXT = 10 * 1024 * 1024
@@ -88,6 +89,10 @@ export function connectionProfile(value: unknown): ConnectionProfile {
     folder: stringValue(profile.folder, 'Workspace folder', 2_000),
   }
   if (profile.passwordSaved !== undefined) parsed.passwordSaved = booleanValue(profile.passwordSaved, 'passwordSaved')
+  if (profile.labelColor !== undefined) {
+    if (!isConnectionLabelColor(profile.labelColor)) throw new IpcValidationError('Connection label color is invalid')
+    parsed.labelColor = profile.labelColor
+  }
   if (profile.databaseMode === 'single' || profile.databaseMode === 'all') parsed.databaseMode = profile.databaseMode
   else if (profile.databaseMode !== undefined) throw new IpcValidationError('Database mode is invalid')
   if (profile.lastChildDb !== undefined) parsed.lastChildDb = stringValue(profile.lastChildDb, 'Last database', 2_000)

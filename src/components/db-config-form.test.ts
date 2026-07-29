@@ -55,6 +55,20 @@ describe('DbConfigForm draft editing', () => {
     expect(form.profile).toEqual(before)
   })
 
+  it('offers muted label colors and patches the selected preset', async () => {
+    const { form, changes } = setup()
+    document.body.appendChild(form)
+    await form.updateComplete
+
+    const colors = [...form.shadowRoot!.querySelectorAll<HTMLButtonElement>('.label-color')]
+    expect(colors.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Ruby', 'Magenta', 'Violet', 'Indigo', 'Blue', 'Cyan', 'Teal', 'Green', 'Gold', 'Orange',
+    ])
+    colors[0]?.click()
+    expect(changes[0]?.labelColor).toBe('accent-01')
+    form.remove()
+  })
+
   it('resets a finished connection test when the draft changes', () => {
     const { form } = setup()
     internals(form)._test = { phase: 'error', message: 'boom' }

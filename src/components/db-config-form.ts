@@ -4,6 +4,7 @@ import { controls, typography } from '../shared-styles'
 import { UiSelect } from './ui-select'
 import type { ConnectionProfile, DatabaseMode, Engine, EngineFlavor, SshAuthType, SshConfig, SslConfig, SslMode } from '../electron'
 import { connectionUrlFromProfile, profileFromConnectionUrl } from '../connection-url'
+import { CONNECTION_LABEL_COLORS } from '../connection-label-colors'
 import { t } from '../i18n'
 
 // Verified wire-compatible variants (Supabase, MariaDB) ride their parent
@@ -116,6 +117,7 @@ export class DbConfigForm extends LitElement {
           )}
         </section>
 
+        ${this._appearanceSection(draft)}
         ${draft.engine === 'sqlite' ? this._sqliteSection(draft) : this._serverSection(draft)}
         ${draft.engine === 'sqlite' ? '' : this._sslSection(draft)}
         ${draft.engine === 'sqlite' ? '' : this._sshSection(draft)}
@@ -132,6 +134,49 @@ export class DbConfigForm extends LitElement {
           </button>
         </footer>
       </div>
+    `
+  }
+
+  private _appearanceSection(draft: ConnectionProfile) {
+    return html`
+      <section>
+        <div class="section-head">
+          <h4>${t('config.appearance')}</h4>
+          <p class="muted small">${t('config.appearanceHelp')}</p>
+        </div>
+        ${this._field(
+          t('config.labelColor'),
+          html`
+            <div class="label-colors" role="radiogroup" aria-label=${t('config.labelColor')}>
+              <button
+                type="button"
+                class="label-color-none ${draft.labelColor ? '' : 'selected'}"
+                role="radio"
+                aria-checked=${String(!draft.labelColor)}
+                title=${t('config.noLabelColor')}
+                @click=${() => this._patch({ labelColor: undefined })}
+              >
+                <span aria-hidden="true"></span>
+              </button>
+              ${CONNECTION_LABEL_COLORS.map((color) => html`
+                <button
+                  type="button"
+                  class="label-color ${draft.labelColor === color.id ? 'selected' : ''}"
+                  style="--label-color: ${color.value}"
+                  role="radio"
+                  aria-checked=${String(draft.labelColor === color.id)}
+                  aria-label=${color.label}
+                  title=${color.label}
+                  @click=${() => this._patch({ labelColor: color.id })}
+                >
+                  <span aria-hidden="true"></span>
+                </button>
+              `)}
+            </div>
+          `,
+          t('config.labelColorHelp'),
+        )}
+      </section>
     `
   }
 
@@ -568,6 +613,69 @@ export class DbConfigForm extends LitElement {
         color: var(--text);
         cursor: pointer;
         user-select: none;
+      }
+
+      .label-colors {
+        min-height: var(--control-h);
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .label-color,
+      .label-color-none {
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+
+      .label-color:hover,
+      .label-color-none:hover {
+        background: var(--btn-secondary-hover);
+      }
+
+      .label-color.selected,
+      .label-color-none.selected {
+        border-color: var(--focus-border);
+        box-shadow: 0 0 0 1px color-mix(in srgb, var(--focus-border) 35%, transparent);
+      }
+
+      .label-color span,
+      .label-color-none span {
+        width: 14px;
+        height: 14px;
+        display: block;
+        border-radius: 4px;
+      }
+
+      .label-color span {
+        background: var(--label-color);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, white 12%, transparent);
+      }
+
+      .label-color-none span {
+        position: relative;
+        overflow: hidden;
+        background: var(--input-bg);
+        border: 1px solid var(--border);
+      }
+
+      .label-color-none span::after {
+        content: '';
+        position: absolute;
+        width: 20px;
+        height: 1px;
+        left: -4px;
+        top: 6px;
+        background: var(--text-3);
+        transform: rotate(-45deg);
       }
 
       .test-row {

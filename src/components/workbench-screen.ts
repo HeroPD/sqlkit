@@ -43,6 +43,7 @@ import type { StatusConnection } from './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
 import { clearInspectDraftCache, dropInspectDraft, sweepInspectDrafts, type ColumnAlterEventDetail } from './table-inspect'
+import { connectionLabelColorValue } from '../connection-label-colors'
 import { clearEditorStateCache, type EditorCommandDetail, type RunQueryDetail } from './sql-editor'
 import type { SelectionCommandId } from '../codemirror/selection-commands'
 import { firstStatement } from '../codemirror/run-query'
@@ -858,6 +859,7 @@ export class WorkbenchScreen extends LitElement {
     const database = this._ctx.activeChildDb ?? profile?.database.trim() ?? ''
     const context = profile ? [profile.name, database].filter(Boolean).join(' · ') : t('action.switchDatabase')
     const phase = profile ? this._live.phase(profile.id) : null
+    const labelColor = connectionLabelColorValue(profile?.labelColor)
     const tab = this._ctx.activeSqlTab()
     const run = this._queries.runFor(this._ctx.activeTabId)
     const running = run.phase === 'running'
@@ -878,6 +880,7 @@ export class WorkbenchScreen extends LitElement {
             <button
               type="button"
               class="database-target"
+              style=${labelColor ? `--connection-label-color: ${labelColor}` : ''}
               aria-label="${t('action.switchDatabase')}: ${context}"
               aria-haspopup="dialog"
               aria-expanded=${String(this._cmdPalette.mode === 'databases')}
@@ -2298,6 +2301,7 @@ export class WorkbenchScreen extends LitElement {
         font-size: var(--font-size-sm);
         text-align: left;
         white-space: nowrap;
+        box-shadow: inset 0 -2px 0 var(--connection-label-color, transparent);
         -webkit-app-region: no-drag;
       }
 
