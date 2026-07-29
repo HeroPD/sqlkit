@@ -23,6 +23,8 @@ type Opts = {
   tables?: Record<string, TableRef[]>
   statuses?: Record<string, unknown>
   phase?: string
+  activeDbId?: string | null
+  activeChildDb?: string | null
 }
 
 function setup(opts: Opts = {}) {
@@ -57,8 +59,8 @@ function setup(opts: Opts = {}) {
     files: () => opts.files ?? [],
     connections: () => opts.connections ?? [],
     activeProfile: () => opts.activeProfile ?? null,
-    activeDbId: () => null,
-    activeChildDb: () => null,
+    activeDbId: () => opts.activeDbId ?? null,
+    activeChildDb: () => opts.activeChildDb ?? null,
     ...actions,
   })
   return { ctrl, actions, live }
@@ -102,10 +104,72 @@ describe('CommandPaletteController entries', () => {
   })
 
   it('lists connections in databases mode', () => {
-    const profile = { id: 'p1', name: 'Local', engine: 'postgresql', databaseMode: 'single' } as ConnectionProfile
-    const { ctrl } = setup({ connections: [profile], statuses: { p1: { phase: 'connected', children: [] } } })
+    const profile = {
+      id: 'p1',
+      name: 'Local',
+      engine: 'postgresql',
+      databaseMode: 'single',
+      labelColor: 'accent-01',
+    } as ConnectionProfile
+    const { ctrl } = setup({
+      connections: [profile],
+      statuses: { p1: { phase: 'connected', children: [] } },
+      activeDbId: 'p1',
+    })
     ctrl.open('databases')
-    expect(ctrl.entries().map((e) => e.id)).toEqual(['db:p1'])
+    expect(ctrl.entries()).toEqual([
+      expect.objectContaining({
+        id: 'db:p1',
+        engine: 'postgresql',
+        connection: true,
+        accentColor: '#b2054c',
+        status: 'connected',
+        statusLabel: 'Connected',
+        inUse: true,
+      }),
+    ])
+  })
+
+  it('marks the active child without mixing identity and status colors', () => {
+    const profile = {
+      id: 'p1',
+      name: 'Cluster',
+      engine: 'postgresql',
+      databaseMode: 'all',
+      labelColor: 'accent-10',
+    } as ConnectionProfile
+    const statuses = { p1: { phase: 'connected', children: [{ name: 'app' }, { name: 'analytics' }] } }
+    const { ctrl } = setup({
+      connections: [profile],
+      statuses,
+      activeDbId: 'p1',
+      activeChildDb: 'analytics',
+    })
+    ctrl.open('databases')
+
+    expect(ctrl.entries()).toEqual([
+      expect.objectContaining({
+        id: 'hdr:p1',
+        accentColor: '#c45b18',
+        status: 'connected',
+        statusLabel: 'Connected',
+      }),
+      expect.objectContaining({ id: 'child:p1:app', inUse: false }),
+      expect.objectContaining({ id: 'child:p1:analytics', inUse: true }),
+    ])
+  })
+
+  it('keeps connection errors searchable without placing the full error in the row', () => {
+    const profile = { id: 'p1', name: 'Broken', engine: 'mysql', databaseMode: 'single' } as ConnectionProfile
+    const statuses = { p1: { phase: 'error', error: 'Connection refused', children: [] } }
+    const { ctrl } = setup({ connections: [profile], statuses, phase: 'error' })
+    ctrl.open('databases')
+
+    expect(ctrl.entries()[0]).toEqual(expect.objectContaining({
+      status: 'error',
+      statusLabel: 'Error',
+      statusError: 'Connection refused',
+    }))
   })
 })
 

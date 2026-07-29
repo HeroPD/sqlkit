@@ -877,29 +877,34 @@ export class WorkbenchScreen extends LitElement {
             ${this.workspace?.name ? html`<span class="title-workspace">— ${this.workspace.name}</span>` : ''}
           </div>
           <div class="titlebar-center">
-            <button
-              type="button"
-              class="database-target"
-              style=${labelColor ? `--connection-label-color: ${labelColor}` : ''}
-              aria-label="${t('action.switchDatabase')}: ${context}"
-              aria-haspopup="dialog"
-              aria-expanded=${String(this._cmdPalette.mode === 'databases')}
-              @click=${this._openDatabasePicker}
+            <span
+              class="database-target-wrap tooltip-start"
+              data-tooltip=${context}
             >
-              <span class="connection-dot ${phase ?? ''}" aria-hidden="true"></span>
-              ${profile
-                ? html`
-                    <span class="target-profile">${profile.name}</span>
-                    ${database
-                      ? html`
-                          <span class="target-separator" aria-hidden="true">›</span>
-                          <strong>${database}</strong>
-                        `
-                      : ''}
-                  `
-                : html`<strong>${t('action.switchDatabase')}</strong>`}
-              <i class="icon icon-chevron-down" aria-hidden="true"></i>
-            </button>
+              <button
+                type="button"
+                class="database-target"
+                style=${labelColor ? `--connection-label-color: ${labelColor}` : ''}
+                aria-label="${t('action.switchDatabase')}: ${context}"
+                aria-haspopup="dialog"
+                aria-expanded=${String(this._cmdPalette.mode === 'databases')}
+                @click=${this._openDatabasePicker}
+              >
+                <span class="connection-dot ${phase ?? ''}" aria-hidden="true"></span>
+                ${profile
+                  ? html`
+                      <span class="target-profile">${profile.name}</span>
+                      ${database
+                        ? html`
+                            <span class="target-separator" aria-hidden="true">›</span>
+                            <strong>${database}</strong>
+                          `
+                        : ''}
+                    `
+                  : html`<strong>${t('action.switchDatabase')}</strong>`}
+                <i class="icon icon-chevron-down" aria-hidden="true"></i>
+              </button>
+            </span>
             <button
               type="button"
               class="query-action ${running ? 'running' : refreshing ? 'refreshing' : ''}"
@@ -2220,7 +2225,9 @@ export class WorkbenchScreen extends LitElement {
       .titlebar-inner {
         display: grid;
         grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
-        gap: 10px;
+        /* Wide enough that a workspace name truncating at its track edge still
+           reads as separate from the database pill. */
+        gap: 20px;
       }
 
       .titlebar-left,
@@ -2286,8 +2293,19 @@ export class WorkbenchScreen extends LitElement {
         font-size: 13px;
       }
 
-      .database-target {
+      /* A fixed box whatever it carries, so switching databases never moves the
+         run action next to it. */
+      .database-target-wrap {
         width: min(340px, 36vw);
+        max-width: 100%;
+        min-width: 0;
+        display: flex;
+        -webkit-app-region: no-drag;
+      }
+
+      .database-target {
+        width: 100%;
+        min-width: 0;
         height: 24px;
         display: flex;
         align-items: center;
@@ -2315,8 +2333,12 @@ export class WorkbenchScreen extends LitElement {
         border-color: var(--focus-border);
       }
 
+      /* The database name keeps its own width up to a cap and never shrinks:
+         the connection name is what gives way, so a short database name always
+         reads in full and a long one still gets more room than its context. */
       .database-target strong {
-        min-width: 0;
+        max-width: 14em;
+        flex: 0 0 auto;
         overflow: hidden;
         color: var(--text);
         font-weight: 500;
@@ -2324,7 +2346,8 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .target-profile {
-        flex-shrink: 1;
+        min-width: 0;
+        flex: 0 1 auto;
         overflow: hidden;
         text-overflow: ellipsis;
       }
@@ -2412,7 +2435,7 @@ export class WorkbenchScreen extends LitElement {
           grid-template-columns: minmax(150px, 1fr) auto minmax(150px, 1fr);
         }
 
-        .database-target {
+        .database-target-wrap {
           width: min(240px, 34vw);
         }
 

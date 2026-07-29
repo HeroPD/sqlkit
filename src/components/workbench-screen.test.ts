@@ -611,6 +611,7 @@ describe('WorkbenchScreen title-bar actions', () => {
     const target = host.querySelector<HTMLElement>('.database-target')
     expect(target?.style.getPropertyValue('--connection-label-color').trim()).toBe('#3f51b5')
     expect(target?.querySelector('.connection-dot.connected')).toBeTruthy()
+    expect(host.querySelector<HTMLElement>('.database-target-wrap')?.dataset.tooltip).toBe('Postgres · db_a')
   })
 
   it('opens the same database picker as Cmd/Ctrl+K', () => {

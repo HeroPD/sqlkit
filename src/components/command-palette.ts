@@ -1,9 +1,13 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { controls, icons, overlay, scrollbars, typography } from '../shared-styles'
+import { controls, icons, overlay, scrollbars, tooltip, typography } from '../shared-styles'
 import { t } from '../i18n'
+import { isMac } from '../platform'
+import type { Engine, EngineFlavor } from '../electron'
+import './engine-badge'
 
 export type PaletteMode = 'commands' | 'quick' | 'databases'
+export type PaletteConnectionStatus = 'connected' | 'connecting' | 'disconnected' | 'error'
 
 // One row. The palette is presentation-only: the owner computes the entries
 // for the current mode and decides what a pick means.
@@ -13,7 +17,18 @@ export type PaletteEntry = {
   detail?: string
   /** Lucide icon class, e.g. 'icon-database'. */
   icon?: string
+  /** Uses the same branded database badge as the configuration list. */
+  engine?: Engine
+  flavor?: EngineFlavor
   keybind?: string
+  /** Cmd+K connection row with a reserved identity/status layout. */
+  connection?: boolean
+  /** Validated profile accent resolved to a CSS color by the controller. */
+  accentColor?: string
+  status?: PaletteConnectionStatus
+  statusLabel?: string
+  statusError?: string
+  inUse?: boolean
   /**
    * A non-pickable group label; the entries after it (until the next header)
    * are its children. Hidden when no child survives the filter; a matching
@@ -30,11 +45,24 @@ const PLACEHOLDERS: Record<PaletteMode, string> = {
   databases: t('palette.databases'),
 }
 
+const SHORTCUTS: Record<PaletteMode, string> = {
+  commands: isMac ? '⇧⌘P' : 'Ctrl Shift P',
+  quick: isMac ? '⌘P' : 'Ctrl P',
+  databases: isMac ? '⌘K' : 'Ctrl K',
+}
+
 // Every whitespace-separated term must appear somewhere in the entry's text.
 function matches(query: string, entry: PaletteEntry): boolean {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
   if (!terms.length) return true
-  const haystack = `${entry.label} ${entry.detail ?? ''} ${entry.id}`.toLowerCase()
+  const haystack = [
+    entry.label,
+    entry.detail ?? '',
+    entry.statusLabel ?? '',
+    entry.statusError ?? '',
+    entry.inUse ? t('palette.inUse') : '',
+    entry.id,
+  ].join(' ').toLowerCase()
   return terms.every((term) => haystack.includes(term))
 }
 
@@ -95,11 +123,22 @@ export class CommandPalette extends LitElement {
   @state()
   private _active = 0
 
+  @state()
+  private _nameTooltip: { label: string; left: number; top: number } | null = null
+
+  private _tooltipTimer: number | null = null
+
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('open') || changed.has('mode')) {
       this._query = ''
       this._active = 0
+      this._hideNameTooltip()
     }
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback()
+    this._hideNameTooltip()
   }
 
   protected updated(changed: PropertyValues) {
@@ -118,21 +157,41 @@ export class CommandPalette extends LitElement {
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <div class="panel">
-          <input
-            type="text"
-            placeholder=${PLACEHOLDERS[this.mode]}
-            .value=${this._query}
-            @input=${this._onInput}
-            @keydown=${(e: KeyboardEvent) => this._onKeydown(e, filtered, active)}
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <div class="list" role="listbox">
+          <div class="search">
+            <i class="icon icon-search search-icon" aria-hidden="true"></i>
+            <input
+              type="text"
+              placeholder=${PLACEHOLDERS[this.mode]}
+              .value=${this._query}
+              @input=${this._onInput}
+              @keydown=${(e: KeyboardEvent) => this._onKeydown(e, filtered, active)}
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <span class="palette-shortcut" aria-hidden="true">${SHORTCUTS[this.mode]}</span>
+          </div>
+          <div class="list" role="listbox" @scroll=${this._hideNameTooltip}>
             ${filtered.length
               ? filtered.map((entry, index) => this._renderEntry(entry, index, active))
               : html`<div class="empty muted">${this._emptyMessage()}</div>`}
           </div>
+          <div class="palette-footer" aria-hidden="true">
+            <span><kbd>↑↓</kbd>${t('palette.navigate')}</span>
+            <span><kbd>↵</kbd>${t('palette.select')}</span>
+            <span><kbd>esc</kbd>${t('palette.close')}</span>
+          </div>
         </div>
+        ${this._nameTooltip
+          ? html`
+              <span
+                class="name-tooltip-anchor tooltip-up tooltip-start"
+                role="tooltip"
+                aria-label=${this._nameTooltip.label}
+                data-tooltip=${this._nameTooltip.label}
+                style="left: ${this._nameTooltip.left}px; top: ${this._nameTooltip.top}px"
+              ></span>
+            `
+          : nothing}
       </div>
     `
   }
@@ -150,25 +209,57 @@ export class CommandPalette extends LitElement {
     if (entry.header) {
       return html`
         <div class="row group" role="presentation">
-          ${entry.icon ? html`<i class="icon ${entry.icon}" aria-hidden="true"></i>` : nothing}
-          <span class="label">${this._highlight(entry.label)}</span>
-          ${entry.detail ? html`<span class="detail">${entry.detail}</span>` : ''}
+          ${this._renderEntryContent(entry)}
         </div>
       `
     }
     return html`
       <div
-        class="row ${entry.indent ? 'indent' : ''} ${index === active ? 'active' : ''}"
+        class="row ${entry.connection ? 'connection' : ''} ${entry.indent ? 'indent' : ''} ${entry.status ? 'has-status' : ''} ${entry.statusError ? 'error-row' : ''} ${index === active ? 'active' : ''}"
         role="option"
         aria-selected=${index === active}
         @click=${() => this._pick(entry)}
         @mousemove=${() => this._setActive(index)}
       >
-        ${entry.icon ? html`<i class="icon ${entry.icon}" aria-hidden="true"></i>` : nothing}
-        <span class="label">${this._highlight(entry.label)}</span>
-        ${entry.detail ? html`<span class="detail">${entry.detail}</span>` : ''}
-        ${entry.keybind ? html`<span class="keybind">${entry.keybind}</span>` : ''}
+        ${this._renderEntryContent(entry)}
       </div>
+    `
+  }
+
+  private _renderEntryContent(entry: PaletteEntry) {
+    return html`
+      ${entry.connection
+        ? html`<span class="label-bar" style=${entry.accentColor ? `--label-color: ${entry.accentColor}` : ''} aria-hidden="true"></span>`
+        : nothing}
+      ${entry.engine
+        ? html`<engine-badge .engine=${entry.engine} .flavor=${entry.flavor ?? ''}></engine-badge>`
+        : nothing}
+      ${entry.icon ? html`<i class="icon ${entry.icon}" aria-hidden="true"></i>` : nothing}
+      ${entry.connection
+        ? html`
+            <span
+              class="label-wrap"
+              @mouseenter=${(event: MouseEvent) => this._showNameTooltip(event, entry.label)}
+              @mouseleave=${this._hideNameTooltip}
+            >
+              <span class="label">${this._highlight(entry.label)}</span>
+            </span>
+          `
+        : html`<span class="label">${this._highlight(entry.label)}</span>`}
+      ${entry.detail ? html`<span class="detail">${entry.detail}</span>` : ''}
+      ${entry.status
+        ? html`
+            <span class="connection-status ${entry.status}" title=${entry.statusError ?? ''}>
+              ${entry.status === 'connecting' ? html`<span class="status-spinner"></span>` : html`<span class="status-dot"></span>`}
+              ${entry.statusLabel}
+            </span>
+          `
+        : ''}
+      ${entry.inUse
+        ? html`<span class="in-use"><i class="icon icon-check" aria-hidden="true"></i>${t('palette.inUse')}</span>`
+        : ''}
+      ${entry.keybind ? html`<span class="keybind">${entry.keybind}</span>` : ''}
+      ${entry.statusError ? html`<span class="status-error">${entry.statusError}</span>` : ''}
     `
   }
 
@@ -182,6 +273,25 @@ export class CommandPalette extends LitElement {
 
   private _setActive(index: number) {
     if (this._active !== index) this._active = index
+  }
+
+  private _showNameTooltip(event: MouseEvent, label: string) {
+    this._hideNameTooltip()
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    const maxWidth = Math.min(420, window.innerWidth - 80)
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - maxWidth - 8))
+    this._tooltipTimer = window.setTimeout(() => {
+      this._tooltipTimer = null
+      this._nameTooltip = { label, left, top: rect.top - 7 }
+    }, 400)
+  }
+
+  private _hideNameTooltip() {
+    if (this._tooltipTimer !== null) {
+      window.clearTimeout(this._tooltipTimer)
+      this._tooltipTimer = null
+    }
+    this._nameTooltip = null
   }
 
   private _onInput(event: Event) {
@@ -236,6 +346,7 @@ export class CommandPalette extends LitElement {
     icons,
     scrollbars,
     overlay,
+    tooltip,
     css`
       :host {
         display: contents;
@@ -247,15 +358,24 @@ export class CommandPalette extends LitElement {
       }
 
       .panel {
-        width: min(560px, calc(100vw - 80px));
+        width: min(600px, calc(100vw - 40px));
         margin-top: 64px;
         overflow: hidden;
+      }
+
+      .search {
+        position: relative;
+        height: 36px;
+        display: flex;
+        align-items: center;
       }
 
       /* Flush divider under the input; no focus ring — the input owns focus
          the whole time the palette is open, so a ring is pure noise. */
       input {
-        height: 34px;
+        height: 100%;
+        padding-left: 32px;
+        padding-right: 70px;
         border-radius: 0;
         border-left: none;
         border-right: none;
@@ -263,15 +383,35 @@ export class CommandPalette extends LitElement {
         border-bottom-color: var(--border);
       }
 
+      .search-icon {
+        position: absolute;
+        left: 10px;
+        z-index: 1;
+        color: var(--text-3);
+        font-size: 15px;
+        pointer-events: none;
+      }
+
       input:focus {
         border-color: var(--border);
         box-shadow: none;
       }
 
+      .palette-shortcut {
+        position: absolute;
+        right: 10px;
+        color: var(--text-3);
+        font-family: var(--ui-font);
+        font-size: var(--font-size-sm);
+      }
+
       .list {
-        max-height: 320px;
+        max-height: 405px;
+        /* The list only scrolls vertically; name tooltips render on the
+           fixed overlay layer below instead of inside this container. */
+        overflow-x: hidden;
         overflow-y: auto;
-        padding: 4px;
+        padding: 3px;
         overscroll-behavior: none;
         overflow-anchor: none;
       }
@@ -281,11 +421,21 @@ export class CommandPalette extends LitElement {
         align-items: center;
         gap: 8px;
         min-height: 26px;
-        padding: 3px 8px;
+        padding: 2px 6px;
         border-radius: 6px;
         cursor: pointer;
         color: var(--text);
         white-space: nowrap;
+      }
+
+      /* Identity left, status right: the name track takes the free width so
+         "Connected" and "In use" line up down the right edge of every row. */
+      .row.connection,
+      .row.group {
+        display: grid;
+        min-height: 30px;
+        grid-template-columns: 3px 19px minmax(0, 1fr) minmax(12px, 32px) 104px 72px;
+        column-gap: 7px;
       }
 
       /* Tracked row: a notch above the menus' 9% hover so Enter's target reads. */
@@ -294,7 +444,7 @@ export class CommandPalette extends LitElement {
       }
 
       .row.indent {
-        padding-left: 26px;
+        padding-left: 18px;
       }
 
       .row.group {
@@ -312,9 +462,63 @@ export class CommandPalette extends LitElement {
         color: var(--text-2);
       }
 
+      .row.connection > .icon,
+      .row.group > .icon,
+      .row.connection > engine-badge,
+      .row.group > engine-badge {
+        grid-column: 2;
+      }
+
+      .row.connection > engine-badge,
+      .row.group > engine-badge {
+        --engine-badge-size: 19px;
+      }
+
+      .label-bar {
+        grid-column: 1;
+        width: 3px;
+        height: 17px;
+        background: var(--label-color, transparent);
+        border-radius: 2px;
+      }
+
+      .row.indent .label-bar {
+        height: 11px;
+        opacity: 0.55;
+      }
+
       .label {
+        min-width: 0;
+        display: block;
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+
+      .label-wrap {
+        grid-column: 3;
+        min-width: 0;
+      }
+
+      /* A detached anchor lets the shared tooltip surface escape the scrolling
+         list while retaining the same appearance used throughout the app. */
+      .name-tooltip-anchor {
+        position: fixed;
+        z-index: 101;
+        width: 0;
+        height: 0;
+        pointer-events: none;
+      }
+
+      .name-tooltip-anchor[data-tooltip]::after {
+        width: max-content;
+        max-width: min(420px, calc(100vw - 80px));
+        box-sizing: border-box;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        opacity: 1;
+        visibility: visible;
+        translate: 0 0;
+        transition: none;
       }
 
       .label mark {
@@ -331,6 +535,75 @@ export class CommandPalette extends LitElement {
         font-size: var(--font-size-sm);
       }
 
+      .row.connection .detail,
+      .row.group .detail {
+        flex: none;
+        text-transform: capitalize;
+      }
+
+      .connection-status {
+        grid-column: 5;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--text-2);
+        font-size: var(--font-size-sm);
+        white-space: nowrap;
+      }
+
+      .status-dot {
+        width: 7px;
+        height: 7px;
+        flex-shrink: 0;
+        background: var(--status-color);
+        border-radius: 50%;
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-color) 12%, transparent);
+      }
+
+      .connection-status.connected {
+        --status-color: var(--status-dot-connected);
+      }
+
+      .connection-status.disconnected {
+        --status-color: var(--text-3);
+      }
+
+      .connection-status.error {
+        --status-color: var(--status-dot-error);
+        color: color-mix(in srgb, var(--status-dot-error) 78%, var(--text));
+      }
+
+      .status-spinner {
+        width: 9px;
+        height: 9px;
+        flex-shrink: 0;
+        border: 1.5px solid color-mix(in srgb, var(--status-dot-warning) 30%, transparent);
+        border-top-color: var(--status-dot-warning);
+        border-radius: 50%;
+        animation: palette-spin 1s linear infinite;
+      }
+
+      @keyframes palette-spin {
+        to { transform: rotate(360deg); }
+      }
+
+      .in-use {
+        grid-column: 6;
+        justify-self: end;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: color-mix(in srgb, var(--accent) 62%, var(--text));
+        font-size: var(--font-size-sm);
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .in-use .icon {
+        color: currentColor;
+        font-size: 11px;
+      }
+
       .keybind {
         margin-left: auto;
         flex-shrink: 0;
@@ -338,8 +611,47 @@ export class CommandPalette extends LitElement {
         font-size: var(--font-size-sm);
       }
 
+      .status-error {
+        grid-column: 3 / -1;
+        margin-top: -4px;
+        overflow: hidden;
+        color: color-mix(in srgb, var(--status-dot-error) 72%, var(--text-3));
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .row.error-row {
+        min-height: 42px;
+        grid-template-rows: 24px 14px;
+      }
+
       .empty {
         padding: 10px 12px;
+      }
+
+      .palette-footer {
+        height: 30px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 0 8px;
+        color: var(--text-3);
+        background: color-mix(in srgb, var(--overlay-bg) 84%, var(--bg));
+        border-top: 1px solid var(--border-subtle);
+        font-size: 14px;
+      }
+
+      .palette-footer span {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .palette-footer kbd {
+        color: var(--text-2);
+        font-family: var(--mono-font);
+        font-size: 14px;
       }
     `,
   ]

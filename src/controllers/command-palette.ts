@@ -4,6 +4,7 @@ import type { ConnectionsController } from './connections'
 import type { PaletteEntry, PaletteMode } from '../components/command-palette'
 import { tableKey } from '../components/explorer-view'
 import { t } from '../i18n'
+import { connectionLabelColorValue } from '../connection-label-colors'
 
 type Deps = {
   live: ConnectionsController
@@ -99,7 +100,7 @@ export class CommandPaletteController implements ReactiveController {
     }
 
     if (this.mode === 'databases') {
-      return this.deps.connections().flatMap((connection) => {
+      return this.deps.connections().flatMap((connection): PaletteEntry[] => {
         const phase = this.deps.live.phase(connection.id)
         const children = this.deps.live.statuses[connection.id]?.children ?? []
 
@@ -112,15 +113,21 @@ export class CommandPaletteController implements ReactiveController {
             {
               id: `hdr:${connection.id}`,
               label: connection.name,
-              detail: `${connection.engine} · ${t('palette.connected')}`,
-              icon: 'icon-database',
+              engine: connection.engine,
+              flavor: connection.flavor,
+              connection: true,
+              accentColor: connectionLabelColorValue(connection.labelColor) ?? undefined,
+              status: 'connected',
+              statusLabel: t('palette.connected'),
               header: true,
             },
             ...children.map((child) => ({
               id: `child:${connection.id}:${child.name}`,
               label: child.name,
-              detail: this.deps.activeDbId() === connection.id && this.deps.activeChildDb() === child.name ? t('palette.inUse') : '',
               icon: 'icon-package',
+              connection: true,
+              accentColor: connectionLabelColorValue(connection.labelColor) ?? undefined,
+              inUse: this.deps.activeDbId() === connection.id && this.deps.activeChildDb() === child.name,
               indent: true,
             })),
           ]
@@ -132,21 +139,20 @@ export class CommandPaletteController implements ReactiveController {
             : phase === 'connecting'
               ? t('palette.connecting')
               : phase === 'error'
-                ? t('palette.error', { error: this.deps.live.statuses[connection.id]?.error ?? '' })
+                ? t('common.error')
                 : t('palette.disconnected')
-        const parts = [connection.engine, label]
-        if (this.deps.activeDbId() === connection.id) parts.push(t('palette.inUse'))
-        // The children of a disconnected all-databases connection aren't
-        // known yet; picking it connects and discovers them.
-        if (connection.databaseMode === 'all' && phase !== 'connected' && phase !== 'connecting') {
-          parts.push(t('palette.connectToList'))
-        }
         return [
           {
             id: `db:${connection.id}`,
             label: connection.name,
-            detail: parts.join(' · '),
-            icon: phase === 'connecting' ? 'icon-loader-circle icon-modifier-spin' : 'icon-database',
+            engine: connection.engine,
+            flavor: connection.flavor,
+            connection: true,
+            accentColor: connectionLabelColorValue(connection.labelColor) ?? undefined,
+            status: phase ?? 'disconnected',
+            statusLabel: label,
+            statusError: phase === 'error' ? this.deps.live.statuses[connection.id]?.error : undefined,
+            inUse: this.deps.activeDbId() === connection.id,
           },
         ]
       })
