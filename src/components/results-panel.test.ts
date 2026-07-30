@@ -470,6 +470,69 @@ describe('results-panel draft rows', () => {
     el.remove()
   })
 
+  it('offers a singular discard action for one staged cell edit', async () => {
+    const el = await mount()
+    el.edits = new Map([['0:0', 'changed']])
+    await el.updateComplete
+    const fill = vi.fn()
+    el.addEventListener('cells-fill', fill)
+
+    const cell = el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="0"] td:nth-child(2)')!
+    cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+    const menu = el.shadowRoot!.querySelector('context-menu')!
+    expect(menu.items).toContainEqual(
+      expect.objectContaining({ id: 'discard-cell-edits', label: 'Discard Cell Edit' }),
+    )
+
+    menu.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'discard-cell-edits' } }))
+
+    expect(fill).toHaveBeenCalledOnce()
+    expect((fill.mock.calls[0]![0] as CustomEvent).detail).toEqual({
+      edits: [],
+      clears: [{ row: 0, col: 0 }],
+      draftCells: [],
+    })
+    el.remove()
+  })
+
+  it('discards every staged edit in a multi-cell selection as one fill', async () => {
+    const el = await mountGrid(2)
+    el.edits = new Map([
+      ['0:0', 'changed a0'],
+      ['0:1', 'changed b0'],
+      ['1:0', 'changed a1'],
+    ])
+    await el.updateComplete
+    const fill = vi.fn()
+    el.addEventListener('cells-fill', fill)
+
+    key(el, { key: 'ArrowRight', shiftKey: true })
+    key(el, { key: 'ArrowDown', shiftKey: true })
+    await el.updateComplete
+    const untouchedCell = el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="1"] td:nth-child(3)')!
+    untouchedCell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+    await el.updateComplete
+    const menu = el.shadowRoot!.querySelector('context-menu')!
+    expect(menu.items).toContainEqual(
+      expect.objectContaining({ id: 'discard-cell-edits', label: 'Discard Selected Edits' }),
+    )
+
+    menu.dispatchEvent(new CustomEvent('menu-pick', { detail: { id: 'discard-cell-edits' } }))
+
+    expect(fill).toHaveBeenCalledOnce()
+    expect((fill.mock.calls[0]![0] as CustomEvent).detail).toEqual({
+      edits: [],
+      clears: [
+        { row: 0, col: 0 },
+        { row: 0, col: 1 },
+        { row: 1, col: 0 },
+      ],
+      draftCells: [],
+    })
+    el.remove()
+  })
+
   it('copies a whole row on Copy Row without moving the selection', async () => {
     const writeClipboardText = vi.fn(() => Promise.resolve())
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }

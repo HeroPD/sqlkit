@@ -116,6 +116,8 @@ const enUS = {
   'results.paste': 'Paste',
   'results.setNull': 'Set NULL',
   'results.setEmptyString': 'Set Empty String',
+  'results.discardCellEdit': 'Discard Cell Edit',
+  'results.discardSelectedEdits': 'Discard Selected Edits',
   'results.useDefault': 'Use Default',
   'results.generateUuidV4': 'Generate UUID (v4)',
   'results.generateUuidV7': 'Generate UUID (v7)',

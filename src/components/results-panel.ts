@@ -1774,6 +1774,7 @@ export class ResultsPanel extends LitElement {
     if (!result) return ''
     if (menu.draftIndex !== undefined) return this._renderDraftMenu(menu)
     const canEdit = this.editable && this._canEditShownResult() && menu.row >= 0 && menu.col >= 0
+    const stagedEdits = canEdit ? this._selectedStagedEdits(menu.row, menu.col) : []
     const canDeleteRows = this.rowEditable && this._canEditShownResult() && menu.row >= 0
     const deletingRows = canDeleteRows ? this._selectedRefs().results : []
     const allDeleting = deletingRows.length > 0 && deletingRows.every((row) => this.pendingDeletes.has(row))
@@ -1815,6 +1816,12 @@ export class ResultsPanel extends LitElement {
             { id: 'paste-cell', label: t('results.paste'), shortcut: isMac ? '⌘V' : 'Ctrl+V' },
             { id: 'set-null', label: t('results.setNull') },
             { id: 'set-empty', label: t('results.setEmptyString') },
+            ...(stagedEdits.length
+              ? [{
+                  id: 'discard-cell-edits',
+                  label: t(stagedEdits.length > 1 ? 'results.discardSelectedEdits' : 'results.discardCellEdit'),
+                }]
+              : []),
           ]
         : []),
       ...(menu.row >= 0 && menu.col >= 0
@@ -1890,6 +1897,7 @@ export class ResultsPanel extends LitElement {
     // cell when it was outside), same as a committed edit would.
     if (action === 'set-null') this._setSelectionNull()
     if (action === 'set-empty') this._setSelectionEmpty()
+    if (action === 'discard-cell-edits') this._discardSelectedCellEdits(at.row, at.col)
     // Deletes the selected result rows through the owner's DELETE review.
     if (action === 'delete-row') this._deleteSelection()
   }
@@ -2706,6 +2714,27 @@ export class ResultsPanel extends LitElement {
   // in a single undoable step.
   private _commitFill(targets: Array<{ ref: RowRef; col: number }>, value: CellInput) {
     this._commitValues(targets.map((target) => ({ ...target, value })))
+  }
+
+  // Returns only staged result edits inside the current selection. Draft cells
+  // and untouched result cells are intentionally excluded from a discard.
+  private _selectedStagedEdits(row: number, col: number): Array<{ row: number; col: number }> {
+    const ref: RowRef = { kind: 'result', row }
+    return this._editTargets({ ref, col, sel: this._sel }).flatMap((target) =>
+      target.ref.kind === 'result' && this.edits.has(`${target.ref.row}:${target.col}`)
+        ? [{ row: target.ref.row, col: target.col }]
+        : [],
+    )
+  }
+
+  private _discardSelectedCellEdits(row: number, col: number) {
+    const clears = this._selectedStagedEdits(row, col)
+    if (!clears.length) return
+    this.dispatchEvent(new CustomEvent('cells-fill', {
+      detail: { edits: [], clears, draftCells: [] },
+      bubbles: true,
+      composed: true,
+    }))
   }
 
   private _commitValues(targets: Array<{ ref: RowRef; col: number; value: CellInput | null }>) {
