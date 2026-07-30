@@ -3,60 +3,15 @@ import type { Engine, QuerySort } from '../../src/electron'
 import { applyFilterCondition, isFilterableQuery } from '../../src/sql-filter'
 import { maskSql, type SqlModeFlags } from '../../src/sql-mask'
 import { isReorderableQuery } from '../../src/sql-order'
+import { scanGoBatches, splitScript } from '../../src/sql-statements'
 import { t } from '../../src/i18n'
 
 export { maskSql }
+export { splitTopLevelStatements } from '../../src/sql-statements'
 
 // SQLite trigger DDL, tested on masked SQL. Shared with sqlite-engine.ts: both
 // sides must classify a script identically or END counts wrong (see below).
 export const containsSqliteTrigger = (masked: string) => /\bcreate\s+(?:temp(?:orary)?\s+)?trigger\b/i.test(masked)
-
-type SplitScript = { statements: { raw: string; masked: string }[]; masked: string }
-
-// One mask pass shared by the splitter and every per-statement consumer.
-function splitScript(sql: string, engine?: Engine, mode?: SqlModeFlags): SplitScript {
-  const masked = maskSql(sql, engine, mode)
-  const statements: SplitScript['statements'] = []
-  let depth = 0
-  // PostgreSQL's SQL-standard routine body is part of one CREATE statement
-  // even though it contains semicolon-terminated statements. CASE has its own
-  // END inside that body, so retain a tiny construct stack rather than treating
-  // the first END as the end of BEGIN ATOMIC.
-  const postgresBlocks: Array<'atomic' | 'case'> = []
-  let previousWord = ''
-  let start = 0
-  const push = (from: number, to: number) => {
-    if (masked.slice(from, to).trim()) statements.push({ raw: sql.slice(from, to).trim(), masked: masked.slice(from, to).trim() })
-  }
-  for (let i = 0; i < masked.length; i += 1) {
-    const char = masked[i]!
-    if (engine === 'postgresql' && /[A-Za-z_]/.test(char) && !/[A-Za-z0-9_$]/.test(masked[i - 1] ?? '')) {
-      let end = i + 1
-      while (/[A-Za-z0-9_$]/.test(masked[end] ?? '')) end += 1
-      const word = masked.slice(i, end).toLowerCase()
-      if (word === 'begin' && /^\s+atomic\b/i.test(masked.slice(end))) {
-        postgresBlocks.push('atomic')
-      } else if (postgresBlocks.length && word === 'case' && previousWord !== 'end') {
-        postgresBlocks.push('case')
-      } else if (postgresBlocks.length && word === 'end') {
-        postgresBlocks.pop()
-      }
-      previousWord = word
-      i = end - 1
-    } else if (char === '(') depth += 1
-    else if (char === ')') depth = Math.max(0, depth - 1)
-    else if (char === ';' && depth === 0 && postgresBlocks.length === 0) {
-      push(start, i)
-      start = i + 1
-    }
-  }
-  push(start, sql.length)
-  return { statements, masked }
-}
-
-export function splitTopLevelStatements(sql: string, engine?: Engine, mode?: SqlModeFlags): string[] {
-  return splitScript(sql, engine, mode).statements.map((statement) => statement.raw)
-}
 
 // Pooled server queries cannot safely leave a transaction open for a later run:
 // that later run may get another connection. Self-contained transaction scripts
@@ -136,23 +91,16 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
   return sawControl
 }
 
-/** SQL Server's GO is a client batch separator, not T-SQL. */
+/** SQL Server's GO is a client batch separator, not T-SQL. Expands each batch by its repeat count. */
 export function splitSqlServerBatches(sql: string): string[] {
-  const masked = maskSql(sql, 'sqlserver')
   const batches: string[] = []
-  let start = 0
-  const line = /^\s*go(?:\s+(\d+))?\s*$/gim
-  for (const match of masked.matchAll(line)) {
-    const batch = sql.slice(start, match.index).trim()
-    const repeat = match[1] === undefined ? 1 : Number(match[1])
+  for (const batch of scanGoBatches(sql)) {
+    const repeat = batch.repeat ?? 1
     if (!Number.isSafeInteger(repeat) || repeat < 1 || repeat > 1_000) {
       throw new Error(t('query.goRepeatRange'))
     }
-    if (batch) for (let index = 0; index < repeat; index += 1) batches.push(batch)
-    start = match.index + match[0].length
+    if (batch.sql) for (let index = 0; index < repeat; index += 1) batches.push(batch.sql)
   }
-  const tail = sql.slice(start).trim()
-  if (tail) batches.push(tail)
   return batches
 }
 

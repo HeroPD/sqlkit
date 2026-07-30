@@ -10,7 +10,7 @@ SqlKit Studio: Electron main + Lit renderer, Vite-bundled; engines Postgres, MyS
 - `src/components/workbench-screen.ts` — orchestrator; per-(profile + child DB) buckets of tabs/selection/results.
 - `src/controllers/` — Lit reactive controllers. Key: `queries.ts` (result trails, staged edits/drafts/deletes, history, tasks), `connections.ts` (statuses + table/column metadata), `result-editing.ts` (write targeting).
 - `src/components/sql-editor.ts` — CodeMirror 6; completion merges dialect keywords, tables, alias-resolved columns; EditorStates cached per tab (LRU 20).
-- Query flow: `run-query` event → `window.sqlkit.runQuery()` → manager → driver → `results-panel.ts`.
+- Query flow: `run-query` event → `_runSql` (parameter prompt, then the destructive preflight of `src/sql-destructive.ts`) → `window.sqlkit.runQuery()` → manager → driver → `results-panel.ts`. Statement splitting is shared with the main process via `src/sql-statements.ts`.
 - UI strings: `src/i18n.ts`; theme CSS vars: `src/index.css`; engine quirks: `src/dialect.ts`, `src/engine-capabilities.ts`.
 
 ## Conventions

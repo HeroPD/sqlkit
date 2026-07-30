@@ -55,6 +55,8 @@ import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
 import { isFilterableQuery } from '../sql-filter'
 import { isReadOnlyQuery, isReorderableQuery } from '../sql-order'
+import { analyzeDestructive, type DestructiveKind } from '../sql-destructive'
+import { splitTopLevelStatements } from '../sql-statements'
 import { foreignKeyTargets } from '../foreign-keys'
 import { jsonColumns } from '../json-columns'
 import type { ExportFormat } from '../result-export'
@@ -176,6 +178,13 @@ export class WorkbenchScreen extends LitElement {
 
   @state()
   private _parameterPrompt: { parameters: QueryParameter[]; resolve: (values: string[] | null) => void } | null = null
+
+  // A run stopped for review because it cannot be undone; resolves with the
+  // user's decision back into the _runSql that is waiting on it.
+  @state()
+  private _destructivePrompt:
+    | { sql: string; params: unknown[]; risks: DestructiveKind[]; script: boolean; resolve: (run: boolean) => void }
+    | null = null
 
   @state()
   private _csvImport: CsvImportState | null = null
@@ -324,7 +333,7 @@ export class WorkbenchScreen extends LitElement {
     activeProfile: () => this._config.activeProfile(),
     dialogs: this._dialogs,
     openPreview: (sql) => this._ctx.openPreview(sql),
-    runSql: (sql) => this._runSql(sql),
+    runSql: (sql, options) => this._runSql(sql, undefined, undefined, undefined, undefined, undefined, options?.preconfirmed),
     refresh: (profileId) => this._live.refresh(profileId),
     onDatabaseDropped: (profileId, database) => this._onDatabaseDropped(profileId, database),
   })
@@ -666,6 +675,8 @@ export class WorkbenchScreen extends LitElement {
   // Runs against the in-use context (⌘K), connecting it first if needed.
   // `filter`/`sort` re-run with grid-injected clauses; omitting them clears both.
   // `baseLine` is the editor line the SQL starts on, for error-line mapping.
+  // `preconfirmed` skips the destructive preflight, for statements this app
+  // generated and already had the user confirm (Explorer drop/truncate).
   private async _runSql(
     sqlText: string,
     sort?: QuerySort | null,
@@ -673,6 +684,7 @@ export class WorkbenchScreen extends LitElement {
     filter?: string | null,
     baseLine?: number,
     trail?: { push?: boolean; table?: TableRef },
+    preconfirmed?: boolean,
   ) {
     // The run belongs to the tab it started from, even if the user switches
     // tabs or contexts before it finishes.
@@ -708,6 +720,26 @@ export class WorkbenchScreen extends LitElement {
         if (this._queries.runFor(tabId).phase === 'running') return
         params = bindParameterValues(parameters, values)
       }
+    }
+
+    // No engine gives us an undo, so an irreversible statement gets one look
+    // first. After parameter binding, so the preview shows the values that will
+    // really be sent.
+    const risks = preconfirmed ? [] : analyzeDestructive(sqlText, profile.engine)
+    if (risks.length) {
+      if (this._destructivePrompt) return
+      const confirmed = await new Promise<boolean>((resolve) => {
+        this._destructivePrompt = {
+          sql: sqlText,
+          params: params ?? [],
+          risks,
+          script: splitTopLevelStatements(sqlText, profile.engine).length > 1,
+          resolve,
+        }
+      })
+      if (!confirmed) return
+      // Another run may have started on this tab while the dialog was open.
+      if (this._queries.runFor(tabId).phase === 'running') return
     }
 
     // Capture the context the run started in. The connect/align below await,
@@ -774,6 +806,22 @@ export class WorkbenchScreen extends LitElement {
     const { values } = (event as CustomEvent<ParametersConfirmDetail>).detail
     this._parameterPrompt = null
     prompt?.resolve(values)
+  }
+
+  private _cancelDestructivePrompt = () => {
+    const prompt = this._destructivePrompt
+    this._destructivePrompt = null
+    prompt?.resolve(false)
+  }
+
+  // The review dialog's confirm hook. Releasing the waiting _runSql is all there
+  // is to do: it reports failures in the results panel like any other run, so
+  // nothing ever comes back to show inline here.
+  private _runDestructive = (): Promise<string | null> => {
+    const prompt = this._destructivePrompt
+    this._destructivePrompt = null
+    prompt?.resolve(true)
+    return Promise.resolve(null)
   }
 
   // Double-click browse: a tab named after the table, pre-filled with a capped SELECT and run.
@@ -1113,6 +1161,21 @@ export class WorkbenchScreen extends LitElement {
               @dialog-cancel=${this._cancelParameterPrompt}
               @parameters-confirm=${this._confirmParameterPrompt}
             ></parameter-dialog>
+          `
+        : ''}
+      ${this._destructivePrompt
+        ? html`
+            <review-query-dialog
+              .heading=${this._destructivePrompt.script ? t('destructive.scriptTitle') : t('destructive.title')}
+              .warning=${t('destructive.lead')}
+              .risks=${this._destructivePrompt.risks.map((risk) => t(`destructive.${risk}`))}
+              .danger=${true}
+              .confirmLabel=${t('destructive.run')}
+              .sql=${this._destructivePrompt.sql}
+              .params=${this._destructivePrompt.params}
+              .run=${this._runDestructive}
+              @dialog-cancel=${this._cancelDestructivePrompt}
+            ></review-query-dialog>
           `
         : ''}
 

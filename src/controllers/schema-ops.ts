@@ -34,7 +34,9 @@ type Deps = {
   activeProfile: () => ConnectionProfile | null
   dialogs: DialogsController
   openPreview: (sql: string) => void
-  runSql: (sql: string) => Promise<void>
+  // `preconfirmed` marks a statement the user has already confirmed here, so the
+  // workbench's destructive preflight does not ask a second time.
+  runSql: (sql: string, options?: { preconfirmed?: boolean }) => Promise<void>
   refresh: (profileId: string) => void
   // Workbench cleanup after a child database is dropped on the server.
   onDatabaseDropped: (profileId: string, database: string) => void
@@ -79,7 +81,7 @@ export class SchemaOpsController {
       action: () => {
         this.deps.openPreview(statement)
         // The schema changed: re-fetch tables/columns once the drop lands.
-        void this.deps.runSql(statement).then(() => this.deps.refresh(profile.id))
+        void this.deps.runSql(statement, { preconfirmed: true }).then(() => this.deps.refresh(profile.id))
       },
     }
   }
@@ -96,7 +98,7 @@ export class SchemaOpsController {
       confirmLabel: t('schema.truncate'),
       action: () => {
         this.deps.openPreview(statement)
-        void this.deps.runSql(statement)
+        void this.deps.runSql(statement, { preconfirmed: true })
       },
     }
   }

@@ -51,6 +51,87 @@ describe('sqlPreviewParts', () => {
   })
 })
 
+describe('review-query-dialog risk callout', () => {
+  it('lists each risk under its own heading, with a destructive confirm button', async () => {
+    const dialog = document.createElement('review-query-dialog')
+    dialog.sql = 'delete from users'
+    dialog.heading = 'This statement destroys data'
+    dialog.warning = 'Nothing here can be rolled back afterwards:'
+    dialog.risks = ['DROP — gone', 'DELETE with no WHERE clause — every row matches.']
+    dialog.danger = true
+    dialog.confirmLabel = 'Run Anyway'
+    document.body.append(dialog)
+    await dialog.updateComplete
+
+    const root = dialog.shadowRoot!
+    expect(root.querySelector('h4')?.textContent).toBe('This statement destroys data')
+    expect([...root.querySelectorAll('.warning li')].map((item) => item.textContent)).toEqual(dialog.risks)
+    expect(root.querySelector('button.primary')?.classList.contains('danger')).toBe(true)
+
+    dialog.remove()
+  })
+
+  it('keeps the review title and a plain confirm button when nothing is at risk', async () => {
+    const dialog = document.createElement('review-query-dialog')
+    dialog.sql = 'update t set a = 1 where id = 2'
+    document.body.append(dialog)
+    await dialog.updateComplete
+
+    const root = dialog.shadowRoot!
+    expect(root.querySelector('h4')?.textContent).toBe('Review query')
+    expect(root.querySelector('.warning')).toBeNull()
+    expect(root.querySelector('button.primary')?.classList.contains('danger')).toBe(false)
+
+    dialog.remove()
+  })
+})
+
+describe('review-query-dialog confirm keys', () => {
+  // Regression: ⌘↵ in the editor opens this dialog while its own keydown is
+  // still travelling to window, where the dialog — mounted in the microtask
+  // between — read it as Enter and ran the statement before it was ever seen.
+  it('ignores the keystroke that opened it', async () => {
+    const dialog = document.createElement('review-query-dialog')
+    let ran = 0
+    dialog.run = () => {
+      ran += 1
+      return Promise.resolve(null)
+    }
+    document.body.append(dialog)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true }))
+    expect(ran).toBe(0)
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(ran).toBe(1)
+
+    dialog.remove()
+  })
+
+  // A second ⌘↵ out of habit must not stand in for reading the dialog.
+  it('confirms on a bare Enter only', async () => {
+    const dialog = document.createElement('review-query-dialog')
+    let ran = 0
+    dialog.run = () => {
+      ran += 1
+      return Promise.resolve(null)
+    }
+    document.body.append(dialog)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    for (const modifier of ['metaKey', 'ctrlKey', 'altKey', 'shiftKey']) {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', [modifier]: true }))
+    }
+    expect(ran).toBe(0)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(ran).toBe(1)
+
+    dialog.remove()
+  })
+})
+
 describe('review-query-dialog focus', () => {
   // Regression: the dialog listens for Escape on window without taking focus,
   // so one press landed twice — the JSON editor behind it closed itself and

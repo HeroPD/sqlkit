@@ -67,7 +67,8 @@ describe('dropTable', () => {
     h.dialogs.acceptConfirm()
     await flush()
     expect(h.openPreview).toHaveBeenCalledWith('DROP TABLE "public"."users";')
-    expect(h.runSql).toHaveBeenCalledWith('DROP TABLE "public"."users";')
+    // Confirmed here, so the run skips the destructive preflight's second ask.
+    expect(h.runSql).toHaveBeenCalledWith('DROP TABLE "public"."users";', { preconfirmed: true })
     expect(h.refresh).toHaveBeenCalledWith('p1')
   })
 
@@ -75,11 +76,11 @@ describe('dropTable', () => {
     const h = harness(profile('sqlserver'))
     h.ops.dropTable({ ...users, kind: 'view' })
     h.dialogs.acceptConfirm()
-    expect(h.runSql).toHaveBeenCalledWith('DROP VIEW [public].[users];')
+    expect(h.runSql).toHaveBeenCalledWith('DROP VIEW [public].[users];', { preconfirmed: true })
 
     h.ops.dropTable({ ...users, kind: 'matview' })
     h.dialogs.acceptConfirm()
-    expect(h.runSql).toHaveBeenCalledWith('DROP MATERIALIZED VIEW [public].[users];')
+    expect(h.runSql).toHaveBeenCalledWith('DROP MATERIALIZED VIEW [public].[users];', { preconfirmed: true })
   })
 
   it('does nothing without an active profile', () => {
@@ -96,14 +97,14 @@ describe('truncateTable', () => {
     h.ops.truncateTable(users)
     expect(h.runSql).not.toHaveBeenCalled()
     h.dialogs.acceptConfirm()
-    expect(h.runSql).toHaveBeenCalledWith('TRUNCATE TABLE "public"."users";')
+    expect(h.runSql).toHaveBeenCalledWith('TRUNCATE TABLE "public"."users";', { preconfirmed: true })
   })
 
   it('uses DELETE FROM on SQLite, which has no TRUNCATE', () => {
     const h = harness(profile('sqlite'))
     h.ops.truncateTable({ schema: null, name: 'users', kind: 'table' })
     h.dialogs.acceptConfirm()
-    expect(h.runSql).toHaveBeenCalledWith('DELETE FROM "users";')
+    expect(h.runSql).toHaveBeenCalledWith('DELETE FROM "users";', { preconfirmed: true })
   })
 })
 

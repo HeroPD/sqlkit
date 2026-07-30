@@ -123,6 +123,113 @@ describe('WorkbenchScreen metadata refresh after writes', () => {
   })
 })
 
+describe('WorkbenchScreen destructive preflight', () => {
+  const runningScreen = () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void; newQuery(): void }
+      _live: { statuses: unknown; phase(profileId: string): string | null; refresh: ReturnType<typeof vi.fn> }
+      _queries: { execute: ReturnType<typeof vi.fn> }
+      _destructivePrompt: { sql: string; risks: string[]; script: boolean } | null
+      _cancelDestructivePrompt(): void
+      _runDestructive(): Promise<string | null>
+      _runSql(
+        sql: string,
+        sort?: unknown,
+        params?: unknown,
+        filter?: unknown,
+        baseLine?: unknown,
+        trail?: unknown,
+        preconfirmed?: boolean,
+      ): Promise<void>
+    }
+    workbench._config.connections = [profile]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._ctx.newQuery()
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', children: [{ name: 'db_a', inUse: true }] } }
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.refresh = vi.fn()
+    workbench._queries.execute = vi.fn(() => Promise.resolve())
+    return workbench
+  }
+
+  it('holds an unqualified DELETE until the user confirms it', async () => {
+    const workbench = runningScreen()
+
+    const running = workbench._runSql('delete from users')
+    expect(workbench._destructivePrompt?.risks).toEqual(['deleteAll'])
+    expect(workbench._destructivePrompt?.sql).toBe('delete from users')
+    expect(workbench._queries.execute).not.toHaveBeenCalled()
+
+    await workbench._runDestructive()
+    await running
+
+    expect(workbench._destructivePrompt).toBeNull()
+    expect(workbench._queries.execute).toHaveBeenCalledWith(expect.objectContaining({ sql: 'delete from users' }))
+  })
+
+  it('runs nothing when the preflight is cancelled', async () => {
+    const workbench = runningScreen()
+
+    const running = workbench._runSql('truncate table events')
+    expect(workbench._destructivePrompt?.risks).toEqual(['truncate'])
+
+    workbench._cancelDestructivePrompt()
+    await running
+
+    expect(workbench._destructivePrompt).toBeNull()
+    expect(workbench._queries.execute).not.toHaveBeenCalled()
+  })
+
+  it('names every risk in a script, worst first', async () => {
+    const workbench = runningScreen()
+
+    const running = workbench._runSql('update t set a = 1;\ndrop table b;')
+    expect(workbench._destructivePrompt?.risks).toEqual(['drop', 'updateAll'])
+    expect(workbench._destructivePrompt?.script).toBe(true)
+
+    workbench._cancelDestructivePrompt()
+    await running
+  })
+
+  // A screen per run: the mocked execute never settles, so the one-run-per-tab
+  // guard would swallow the second.
+  it('lets scoped writes and reads through untouched', async () => {
+    for (const sql of ['delete from users where id = 1', 'select * from users']) {
+      const workbench = runningScreen()
+      await workbench._runSql(sql)
+
+      expect(workbench._destructivePrompt).toBeNull()
+      expect(workbench._queries.execute).toHaveBeenCalledWith(expect.objectContaining({ sql }))
+    }
+  })
+
+  // The Explorer's drop/truncate confirm themselves before handing the statement
+  // over; a second dialog for the same click would train the user to click through.
+  it('does not ask again for a statement the user already confirmed', async () => {
+    const workbench = runningScreen()
+
+    await workbench._runSql('DROP TABLE "public"."users";', undefined, undefined, undefined, undefined, undefined, true)
+
+    expect(workbench._destructivePrompt).toBeNull()
+    expect(workbench._queries.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a stopped run when another run started while the dialog was open', async () => {
+    const workbench = runningScreen()
+
+    const stopped = workbench._runSql('delete from users')
+    await workbench._runSql('select 1')
+
+    await workbench._runDestructive()
+    await stopped
+
+    expect(workbench._queries.execute).toHaveBeenCalledTimes(1)
+    expect(workbench._queries.execute).toHaveBeenCalledWith(expect.objectContaining({ sql: 'select 1' }))
+  })
+})
+
 describe('WorkbenchScreen CSV import', () => {
   const table: TableRef = { schema: 'public', name: 'users', kind: 'table' }
   const columns: ColumnRef[] = [

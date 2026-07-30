@@ -15,9 +15,10 @@ function deepActiveElement(): HTMLElement | null {
 // Re-exported so existing importers keep their path.
 export { formatPreviewParam, previewSql, sqlPreviewParts }
 
-// Shows a generated write statement (UPDATE today; INSERT/DELETE later) and its
-// bound params for the user to read before it runs. Dispatches `dialog-confirm`
-// / `dialog-cancel`; closes itself on Escape or backdrop click. Enter runs the
+// Shows a statement and its bound params for the user to read before it runs:
+// a generated write (UPDATE today; INSERT/DELETE later), or one the user wrote
+// that the destructive preflight stopped. Dispatches `dialog-confirm` /
+// `dialog-cancel`; closes itself on Escape or backdrop click. Enter runs the
 // statement, unless the Cancel button holds focus (then Enter cancels).
 @customElement('review-query-dialog')
 export class ReviewQueryDialog extends LitElement {
@@ -30,8 +31,20 @@ export class ReviewQueryDialog extends LitElement {
   @property()
   confirmLabel = t('common.run')
 
+  /** Defaults to the review title; a preflight names what it stopped instead. */
+  @property()
+  heading = ''
+
   @property()
   warning = ''
+
+  /** One line per risk, listed under `warning` in the same callout. */
+  @property({ attribute: false })
+  risks: string[] = []
+
+  /** Styles the confirm button as destructive, for a run that cannot be undone. */
+  @property({ type: Boolean })
+  danger = false
 
   // Runs the reviewed statement, resolving to an error message (shown inline) or
   // null on success. The dialog owns the applying/error UI so failures stay in
@@ -42,15 +55,31 @@ export class ReviewQueryDialog extends LitElement {
   @state() private _applying = false
   @state() private _error = ''
   private _returnFocus: HTMLElement | null = null
+  /**
+   * Whether Enter may confirm yet. The keystroke that opens this dialog is still
+   * propagating when it mounts — ⌘↵ in the editor, or Enter on a command-palette
+   * entry, runs the query, Lit renders us in the microtask that follows, and the
+   * same keydown then reaches the window listener below. Confirming on it ran a
+   * destructive statement the user never got to see. Arming on the next task
+   * puts the opening keystroke out of reach; a click is unaffected.
+   */
+  private _armed = false
+  private _armTimer: ReturnType<typeof setTimeout> | null = null
 
   connectedCallback() {
     super.connectedCallback()
     window.addEventListener('keydown', this._onKeydown)
+    this._armTimer = setTimeout(() => {
+      this._armed = true
+    }, 0)
   }
 
   disconnectedCallback() {
     super.disconnectedCallback()
     window.removeEventListener('keydown', this._onKeydown)
+    if (this._armTimer !== null) clearTimeout(this._armTimer)
+    this._armTimer = null
+    this._armed = false
     // Hand focus back to whatever opened the dialog, so cancelling returns the
     // user to the editor they were in rather than to nothing.
     this._returnFocus?.focus()
@@ -76,18 +105,26 @@ export class ReviewQueryDialog extends LitElement {
 
   render() {
     const preview = previewSql(this.sql, this.params)
+    const title = this.heading || t('review.title')
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
-        <div class="panel" role="dialog" aria-modal="true" aria-label=${t('review.title')} tabindex="-1">
-          <h4>${t('review.title')}</h4>
-          ${this.warning ? html`<p class="warning" role="alert">${this.warning}</p>` : ''}
+        <div class="panel" role="dialog" aria-modal="true" aria-label=${title} tabindex="-1">
+          <h4>${title}</h4>
+          ${this.warning || this.risks.length
+            ? html`
+                <div class="warning" role="alert">
+                  ${this.warning ? html`<p>${this.warning}</p>` : ''}
+                  ${this.risks.length ? html`<ul>${this.risks.map((risk) => html`<li>${risk}</li>`)}</ul>` : ''}
+                </div>
+              `
+            : ''}
           <pre class="sql"><code>${sqlPreviewParts(preview).map((part) =>
             part.kind ? html`<span class=${part.kind}>${part.text}</span>` : part.text,
           )}</code></pre>
           ${this._error ? html`<p class="error" role="alert">${this._error}</p>` : ''}
           <div class="actions">
             <button class="secondary" ?disabled=${this._applying} @click=${this._cancel}>${t('common.cancel')}</button>
-            <button class="primary" ?disabled=${this._applying} @click=${this._confirm}>
+            <button class="primary ${this.danger ? 'danger' : ''}" ?disabled=${this._applying} @click=${this._confirm}>
               ${this._applying
                 ? html`<i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i> ${t('common.applying')}`
                 : this.confirmLabel}
@@ -105,9 +142,16 @@ export class ReviewQueryDialog extends LitElement {
       this._cancel()
       return
     }
-    // Enter runs the statement. A focused button handles its own Enter (so Enter
-    // on Cancel still cancels); otherwise we confirm.
-    if (event.key === 'Enter' && !(this.shadowRoot?.activeElement instanceof HTMLButtonElement)) {
+    // A bare Enter runs the statement. A focused button handles its own Enter (so
+    // Enter on Cancel still cancels); otherwise we confirm. Chords are not this
+    // dialog's: ⌘↵ is the editor's run shortcut, and taking it here would let a
+    // second reflexive press stand in for reading what is about to run.
+    if (
+      event.key === 'Enter' &&
+      this._armed &&
+      !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) &&
+      !(this.shadowRoot?.activeElement instanceof HTMLButtonElement)
+    ) {
       event.preventDefault()
       void this._confirm()
     }
@@ -195,6 +239,19 @@ export class ReviewQueryDialog extends LitElement {
         line-height: 1.4;
       }
 
+      .warning p {
+        margin: 0;
+      }
+
+      .warning ul {
+        margin: 0;
+        padding-left: 18px;
+      }
+
+      .warning p + ul {
+        margin-top: 6px;
+      }
+
       .error {
         margin: 0;
         padding: 8px 10px;
@@ -225,6 +282,15 @@ export class ReviewQueryDialog extends LitElement {
       button:disabled {
         opacity: 0.6;
         cursor: not-allowed;
+      }
+
+      /* Extra .primary keeps these above the shared primary:hover rule in specificity. */
+      button.primary.danger {
+        background: color-mix(in srgb, var(--status-dot-error) 78%, #000);
+      }
+
+      button.primary.danger:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--status-dot-error) 92%, #000);
       }
 
       .icon-modifier-spin {
