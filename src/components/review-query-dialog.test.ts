@@ -51,36 +51,61 @@ describe('sqlPreviewParts', () => {
   })
 })
 
-describe('review-query-dialog risk callout', () => {
-  it('lists each risk under its own heading, with a destructive confirm button', async () => {
+describe('review-query-dialog presentation', () => {
+  it('shows destructive copy and action without a separate risk callout', async () => {
     const dialog = document.createElement('review-query-dialog')
     dialog.sql = 'delete from users'
-    dialog.heading = 'This statement destroys data'
-    dialog.warning = 'Nothing here can be rolled back afterwards:'
-    dialog.risks = ['DROP — gone', 'DELETE with no WHERE clause — every row matches.']
+    dialog.heading = 'Run destructive query?'
+    dialog.description = 'This DELETE will remove every row and cannot be undone.'
     dialog.danger = true
-    dialog.confirmLabel = 'Run Anyway'
+    dialog.confirmLabel = 'Run anyway'
     document.body.append(dialog)
     await dialog.updateComplete
 
     const root = dialog.shadowRoot!
-    expect(root.querySelector('h4')?.textContent).toBe('This statement destroys data')
-    expect([...root.querySelectorAll('.warning li')].map((item) => item.textContent)).toEqual(dialog.risks)
+    expect(root.querySelector('h4')?.textContent).toBe('Run destructive query?')
+    expect(root.querySelector('.heading p')?.textContent).toBe(dialog.description)
+    expect(root.querySelector('.warning')).toBeNull()
+    expect(root.querySelector('.icon-list-x')).not.toBeNull()
     expect(root.querySelector('button.primary')?.classList.contains('danger')).toBe(true)
+    expect(root.querySelector('.shortcuts')).toBeNull()
+    expect(root.querySelector('button.secondary')?.textContent?.replace(/\s/g, '')).toBe('Cancelesc')
+    expect(root.querySelector('button.primary')?.textContent?.replace(/\s/g, '')).toBe('Runanyway↵')
 
     dialog.remove()
   })
 
-  it('keeps the review title and a plain confirm button when nothing is at risk', async () => {
+  it('uses normal review defaults and the existing file-code icon', async () => {
     const dialog = document.createElement('review-query-dialog')
     dialog.sql = 'update t set a = 1 where id = 2'
     document.body.append(dialog)
     await dialog.updateComplete
 
     const root = dialog.shadowRoot!
-    expect(root.querySelector('h4')?.textContent).toBe('Review query')
-    expect(root.querySelector('.warning')).toBeNull()
+    expect(root.querySelector('h4')?.textContent).toBe('Review changes')
+    expect(root.querySelector('.heading p')?.textContent).toBe('Review the generated SQL before applying changes.')
+    expect(root.querySelector('.icon-file-code')).not.toBeNull()
     expect(root.querySelector('button.primary')?.classList.contains('danger')).toBe(false)
+    expect(root.querySelector('button.primary')?.textContent?.replace(/\s/g, '')).toBe('Applychanges↵')
+
+    dialog.remove()
+  })
+
+  it('shows failures as inline text and restores the actions', async () => {
+    const dialog = document.createElement('review-query-dialog')
+    dialog.sql = 'update t set a = 1'
+    dialog.run = () => Promise.resolve('permission denied')
+    document.body.append(dialog)
+    await dialog.updateComplete
+
+    dialog.shadowRoot!.querySelector<HTMLButtonElement>('button.primary')!.click()
+    await dialog.updateComplete
+    await Promise.resolve()
+    await dialog.updateComplete
+
+    expect(dialog.shadowRoot!.querySelector('.error')?.textContent).toBe('permission denied')
+    expect(dialog.shadowRoot!.querySelector('.error')?.getAttribute('role')).toBe('alert')
+    expect(dialog.shadowRoot!.querySelector<HTMLButtonElement>('button.primary')?.disabled).toBe(false)
 
     dialog.remove()
   })

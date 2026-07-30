@@ -17,7 +17,7 @@ export { formatPreviewParam, previewSql, sqlPreviewParts }
 
 // Shows a statement and its bound params for the user to read before it runs:
 // a generated write (UPDATE today; INSERT/DELETE later), or one the user wrote
-// that the destructive preflight stopped. Dispatches `dialog-confirm` /
+// that the destructive preflight stopped. Dispatches `dialog-done` /
 // `dialog-cancel`; closes itself on Escape or backdrop click. Enter runs the
 // statement, unless the Cancel button holds focus (then Enter cancels).
 @customElement('review-query-dialog')
@@ -29,18 +29,14 @@ export class ReviewQueryDialog extends LitElement {
   params: unknown[] = []
 
   @property()
-  confirmLabel = t('common.run')
+  confirmLabel = t('review.apply')
 
-  /** Defaults to the review title; a preflight names what it stopped instead. */
+  /** Defaults to the review copy; a destructive preflight supplies its own. */
   @property()
   heading = ''
 
   @property()
-  warning = ''
-
-  /** One line per risk, listed under `warning` in the same callout. */
-  @property({ attribute: false })
-  risks: string[] = []
+  description = ''
 
   /** Styles the confirm button as destructive, for a run that cannot be undone. */
   @property({ type: Boolean })
@@ -106,29 +102,44 @@ export class ReviewQueryDialog extends LitElement {
   render() {
     const preview = previewSql(this.sql, this.params)
     const title = this.heading || t('review.title')
+    const description = this.description || t('review.description')
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
-        <div class="panel" role="dialog" aria-modal="true" aria-label=${title} tabindex="-1">
-          <h4>${title}</h4>
-          ${this.warning || this.risks.length
-            ? html`
-                <div class="warning" role="alert">
-                  ${this.warning ? html`<p>${this.warning}</p>` : ''}
-                  ${this.risks.length ? html`<ul>${this.risks.map((risk) => html`<li>${risk}</li>`)}</ul>` : ''}
-                </div>
-              `
-            : ''}
-          <pre class="sql"><code>${sqlPreviewParts(preview).map((part) =>
-            part.kind ? html`<span class=${part.kind}>${part.text}</span>` : part.text,
-          )}</code></pre>
-          ${this._error ? html`<p class="error" role="alert">${this._error}</p>` : ''}
-          <div class="actions">
-            <button class="secondary" ?disabled=${this._applying} @click=${this._cancel}>${t('common.cancel')}</button>
-            <button class="primary ${this.danger ? 'danger' : ''}" ?disabled=${this._applying} @click=${this._confirm}>
-              ${this._applying
-                ? html`<i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i> ${t('common.applying')}`
-                : this.confirmLabel}
-            </button>
+        <div
+          class="panel ${this.danger ? 'danger-review' : 'normal-review'}"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="review-title"
+          aria-describedby="review-description"
+          tabindex="-1"
+        >
+          <header class="dialog-head">
+            <span class="dialog-icon" aria-hidden="true">
+              <i class="icon ${this.danger ? 'icon-list-x' : 'icon-file-code'}"></i>
+            </span>
+            <div class="heading">
+              <h4 id="review-title">${title}</h4>
+              <p id="review-description">${description}</p>
+            </div>
+          </header>
+          <div class="content">
+            <span class="preview-label">${t('review.preview')}</span>
+            <pre class="sql"><code>${sqlPreviewParts(preview).map((part) =>
+              part.kind ? html`<span class=${part.kind}>${part.text}</span>` : part.text,
+            )}</code></pre>
+            ${this._error ? html`<p class="error" role="alert">${this._error}</p>` : ''}
+          </div>
+          <div class="footer">
+            <div class="actions">
+              <button class="secondary" ?disabled=${this._applying} @click=${this._cancel}>
+                ${t('common.cancel')}<kbd aria-hidden="true">esc</kbd>
+              </button>
+              <button class="primary ${this.danger ? 'danger' : ''}" ?disabled=${this._applying} @click=${this._confirm}>
+                ${this._applying
+                  ? html`<i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i> ${t('common.applying')}`
+                  : html`${this.confirmLabel}<kbd aria-hidden="true">↵</kbd>`}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -205,17 +216,87 @@ export class ReviewQueryDialog extends LitElement {
       }
 
       .panel {
-        width: min(560px, calc(100vw - 80px));
+        position: relative;
+        width: min(620px, calc(100vw - 80px));
         max-height: min(680px, calc(100vh - 80px));
-        padding: 18px 20px;
-        gap: 8px;
+        padding: 0;
+        gap: 0;
+        overflow: hidden;
+      }
+
+      .panel::before {
+        position: absolute;
+        inset: 0 0 auto;
+        z-index: 1;
+        height: 2px;
+        background: linear-gradient(90deg, transparent, var(--accent), transparent);
+        content: '';
+      }
+
+      .panel.danger-review::before {
+        background: linear-gradient(90deg, transparent, var(--status-dot-error), transparent);
+      }
+
+      .dialog-head {
+        display: grid;
+        grid-template-columns: 36px minmax(0, 1fr);
+        gap: 12px;
+        padding: 20px 22px 15px;
+      }
+
+      .dialog-icon {
+        --icon-size: 17px;
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        color: color-mix(in srgb, var(--accent) 76%, var(--text));
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+        border-radius: 8px;
+      }
+
+      .danger-review .dialog-icon {
+        color: color-mix(in srgb, var(--status-dot-error) 82%, var(--text));
+        background: color-mix(in srgb, var(--status-dot-error) 10%, transparent);
+        border-color: color-mix(in srgb, var(--status-dot-error) 24%, transparent);
+      }
+
+      .heading {
+        min-width: 0;
+        padding-top: 1px;
+      }
+
+      .heading h4 {
+        margin-bottom: 4px;
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      .heading p {
+        line-height: 1.45;
+      }
+
+      .content {
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 0 22px 18px;
+      }
+
+      .preview-label {
+        margin-bottom: 7px;
+        color: var(--text-2);
+        font-size: var(--font-size-sm);
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
       }
 
       .sql {
         margin: 0;
         padding: 10px 12px;
-        min-height: 140px;
-        max-height: min(420px, 60vh);
+        max-height: min(240px, 48vh);
         overflow: auto;
         white-space: pre-wrap;
         word-break: break-word;
@@ -229,36 +310,10 @@ export class ReviewQueryDialog extends LitElement {
         border-radius: 4px;
       }
 
-      .warning {
-        margin: 0;
-        padding: 8px 10px;
-        color: var(--text);
-        background: color-mix(in srgb, var(--status-dot-warning) 14%, transparent);
-        border: 1px solid color-mix(in srgb, var(--status-dot-warning) 45%, transparent);
-        border-radius: 4px;
-        line-height: 1.4;
-      }
-
-      .warning p {
-        margin: 0;
-      }
-
-      .warning ul {
-        margin: 0;
-        padding-left: 18px;
-      }
-
-      .warning p + ul {
-        margin-top: 6px;
-      }
-
       .error {
-        margin: 0;
-        padding: 8px 10px;
-        color: var(--text);
-        background: color-mix(in srgb, var(--status-dot-error) 14%, transparent);
-        border: 1px solid color-mix(in srgb, var(--status-dot-error) 45%, transparent);
-        border-radius: 4px;
+        margin: 10px 0 0;
+        padding: 0;
+        color: color-mix(in srgb, var(--status-dot-error) 70%, var(--text));
         line-height: 1.4;
       }
 
@@ -266,22 +321,35 @@ export class ReviewQueryDialog extends LitElement {
         font: inherit;
       }
 
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        padding: 10px 22px;
+        background: color-mix(in srgb, var(--bg) 18%, transparent);
+        border-top: 1px solid var(--border-subtle);
+      }
+
       .actions {
         display: flex;
-        justify-content: flex-end;
+        flex: none;
         gap: 8px;
-        margin-top: 12px;
       }
 
       .actions button {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        gap: 7px;
+        white-space: nowrap;
       }
 
-      button:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
+      .actions kbd {
+        color: var(--text-2);
+        font: var(--font-size) var(--mono-font);
+      }
+
+      button.primary kbd {
+        color: color-mix(in srgb, var(--on-accent) 72%, transparent);
       }
 
       /* Extra .primary keeps these above the shared primary:hover rule in specificity. */

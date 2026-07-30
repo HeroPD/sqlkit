@@ -77,7 +77,8 @@ export class SchemaOpsController {
     this.deps.dialogs.confirm = {
       message: t('schema.dropPrompt', { kind: tableKindLabel(table.kind), name: table.name }),
       detail: t('schema.dropDetail'),
-      confirmLabel: t('schema.drop'),
+      confirmLabel: t('schema.dropAction', { kind: tableKindLabel(table.kind) }),
+      danger: true,
       action: () => {
         this.deps.openPreview(statement)
         // The schema changed: re-fetch tables/columns once the drop lands.
@@ -94,8 +95,9 @@ export class SchemaOpsController {
     const statement = profile.engine === 'sqlite' ? `DELETE FROM ${qualified};` : `TRUNCATE TABLE ${qualified};`
     this.deps.dialogs.confirm = {
       message: t('schema.truncatePrompt', { name: table.name }),
-      detail: t('schema.truncateDetail', { statement }),
-      confirmLabel: t('schema.truncate'),
+      detail: t('schema.truncateDetail', { statement: statement.replace(/;$/, '') }),
+      confirmLabel: t('schema.truncateAction'),
+      danger: true,
       action: () => {
         this.deps.openPreview(statement)
         void this.deps.runSql(statement, { preconfirmed: true })
@@ -136,7 +138,7 @@ export class SchemaOpsController {
     this.deps.dialogs.review = {
       sql: statements.map((statement) => `${statement};`).join('\n\n'),
       params: [],
-      warning: this._ddlWarning(spec.engine, statements.length),
+      description: this._ddlWarning(spec.engine, statements.length),
       run: () => this._runAlter(spec, statements),
     }
   }
@@ -187,6 +189,7 @@ export class SchemaOpsController {
       message: t('schema.dropDatabasePrompt', { database }),
       detail: t('schema.dropDatabaseDetail'),
       confirmLabel: t('schema.dropDatabase'),
+      danger: true,
       action: () => void this._dropDatabase(profileId, database),
     }
   }

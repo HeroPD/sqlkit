@@ -440,7 +440,7 @@ describe('WorkbenchScreen leaving a result with staged work', () => {
       goBack(tabId: string | null): boolean
     }
     _dialogs: { confirm: { action(): void } | null }
-    _guardStagedLeave(tabId: string, leave: () => void): void
+    _guardStagedLeave(tabId: string, intent: 'result' | 'foreignKey', leave: () => void): void
     _onResultNavigate(event: Event): void
   }
 
@@ -449,7 +449,7 @@ describe('WorkbenchScreen leaving a result with staged work', () => {
     const leave = vi.fn()
     workbench._queries.hasStaged = () => false
 
-    workbench._guardStagedLeave('tab-a', leave)
+    workbench._guardStagedLeave('tab-a', 'result', leave)
 
     expect(leave).toHaveBeenCalledTimes(1)
     expect(workbench._dialogs.confirm).toBeNull()
@@ -466,7 +466,7 @@ describe('WorkbenchScreen leaving a result with staged work', () => {
       value: { querySelector: () => ({ hasUnstagedJson: () => true }) },
     })
 
-    workbench._guardStagedLeave('tab-a', leave)
+    workbench._guardStagedLeave('tab-a', 'result', leave)
     expect(leave).not.toHaveBeenCalled()
     expect(workbench._dialogs.confirm).not.toBeNull()
 
@@ -484,7 +484,7 @@ describe('WorkbenchScreen leaving a result with staged work', () => {
     workbench._queries.hasStaged = () => true
     workbench._queries.discardStaged = discardStaged
 
-    workbench._guardStagedLeave('tab-a', leave)
+    workbench._guardStagedLeave('tab-a', 'result', leave)
     expect(leave).not.toHaveBeenCalled()
     expect(discardStaged).not.toHaveBeenCalled()
 
@@ -621,6 +621,27 @@ describe('WorkbenchScreen staged result changes', () => {
 
     workbench._dialogs.acceptConfirm()
     expect(closed).toHaveBeenCalledOnce()
+  })
+
+  it('names foreign-key navigation when staged changes block it', () => {
+    const screen = new WorkbenchScreen()
+    const leave = vi.fn()
+    const workbench = screen as never as {
+      _queries: { setEdit(tabId: string, row: number, col: number, value: string): void }
+      _dialogs: { confirm: { message: string; detail: string; confirmLabel: string; danger?: boolean } | null }
+      _guardStagedLeave(tabId: string, intent: 'result' | 'foreignKey', leave: () => void): void
+    }
+    workbench._queries.setEdit('t1', 0, 0, '2')
+
+    workbench._guardStagedLeave('t1', 'foreignKey', leave)
+
+    expect(leave).not.toHaveBeenCalled()
+    expect(workbench._dialogs.confirm).toMatchObject({
+      message: 'Discard changes and open the referenced row?',
+      confirmLabel: 'Discard and open',
+      danger: true,
+    })
+    expect(workbench._dialogs.confirm?.detail).toContain('Following this foreign key')
   })
 })
 

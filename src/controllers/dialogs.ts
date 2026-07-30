@@ -4,7 +4,15 @@ import type { CreateDatabaseDetail } from '../components/create-database-dialog'
 import type { DatabaseCreateMeta, DatabaseCreateOptions } from '../electron'
 import { t } from '../i18n'
 
-type ConfirmConfig = { message: string; detail: string; confirmLabel: string; action: () => void }
+type ConfirmConfig = {
+  message: string
+  detail: string
+  confirmLabel: string
+  action: () => void
+  danger?: boolean
+  /** null makes an acknowledge-only notice with no secondary action. */
+  cancelLabel?: string | null
+}
 type PromptConfig = {
   message: string
   detail: string
@@ -16,7 +24,7 @@ type PromptConfig = {
 }
 // A generated write statement awaiting the user's review before it runs. `run`
 // resolves to an error message to show inline in the dialog, or null on success.
-type ReviewConfig = { sql: string; params: unknown[]; warning?: string; run: () => Promise<string | null> }
+type ReviewConfig = { sql: string; params: unknown[]; description?: string; run: () => Promise<string | null> }
 // A CREATE DATABASE dialog: the server's option metadata plus the action run on accept.
 type CreateDbConfig = { meta: DatabaseCreateMeta; action: (name: string, options: DatabaseCreateOptions) => void }
 
@@ -86,7 +94,7 @@ export class DialogsController implements ReactiveController {
 
   // Error notice via the confirm dialog, with only an acknowledge action.
   notice(message: string, detail: string) {
-    this.confirm = { message, detail, confirmLabel: t('common.ok'), action: () => {} }
+    this.confirm = { message, detail, confirmLabel: t('common.ok'), cancelLabel: null, action: () => {} }
   }
 
   acceptConfirm = () => {

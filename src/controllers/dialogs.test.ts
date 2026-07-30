@@ -65,7 +65,7 @@ describe('DialogsController notice', () => {
   it('opens a confirm with an acknowledge-only action', () => {
     const d = new DialogsController(host())
     d.notice('Failed', 'reason')
-    expect(d.confirm).toMatchObject({ message: 'Failed', detail: 'reason', confirmLabel: 'OK' })
+    expect(d.confirm).toMatchObject({ message: 'Failed', detail: 'reason', confirmLabel: 'OK', cancelLabel: null })
     d.acceptConfirm()
     expect(d.confirm).toBeNull()
   })

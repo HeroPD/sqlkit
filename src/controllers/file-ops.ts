@@ -145,6 +145,7 @@ export class FileOpsController {
       message: t('file.deletePrompt', { name }),
       detail: t('file.deleteTrashDetail'),
       confirmLabel: t('file.moveToTrash'),
+      danger: true,
       action: () => void this.performDelete(path),
     }
   }

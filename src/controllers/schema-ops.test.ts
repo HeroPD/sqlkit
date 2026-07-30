@@ -63,6 +63,8 @@ describe('dropTable', () => {
 
     expect(h.runSql).not.toHaveBeenCalled()
     expect(h.dialogs.confirm?.message).toBe('Drop table "users"?')
+    expect(h.dialogs.confirm?.confirmLabel).toBe('Drop table')
+    expect(h.dialogs.confirm?.danger).toBe(true)
 
     h.dialogs.acceptConfirm()
     await flush()
@@ -96,6 +98,12 @@ describe('truncateTable', () => {
     const h = harness()
     h.ops.truncateTable(users)
     expect(h.runSql).not.toHaveBeenCalled()
+    expect(h.dialogs.confirm).toMatchObject({
+      message: 'Remove all rows from "users"?',
+      detail: 'TRUNCATE TABLE "public"."users" will permanently remove every row. This cannot be undone.',
+      confirmLabel: 'Truncate table',
+      danger: true,
+    })
     h.dialogs.acceptConfirm()
     expect(h.runSql).toHaveBeenCalledWith('TRUNCATE TABLE "public"."users";', { preconfirmed: true })
   })
@@ -141,7 +149,7 @@ describe('alterColumns', () => {
     h.ops.alterColumns(s)
 
     expect(sqlkit.runDdl).not.toHaveBeenCalled()
-    expect(h.dialogs.review?.warning).toBeUndefined()
+    expect(h.dialogs.review?.description).toBeUndefined()
     expect(h.dialogs.review?.sql).toBe(
       'ALTER TABLE "public"."users" DROP COLUMN "legacy";\n\nALTER TABLE "public"."users" ADD COLUMN "age" integer;',
     )
@@ -238,7 +246,7 @@ describe('alterColumns', () => {
     sqlkit.runDdl.mockResolvedValue({ success: false, failedIndex: 1, partial: true, appliedCount: 1, error: 'boom' })
     const h = harness()
     h.ops.alterColumns(spec({ engine: 'mysql', drops: ['a', 'b'] }))
-    expect(h.dialogs.review?.warning).toMatch(/commits schema statements individually/i)
+    expect(h.dialogs.review?.description).toMatch(/commits schema statements individually/i)
     const error = await h.dialogs.review!.run()
 
     expect(error).toContain('1 earlier statement(s) were already committed by MySQL.')

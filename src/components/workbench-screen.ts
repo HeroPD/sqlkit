@@ -663,6 +663,7 @@ export class WorkbenchScreen extends LitElement {
         message: t('workbench.closeTabPrompt', { title }),
         detail,
         confirmLabel: fileDirty ? t('workbench.closeWithoutSaving') : t('workbench.discardAndClose'),
+        danger: true,
         action: () => this._ctx.closeTab(id),
       }
       return
@@ -1099,6 +1100,8 @@ export class WorkbenchScreen extends LitElement {
               .message=${this._dialogs.confirm.message}
               .detail=${this._dialogs.confirm.detail}
               .confirmLabel=${this._dialogs.confirm.confirmLabel}
+              .cancelLabel=${this._dialogs.confirm.cancelLabel === undefined ? t('common.cancel') : this._dialogs.confirm.cancelLabel}
+              .danger=${this._dialogs.confirm.danger ?? false}
               @dialog-cancel=${() => (this._dialogs.confirm = null)}
               @dialog-confirm=${this._dialogs.acceptConfirm}
             ></confirm-dialog>
@@ -1129,7 +1132,8 @@ export class WorkbenchScreen extends LitElement {
             <review-query-dialog
               .sql=${this._dialogs.review.sql}
               .params=${this._dialogs.review.params}
-              .warning=${this._dialogs.review.warning ?? ''}
+              .description=${this._dialogs.review.description ?? t('review.description')}
+              .confirmLabel=${t('review.apply')}
               .run=${this._dialogs.review.run}
               @dialog-cancel=${() => {
                 this._dialogs.review = null
@@ -1167,8 +1171,10 @@ export class WorkbenchScreen extends LitElement {
         ? html`
             <review-query-dialog
               .heading=${this._destructivePrompt.script ? t('destructive.scriptTitle') : t('destructive.title')}
-              .warning=${t('destructive.lead')}
-              .risks=${this._destructivePrompt.risks.map((risk) => t(`destructive.${risk}`))}
+              .description=${[
+                ...this._destructivePrompt.risks.map((risk) => t(`destructive.${risk}`)),
+                t(this._destructivePrompt.risks.length > 1 ? 'destructive.cannotUndoMany' : 'destructive.cannotUndo'),
+              ].join(' ')}
               .danger=${true}
               .confirmLabel=${t('destructive.run')}
               .sql=${this._destructivePrompt.sql}
@@ -1583,6 +1589,7 @@ export class WorkbenchScreen extends LitElement {
       message: t('workbench.removeDatabasePrompt', { name: profile.name.trim() || t('config.newDatabase') }),
       detail: t('workbench.removeDatabaseDetail'),
       confirmLabel: t('common.remove'),
+      danger: true,
       action: () => void this._removeDatabase(id),
     }
   }
@@ -1889,7 +1896,7 @@ export class WorkbenchScreen extends LitElement {
   // Staged edits, new rows and deletions are aligned to the visible result by row
   // index, so they cannot follow the user to another result. Leaving with unsaved
   // work therefore has to be a decision rather than a silent discard.
-  private _guardStagedLeave(tabId: string, leave: () => void) {
+  private _guardStagedLeave(tabId: string, intent: 'result' | 'foreignKey', leave: () => void) {
     // The results panel can hold JSON editor text that never staged (invalid,
     // or reachable only through Forward) — same unsaved work, same guard.
     const unstagedJson = this.renderRoot?.querySelector('results-panel')?.hasUnstagedJson() ?? false
@@ -1898,9 +1905,10 @@ export class WorkbenchScreen extends LitElement {
       return
     }
     this._dialogs.confirm = {
-      message: t('results.leaveStagedPrompt'),
-      detail: t('results.leaveStagedDetail'),
-      confirmLabel: t('results.discardAndLeave'),
+      message: t(intent === 'foreignKey' ? 'results.followStagedPrompt' : 'results.leaveStagedPrompt'),
+      detail: t(intent === 'foreignKey' ? 'results.followStagedDetail' : 'results.leaveStagedDetail'),
+      confirmLabel: t(intent === 'foreignKey' ? 'results.discardAndOpen' : 'results.discardAndLeave'),
+      danger: true,
       // Discard for real before leaving: nothing on the navigation path realigns
       // staged state, and stale row-indexed edits would arm writes against
       // whatever result appears next.
@@ -1919,7 +1927,7 @@ export class WorkbenchScreen extends LitElement {
     // Refuse before prompting: confirming a discard for a step that will not
     // happen (mid-run, or nowhere to go) would throw staged work away for nothing.
     if (!(direction === 'back' ? this._queries.canGoBack(tabId) : this._queries.canGoForward(tabId))) return
-    this._guardStagedLeave(tabId, () => {
+    this._guardStagedLeave(tabId, 'result', () => {
       if (direction === 'back') this._queries.goBack(tabId)
       else this._queries.goForward(tabId)
     })
@@ -1979,7 +1987,7 @@ export class WorkbenchScreen extends LitElement {
       dialect.placeholder(1),
       BROWSE_ROW_LIMIT,
     )
-    this._guardStagedLeave(tabId, () => {
+    this._guardStagedLeave(tabId, 'foreignKey', () => {
       void this._runSql(sql, null, [value], null, undefined, { push: true, table }).then(() => {
         if (this._ctx.activeTabId === tabId) this.renderRoot.querySelector('results-panel')?.focusLandedResult()
       })
@@ -2200,6 +2208,7 @@ export class WorkbenchScreen extends LitElement {
         ? t('tasks.endSessionOwn')
         : t('tasks.endSessionDetail', { user: session.user || t('tasks.sessionIdle') }),
       confirmLabel: t('tasks.endSessionConfirm'),
+      danger: true,
       action: () => void this._endSession(profileId, session.id, mode),
     }
   }
@@ -2257,6 +2266,7 @@ export class WorkbenchScreen extends LitElement {
         message: t('workbench.closeWorkspacePrompt'),
         detail: t('workbench.closeWorkspaceDetail'),
         confirmLabel: t('workbench.discardAndClose'),
+        danger: true,
         action: () => this._closeWorkspaceNow(),
       }
       return
