@@ -342,6 +342,17 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
+  it('reports one result for a single DML statement', async () => {
+    const driver = await connectDriver()
+    try {
+      const result = await driver.query('delete from books where id = -1')
+      expect(result.rowCount).toBe(0)
+      expect(result.resultSets).toBeUndefined()
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('drains a capped read without cancelling statement semantics', async () => {
     const driver = await connectDriver()
     try {

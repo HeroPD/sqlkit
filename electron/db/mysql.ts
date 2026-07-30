@@ -33,6 +33,11 @@ type RawConnection = {
 
 type FieldMeta = { name: string; db?: string; schema?: string; orgTable?: string; orgName?: string; columnType?: number; type?: number }
 
+// mysql2 emits `fields(undefined)` immediately before an INSERT/UPDATE/DELETE
+// OK packet. That is protocol metadata, not a separate empty result set.
+export const mysqlResultFields = (fields: unknown): FieldMeta[] | null =>
+  Array.isArray(fields) ? fields as FieldMeta[] : null
+
 // MYSQL_TYPE_JSON in the wire protocol's column definitions. MariaDB never
 // sends it (its JSON is LONGTEXT on the wire), so MariaDB JSON exports keep
 // their pre-detection quoting rather than guessing from cell contents.
@@ -951,8 +956,9 @@ function streamQuery(
     }
     const query = raw.query({ sql, values: params, rowsAsArray: true })
     query.on('fields', (fields) => {
+      const list = mysqlResultFields(fields)
+      if (!list) return
       pushCurrent()
-      const list = Array.isArray(fields) ? (fields as FieldMeta[]) : []
       columns = list.map((field) => field.name)
       // Active-db columns get schema null to match listTables' TableRefs; cross-db
       // ones keep the db name so they never bind to a same-named active-db table.

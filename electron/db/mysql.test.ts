@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { jsonValidColumn, mysqlSessionIdentificationAvailable, mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
+import { jsonValidColumn, mysqlResultFields, mysqlSessionIdentificationAvailable, mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
 
 describe('mysqlVersion', () => {
   it('labels plain MySQL versions', () => {
@@ -28,6 +28,13 @@ describe('mysqlSessionIdentificationAvailable', () => {
     expect(mysqlSessionIdentificationAvailable(0, -1)).toBe(false)
     expect(mysqlSessionIdentificationAvailable(1, 0)).toBe(false)
     expect(mysqlSessionIdentificationAvailable(undefined, undefined)).toBe(false)
+  })
+})
+
+describe('mysqlResultFields', () => {
+  it('ignores the undefined fields event emitted before a DML OK packet', () => {
+    expect(mysqlResultFields(undefined)).toBeNull()
+    expect(mysqlResultFields([])).toEqual([])
   })
 })
 
