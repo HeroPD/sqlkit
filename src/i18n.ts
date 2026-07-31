@@ -595,7 +595,7 @@ const enUS = {
   'editing.noConnectionTitle': 'Cannot edit this result',
   'editing.noConnectionDetail': 'Select a database connection before writing changes.',
   'editing.cannotEditColumnTitle': 'Cannot edit this column',
-  'editing.cannotEditColumnDetail': 'The selected column is not an editable table column with its primary key in the result.',
+  'editing.cannotEditColumnDetail': 'The selected column is not an editable table column.',
   'editing.cannotSafely': 'Cannot safely {action}',
   'editing.unsafeComparison': '{column} ({dataType}) cannot be compared safely for concurrent changes. Use explicit SQL, or add a version column to guard on.',
   'editing.actionEditCell': 'edit this cell',
