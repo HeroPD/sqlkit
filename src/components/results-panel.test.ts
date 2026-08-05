@@ -279,6 +279,35 @@ describe('results-panel multiple and paged results', () => {
     el.remove()
   })
 
+  it('closes the JSON editor when another result set takes the body', async () => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.rowEditable = true
+    el.run = {
+      phase: 'done',
+      result: {
+        columns: ['second'], rows: [['{"b":2}']], rowCount: 1, durationMs: 1,
+        resultSets: [
+          { columns: ['first'], rows: [['{"a":1}']], rowCount: 1 },
+          { columns: ['second'], rows: [['{"b":2}']], rowCount: 1 },
+        ],
+      },
+    }
+    document.body.append(el)
+    await el.updateComplete
+    ;(el as unknown as { _openJson: (ref: unknown, col: number) => void })._openJson({ kind: 'result', row: 0 }, 0)
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.json-view .json-title')?.textContent).toBe('second')
+
+    const select = el.shadowRoot!.querySelector('ui-select.result-set-select' as 'ui-select')!
+    select.value = '0'
+    select.dispatchEvent(new CustomEvent('change', { detail: { value: '0' } }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.json-view')).toBeNull()
+    expect(el.shadowRoot!.querySelector('thead th:not(.num)')?.textContent).toContain('first')
+    el.remove()
+  })
+
   it('drops dragged widths on other result sets but re-adopts saved widths on the last', async () => {
     const el = document.createElement('results-panel')
     el.columnWidths = new Map([[0, 321]])
@@ -781,6 +810,134 @@ describe('results-panel draft rows', () => {
     el.addEventListener('save-rows', saveRows)
     saveButton().click()
     expect(saveRows).toHaveBeenCalledOnce()
+    el.remove()
+  })
+
+  // ⌘S and the app menu route through saveRows() so they cannot drift from the
+  // toolbar button; its answer is what tells them whether the keystroke was
+  // spoken for or still belongs to the file.
+  it('reports whether it had a save to make', async () => {
+    const el = await mount()
+    el.drafts = []
+    el.edits = new Map()
+    await el.updateComplete
+    const saveRows = vi.fn()
+    el.addEventListener('save-rows', saveRows)
+
+    expect(el.saveRows()).toBe(false)
+    expect(saveRows).not.toHaveBeenCalled()
+
+    el.edits = new Map([['0:0', 'changed']])
+    await el.updateComplete
+    expect(el.saveRows()).toBe(true)
+    expect(saveRows).toHaveBeenCalledOnce()
+    el.remove()
+  })
+
+  it('stages the cell being typed into rather than letting the save pass it by', async () => {
+    const el = await mountGrid(2)
+    const saveRows = vi.fn()
+    const cellEdit = vi.fn()
+    el.addEventListener('save-rows', saveRows)
+    el.addEventListener('cell-edit', cellEdit)
+
+    // Open the inline editor and type, without blurring — which is exactly
+    // where the caret is when a keyboard save arrives.
+    el.shadowRoot!.querySelector<HTMLTableCellElement>('tbody td:not(.num)')!
+      .dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLInputElement>('.cell-edit')!.value = 'typed'
+
+    // Nothing is staged yet, so without the flush this reports no save to make
+    // and ⌘S falls through to writing the file.
+    expect(el.saveRows()).toBe(true)
+    expect((cellEdit.mock.calls[0]![0] as CustomEvent).detail).toEqual({ row: 0, col: 0, value: 'typed' })
+    expect(saveRows).toHaveBeenCalledOnce()
+    el.remove()
+  })
+
+  it('stages the record field being typed into, alongside what was already staged', async () => {
+    const el = await mountGrid(2)
+    const cellEdit = vi.fn()
+    el.addEventListener('cell-edit', cellEdit)
+    // An edit staged earlier: the save would have gone ahead on its own and
+    // quietly dropped whatever was still in the open field.
+    el.edits = new Map([['1:1', 'earlier']])
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+
+    const field = el.shadowRoot!.querySelector<HTMLTextAreaElement>('textarea.record-value[data-col="1"]')!
+    field.focus()
+    field.value = 'in progress'
+
+    expect(el.saveRows()).toBe(true)
+    expect((cellEdit.mock.calls[0]![0] as CustomEvent).detail).toEqual({ row: 0, col: 1, value: 'in progress' })
+    el.remove()
+  })
+
+  it('does not claim a save after the open field clears the last staged edit', async () => {
+    const el = await mountGrid(2)
+    el.edits = new Map([['0:1', 'pending']])
+    await el.updateComplete
+    const clear = vi.fn()
+    const saveRows = vi.fn()
+    el.addEventListener('cell-edit-clear', clear)
+    el.addEventListener('save-rows', saveRows)
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+
+    const field = el.shadowRoot!.querySelector<HTMLTextAreaElement>('textarea.record-value[data-col="1"]')!
+    field.focus()
+    field.value = 'b0'
+
+    expect(el.saveRows()).toBe(false)
+    expect((clear.mock.calls[0]![0] as CustomEvent).detail).toEqual({ row: 0, col: 1 })
+    expect(saveRows).not.toHaveBeenCalled()
+    el.remove()
+  })
+
+  it('claims the keystroke for a JSON document typed but never flushed', async () => {
+    const el = await mount()
+    el.drafts = []
+    el.edits = new Map()
+    await el.updateComplete
+    const saveRows = vi.fn()
+    const cellEdit = vi.fn()
+    el.addEventListener('save-rows', saveRows)
+    el.addEventListener('cell-edit', cellEdit)
+    ;(el as unknown as { _openJson(ref: unknown, col: number): void })._openJson({ kind: 'result', row: 0 }, 0)
+    await el.updateComplete
+    ;(el as unknown as { _jsonDraft: string })._jsonDraft = '{"a":1}'
+
+    // Nothing is staged by the write controller's reckoning, but the document
+    // on screen is a save waiting to happen and only the panel can see it.
+    expect(el.saveRows()).toBe(true)
+    expect(cellEdit).toHaveBeenCalledOnce()
+    expect(saveRows).toHaveBeenCalledOnce()
+    el.remove()
+  })
+
+  it('does not claim a save for a JSON-only formatting change', async () => {
+    const el = await mount()
+    el.run = {
+      phase: 'done',
+      result: { columns: ['document'], rows: [['{"a":1}']], rowCount: 1, durationMs: 1 },
+    }
+    el.drafts = []
+    el.edits = new Map()
+    await el.updateComplete
+    const cellEdit = vi.fn()
+    const saveRows = vi.fn()
+    el.addEventListener('cell-edit', cellEdit)
+    el.addEventListener('save-rows', saveRows)
+    ;(el as unknown as { _openJson(ref: unknown, col: number): void })._openJson({ kind: 'result', row: 0 }, 0)
+    await el.updateComplete
+    ;(el as unknown as { _jsonDraft: string })._jsonDraft = '{ "a" : 1 }'
+
+    expect(el.saveRows()).toBe(false)
+    expect(cellEdit).not.toHaveBeenCalled()
+    expect(saveRows).not.toHaveBeenCalled()
     el.remove()
   })
 
@@ -2067,6 +2224,10 @@ describe('results-panel keeps the reader in place across a save', () => {
         durationMs: 1,
       },
     }
+    // Column a is the table's primary key, so `a42` is what names row 42 across
+    // the re-run — the workbench derives this from the same metadata the write
+    // path targets rows by.
+    el.keyColumns = [0]
     el.edits = new Map([['5:0', 'edited']])
     document.body.append(el)
     await el.updateComplete
@@ -2108,10 +2269,33 @@ describe('results-panel keeps the reader in place across a save', () => {
     await el.updateComplete
   }
 
+  // The same refresh, but with rows the caller chooses — a re-run is free to
+  // hand the same columns back in a different order or one row short.
+  const refreshWith = async (el: Awaited<ReturnType<typeof mountScrollable>>['el'], rows: unknown[][]) => {
+    el.edits = new Map()
+    el.drafts = []
+    el.pendingDeletes = new Set()
+    el.run = { phase: 'running', executionId: 'refresh', profileId: 'p' }
+    await el.updateComplete
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT a, b FROM t',
+      result: { columns: ['a', 'b'], rows, rowCount: rows.length, durationMs: 1, sessionId: 'refreshed' },
+    }
+    await el.updateComplete
+  }
+
   const save = (el: HTMLElement) =>
     [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.head-action')]
       .find((button) => button.getAttribute('aria-label') === 'Save changes')!
       .click()
+
+  const openRecordOnRow42 = async (el: Awaited<ReturnType<typeof mountScrollable>>['el']) => {
+    ;(el as unknown as { _sel: unknown })._sel = { r0: 42, c0: 1, r1: 42, c1: 1 }
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.record-view')?.textContent).toContain('Row #43')
+  }
 
   it('stays where it was when the refresh brings back the same columns', async () => {
     const { el, body } = await mountScrollable()
@@ -2140,11 +2324,211 @@ describe('results-panel keeps the reader in place across a save', () => {
     const { el, body } = await mountScrollable()
     body.scrollTop = 1200
     save(el)
-    // The workbench relays a review-dialog cancel as saveNotRun(): the save
-    // never ran, so a later same-column result must not inherit the restore.
-    el.saveNotRun()
+    // The workbench relays a review-dialog cancel as refreshNotComing(): the
+    // save never ran, so a later same-column result must not inherit the restore.
+    el.refreshNotComing()
     await refresh(el, ['a', 'b'])
     expect(body.scrollTop).toBe(0)
+  })
+
+  it('keeps the selected cell, not just the scroll position', async () => {
+    const { el } = await mountScrollable()
+    ;(el as unknown as { _sel: unknown })._sel = { r0: 42, c0: 1, r1: 42, c1: 1 }
+    save(el)
+    await refresh(el, ['a', 'b'])
+    expect((el as unknown as { _sel: unknown })._sel).toEqual({ r0: 42, c0: 1, r1: 42, c1: 1 })
+  })
+
+  it('stays in the record view when the save was made there', async () => {
+    const { el } = await mountScrollable()
+    ;(el as unknown as { _sel: unknown })._sel = { r0: 42, c0: 1, r1: 42, c1: 1 }
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeTruthy()
+
+    save(el)
+    await refresh(el, ['a', 'b'])
+    const record = el.shadowRoot!.querySelector<HTMLElement>('.record-view')
+    expect(record).toBeTruthy()
+    // The same row, with the same field focused.
+    expect(record!.textContent).toContain('Row #43')
+    expect(record!.querySelectorAll('.record-field')[2]?.classList.contains('active')).toBe(true)
+  })
+
+  it('returns to the grid when the refreshed result cannot hold the record row', async () => {
+    const { el } = await mountScrollable()
+    ;(el as unknown as { _sel: unknown })._sel = { r0: 42, c0: 1, r1: 42, c1: 1 }
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+
+    el.edits = new Map()
+    save(el)
+    el.run = { phase: 'running', executionId: 'refresh', profileId: 'p' }
+    await el.updateComplete
+    el.run = {
+      phase: 'done',
+      sql: 'SELECT a, b FROM t',
+      result: { columns: ['a', 'b'], rows: [['a0', 'b0']], rowCount: 1, durationMs: 1, sessionId: 'shrunk' },
+    }
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+    expect(el.shadowRoot!.querySelector('table')).toBeTruthy()
+  })
+
+  it('will not reopen a row-specific view once the refresh has renumbered the rows', async () => {
+    const { el, body } = await mountScrollable()
+    body.scrollTop = 1200
+    await openRecordOnRow42(el)
+    save(el)
+    // A row above was removed (another client, or a delete in the same batch),
+    // so index 42 now holds what used to be row 43.
+    const rows = Array.from({ length: 199 }, (_, i) => ['a', 'b'].map((column) => `${column}${i + 1}`))
+    await refreshWith(el, rows)
+
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+    expect(el.shadowRoot!.querySelector('table')).toBeTruthy()
+    // The scroll offset addresses a position, not a row, so it still applies.
+    expect(body.scrollTop).toBe(1200)
+    expect((el as unknown as { _sel: unknown })._sel).toEqual({ r0: 0, c0: 0, r1: 0, c1: 0 })
+  })
+
+  it('will not reopen a row-specific view when the save also inserts or deletes', async () => {
+    const { el, body } = await mountScrollable()
+    body.scrollTop = 1200
+    await openRecordOnRow42(el)
+    // A delete staged elsewhere in the grid renumbers every row below it, so
+    // nothing addressed by index survives the save — probe or no probe.
+    el.pendingDeletes = new Set([7])
+    await el.updateComplete
+    save(el)
+    await refresh(el, ['a', 'b'])
+
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+    expect(body.scrollTop).toBe(1200)
+  })
+
+  it('reopens the record view when the rows come back unmoved', async () => {
+    const { el } = await mountScrollable()
+    await openRecordOnRow42(el)
+    save(el)
+    await refreshWith(el, Array.from({ length: 200 }, (_, i) => ['a', 'b'].map((column) => `${column}${i}`)))
+    expect(el.shadowRoot!.querySelector('.record-view')?.textContent).toContain('Row #43')
+  })
+
+  it('recognises the row by the key it will carry once the save lands', async () => {
+    const { el } = await mountScrollable()
+    await openRecordOnRow42(el)
+    // The key column itself is what is being written, so the value it is about
+    // to hold is what names the row afterwards — not the one it is replacing.
+    el.edits = new Map([['42:0', 'rekeyed']])
+    await el.updateComplete
+    save(el)
+    const rows = Array.from({ length: 200 }, (_, i) => [`a${i}`, `b${i}`])
+    rows[42] = ['rekeyed', 'b42']
+    await refreshWith(el, rows)
+    expect(el.shadowRoot!.querySelector('.record-view')?.textContent).toContain('Row #43')
+  })
+
+  it('reopens even when other rows read identically outside the key', async () => {
+    const { el } = await mountScrollable()
+    await openRecordOnRow42(el)
+    save(el)
+    // Row 100 duplicates everything but the key. The key is the identity, so
+    // there is nothing ambiguous here to back away from.
+    const refreshed = Array.from({ length: 200 }, (_, i) => [`a${i}`, `b${i}`])
+    refreshed[100] = ['a100', 'b42']
+    await refreshWith(el, refreshed)
+    expect(el.shadowRoot!.querySelector('.record-view')?.textContent).toContain('Row #43')
+  })
+
+  it('will not reopen when the result has no key to go on', async () => {
+    const { el, body } = await mountScrollable()
+    // An expression projection or a keyless table: the write path could not
+    // target these rows either, so there is nothing to recognise one by.
+    el.keyColumns = []
+    await el.updateComplete
+    body.scrollTop = 1200
+    await openRecordOnRow42(el)
+    save(el)
+    await refresh(el, ['a', 'b'])
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+    expect(body.scrollTop).toBe(1200)
+  })
+
+  it('brings a range selection back collapsed onto its focus cell', async () => {
+    const { el } = await mountScrollable()
+    // Rows 5-10 selected, focused on 10. Editing row 5's sort value can lift it
+    // clear of the range while index 10 keeps its occupant, so the corner proves
+    // nothing about what the range now spans.
+    ;(el as unknown as { _sel: unknown })._sel = { r0: 5, c0: 0, r1: 10, c1: 1 }
+    save(el)
+    await refresh(el, ['a', 'b'])
+    expect((el as unknown as { _sel: unknown })._sel).toEqual({ r0: 10, c0: 1, r1: 10, c1: 1 })
+  })
+
+  it('drops the armed restore when the refresh errors instead of landing rows', async () => {
+    const { el } = await mountScrollable()
+    await openRecordOnRow42(el)
+    save(el)
+    el.edits = new Map()
+    el.run = { phase: 'running', executionId: 'refresh', profileId: 'p' }
+    await el.updateComplete
+    el.run = { phase: 'error', error: 'relation "t" does not exist' }
+    await el.updateComplete
+
+    // The next query stands on its own: same columns and the same key at that
+    // index would otherwise be enough to inherit a token nothing spent.
+    await refreshWith(el, Array.from({ length: 200 }, (_, i) => [`a${i}`, `b${i}`]))
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+  })
+
+  it('drops the armed restore when another tab takes the panel over', async () => {
+    const { el } = await mountScrollable()
+    el.tabId = 'tab-a'
+    await el.updateComplete
+    await openRecordOnRow42(el)
+    save(el)
+    // The save's refresh never ran — the user moved on before it was dispatched.
+    // Tab B browses the same table, so its rows answer every other check.
+    el.tabId = 'tab-b'
+    await refreshWith(el, Array.from({ length: 200 }, (_, i) => [`a${i}`, `b${i}`]))
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+  })
+
+  it('still restores across the running phase the refresh passes through', async () => {
+    const { el } = await mountScrollable()
+    el.tabId = 'tab-a'
+    await el.updateComplete
+    await openRecordOnRow42(el)
+    save(el)
+    await refresh(el, ['a', 'b'])
+    expect(el.shadowRoot!.querySelector('.record-view')?.textContent).toContain('Row #43')
+  })
+
+  it('will not reopen when the row it was on has moved elsewhere in the result', async () => {
+    const { el } = await mountScrollable()
+    await openRecordOnRow42(el)
+    save(el)
+    // Row 42 is still in the result, just not at index 42 — an ORDER BY the
+    // edit disturbed, or a Postgres update on a query that carries none.
+    const refreshed = Array.from({ length: 200 }, (_, i) => [`a${i}`, `b${i}`])
+    refreshed[42] = ['a199', 'b199']
+    refreshed[199] = ['a42', 'b42']
+    await refreshWith(el, refreshed)
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+  })
+
+  it('stays in the JSON editor when the save was made there', async () => {
+    const { el } = await mountScrollable()
+    ;(el as unknown as { _openJson: (ref: unknown, col: number) => void })._openJson({ kind: 'result', row: 42 }, 1)
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.json-view')).toBeTruthy()
+
+    save(el)
+    await refresh(el, ['a', 'b'])
+    const json = el.shadowRoot!.querySelector<HTMLElement>('.json-view')
+    expect(json).toBeTruthy()
+    expect(json!.querySelector('.json-row')?.textContent).toBe('Row #43')
   })
 })
 
@@ -2221,6 +2605,56 @@ describe('results-panel remembers where the reader was in each result', () => {
     el.run = { phase: 'done', sql: 'SELECT x FROM u', result: followed }
     await el.updateComplete
     expect(body.scrollTop).toBe(600)
+  })
+
+  it('comes back to the same rows after a trip through the record view', async () => {
+    const { el, body } = await mount()
+    body.scrollTop = 1500
+    ;(el as unknown as { _sel: unknown })._sel = { r0: 42, c0: 1, r1: 42, c1: 1 }
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+    // The grid leaves the DOM, so the body collapses and the browser clamps.
+    body.scrollTop = 0
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')!.click()
+    await el.updateComplete
+    expect(body.scrollTop).toBe(1500)
+  })
+
+  it('bookmarks the grid position a result was showing before the record view', async () => {
+    const { el, body } = await mount()
+    const first = el.run.phase === 'done' ? el.run.result : null
+    body.scrollTop = 1500
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+    body.scrollTop = 0
+
+    el.run = { phase: 'done', sql: 'SELECT x FROM u', result: resultOf(['x'], 'second') }
+    await el.updateComplete
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: first! }
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]')!.click()
+    await el.updateComplete
+    expect(body.scrollTop).toBe(1500)
+  })
+
+  it('returns to the record view a result was left in', async () => {
+    const { el, body } = await mount()
+    const first = el.run.phase === 'done' ? el.run.result : null
+    body.scrollTop = 1500
+    ;(el as unknown as { _sel: unknown })._sel = { r0: 42, c0: 1, r1: 42, c1: 1 }
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="List view"]')!.click()
+    await el.updateComplete
+
+    el.run = { phase: 'done', sql: 'SELECT x FROM u', result: resultOf(['x'], 'second') }
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.record-view')).toBeNull()
+
+    el.run = { phase: 'done', sql: 'SELECT a, b FROM t', result: first! }
+    await el.updateComplete
+    const record = el.shadowRoot!.querySelector<HTMLElement>('.record-view')
+    expect(record).toBeTruthy()
+    expect(record!.textContent).toContain('Row #43')
   })
 
   it('starts a never-seen result at the top', async () => {

@@ -100,6 +100,14 @@ export function singleTableEditContext(input: ResultEditInput): SingleTableEditC
   return pkIndexes.length ? { engine: input.engine ?? null, table, columns, result: run.result, sql, pkIndexes } : null
 }
 
+/** Result columns holding the row's declared primary key, by column index.
+ * Empty unless every key column is projected and resolvable — the same bar a
+ * write has to clear, so a result that can be saved always has one. The only
+ * identity a row keeps across a re-run: values repeat, and row numbers move. */
+export function resultKeyColumns(input: ResultEditInput): readonly number[] {
+  return singleTableEditContext(input)?.pkIndexes.map((pk) => pk.index) ?? []
+}
+
 export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEditContext | null {
   const single = singleTableEditContext(input)
   if (!input.profileId || input.run.phase !== 'done') return null

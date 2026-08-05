@@ -335,6 +335,44 @@ describe('WorkbenchScreen tab scroll state', () => {
   })
 })
 
+describe('WorkbenchScreen row identity for the results panel', () => {
+  const mount = (resultSets?: unknown[]) => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _ctx: { activeTabId: string | null; activeDbId: string | null }
+      _queries: { runFor(tabId: string | null): unknown }
+      _live: { columns: Record<string, unknown[]> }
+      _resultEditing: { keyColumns(): readonly number[] }
+      _resultKeyColumns(): readonly number[]
+    }
+    workbench._ctx.activeTabId = 'tab-a'
+    workbench._ctx.activeDbId = 'db-a'
+    workbench._live.columns = { 'db-a': [] }
+    // One run object, as the controller holds it: the memo keys on its identity.
+    const run = {
+      phase: 'done',
+      sql: 'select id, name from accounts',
+      result: { columns: ['id', 'name'], rows: [[1, 'Ada']], rowCount: 1, durationMs: 1, ...(resultSets ? { resultSets } : {}) },
+    }
+    workbench._queries.runFor = () => run
+    workbench._resultEditing = { keyColumns: () => [0] }
+    return workbench
+  }
+
+  it('hands the panel the key columns the write path targets rows by', () => {
+    const workbench = mount()
+    expect(workbench._resultKeyColumns()).toEqual([0])
+    // Memoised: the panel reads this every render, and a fresh array each time
+    // would read as changed data.
+    expect(workbench._resultKeyColumns()).toBe(workbench._resultKeyColumns())
+  })
+
+  it('offers nothing for a multi-set run, whose column sources are per set', () => {
+    const workbench = mount([{ columns: ['id'], rows: [[1]], rowCount: 1 }, { columns: ['id', 'name'], rows: [[1, 'Ada']], rowCount: 1 }])
+    expect(workbench._resultKeyColumns()).toEqual([])
+  })
+})
+
 describe('WorkbenchScreen result sorting', () => {
   it('re-runs immediately without opening a confirmation dialog', () => {
     const screen = new WorkbenchScreen()
@@ -579,6 +617,57 @@ describe('WorkbenchScreen staged result changes', () => {
 
     expect(saveChanges).toHaveBeenCalledOnce()
     expect(saveActive).not.toHaveBeenCalled()
+  })
+
+  // ⌘S and the app menu used to call the write controller straight past the
+  // panel, so a save made from the record view or the JSON editor armed no
+  // restore and always came back to the grid — the toolbar button was the only
+  // way in that worked.
+  it('saves staged result changes through the panel, not around it', () => {
+    const screen = new WorkbenchScreen()
+    screen.workspace = { name: 'Workspace', path: '/workspace' }
+    const saveRows = vi.fn(() => true)
+    const saveChanges = vi.fn()
+    const saveActive = vi.fn()
+    const workbench = screen as never as {
+      _resultEditing: { hasPendingChanges(): boolean; saveChanges(): void }
+      _fileOps: { saveActive(): void }
+      renderRoot: { querySelector(selector: string): unknown }
+      _saveActive(): void
+    }
+    workbench._resultEditing = { hasPendingChanges: () => true, saveChanges }
+    workbench._fileOps = { saveActive }
+    workbench.renderRoot = { querySelector: (selector) => (selector === 'results-panel' ? { saveRows } : null) }
+
+    workbench._saveActive()
+
+    expect(saveRows).toHaveBeenCalledOnce()
+    expect(saveChanges).not.toHaveBeenCalled()
+    expect(saveActive).not.toHaveBeenCalled()
+  })
+
+  // The panel decides, because only it can see a JSON document typed but not
+  // yet flushed: nothing staged by that measure still means a save to make.
+  it('saves the file only once the panel says it had nothing to save', () => {
+    const screen = new WorkbenchScreen()
+    screen.workspace = { name: 'Workspace', path: '/workspace' }
+    const saveActive = vi.fn()
+    const workbench = screen as never as {
+      _resultEditing: { hasPendingChanges(): boolean; saveChanges(): void }
+      _fileOps: { saveActive(): void }
+      renderRoot: { querySelector(selector: string): unknown }
+      _saveActive(): void
+    }
+    workbench._resultEditing = { hasPendingChanges: () => false, saveChanges: vi.fn() }
+    workbench._fileOps = { saveActive }
+
+    workbench.renderRoot = { querySelector: () => ({ saveRows: () => true }) }
+    workbench._saveActive()
+    expect(saveActive).not.toHaveBeenCalled()
+
+    workbench.renderRoot = { querySelector: () => ({ saveRows: () => false }) }
+    workbench._saveActive()
+    expect(saveActive).toHaveBeenCalledOnce()
   })
 
   it('confirms before closing a tab with staged result changes', () => {

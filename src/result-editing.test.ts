@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ColumnRef, QueryResult, TableRef } from './electron'
-import { buildEditSpecs, rowKeysForDelete, singleTableEditContext, type ResultEditInput } from './result-editing'
+import { buildEditSpecs, resultKeyColumns, rowKeysForDelete, singleTableEditContext, type ResultEditInput } from './result-editing'
 
 const accounts: TableRef = { schema: 'public', name: 'accounts', kind: 'table' }
 const companies: TableRef = { schema: 'public', name: 'companies', kind: 'table' }
@@ -97,6 +97,29 @@ describe('result edit context', () => {
       ok: true,
       value: [[{ name: 'id', value: 1 }]],
     })
+  })
+
+  it('reports the key columns a row can be recognised by after a re-run', () => {
+    const projected = input({
+      columns: ['name', 'id'],
+      columnSources: [source(accounts, 'name'), source(accounts, 'id')],
+      rows: [['Ada', 1]],
+      rowCount: 1,
+      durationMs: 1,
+    }, 'select name, id from public.accounts')
+    expect(resultKeyColumns(projected)).toEqual([1])
+
+    // No key in the projection is the same bar a write has to clear, so the
+    // panel is told nothing rather than something it could mistake for identity.
+    const keyless = input({
+      columns: ['name'],
+      columnSources: [source(accounts, 'name')],
+      rows: [['Ada']],
+      rowCount: 1,
+      durationMs: 1,
+    }, 'select name from public.accounts')
+    expect(resultKeyColumns(keyless)).toEqual([])
+    expect(singleTableEditContext(keyless)).toBeNull()
   })
 
   it('does not fall back to result column names when metadata says the PK is absent', () => {

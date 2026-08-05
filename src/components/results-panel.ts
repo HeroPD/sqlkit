@@ -50,6 +50,7 @@ export type FollowForeignKeyDetail = { row: number; col: number }
 // would read as "the data changed" to anything memoising on identity.
 const NO_FOREIGN_KEYS: ReadonlyMap<number, ColumnReference> = new Map()
 const NO_JSON_COLUMNS: ReadonlySet<number> = new Set()
+const NO_KEY_COLUMNS: readonly number[] = []
 
 // A header sort button click: re-sort by `column`, or clear the sort (null).
 export type SortColumnDetail = { columnIndex: number; direction: SortDir | null }
@@ -111,6 +112,32 @@ const formatCell = (value: unknown): string => {
 const inputText = (value: CellInput): string => isSqlNull(value) ? '' : value
 const sameInput = (left: CellInput, right: CellInput): boolean =>
   isSqlNull(left) ? isSqlNull(right) : !isSqlNull(right) && left === right
+
+/** A row's primary key, read as text, taken before a save and checked against
+ * what the refresh puts at that index. The key is what the write itself targets
+ * rows by, so it is the one reading that still names the same row on the other
+ * side of a re-run — ordinary values repeat, and row numbers move. */
+type RowProbe = { cols: readonly number[]; text: string }
+
+/** What a save's refresh should put back, and what entitles it to. Only armed
+ * for an edits-only save: an insert or a delete renumbers every row after it,
+ * and staged drafts hold display rows of their own, so nothing addressed by row
+ * index means the same thing on the other side of one. */
+type KeepAfterSave = {
+  tabId: string | null
+  columns: readonly string[]
+  sel: CellRect | null
+  record: { ref: RowRef; col: number } | null
+  json: { ref: RowRef; col: number } | null
+  probes: Map<number, RowProbe>
+}
+
+type EditChange = { event: string; detail: Record<string, unknown> }
+
+// Control characters delimit: a key column can hold any printable text, so a
+// visible separator would let two different keys read the same.
+const probeTextOf = (values: readonly unknown[]): string =>
+  values.map((value) => (value === null || value === undefined || isSqlNull(value) ? '\u0000' : formatCell(value))).join('\u0001')
 
 const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const isWordChar = (char: string | undefined) => char !== undefined && /[\p{L}\p{N}_]/u.test(char)
@@ -199,6 +226,18 @@ export class ResultsPanel extends LitElement {
    * Their cells open in the JSON editor instead of the one-line inline input. */
   @property({ attribute: false })
   jsonColumns: ReadonlySet<number> = NO_JSON_COLUMNS
+
+  /** Result columns holding the row's primary key. The one thing that still
+   * names a row after a save re-runs the query — row numbers move, and values
+   * repeat. Empty when the write path could not target the rows either. */
+  @property({ attribute: false })
+  keyColumns: readonly number[] = NO_KEY_COLUMNS
+
+  /** The tab whose result trail is on screen. A save's refresh lands in the tab
+   * it was made from and nowhere else, so this is what scopes the view restore
+   * that save armed — two tabs on one table would otherwise claim each other's. */
+  @property({ attribute: false })
+  tabId: string | null = null
 
   /** When true, double-clicking a cell opens inline editing for text selection/copy.
    * The owner may reject impossible writes after a changed value is submitted. */
@@ -343,15 +382,20 @@ export class ResultsPanel extends LitElement {
   // both axes: a wide result is as easily scrolled sideways as down.
   private _gridScroll = { top: 0, left: 0 }
   private _restoreGridScroll = false
-  // Column shape of the result a save was started from. A successful save
-  // re-runs the tab's query, and landing back at row 1 loses the row the user
-  // was working on — the columns tell a refresh apart from a new query.
-  private _keepScrollColumns: readonly string[] | null = null
+  // What the result a save was started from was showing. A successful save
+  // re-runs the tab's query, and coming back to the grid at row 1 loses both the
+  // row the user was working on and the view they were working in — the columns
+  // tell that refresh apart from a new query, and the probes tell whether the
+  // rows it brought back are still numbered the way they were.
+  private _keepAfterSave: KeepAfterSave | null = null
   // Where the reader was in each result this tab has shown. The trail keeps its
   // entries by identity, so following a foreign key and coming back can return
   // to the rows (and the cell) the user left instead of the top. Weak so a
   // dropped result takes its bookmark with it.
-  private _viewStates = new WeakMap<QueryResult, { scroll: { top: number; left: number }; sel: CellRect | null }>()
+  private _viewStates = new WeakMap<
+    QueryResult,
+    { scroll: { top: number; left: number }; sel: CellRect | null; record: { ref: RowRef; col: number } | null }
+  >()
   private _shownRunResult: QueryResult | null = null
 
   // Widths measured once per result, keyed by session so appends don't reflow.
@@ -385,8 +429,22 @@ export class ResultsPanel extends LitElement {
   // An FK follow removes the focused button while its destination query runs.
   // Keep that one-shot intent until the new table actually exists.
   private _focusLandedResultPending = false
-  // Focus the record view after switching away from the grid table.
-  private _recordFocusPending = false
+  // Focus the record view after switching away from the grid table. A column
+  // number puts the cursor back in that field instead — where a save made from
+  // the record view left the user typing.
+  private _recordFocusPending: number | 'view' | null = null
+
+  // The record view and the JSON editor each show one row of one result set, so
+  // whatever takes the body over next leaves them pointing at a row that is no
+  // longer there — the closed document Forward holds included.
+  private _dropCellViews() {
+    this._record = null
+    this._jsonCell = null
+    this._jsonDraft = ''
+    this._jsonProblem = null
+    this._jsonProblemShown = false
+    this._jsonForward = null
+  }
 
   private _shownResult(): QueryResult | null {
     if (this.run.phase !== 'done') return null
@@ -409,7 +467,7 @@ export class ResultsPanel extends LitElement {
     this._findCache = null
     this._sel = null
     this._editing = null
-    this._record = null
+    this._dropCellViews()
     this._displayCache = null
     this._widthsCache = null
     // Dragged widths belong to the last set (the one persistence tracks); other
@@ -418,6 +476,8 @@ export class ResultsPanel extends LitElement {
     this._colLayout = null
     this._scrollTop = 0
     this._resetScroll = true
+    // A restore armed for the set being left would outrank the reset above.
+    this._restoreGridScroll = false
     this.requestUpdate()
     requestAnimationFrame(() => this._maybeLoadMore())
   }
@@ -472,7 +532,7 @@ export class ResultsPanel extends LitElement {
     // back, which is what makes returning from a followed foreign key land on
     // the row the user left.
     if (this._shownRunResult) {
-      this._viewStates.set(this._shownRunResult, { scroll: this._currentGridScroll(), sel: this._sel })
+      this._viewStates.set(this._shownRunResult, { scroll: this._currentGridScroll(), sel: this._sel, record: this._record })
     }
     this._shownRunResult = this.run.phase === 'done' ? this.run.result : null
     // The popover shows the query behind the result that just went away; left
@@ -492,41 +552,50 @@ export class ResultsPanel extends LitElement {
         ? { r0: 0, c0: 0, r1: 0, c1: 0 }
         : null
     this._editing = null
-    this._record = null
-    // The open cell belongs to the result that just went away; a trail step or
-    // a re-run would leave the editor pointing at a row that no longer exists.
-    this._jsonCell = null
-    this._jsonDraft = ''
-    this._jsonProblem = null
-    this._jsonProblemShown = false
-    this._jsonForward = null
+    this._dropCellViews()
     // The refresh a save triggers keeps the same columns, so the rows the user
     // was working on are still there — stay where they were rather than
-    // snapping to row 1. Any other result (a new query, a trail step) starts at
-    // the top as before. Only a landed result answers this: the refresh passes
-    // through `running` first, and judging the flag there would spend it before
-    // the rows arrive.
+    // snapping to row 1 of the grid. Any other result (a new query, a trail
+    // step) starts at the top as before. Only a landed result answers this: the
+    // refresh passes through `running` first, and judging the flag there would
+    // spend it before the rows arrive.
     if (this.run.phase === 'done') {
       const bookmark = this._viewStates.get(this.run.result)
       if (bookmark) {
-        this._keepScrollColumns = null
+        this._keepAfterSave = null
         this._sel = bookmark.sel
+        const record = bookmark.record
+        if (record && this._stillShown(record.ref, shown)) this._openRecord(record.ref, record.col)
         this._gridScroll = bookmark.scroll
         this._restoreGridScroll = true
         return
       }
-      const keepScroll =
-        this._keepScrollColumns !== null &&
-        shown?.columns.length === this._keepScrollColumns.length &&
-        shown.columns.every((column, index) => column === this._keepScrollColumns?.[index])
-      this._keepScrollColumns = null
-      if (keepScroll) {
+      const keep = this._keepAfterSave
+      this._keepAfterSave = null
+      if (keep && keep.tabId === this.tabId && this._sameColumns(shown, keep.columns)) {
+        // Same rows, so put back what the user was looking at and not just how
+        // far down it was — but only onto rows that still probe as the ones
+        // they were. Where that can't be shown, the grid is the honest answer.
+        const rowHeld = (row: number) => this._sameRow(row, keep, shown)
+        // One row, by construction (see KeepAfterSave), so one row to vouch for.
+        if (keep.sel && keep.sel.r1 < this._display().order.length && rowHeld(keep.sel.r1)) this._sel = keep.sel
+        if (keep.record?.ref.kind === 'result' && rowHeld(keep.record.ref.row)) {
+          this._openRecord(keep.record.ref, keep.record.col, keep.record.col)
+        }
+        if (keep.json?.ref.kind === 'result' && rowHeld(keep.json.ref.row)) this._reopenSavedJson(keep.json.ref, keep.json.col)
         this._restoreGridScroll = true
         return
       }
     }
     this._scrollTop = 0
     this._resetScroll = true
+    // A restore armed for the result being left would outrank the reset above.
+    this._restoreGridScroll = false
+    // Only the refresh's own `running` earns the wait. Anything else arriving
+    // here says the result the save armed a restore for is not coming — it
+    // errored, it was cancelled, or another tab's run took the panel over — and
+    // a token left behind would be spent on whatever lands next.
+    if (this.run.phase !== 'running') this._keepAfterSave = null
   }
 
   firstUpdated() {
@@ -609,11 +678,15 @@ export class ResultsPanel extends LitElement {
         this._focusLandedResultPending = false
       }
     }
-    if (this._recordFocusPending) {
+    if (this._recordFocusPending !== null) {
       const record = this.shadowRoot?.querySelector<HTMLElement>('.record-view')
       if (record) {
-        this._recordFocusPending = false
-        record.focus()
+        const field = this._recordFocusPending
+        this._recordFocusPending = null
+        const target = typeof field === 'number'
+          ? record.querySelector<HTMLTextAreaElement>(`textarea.record-value[data-col="${field}"]`)
+          : null
+        ;(target ?? record).focus()
       }
     }
     if (this._filterFocusPending) {
@@ -656,10 +729,11 @@ export class ResultsPanel extends LitElement {
     this.requestUpdate()
   }
 
-  // The grid's current offsets, or the ones kept when the JSON editor took the
-  // body over (it scrolls the body to the top, so reading it then is useless).
+  // The grid's current offsets, or the ones kept when the JSON editor or the
+  // record view took the body over (the grid leaves the DOM, so the body
+  // collapses and the offset is clamped away — reading it then is useless).
   private _currentGridScroll() {
-    if (this._jsonCell) return this._gridScroll
+    if (this._jsonCell || this._record) return this._gridScroll
     const body = this._bodyEl()
     return body ? { top: body.scrollTop, left: body.scrollLeft } : { top: this._scrollTop, left: 0 }
   }
@@ -921,37 +995,114 @@ export class ResultsPanel extends LitElement {
     return targets
   }
 
-  private _saveRows = () => {
+  /** Saves the staged changes, as the toolbar's Save button does. ⌘S and the
+   * app menu come through here rather than calling the write controller
+   * straight: the panel is the only thing that knows what is on screen, so it
+   * has to flush the JSON editor and arm the view restore before the save goes
+   * out. Going around it lands the refresh back in the grid every time.
+   *
+   * Answers whether the panel had a save to make — an unflushed JSON document
+   * counts, and nothing outside this component can see one — so ⌘S knows
+   * whether the keystroke is spoken for or belongs to the file. */
+  saveRows(): boolean {
+    return this._saveRows()
+  }
+
+  private _saveRows = (): boolean => {
     // The JSON editor holds its text until a flush point, and this is one —
     // otherwise ⌘S while typing would save everything except what is on screen.
     // What the flush just staged is in the owner's state but not yet back in
     // `edits`, so a save driven only by the editor has to count it directly:
     // asking _hasPending() alone would silently need a second click.
+    // Same for the cell being typed into: the inline input and the record field
+    // hand their text over on blur, and a keyboard save never blurs anything.
+    // Without this, ⌘S mid-edit saves every cell except the one under the caret
+    // — or, with nothing else staged, decides there is no save to make at all
+    // and writes the file instead.
+    let pending = this._hasPending()
+    const committed = this._flushOpenEdit()
+    if (committed !== null) pending = committed
     const flushed = this._flushJson()
+    if (flushed !== null) pending = flushed
     // A document the parser rejects is never staged. The strip under the editor
     // already says what is wrong; put the cursor on it so it is findable.
-    if (!flushed && this._jsonCell && this._jsonDirty() && jsonError(this._jsonDraft.trim())) {
+    if (flushed === null && this._jsonCell && this._jsonDirty() && jsonError(this._jsonDraft.trim())) {
       this._revealJsonError()
-      return
+      // Refused, but answered: the error strip is what the keystroke produced,
+      // and falling through to save the file behind it would be a non sequitur.
+      return true
     }
-    if (!flushed && !this._hasPending()) return
+    if (!pending) return false
     // A save that lands re-runs the query; remember where to come back to. With
     // the editor open the body shows it, so the grid's position is the one
     // captured when it opened.
     if (!this._jsonCell) this._gridScroll = this._currentGridScroll()
-    this._keepScrollColumns = this._shownResult()?.columns ?? null
+    this._keepAfterSave = this._armViewKeep()
     this.dispatchEvent(new CustomEvent('save-rows', { bubbles: true, composed: true }))
     // Keyboard activation (Tab + Enter) leaves focus on the button, and the
     // review dialog hands focus back to whatever held it — put it in the editor
     // first, so cancelling the dialog returns the user to the document. Mouse
     // clicks never focus the button (see _onHeadPointerDown), so this is a no-op there.
     if (this._jsonCell) this.shadowRoot?.querySelector('json-cell-editor')?.focusEditor()
+    return true
   }
 
-  /** The save this panel armed a scroll-keep for never ran — the review was
-   * cancelled — so the next result must not inherit the stale restore. */
-  saveNotRun() {
-    this._keepScrollColumns = null
+  // Commits whichever field is mid-edit: the inline cell input, or the record
+  // field holding focus. Only one can be open at a time, and both stage on blur
+  // — which a save from the keyboard never triggers.
+  private _flushOpenEdit(): boolean | null {
+    const input = this._editing ? this.shadowRoot?.querySelector<HTMLInputElement>('.cell-edit') : null
+    if (input) return this._commitEdit(input)
+    const focused = this.shadowRoot?.activeElement
+    if (this._record && focused instanceof HTMLTextAreaElement && focused.classList.contains('record-value')) {
+      return this._commitRecordEdit(focused)
+    }
+    return null
+  }
+
+  /** No result is coming for the view-keep this panel armed: the review was
+   * cancelled, or the save committed but its refresh never started. Either way
+   * the next result to arrive must not inherit the stale restore. */
+  refreshNotComing() {
+    this._keepAfterSave = null
+  }
+
+  // What the refresh should put the user back into. Row-addressed state only
+  // survives an edits-only save (see KeepAfterSave), and each row it names
+  // carries a probe the refresh has to satisfy before anything reopens on it.
+  private _armViewKeep(): KeepAfterSave | null {
+    const columns = this._shownResult()?.columns
+    if (!columns) return null
+    const rowsHeld = !this.drafts.length && !this.pendingDeletes.size
+    const sel = this._sel
+    const keep: KeepAfterSave = {
+      tabId: this.tabId,
+      columns,
+      // Collapsed to the focus cell, the one row a probe can speak for. A range
+      // put back around it could have taken in rows that moved while its corner
+      // stayed put — and a later fill or delete would act on them unseen.
+      sel: rowsHeld && sel ? { r0: sel.r1, c0: sel.c1, r1: sel.r1, c1: sel.c1 } : null,
+      record: rowsHeld ? this._record : null,
+      json: rowsHeld && this._jsonCell ? { ref: this._jsonCell.ref, col: this._jsonCell.col } : null,
+      probes: new Map(),
+    }
+    const rowOf = (ref: RowRef | undefined) => (ref?.kind === 'result' ? ref.row : null)
+    for (const row of [keep.sel?.r1 ?? null, rowOf(keep.record?.ref), rowOf(keep.json?.ref)]) {
+      if (row === null || keep.probes.has(row)) continue
+      const probe = this._rowProbe(row)
+      if (probe) keep.probes.set(row, probe)
+    }
+    return keep
+  }
+
+  // The key this row will carry once the save lands: a key column being
+  // rewritten is recognised by the value it is about to hold, not the one it is
+  // replacing. Null when the result has no key to go on, which is also the case
+  // where the write path refuses to target the rows at all.
+  private _rowProbe(row: number): RowProbe | null {
+    const cols = this.keyColumns
+    if (!cols.length || !this._shownResult()?.rows[row]) return null
+    return { cols, text: probeTextOf(cols.map((col) => this._recordValue({ kind: 'result', row }, col))) }
   }
 
   private _hasPending() {
@@ -1252,7 +1403,7 @@ export class ResultsPanel extends LitElement {
 
   private _closeFind = () => {
     this._dismissFind()
-    if (this._record) this._recordFocusPending = true
+    if (this._record) this._recordFocusPending = 'view'
     else this._focusGridPending = true
   }
 
@@ -1888,7 +2039,7 @@ export class ResultsPanel extends LitElement {
       }))
     }
     if (action === 'export') this._exportOpen = true
-    if (action === 'view-record' && at.row >= 0 && at.col >= 0) this._openRecord({ kind: 'result', row: at.row }, at.col)
+    if (action === 'view-record' && at.row >= 0 && at.col >= 0) this._enterRecord({ kind: 'result', row: at.row }, at.col)
     // Edit opens the inline editor on the clicked cell; if it's inside a
     // multi-cell selection, the committed value fills the whole selection.
     if (action === 'edit-cell' && at.row >= 0 && at.col >= 0) this._beginEdit({ kind: 'result', row: at.row }, at.col, null)
@@ -2146,35 +2297,38 @@ export class ResultsPanel extends LitElement {
     this._commitRecordEdit(event.target as HTMLTextAreaElement)
   }
 
-  private _commitRecordEdit(input: HTMLTextAreaElement) {
+  /** Whether pending work remains after committing this field. */
+  private _commitRecordEdit(input: HTMLTextAreaElement): boolean {
     const record = this._record
     const col = Number(input.dataset.col)
-    if (!record || !Number.isFinite(col)) return
+    if (!record || !Number.isFinite(col)) return this._hasPending()
     const value = input.value
     if (record.ref.kind === 'draft') {
       const current = this.drafts[record.ref.index]?.cells[col]
       // A NULL cell renders as empty text; leaving it empty must not silently
       // convert NULL to ''. The '' toolbar action sets an empty string explicitly.
-      if ((current === null || current === undefined || isSqlNull(current)) && value === '') return
+      if ((current === null || current === undefined || isSqlNull(current)) && value === '') return this._hasPending()
       if (current === null || current === undefined || !sameInput(value, current)) {
-        this.dispatchEvent(new CustomEvent('draft-edit', { detail: { index: record.ref.index, col, value }, bubbles: true, composed: true }))
+        const change = { event: 'draft-edit', detail: { index: record.ref.index, col, value } }
+        this.dispatchEvent(new CustomEvent(change.event, { detail: change.detail, bubbles: true, composed: true }))
+        return this._pendingAfterChanges([change])
       }
-      return
+      return this._hasPending()
     }
-    if (!this.editable || !this._canEditShownResult() || this.run.phase !== 'done') return
+    if (!this.editable || !this._canEditShownResult() || this.run.phase !== 'done') return this._hasPending()
     const original = this._shownResult()?.rows[record.ref.row]?.[col]
     const originalInput: CellInput = original === null || original === undefined ? SQL_NULL : formatCell(original)
     const key = `${record.ref.row}:${col}`
     const pending = this.edits.get(key)
     const current = pending ?? originalInput
-    if (sameInput(value, current)) return
+    if (sameInput(value, current)) return this._hasPending()
     // Same NULL-renders-empty rule for result cells: blur alone stages nothing.
-    if (value === '' && isSqlNull(current)) return
-    if (pending !== undefined && sameInput(value, originalInput)) {
-      this.dispatchEvent(new CustomEvent('cell-edit-clear', { detail: { row: record.ref.row, col }, bubbles: true, composed: true }))
-    } else {
-      this.dispatchEvent(new CustomEvent('cell-edit', { detail: { row: record.ref.row, col, value }, bubbles: true, composed: true }))
-    }
+    if (value === '' && isSqlNull(current)) return this._hasPending()
+    const change = pending !== undefined && sameInput(value, originalInput)
+      ? { event: 'cell-edit-clear', detail: { row: record.ref.row, col } }
+      : { event: 'cell-edit', detail: { row: record.ref.row, col, value } }
+    this.dispatchEvent(new CustomEvent(change.event, { detail: change.detail, bubbles: true, composed: true }))
+    return this._pendingAfterChanges([change])
   }
 
   // --- cell selection ---------------------------------------------------------
@@ -2290,13 +2444,54 @@ export class ResultsPanel extends LitElement {
   private _openRecordAtSelection() {
     if (!this._sel) return
     const ref = this._refAt(this._sel.r1)
-    if (ref) this._openRecord(ref, this._sel.c1)
+    if (ref) this._enterRecord(ref, this._sel.c1)
   }
 
-  private _openRecord(ref: RowRef, col: number) {
+  // Leaving the grid for the record view: keep where it was scrolled to, the
+  // way opening the JSON editor does, so closing the view lands on the same
+  // rows instead of at the top.
+  private _enterRecord(ref: RowRef, col: number) {
+    this._gridScroll = this._currentGridScroll()
+    this._openRecord(ref, col)
+  }
+
+  private _openRecord(ref: RowRef, col: number, focus: number | 'view' = 'view') {
     this._record = { ref, col }
     if (this._findOpen) this._findIndex = -1
-    this._recordFocusPending = true
+    this._recordFocusPending = focus
+  }
+
+  /** Whether a remembered row is still a row of the result that just landed.
+   * Drafts never are: a save turns them into rows whose index nothing here can
+   * predict, and a re-run drops them from the numbering entirely. */
+  private _stillShown(ref: RowRef, shown: QueryResult | null): boolean {
+    return ref.kind === 'result' && ref.row < (shown?.rows.length ?? 0)
+  }
+
+  /** Whether a row index still addresses the row it did before the save. An
+   * index alone proves nothing: an edit to an ORDER BY column moves its row,
+   * and a browse query carries no ORDER BY at all, so Postgres is free to hand
+   * an updated row back in a different place. Matching the key is the proof —
+   * two rows cannot answer to it, so there is nothing here to mistake. */
+  private _sameRow(row: number, keep: KeepAfterSave, shown: QueryResult | null): boolean {
+    const probe = keep.probes.get(row)
+    const cells = shown?.rows[row]
+    if (!probe || !cells) return false
+    return probeTextOf(probe.cols.map((col) => cells[col])) === probe.text
+  }
+
+  private _sameColumns(shown: QueryResult | null, columns: readonly string[]) {
+    return shown?.columns.length === columns.length && shown.columns.every((column, index) => column === columns[index])
+  }
+
+  // Puts the editor back on the cell a save was made from, showing the value
+  // that save wrote — what reopening the cell by hand would show. Only reached
+  // with a clean document: _saveRows refuses to run while the draft is unstaged.
+  private _reopenSavedJson(ref: RowRef, col: number) {
+    this._jsonForward = null
+    this._jsonCell = { ref, col, original: '' }
+    this._setJsonText(this._jsonCell, this._editCellText(ref, col))
+    this._jsonFocusPending = true
   }
 
   private _toggleRecordView = () => {
@@ -2308,6 +2503,7 @@ export class ResultsPanel extends LitElement {
     this._record = null
     if (this._findOpen) this._findIndex = -1
     this._focusGridPending = true
+    this._restoreGridScroll = true
   }
 
   private _onRecordKeydown = (event: KeyboardEvent) => {
@@ -2638,18 +2834,18 @@ export class ResultsPanel extends LitElement {
   // Stages the draft as one minified line. Called at flush points only — blur,
   // close, and just before a save — so a session of typing lands as a single
   // undoable step rather than one per keystroke.
-  private _flushJson(): boolean {
+  private _flushJson(): boolean | null {
     const open = this._jsonCell
-    if (!open || !this._jsonDirty()) return false
+    if (!open || !this._jsonDirty()) return null
     const text = this._jsonDraft.trim()
     // Invalid text is never staged: the editor keeps showing it with the parse
     // error until it is valid, so a save can only ever write a real document.
-    if (!text || jsonError(text)) return false
+    if (!text || jsonError(text)) return null
     const change = this._classifyEdit(open.ref, open.col, minifyJson(text))
     if (change) this.dispatchEvent(new CustomEvent(change.event, { detail: change.detail, bubbles: true, composed: true }))
     // The staged value is now what the editor holds, so it is no longer dirty.
     this._jsonCell = { ...open, original: this._jsonDraft }
-    return true
+    return this._pendingAfterChanges(change ? [change] : [])
   }
 
   private _onEditKeydown = (event: KeyboardEvent) => {
@@ -2676,22 +2872,28 @@ export class ResultsPanel extends LitElement {
   // Commits the inline edit onto the snapshotted selection. A single cell keeps
   // the per-cell events; a multi-cell fill collapses into one staged step so ⌘Z
   // reverses the whole gesture (and it doesn't clone the edit map once per cell).
-  private _commitEdit(input: HTMLInputElement) {
+  /** Whether pending work remains after committing this field. The owner
+   * receives the events synchronously, but the updated properties do not render
+   * back before saveRows() must decide whether the keystroke belongs to rows. */
+  private _commitEdit(input: HTMLInputElement): boolean {
     const editing = this._editing
     this._editing = null
-    if (!editing) return
+    if (!editing) return this._hasPending()
     const value = input.value
-    if (editing.seed === null && value === this._editCellText(editing.ref, editing.col)) return
+    if (editing.seed === null && value === this._editCellText(editing.ref, editing.col)) return this._hasPending()
     const targets = this._editTargets(editing)
-    if (targets.length > 1) return this._commitFill(targets, value)
+    if (targets.length > 1) {
+      return this._commitFill(targets, value)
+    }
     const target = targets[0]
     const change = target && this._classifyEdit(target.ref, target.col, value)
     if (change) this.dispatchEvent(new CustomEvent(change.event, { detail: change.detail, bubbles: true, composed: true }))
+    return this._pendingAfterChanges(change ? [change] : [])
   }
 
   // What a value does to one cell: stage a draft cell, stage/clear a result edit,
   // or nothing when it matches the current value.
-  private _classifyEdit(ref: RowRef, col: number, value: CellInput | null): { event: string; detail: Record<string, unknown> } | null {
+  private _classifyEdit(ref: RowRef, col: number, value: CellInput | null): EditChange | null {
     if (ref.kind === 'draft') {
       // null = "use default" (column omitted from INSERT); distinct from SQL NULL.
       const current = this.drafts[ref.index]?.cells[col] ?? null
@@ -2712,8 +2914,8 @@ export class ResultsPanel extends LitElement {
 
   // Bundles every changed cell of a fill into one event so the owner stages them
   // in a single undoable step.
-  private _commitFill(targets: Array<{ ref: RowRef; col: number }>, value: CellInput) {
-    this._commitValues(targets.map((target) => ({ ...target, value })))
+  private _commitFill(targets: Array<{ ref: RowRef; col: number }>, value: CellInput): boolean {
+    return this._commitValues(targets.map((target) => ({ ...target, value })))
   }
 
   // Returns only staged result edits inside the current selection. Draft cells
@@ -2737,13 +2939,15 @@ export class ResultsPanel extends LitElement {
     }))
   }
 
-  private _commitValues(targets: Array<{ ref: RowRef; col: number; value: CellInput | null }>) {
+  private _commitValues(targets: Array<{ ref: RowRef; col: number; value: CellInput | null }>): boolean {
+    const changes: EditChange[] = []
     const edits: Array<{ row: number; col: number; value: CellInput }> = []
     const clears: Array<{ row: number; col: number }> = []
     const draftCells: Array<{ index: number; col: number; value: CellInput | null }> = []
     for (const { ref, col, value } of targets) {
       const change = this._classifyEdit(ref, col, value)
       if (!change) continue
+      changes.push(change)
       if (change.event === 'draft-edit') draftCells.push(change.detail as { index: number; col: number; value: CellInput | null })
       else if (change.event === 'cell-edit-clear') clears.push(change.detail as { row: number; col: number })
       else edits.push(change.detail as { row: number; col: number; value: CellInput })
@@ -2751,6 +2955,22 @@ export class ResultsPanel extends LitElement {
     if (edits.length || clears.length || draftCells.length) {
       this.dispatchEvent(new CustomEvent('cells-fill', { detail: { edits, clears, draftCells }, bubbles: true, composed: true }))
     }
+    return this._pendingAfterChanges(changes)
+  }
+
+  // Projects the staged state after events emitted in this call. DOM events
+  // update the owner immediately, but this component still has its pre-event
+  // properties until Lit renders again.
+  private _pendingAfterChanges(changes: readonly EditChange[]): boolean {
+    const edits = new Set(this.edits.keys())
+    for (const change of changes) {
+      if (change.event !== 'cell-edit' && change.event !== 'cell-edit-clear') continue
+      const { row, col } = change.detail as { row: number; col: number }
+      const key = `${row}:${col}`
+      if (change.event === 'cell-edit-clear') edits.delete(key)
+      else edits.add(key)
+    }
+    return this.drafts.length > 0 || this.pendingDeletes.size > 0 || edits.size > 0
   }
 
   private _editCellText(ref: RowRef, col: number): string {

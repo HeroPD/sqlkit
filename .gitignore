@@ -33,3 +33,5 @@ design/
 *.sw?
 release
 build/*.iconset/
+
+things_to_resolve.txt

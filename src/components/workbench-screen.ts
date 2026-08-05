@@ -127,6 +127,7 @@ const BROWSE_ROW_LIMIT = 200
 // same reference every time.
 const NO_FOREIGN_KEYS: ReadonlyMap<number, ColumnReference> = new Map()
 const NO_JSON_COLUMNS: ReadonlySet<number> = new Set()
+const NO_KEY_COLUMNS: readonly number[] = []
 
 const COMMANDS: ReadonlyArray<{ id: string; label: string; keybind?: string }> = [
   { id: 'new-query', label: t('action.newQuery'), keybind: mod('N') },
@@ -317,7 +318,8 @@ export class WorkbenchScreen extends LitElement {
     tables: () => (this._ctx.activeDbId ? (this._live.tables[this._ctx.activeDbId] ?? []) : []),
     columns: () => (this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? []) : []),
     dialogs: this._dialogs,
-    runSql: (sql) => this._runSql(sql),
+    refreshResult: () => this._refreshSavedResult(),
+    refreshNotComing: () => this.renderRoot.querySelector('results-panel')?.refreshNotComing(),
     drafts: () => this._queries.draftsFor(this._ctx.activeTabId),
     dropDrafts: (tabId, indexes) => this._queries.dropDrafts(tabId, indexes),
     edits: () => this._queries.editsList(this._ctx.activeTabId),
@@ -342,6 +344,8 @@ export class WorkbenchScreen extends LitElement {
   private _foreignKeyCache: { result: QueryResult; columns: ColumnRef[]; map: ReadonlyMap<number, ColumnReference> } | null = null
 
   private _jsonColumnCache: { result: QueryResult; columns: ColumnRef[]; set: ReadonlySet<number> } | null = null
+
+  private _keyColumnCache: { result: QueryResult; columns: ColumnRef[]; keys: readonly number[] } | null = null
 
   private _unsubscribeMenu: (() => void) | null = null
 
@@ -377,7 +381,7 @@ export class WorkbenchScreen extends LitElement {
         if (this._ctx.activeTabId) this._requestCloseTab(this._ctx.activeTabId)
         break
       case 'refresh-results':
-        this._refreshResults()
+        void this._refreshResults()
         break
       default:
         // Selection menu: the command runs against the editor of the active tab,
@@ -392,13 +396,25 @@ export class WorkbenchScreen extends LitElement {
 
   // ⌘R: re-run the active tab's current result query, keeping its filter and sort.
   // No-op until a query has produced a result.
-  private _refreshResults() {
+  private async _refreshResults() {
     const tabId = this._ctx.activeTabId
     const run = this._queries.runFor(tabId)
     if (run.phase !== 'done' || !run.sql) return
     // Carry the run's own table: a followed result re-run without it would fall
     // back to the tab's table and retarget (or disarm) grid editing.
-    void this._runSql(run.sql, this._queries.sortFor(tabId), run.params, this._queries.filterFor(tabId), undefined, run.table ? { table: run.table } : undefined)
+    await this._runSql(run.sql, this._queries.sortFor(tabId), run.params, this._queries.filterFor(tabId), undefined, run.table ? { table: run.table } : undefined)
+  }
+
+  /** The refresh a committed save triggers: the same re-run as ⌘R, reporting
+   * whether a result actually landed. _runSql has several ways to return before
+   * it starts — a parameter prompt the user dismisses is the reachable one —
+   * and none of them move the run, so nothing else can tell the panel that the
+   * restore it armed has nothing to wait for. */
+  private async _refreshSavedResult(): Promise<boolean> {
+    const tabId = this._ctx.activeTabId
+    const before = this._queries.runFor(tabId)
+    await this._refreshResults()
+    return this._queries.runFor(tabId) !== before
   }
 
   private _saveActive() {
@@ -407,6 +423,12 @@ export class WorkbenchScreen extends LitElement {
       this.renderRoot.querySelector('table-inspect')?.save()
       return
     }
+    // The panel answers first, through the same call its Save button makes, so
+    // ⌘S and the button cannot drift: it flushes the JSON editor and arms the
+    // restore that keeps the reader in the view they saved from. It is also the
+    // only one that can see an unflushed JSON document, which is why it decides
+    // whether there was a save to make rather than being asked beforehand.
+    if (this.renderRoot?.querySelector('results-panel')?.saveRows()) return
     if (this._resultEditing.hasPendingChanges()) {
       this._resultEditing.saveChanges()
       return
@@ -551,12 +573,12 @@ export class WorkbenchScreen extends LitElement {
 
     if (key === 'f5' && !hasMod && !event.altKey && !event.shiftKey) {
       event.preventDefault()
-      this._refreshResults()
+      void this._refreshResults()
       return
     }
     if (key === 'r' && hasMod && !event.altKey && !event.shiftKey) {
       event.preventDefault()
-      this._refreshResults()
+      void this._refreshResults()
       return
     }
 
@@ -866,7 +888,7 @@ export class WorkbenchScreen extends LitElement {
     }
     if (this._activeActionSurface === 'results' && run.phase === 'done' && run.sql) {
       const unstagedJson = this.renderRoot.querySelector('results-panel')?.hasUnstagedJson() ?? false
-      if (!this._resultEditing.hasPendingChanges() && !unstagedJson) this._refreshResults()
+      if (!this._resultEditing.hasPendingChanges() && !unstagedJson) void this._refreshResults()
       return
     }
     this.renderRoot.querySelector('sql-editor')?.runExplicitQuery()
@@ -1139,7 +1161,7 @@ export class WorkbenchScreen extends LitElement {
                 this._dialogs.review = null
                 // A cancelled save never refreshes; the panel must not keep
                 // waiting to restore its scroll into a later, unrelated result.
-                this.renderRoot.querySelector('results-panel')?.saveNotRun()
+                this.renderRoot.querySelector('results-panel')?.refreshNotComing()
               }}
               @dialog-done=${() => (this._dialogs.review = null)}
             ></review-query-dialog>
@@ -1445,6 +1467,8 @@ export class WorkbenchScreen extends LitElement {
             .canGoForward=${this._queries.canGoForward(this._ctx.activeTabId)}
             .foreignKeys=${this._resultForeignKeys()}
             .jsonColumns=${this._resultJsonColumns()}
+            .keyColumns=${this._resultKeyColumns()}
+            .tabId=${this._ctx.activeTabId}
             .editable=${this._resultEditing.hasResultCells()}
             .rowEditable=${this._resultEditing.rowEditable()}
             .insertTable=${this._resultEditing.resultTable()}
@@ -1961,6 +1985,21 @@ export class WorkbenchScreen extends LitElement {
     const set = jsonColumns(run.result, columns)
     this._jsonColumnCache = { result: run.result, columns, set }
     return set
+  }
+
+  /** Result columns carrying the row's primary key, so the panel can tell a row
+   * apart from the one that took its index after a save re-ran the query.
+   * Memoised on the same identities, and silent for a multi-set run for the
+   * same reason: column sources are per set. */
+  private _resultKeyColumns(): readonly number[] {
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    const columns = this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? []) : []
+    if (run.phase !== 'done' || (run.result.resultSets?.length ?? 0) > 1) return NO_KEY_COLUMNS
+    const cached = this._keyColumnCache
+    if (cached && cached.result === run.result && cached.columns === columns) return cached.keys
+    const keys = this._resultEditing.keyColumns()
+    this._keyColumnCache = { result: run.result, columns, keys }
+    return keys
   }
 
   // Follows one cell's foreign key: opens the referenced row as a new trail entry

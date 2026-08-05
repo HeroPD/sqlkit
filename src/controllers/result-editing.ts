@@ -1,4 +1,3 @@
-import { firstStatement } from '../codemirror/run-query'
 import type { QueryRun } from '../components/results-panel'
 import type { SqlTabState } from './contexts'
 import type { DialogsController } from './dialogs'
@@ -9,6 +8,7 @@ import {
   buildInsertRows,
   buildPendingUpdate,
   hasResultCells,
+  resultKeyColumns,
   resultSourceTable,
   rowKeysForDelete,
   singleTableEditContext,
@@ -26,7 +26,12 @@ type Deps = {
   tables: () => TableRef[]
   columns: () => ColumnRef[]
   dialogs: DialogsController
-  runSql: (sql: string) => Promise<void>
+  /** Re-runs what produced the shown result — same SQL, sort, parameters and
+   * filter — reporting whether a result actually landed. False when the refresh
+   * never started, which a dismissed parameter prompt is enough to cause. */
+  refreshResult: () => Promise<boolean>
+  /** Tells the panel the refresh it armed a view restore for is not coming. */
+  refreshNotComing: () => void
   // The active tab's staged new rows and cell edits, and how to clear them once saved.
   drafts: () => DraftRow[]
   dropDrafts: (tabId: string, indexes: number[]) => void
@@ -60,6 +65,13 @@ export class ResultEditingController {
    * copied/exported as. Null for a join or expression-only query. */
   resultTable() {
     return resultSourceTable(this.input())
+  }
+
+  /** Result columns carrying the primary key of the shown rows. The panel uses
+   * them to recognise a row across the re-run a save triggers; the write path
+   * already refuses anything they come back empty for. */
+  keyColumns() {
+    return resultKeyColumns(this.input())
   }
 
   /** Whether there is anything staged to save (cell edits, new rows, or deletes). */
@@ -110,8 +122,7 @@ export class ResultEditingController {
     const childDb = this.deps.activeChildDb()
     const tab = this.deps.activeTab()
     const tabId = tab?.id ?? null
-    const refreshSql = tab ? firstStatement(tab.content) || tab.content : null
-    const applied = { hadEdits: editsList.length > 0, draftCount: drafts.length, hadDeletes: deletes.length > 0, tabId, refreshSql }
+    const applied = { hadEdits: editsList.length > 0, draftCount: drafts.length, hadDeletes: deletes.length > 0, tabId }
     this.deps.dialogs.review = {
       sql: display,
       params: [],
@@ -126,7 +137,7 @@ export class ResultEditingController {
     profile: ConnectionProfile,
     childDb: string | null,
     statements: BatchStatement[],
-    applied: { hadEdits: boolean; draftCount: number; hadDeletes: boolean; tabId: string | null; refreshSql: string | null },
+    applied: { hadEdits: boolean; draftCount: number; hadDeletes: boolean; tabId: string | null },
   ): Promise<string | null> {
     let outcome: BatchResult
     try {
@@ -141,14 +152,27 @@ export class ResultEditingController {
           : outcome.error
       return t('editing.saveRolledBack', { error: reason })
     }
-    const { hadEdits, draftCount, hadDeletes, tabId, refreshSql } = applied
+    const { hadEdits, draftCount, hadDeletes, tabId } = applied
     if (tabId && hadEdits) this.deps.clearEdits(tabId)
     if (tabId && hadDeletes) this.deps.clearDeletions(tabId)
     if (tabId && draftCount > 0) this.deps.dropDrafts(tabId, Array.from({ length: draftCount }, (_, index) => index))
     // The write is committed; any pre-save undo history would restore already-
     // saved rows/edits, so drop it (the dropDrafts above may have recorded a step).
     if (tabId) this.deps.clearStagedHistory?.(tabId)
-    if (refreshSql && this.deps.activeTab()?.id === tabId) void this.deps.runSql(refreshSql)
+    // Re-runs the result the way ⌘R does, carrying its sort, parameters and
+    // filter: hand-rolling the SQL here dropped all three, so a sorted grid came
+    // back in table order and a parameterised one re-prompted. Not awaited — the
+    // review dialog closes on this returning, and it must not sit over the
+    // re-query. The panel armed a view restore for this refresh, so a refresh
+    // that never starts has to say so; left waiting, the token is spent on
+    // whatever result lands next.
+    if (this.deps.activeTab()?.id === tabId) {
+      void this.deps.refreshResult().then((refreshed) => {
+        if (!refreshed) this.deps.refreshNotComing()
+      })
+    } else {
+      this.deps.refreshNotComing()
+    }
     return null
   }
 

@@ -53,7 +53,8 @@ function make() {
   let edits: Array<{ row: number; col: number; value: string }> = []
   let deletes: number[] = []
   const dialogs = new DialogsController({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
-  const runSql = vi.fn(() => Promise.resolve())
+  const refreshResult = vi.fn(() => Promise.resolve(true))
+  const refreshNotComing = vi.fn()
   const dropDrafts = vi.fn((_tabId: string, indexes: number[]) => {
     const drop = new Set(indexes)
     drafts = drafts.filter((_, i) => !drop.has(i))
@@ -74,7 +75,8 @@ function make() {
     tables: () => [accounts],
     columns: () => columns,
     dialogs,
-    runSql,
+    refreshResult,
+    refreshNotComing,
     drafts: () => drafts,
     dropDrafts,
     edits: () => edits,
@@ -86,7 +88,8 @@ function make() {
   return {
     ctrl,
     dialogs,
-    runSql,
+    refreshResult,
+    refreshNotComing,
     dropDrafts,
     clearEdits,
     clearDeletions,
@@ -107,7 +110,7 @@ describe('ResultEditingController', () => {
   it('commits a staged cell edit as one atomic batch against the child captured at review', async () => {
     const runBatch = vi.fn(() => Promise.resolve({ success: true }))
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
-    const { ctrl, dialogs, runSql, clearEdits, setEdits, setActiveChild, setActiveTab } = make()
+    const { ctrl, dialogs, refreshResult, refreshNotComing, clearEdits, setEdits, setActiveChild, setActiveTab } = make()
 
     setEdits([{ row: 0, col: 1, value: 'Grace' }])
     ctrl.saveChanges()
@@ -117,8 +120,11 @@ describe('ResultEditingController', () => {
 
     expect(runBatch).toHaveBeenCalledWith('p1', 'db_a', [expect.objectContaining({ sql: expect.stringContaining('UPDATE') })])
     expect(clearEdits).toHaveBeenCalledWith('tab-a')
-    // The active tab moved away before accepting, so no refresh runs there.
-    expect(runSql).not.toHaveBeenCalled()
+    // The active tab moved away before accepting, so no refresh runs there —
+    // and the panel is told, or the view restore it armed waits for a result
+    // that will never come and lands on whatever does.
+    expect(refreshResult).not.toHaveBeenCalled()
+    expect(refreshNotComing).toHaveBeenCalledOnce()
   })
 
   it('keeps staged edits when the batch reports a zero-row change', async () => {
@@ -126,7 +132,7 @@ describe('ResultEditingController', () => {
       Promise.resolve({ success: false, failedIndex: 0, error: 'A change affected no rows; the row may have been modified or removed.' }),
     )
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
-    const { ctrl, dialogs, runSql, clearEdits, setEdits } = make()
+    const { ctrl, dialogs, refreshResult, refreshNotComing, clearEdits, setEdits } = make()
 
     setEdits([{ row: 0, col: 1, value: 'Grace' }])
     ctrl.saveChanges()
@@ -134,14 +140,17 @@ describe('ResultEditingController', () => {
 
     expect(runBatch).toHaveBeenCalledOnce()
     expect(clearEdits).not.toHaveBeenCalled()
-    expect(runSql).not.toHaveBeenCalled()
+    expect(refreshResult).not.toHaveBeenCalled()
+    // Nothing committed, so the review dialog stays open on the error: the save
+    // may yet be retried, and its armed restore is still good for that run.
+    expect(refreshNotComing).not.toHaveBeenCalled()
     expect(error).toContain('affected no rows')
   })
 
   it('saves edits and new rows together as one batch: UPDATE then an INSERT per row', async () => {
     const runBatch = vi.fn(() => Promise.resolve({ success: true }))
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
-    const { ctrl, dialogs, runSql, dropDrafts, clearEdits, clearStagedHistory, setDrafts, setEdits } = make()
+    const { ctrl, dialogs, refreshResult, refreshNotComing, dropDrafts, clearEdits, clearStagedHistory, setDrafts, setEdits } = make()
 
     setEdits([{ row: 0, col: 1, value: 'Grace' }])
     // Row 1 fills only name (id untouched → DB default); row 2 fills both.
@@ -167,7 +176,25 @@ describe('ResultEditingController', () => {
     expect(dropDrafts).toHaveBeenCalledWith('tab-a', [0, 1])
     // A committed batch invalidates undo history so ⌘Z can't restore saved rows.
     expect(clearStagedHistory).toHaveBeenCalledWith('tab-a')
-    expect(runSql).toHaveBeenCalledOnce()
+    expect(refreshResult).toHaveBeenCalledOnce()
+    expect(refreshNotComing).not.toHaveBeenCalled()
+  })
+
+  it('tells the panel when the refresh it armed a restore for never starts', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
+    const { ctrl, dialogs, refreshResult, refreshNotComing, setEdits } = make()
+    // A parameterised query re-prompts on refresh; dismissing that prompt
+    // returns before the run starts, so nothing moves and no result lands.
+    refreshResult.mockResolvedValueOnce(false)
+
+    setEdits([{ row: 0, col: 1, value: 'Grace' }])
+    ctrl.saveChanges()
+    await dialogs.review!.run()
+    await Promise.resolve()
+
+    expect(refreshResult).toHaveBeenCalledOnce()
+    expect(refreshNotComing).toHaveBeenCalledOnce()
   })
 
   it('runs a staged row deletion as part of the save batch and clears it on commit', async () => {
@@ -205,7 +232,7 @@ describe('ResultEditingController', () => {
       Promise.resolve({ success: false, failedIndex: 1, error: 'duplicate key value violates unique constraint' }),
     )
     ;(window as unknown as { sqlkit: unknown }).sqlkit = { runBatch }
-    const { ctrl, dialogs, runSql, dropDrafts, clearEdits, setDrafts } = make()
+    const { ctrl, dialogs, refreshResult, refreshNotComing, dropDrafts, clearEdits, setDrafts } = make()
 
     setDrafts([{ after: -1, cells: ['1', 'A'] }, { after: -1, cells: ['2', 'B'] }])
     ctrl.saveChanges()
@@ -215,7 +242,9 @@ describe('ResultEditingController', () => {
     // Atomic: nothing committed, so nothing is cleared, dropped, or refreshed.
     expect(dropDrafts).not.toHaveBeenCalled()
     expect(clearEdits).not.toHaveBeenCalled()
-    expect(runSql).not.toHaveBeenCalled()
+    expect(refreshResult).not.toHaveBeenCalled()
+    // The dialog stays open on the error, so the armed restore stays good for a retry.
+    expect(refreshNotComing).not.toHaveBeenCalled()
     expect(error).toContain('rolled back')
   })
 })
