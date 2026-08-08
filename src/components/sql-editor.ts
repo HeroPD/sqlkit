@@ -18,6 +18,7 @@ import {
   defaultKeymap,
   history,
   historyKeymap,
+  indentLess,
   indentWithTab,
 } from '@codemirror/commands'
 import {
@@ -177,6 +178,12 @@ const appTheme = EditorView.theme(
     '.cm-completionLabel': {
       display: 'inline',
     },
+    /* Suggested table alias, shown dimly after the name. */
+    '.cm-completionDetail': {
+      marginLeft: '0.8em',
+      fontStyle: 'normal',
+      opacity: '0.55',
+    },
     '.cm-completionIcon': {
       display: 'none',
     }
@@ -270,6 +277,7 @@ const baseKeymap = keymap.of([
 
       return indentWithTab.run?.(view) ?? false
     },
+    shift: indentLess,
   },
 
   ...closeBracketsKeymap,
@@ -331,14 +339,16 @@ function inFromList(sql: string, index: number): boolean {
   return last === 'from'
 }
 
+// A FROM/JOIN/UPDATE/INTO clause (or FROM-list comma) binding a table to an alias.
+const ALIAS_BINDINGS = new RegExp(
+  `(?:\\b(?:from|join|update|into)\\b|(,))\\s*(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?\\s+(?:as\\s+)?(${IDENT_SEG})`,
+  'gi',
+)
+
 // Finds what table `alias` (unquoted, lowercased) is bound to in FROM/JOIN/UPDATE/INTO
 // clauses or old-style FROM lists. Returns `schema.table` or `table`, lowercased.
 function findAliasTarget(sql: string, alias: string): string | null {
-  const pattern = new RegExp(
-    `(?:\\b(?:from|join|update|into)\\b|(,))\\s*(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?\\s+(?:as\\s+)?(${IDENT_SEG})`,
-    'gi',
-  )
-  for (const match of sql.matchAll(pattern)) {
+  for (const match of sql.matchAll(ALIAS_BINDINGS)) {
     const [, comma, first, second, aliasSeg] = match
     if (first === undefined || aliasSeg === undefined) continue
     const candidate = normIdent(aliasSeg)
@@ -348,6 +358,33 @@ function findAliasTarget(sql: string, alias: string): string | null {
     return second !== undefined ? `${normIdent(first)}.${normIdent(second)}` : normIdent(first)
   }
   return null
+}
+
+// The `JOIN table [alias] ON ` the cursor sits directly after.
+const JOIN_ON_TARGET = new RegExp(
+  `\\bjoin\\s+(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(${IDENT_SEG}))?\\s+on\\s+$`,
+  'i',
+)
+
+// Every FROM/JOIN table binding with its optional alias; the lookahead keeps a
+// following keyword (`FROM users JOIN …`) from being read as users's alias.
+const TABLE_BINDINGS = new RegExp(
+  `\\b(?:from|join)\\s+(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
+  'gi',
+)
+
+// All alias names already bound in `sql`, so a suggested alias picks a fresh one.
+function boundAliases(sql: string): Set<string> {
+  const taken = new Set<string>()
+  for (const match of sql.matchAll(ALIAS_BINDINGS)) {
+    const [, comma, first, , aliasSeg] = match
+    if (first === undefined || aliasSeg === undefined) continue
+    const candidate = normIdent(aliasSeg)
+    if (ALIAS_STOPWORDS.has(candidate)) continue
+    if (comma !== undefined && !inFromList(sql, match.index ?? 0)) continue
+    taken.add(candidate)
+  }
+  return taken
 }
 
 @customElement('sql-editor')
@@ -834,12 +871,35 @@ export class SqlEditor extends LitElement {
       if (list) list.push(option)
       else columnsByTable.set(key, [option])
     }
+    // Boost falls with table position so equal matches list in schema order, not alphabetically.
+    const ordinals = new Map<string, number>()
     for (const column of this.columns ?? []) {
-      const option = makeOption(column.name, 'property', 30)
       const tableLower = column.table.toLowerCase()
+      const tableKey = column.schema ? `${column.schema.toLowerCase()}.${tableLower}` : tableLower
+      const index = ordinals.get(tableKey) ?? 0
+      ordinals.set(tableKey, index + 1)
+      const option = makeOption(column.name, 'property', 30 - index * 0.01)
       addColumn(tableLower, option)
-      if (column.schema) addColumn(`${column.schema.toLowerCase()}.${tableLower}`, option)
+      if (column.schema) addColumn(tableKey, option)
       if (!bareColumns.has(column.name)) bareColumns.set(column.name, option)
+    }
+
+    // Foreign keys per owning table (bare name, lowercased), grouped by
+    // constraint so a composite key suggests its full ANDed condition.
+    const fkGroups = new Map<string, { owner: string; refTable: string; cols: { name: string; refColumn: string }[] }>()
+    for (const column of this.columns ?? []) {
+      const ref = column.references
+      if (!ref) continue
+      const key = `${column.schema ?? ''}.${column.table.toLowerCase()}:${ref.constraint}`
+      const group = fkGroups.get(key)
+      if (group) group.cols.push({ name: column.name, refColumn: ref.column })
+      else fkGroups.set(key, { owner: column.table.toLowerCase(), refTable: ref.table, cols: [{ name: column.name, refColumn: ref.column }] })
+    }
+    const fksByTable = new Map<string, { refTable: string; cols: { name: string; refColumn: string }[] }[]>()
+    for (const group of fkGroups.values()) {
+      const list = fksByTable.get(group.owner)
+      if (list) list.push(group)
+      else fksByTable.set(group.owner, [group])
     }
 
     // Lowercased once here, not per keystroke in the source below.
@@ -847,9 +907,100 @@ export class SqlEditor extends LitElement {
       (option) => [option.label.toLowerCase(), option] as const,
     )
 
+    // Fresh alias for `table`: word initials, then name prefixes, then a
+    // numbered fallback; never a reserved word, a bound alias, or a table name.
+    const aliasFor = (table: string, taken: Set<string>): string => {
+      const lower = table.toLowerCase()
+      const words = lower.split(/[^a-z0-9]+/).filter(Boolean)
+      const compact = words.join('')
+      const candidates = [words.map((word) => word.charAt(0)).join('')]
+      for (let len = 2; len <= 4 && len < compact.length; len++) candidates.push(compact.slice(0, len))
+      for (const candidate of candidates) {
+        if (/^[a-z_]/.test(candidate) && candidate !== lower && !reserved.has(candidate) && !taken.has(candidate)) return candidate
+      }
+      const base = /^[a-z_]/.test(candidates[0] ?? '') ? candidates[0] ?? 't' : 't'
+      for (let n = 2; ; n++) if (!taken.has(`${base}${n}`)) return `${base}${n}`
+    }
+
+    // A table completed in FROM/JOIN position also inserts its alias. The
+    // chosen alias is reserved in `taken`, so one popup never shows two
+    // tables with the same suggestion.
+    const aliasedOption = (option: Completion, taken: Set<string>): Completion => {
+      const alias = aliasFor(option.label, taken)
+      taken.add(alias)
+      const applied = typeof option.apply === 'string' ? option.apply : option.label
+      return { label: option.label, type: option.type, boost: option.boost, detail: alias, apply: `${applied} ${alias}` }
+    }
+
     return ifNotIn(
       ['String', 'LineComment', 'BlockComment'],
       (context: CompletionContext) => {
+        // Alias and FK scans see only the statement under the caret: bindings
+        // in the script's other statements must not leak into suggestions.
+        const block = queryToRun(context.state)
+        const statement = block?.sql ?? context.state.doc.toString()
+        const statementStart = block?.from ?? 0
+
+        // Whether `pos` sits right after FROM/JOIN (or a FROM-list comma),
+        // where a completed table should bring an alias along.
+        const inTableClause = (pos: number) => {
+          const before = context.state.sliceDoc(Math.max(0, pos - 200), pos)
+          if (/\b(?:from|join)\s+$/i.test(before)) return true
+          return /,\s*$/.test(before) && inFromList(statement, pos - statementStart)
+        }
+        const takenAliases = () => {
+          const taken = boundAliases(statement)
+          for (const name of tableNames.keys()) taken.add(name)
+          return taken
+        }
+
+        // Aliases bound in the statement complete like names and rank above
+        // tables and columns: they are what a qualified reference here starts
+        // with. The dim detail names the table each alias stands for.
+        const aliasOptions = (): Completion[] => {
+          const options: Completion[] = []
+          const seen = new Set<string>()
+          for (const match of statement.matchAll(TABLE_BINDINGS)) {
+            const [, seg, qualified, alias] = match
+            const table = qualified ?? seg
+            if (alias === undefined || table === undefined || seen.has(alias)) continue
+            seen.add(alias)
+            options.push({ label: alias, type: 'variable', boost: 70, detail: tableNames.get(normIdent(table)) ?? table })
+          }
+          return options
+        }
+
+        // FK equalities linking the table of the `JOIN … ON ` before `pos` to
+        // the other tables bound in the statement, in both key directions.
+        const onConditions = (pos: number): string[] => {
+          const join = JOIN_ON_TARGET.exec(context.state.sliceDoc(Math.max(statementStart, pos - 500), pos))
+          if (!join) return []
+          const [, joinSeg, joinQualified, joinAlias] = join
+          const joinTable = joinQualified ?? joinSeg
+          if (joinTable === undefined) return []
+          const joinKey = normIdent(joinTable)
+          const joinRef = joinAlias ?? joinTable
+          const conditions = new Set<string>()
+          for (const match of statement.matchAll(TABLE_BINDINGS)) {
+            const [, seg, qualified, alias] = match
+            const table = qualified ?? seg
+            if (table === undefined) continue
+            const tableKey = normIdent(table)
+            const ref = alias ?? table
+            // Skip the joined binding itself, but keep self-joins under other aliases.
+            if (tableKey === joinKey && normIdent(ref) === normIdent(joinRef)) continue
+            for (const fk of fksByTable.get(joinKey) ?? []) {
+              if (normIdent(fk.refTable) !== tableKey) continue
+              conditions.add(fk.cols.map((col) => `${joinRef}.${ident(col.name)} = ${ref}.${ident(col.refColumn)}`).join(' AND '))
+            }
+            for (const fk of fksByTable.get(tableKey) ?? []) {
+              if (normIdent(fk.refTable) !== joinKey) continue
+              conditions.add(fk.cols.map((col) => `${joinRef}.${ident(col.refColumn)} = ${ref}.${ident(col.name)}`).join(' AND '))
+            }
+          }
+          return [...conditions]
+        }
+
         // `x.` completes members of x: a table's (or FROM/JOIN alias's)
         // columns, a schema's tables, or a unique table-name prefix.
         const dotted = context.matchBefore(DOTTED_MATCH)
@@ -879,7 +1030,11 @@ export class SqlEditor extends LitElement {
           }
           if (cols) return member(cols)
           const schemaTables = tablesBySchema.get(baseKey)
-          if (schemaTables) return member(schemaTables)
+          if (schemaTables) {
+            if (requote || !inTableClause(dotted.from)) return member(schemaTables)
+            const taken = takenAliases()
+            return member(schemaTables.map((option) => aliasedOption(option, taken)))
+          }
           // Unique prefix: complete `use.` as `users.<col>`, replacing the whole token.
           const candidates = [...tableNames.keys()].filter((name) => name.startsWith(baseKey))
           const onlyMatch = candidates.length === 1 ? candidates[0] : undefined
@@ -892,23 +1047,44 @@ export class SqlEditor extends LitElement {
               const label = `${display}.${option.label}`
               const applied = `${ident(display)}.${ident(option.label)}`
               return applied === label
-                ? { label, type: 'property', boost: 30 }
-                : { label, type: 'property', boost: 30, apply: applied }
+                ? { label, type: 'property', boost: option.boost }
+                : { label, type: 'property', boost: option.boost, apply: applied }
             }),
             validFor: /^[A-Za-z_][\w$]*\.[A-Za-z0-9_$]*$/,
           }
         }
 
         const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_$]*/)
-
-        if (!word && !context.explicit) return null
-
         const from = word ? word.from : context.pos
         const typed = word ? word.text.toLowerCase() : ''
 
+        // Right after JOIN … ON the intent is unambiguous, so the FK
+        // conditions pop up unprompted — and alone, not buried in keywords.
+        const conditions = onConditions(from)
+        const unprompted = !word && !context.explicit
+        if (unprompted && !conditions.length) return null
+
         const options: Completion[] = []
-        for (const [lower, option] of entries) {
-          if (lower.startsWith(typed)) options.push(option)
+        if (!unprompted) {
+          const taken = inTableClause(from) ? takenAliases() : null
+          for (const [lower, option] of entries) {
+            if (!lower.startsWith(typed)) continue
+            // In FROM/JOIN position, bare column names are noise.
+            if (taken && option.type === 'property') continue
+            options.push(taken && option.type === 'type' ? aliasedOption(option, taken) : option)
+          }
+          // A table position binds new aliases; everywhere else offers the bound ones.
+          if (!taken) {
+            for (const option of aliasOptions()) {
+              if (option.label.toLowerCase().startsWith(typed)) options.push(option)
+            }
+          }
+        }
+        // sortText outranks the equally-boosted SELECT on empty explicit input.
+        for (const condition of conditions) {
+          if (condition.toLowerCase().startsWith(typed)) {
+            options.push({ label: condition, type: 'property', boost: 99, sortText: '0' })
+          }
         }
 
         if (!options.length) return null
@@ -916,7 +1092,9 @@ export class SqlEditor extends LitElement {
         return {
           from,
           options,
-          validFor: /^[A-Za-z_][A-Za-z0-9_$]*$/,
+          // An unprompted result re-queries per keystroke, so typing past the
+          // popup brings back the full keyword/column list.
+          validFor: unprompted ? undefined : /^[A-Za-z_][A-Za-z0-9_$]*$/,
         }
       },
     )

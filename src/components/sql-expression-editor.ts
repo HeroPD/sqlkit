@@ -21,11 +21,12 @@ const EXPRESSION_TERMS = new Set([
 export function expressionCompletionOptions(engine: Engine, columns: string[]): Completion[] {
   const config = resolveDialect(dialectForEngine[engine])
   const reservedWords = new Set(config.keywords.flatMap((keyword) => keyword.toUpperCase().split(/\s+/)))
-  const columnOptions = columns.map((column) => ({
+  // Boost falls with position so equal matches list in result order, not alphabetically.
+  const columnOptions = columns.map((column, index) => ({
     label: column,
     apply: /^[A-Za-z_][\w$]*$/.test(column) && !reservedWords.has(column.toUpperCase()) ? column : config.quoteIdent(column),
     type: 'property',
-    boost: 99,
+    boost: 99 - index * 0.01,
   }))
   const keywordOptions = [...new Set(config.keywords)].filter((keyword) => EXPRESSION_TERMS.has(keyword)).map((keyword) => ({
     label: keyword,

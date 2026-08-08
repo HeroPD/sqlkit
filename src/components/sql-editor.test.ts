@@ -11,8 +11,8 @@ beforeAll(stubEditorLayout)
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-// Mounts an editor with fixture metadata and opens completion at the end of `doc`.
-async function mountCompletion(doc: string) {
+// Mounts an editor with fixture metadata; completion is opened by the caller.
+async function mountWithMeta(doc: string) {
   const el = document.createElement('sql-editor')
   el.tabId = `completion:${doc}`
   el.value = doc
@@ -24,23 +24,39 @@ async function mountCompletion(doc: string) {
     { schema: 'public', table: 'postings', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
     { schema: 'public', table: 'postings', name: 'item_count', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: false },
     { schema: 'public', table: 'postings', name: 'sort order', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: false },
+    { schema: 'public', table: 'postings', name: 'created_at', dataType: 'timestamptz', nullable: true, primaryKey: false, foreignKey: false },
+    { schema: 'public', table: 'postings', name: 'author', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: true, references: { schema: 'public', table: 'users', column: 'id', constraint: 'postings_author_fkey' } },
+    { schema: 'public', table: 'users', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
     { schema: 'public', table: 'users', name: 'user_name', dataType: 'text', nullable: true, primaryKey: false, foreignKey: false },
   ]
   document.body.append(el)
   await el.updateComplete
   const view = (el as unknown as { _view: EditorView })._view
-  view.dispatch({ selection: { anchor: doc.length } })
-  startCompletion(view)
-  for (let i = 0; i < 20 && completionStatus(view.state) !== 'active'; i++) await sleep(25)
   return { el, view }
 }
 
-// Opens completion at the end of `doc` and returns the option labels.
-async function completionsAt(doc: string) {
-  const { el } = await mountCompletion(doc)
-  const labels = [...el.shadowRoot!.querySelectorAll('.cm-tooltip-autocomplete li .cm-completionLabel')].map(
+// Mounts an editor and opens completion at `cursor` (default: end of `doc`).
+async function mountCompletion(doc: string, cursor = doc.length) {
+  const { el, view } = await mountWithMeta(doc)
+  view.dispatch({ selection: { anchor: cursor } })
+  startCompletion(view)
+  await completionOpen(view)
+  return { el, view }
+}
+
+async function completionOpen(view: EditorView) {
+  for (let i = 0; i < 20 && completionStatus(view.state) !== 'active'; i++) await sleep(25)
+}
+
+const optionLabels = (el: HTMLElement) =>
+  [...el.shadowRoot!.querySelectorAll('.cm-tooltip-autocomplete li .cm-completionLabel')].map(
     (label) => label.textContent,
   )
+
+// Opens completion at `cursor` (default: end of `doc`) and returns the option labels.
+async function completionsAt(doc: string, cursor?: number) {
+  const { el } = await mountCompletion(doc, cursor)
+  const labels = optionLabels(el)
   el.remove()
   return labels
 }
@@ -49,7 +65,11 @@ async function completionsAt(doc: string) {
 async function acceptAt(doc: string, label: string) {
   const { el, view } = await mountCompletion(doc)
   const selected = () => el.shadowRoot!.querySelector('li[aria-selected] .cm-completionLabel')?.textContent
-  for (let i = 0; i < 40 && selected() !== label; i++) moveCompletionSelection(true)(view)
+  // the tooltip's selection marker updates asynchronously, so settle after each move
+  for (let i = 0; i < 40 && selected() !== label; i++) {
+    moveCompletionSelection(true)(view)
+    await sleep(15)
+  }
   await sleep(80) // interactionDelay guards against accepting a just-opened tooltip
   acceptCompletion(view)
   const result = view.state.doc.toString()
@@ -59,6 +79,13 @@ async function acceptAt(doc: string, label: string) {
 
 test('table. completes its columns', async () => {
   expect(await completionsAt('SELECT * FROM postings WHERE postings.i')).toEqual(['id', 'item_count'])
+})
+
+test('columns list in table order, not alphabetically', async () => {
+  // author and created_at sort first alphabetically but sit last in the table
+  expect(await completionsAt('SELECT * FROM postings WHERE postings.')).toEqual([
+    'id', 'item_count', 'sort order', 'created_at', 'author',
+  ])
 })
 
 test('FROM/JOIN alias resolves to the aliased table', async () => {
@@ -118,6 +145,78 @@ test('select-list commas do not bind aliases', async () => {
 
 test('FROM-list commas bind old-style join aliases', async () => {
   expect(await completionsAt('SELECT * FROM postings g, users q WHERE q.us')).toEqual(['user_name'])
+})
+
+test('a table completed after FROM or JOIN inserts a fresh alias', async () => {
+  expect(await acceptAt('SELECT * FROM us', 'users')).toBe('SELECT * FROM users u')
+  // u is taken by the first join, so the second falls back to a longer prefix
+  expect(await acceptAt('SELECT * FROM users u JOIN us', 'users')).toBe('SELECT * FROM users u JOIN users us')
+})
+
+test('FROM-list commas and schema-qualified tables alias too', async () => {
+  expect(await acceptAt('SELECT * FROM postings p, us', 'users')).toBe('SELECT * FROM postings p, users u')
+  expect(await acceptAt('SELECT * FROM public.us', 'users')).toBe('SELECT * FROM public.users u')
+})
+
+test('tables outside FROM/JOIN complete without an alias', async () => {
+  expect(await acceptAt('INSERT INTO us', 'users')).toBe('INSERT INTO users')
+})
+
+test('ON suggestions ignore bindings from other statements', async () => {
+  // the quoted binding in the first statement must not produce a second condition
+  const labels = await completionsAt('SELECT * FROM "postings";\n\nSELECT * FROM postings pt JOIN users cu ON ')
+  expect(labels.filter((label) => label?.includes(' = '))).toEqual(['cu.id = pt.author'])
+})
+
+test('alias suggestions ignore aliases bound in other statements', async () => {
+  expect(await acceptAt('SELECT * FROM users u;\n\nSELECT * FROM us', 'users')).toBe(
+    'SELECT * FROM users u;\n\nSELECT * FROM users u',
+  )
+})
+
+test('bound aliases complete first outside FROM/JOIN', async () => {
+  const doc = 'SELECT * FROM postings pt\n  JOIN users cu ON cu.id = pt.author\n  WHERE pt.id = 1\n  ORDER BY c'
+  expect((await completionsAt(doc))[0]).toBe('cu')
+  // in FROM/JOIN position the binding suggestions stay alias-free
+  expect(await completionsAt('SELECT * FROM postings pt JOIN p')).not.toContain('pt')
+})
+
+test('FROM/JOIN suggestions omit bare column names', async () => {
+  const labels = await completionsAt('SELECT * FROM us')
+  expect(labels).toContain('users')
+  expect(labels).not.toContain('user_name')
+})
+
+test('ON suggestions resolve aliases mid-document with trailing clauses', async () => {
+  const doc = 'SELECT * FROM postings pt\n  JOIN users cu ON \n  WHERE pt.id = 1\n  ORDER BY c.id\n  LIMIT 1'
+  const cursor = doc.indexOf(' ON ') + ' ON '.length
+  expect((await completionsAt(doc, cursor))[0]).toBe('cu.id = pt.author')
+})
+
+test('FK conditions pop up unprompted after typing the space past ON', async () => {
+  const { el, view } = await mountWithMeta('SELECT * FROM users u JOIN postings p ON')
+  const end = view.state.doc.length
+  view.dispatch({
+    changes: { from: end, insert: ' ' },
+    selection: { anchor: end + 1 },
+    userEvent: 'input.type',
+  })
+  await completionOpen(view)
+  // the unprompted popup shows only the join conditions, not keywords
+  expect(optionLabels(el)).toEqual(['p.author = u.id'])
+  el.remove()
+})
+
+test('ON after a join suggests the FK condition first', async () => {
+  expect((await completionsAt('SELECT * FROM users u JOIN postings p ON '))[0]).toBe('p.author = u.id')
+  expect(await acceptAt('SELECT * FROM users u JOIN postings p ON p', 'p.author = u.id')).toBe(
+    'SELECT * FROM users u JOIN postings p ON p.author = u.id',
+  )
+})
+
+test('ON conditions follow the FK in either direction and bare table names', async () => {
+  expect((await completionsAt('SELECT * FROM postings p JOIN users u ON '))[0]).toBe('u.id = p.author')
+  expect((await completionsAt('SELECT * FROM users JOIN postings p ON '))[0]).toBe('p.author = users.id')
 })
 
 const text = (el: SqlEditor) => el.shadowRoot!.querySelector('.cm-content')!.textContent ?? ''
@@ -202,6 +301,17 @@ test('run-query and editor-change fire on the remounted element', async () => {
   expect(events).toContain('run')
   expect(events).toContain('change')
   second.remove()
+})
+
+test('Shift-Tab dedents every selected line', async () => {
+  const el = await mount('tab-dedent', 'select\n  1,\n  2;')
+  const view = (el as unknown as { _view: EditorView })._view
+  view.dispatch({ selection: { anchor: 9, head: 14 } }) // spans lines 2-3
+  view.contentDOM.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }),
+  )
+  expect(view.state.doc.toString()).toBe('select\n1,\n2;')
+  el.remove()
 })
 
 test('runCurrentQuery matches the selection-or-nearest-statement shortcut target', async () => {
