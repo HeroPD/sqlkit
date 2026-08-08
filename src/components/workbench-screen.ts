@@ -195,6 +195,12 @@ export class WorkbenchScreen extends LitElement {
   private _transactionPopoverProfileId: string | null = null
 
   @state()
+  private _transactionManagerOpen = false
+
+  @state()
+  private _expandedTransactionProfileIds = new Set<string>()
+
+  @state()
   private _transactionSessions = new Map<string, TransactionSession>()
 
   @state()
@@ -391,11 +397,14 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onWindowPointerDown = (event: PointerEvent) => {
-    if (this._transactionPopoverProfileId === null) return
+    if (this._transactionPopoverProfileId === null && !this._transactionManagerOpen) return
     const inside = event.composedPath().some(
-      (node) => node instanceof HTMLElement && node.classList.contains('txn-control'),
+      (node) => node instanceof HTMLElement && (node.classList.contains('txn-control') || node.classList.contains('txn-overflow')),
     )
-    if (!inside) this._transactionPopoverProfileId = null
+    if (!inside) {
+      this._transactionPopoverProfileId = null
+      this._transactionManagerOpen = false
+    }
   }
 
   /** App-menu items (File > …) arriving from the main process. */
@@ -481,6 +490,8 @@ export class WorkbenchScreen extends LitElement {
       this._queries.reset()
       this._transactionSessions = new Map()
       this._transactionPopoverProfileId = null
+      this._transactionManagerOpen = false
+      this._expandedTransactionProfileIds = new Set()
       clearEditorStateCache()
       clearInspectDraftCache()
       this._inspectDirtyTabIds = new Set()
@@ -505,8 +516,16 @@ export class WorkbenchScreen extends LitElement {
     const tabId = this._restoreScrollTabId
     this._restoreScrollTabId = null
     if (tabId) void this._restoreTabScroll(tabId)
-    if (this._transactionPopoverProfileId && !this._live.transaction(this._transactionPopoverProfileId)) {
+    if (
+      this._transactionPopoverProfileId &&
+      (this._transactionPopoverProfileId !== this._config.activeProfile()?.id || !this._live.transaction(this._transactionPopoverProfileId))
+    ) {
       this._transactionPopoverProfileId = null
+    }
+    if (this._transactionManagerOpen) {
+      const activeProfileId = this._config.activeProfile()?.id
+      const backgroundCount = this._transactionOwners().filter((owner) => owner.profile.id !== activeProfileId).length
+      if (backgroundCount === 0) this._transactionManagerOpen = false
     }
   }
 
@@ -622,9 +641,10 @@ export class WorkbenchScreen extends LitElement {
     const key = event.key.toLowerCase()
     const hasMod = event.metaKey || event.ctrlKey
 
-    if (key === 'escape' && this._transactionPopoverProfileId !== null) {
+    if (key === 'escape' && (this._transactionPopoverProfileId !== null || this._transactionManagerOpen)) {
       event.preventDefault()
       this._transactionPopoverProfileId = null
+      this._transactionManagerOpen = false
       return
     }
 
@@ -962,6 +982,11 @@ export class WorkbenchScreen extends LitElement {
       next.delete(profileId)
       this._transactionSessions = next
       this._transactionPopoverProfileId = null
+      if (this._expandedTransactionProfileIds.has(profileId)) {
+        const expanded = new Set(this._expandedTransactionProfileIds)
+        expanded.delete(profileId)
+        this._expandedTransactionProfileIds = expanded
+      }
     }
     // Surface a failure where run errors already show; the control itself stays
     // truthful through the status rebroadcast.
@@ -1085,14 +1110,41 @@ export class WorkbenchScreen extends LitElement {
     this._cmdPalette.open('databases')
   }
 
-  // The first connected profile holding an open manual transaction, so the
-  // title-bar control stays reachable after switching to another connection.
-  private _transactionOwner(): { profile: ConnectionProfile; transaction: { childDb: string; failed?: boolean } } | null {
-    for (const candidate of this._config.connections) {
-      const transaction = this._live.transaction(candidate.id)
-      if (transaction) return { profile: candidate, transaction }
-    }
-    return null
+  private _transactionOwners(): Array<{
+    profile: ConnectionProfile
+    transaction: { childDb: string; failed?: boolean }
+  }> {
+    return this._config.connections.flatMap((profile) => {
+      const transaction = this._live.transaction(profile.id)
+      return transaction ? [{ profile, transaction }] : []
+    })
+  }
+
+  private _renderTransactionRuns(profileId: string) {
+    const runs = this._transactionSessions.get(profileId)?.runs ?? []
+    return html`
+      <div class="txn-runs">
+        ${runs.length
+          ? runs.map((run, index) => html`
+              <div class="txn-run" title=${run.success ? run.sql : `${run.sql}\n\n${run.error}`}>
+                <span class="txn-run-index">${index + 1}</span>
+                <div class="txn-run-copy">
+                  <code>${summarizeTransactionSql(run.sql)}</code>
+                  <span>
+                    <span class="txn-outcome ${run.success ? 'ok' : 'error'}">
+                      ${run.success ? t('common.ok') : t('common.error')}
+                    </span>
+                    ${run.success
+                      ? html`${run.rowCount === null ? '' : ` · ${formatInteger(run.rowCount)} ${rowWord(run.rowCount)}`} · ${run.tabName}`
+                      : html` · ${run.error} · ${run.tabName}`}
+                  </span>
+                </div>
+                <span class="txn-duration">${Math.max(1, Math.round(run.durationMs))} ms</span>
+              </div>
+            `)
+          : html`<p class="txn-empty">${t('transaction.sessionEmpty')}</p>`}
+      </div>
+    `
   }
 
   private _renderTransactionControl(
@@ -1113,6 +1165,7 @@ export class WorkbenchScreen extends LitElement {
           aria-expanded=${String(open)}
           @click=${() => {
             this._transactionPopoverProfileId = open ? null : profile.id
+            if (!open) this._transactionManagerOpen = false
           }}
         >
           <span class="txn-dot" aria-hidden="true"></span>
@@ -1157,30 +1210,109 @@ export class WorkbenchScreen extends LitElement {
                     <strong>${profile.name}</strong><span aria-hidden="true">›</span><span>${transaction.childDb}</span>
                   </div>
                 </div>
-                <div class="txn-runs">
-                  ${runs.length
-                    ? runs.map((run, index) => html`
-                        <div class="txn-run" title=${run.success ? run.sql : `${run.sql}\n\n${run.error}`}>
-                          <span class="txn-run-index">${index + 1}</span>
-                          <div class="txn-run-copy">
-                            <code>${summarizeTransactionSql(run.sql)}</code>
-                            <span>
-                              <span class="txn-outcome ${run.success ? 'ok' : 'error'}">
-                                ${run.success ? t('common.ok') : t('common.error')}
-                              </span>
-                              ${run.success
-                                ? html`${run.rowCount === null ? '' : ` · ${formatInteger(run.rowCount)} ${rowWord(run.rowCount)}`} · ${run.tabName}`
-                                : html` · ${run.error} · ${run.tabName}`}
-                            </span>
-                          </div>
-                          <span class="txn-duration">${Math.max(1, Math.round(run.durationMs))} ms</span>
-                        </div>
-                      `)
-                    : html`<p class="txn-empty">${t('transaction.sessionEmpty')}</p>`}
-                </div>
+                ${this._renderTransactionRuns(profile.id)}
                 <div class="txn-popover-foot">
                   <i class="icon icon-history" aria-hidden="true"></i>${t('transaction.sessionScope')}
                 </div>
+              </div>
+            `
+          : ''}
+      </div>
+    `
+  }
+
+  private _toggleExpandedTransaction(profileId: string) {
+    const next = new Set(this._expandedTransactionProfileIds)
+    if (next.has(profileId)) next.delete(profileId)
+    else next.add(profileId)
+    this._expandedTransactionProfileIds = next
+  }
+
+  private _switchToTransaction(profileId: string, childDb: string) {
+    this._transactionManagerOpen = false
+    this._setActiveDb(profileId, childDb)
+  }
+
+  private _renderTransactionOverflow(
+    owners: Array<{ profile: ConnectionProfile; transaction: { childDb: string; failed?: boolean } }>,
+  ) {
+    if (!owners.length) return ''
+    return html`
+      <div class="txn-overflow">
+        <button
+          type="button"
+          class="txn-overflow-trigger"
+          aria-label=${t('transaction.otherAria', { count: owners.length })}
+          aria-haspopup="dialog"
+          aria-expanded=${String(this._transactionManagerOpen)}
+          @click=${() => {
+            this._transactionManagerOpen = !this._transactionManagerOpen
+            if (this._transactionManagerOpen) this._transactionPopoverProfileId = null
+          }}
+        >
+          +${owners.length}<i class="icon icon-chevron-down" aria-hidden="true"></i>
+        </button>
+        ${this._transactionManagerOpen
+          ? html`
+              <div class="txn-manager" role="dialog" aria-label=${t('transaction.otherTitle')}>
+                <div class="txn-manager-head">
+                  <strong>${t('transaction.otherTitle')}</strong>
+                  <span>${t('transaction.sessionCount', { count: owners.length })}</span>
+                </div>
+                <div class="txn-manager-list">
+                  ${owners.map(({ profile, transaction }) => {
+                    const session = this._transactionSessions.get(profile.id)
+                    const expanded = this._expandedTransactionProfileIds.has(profile.id)
+                    return html`
+                      <section class="txn-other ${transaction.failed ? 'failed' : ''} ${expanded ? 'expanded' : ''}">
+                        <button
+                          type="button"
+                          class="txn-other-main"
+                          aria-expanded=${String(expanded)}
+                          @click=${() => this._toggleExpandedTransaction(profile.id)}
+                        >
+                          <span class="txn-other-copy">
+                            <strong>${profile.name}${transaction.failed
+                              ? html` <span class="txn-failed-label">· ${t('transaction.failedLabel')}</span>`
+                              : ''}</strong>
+                            <span>
+                              ${transaction.childDb} · ${t('transaction.queryCount', { count: session?.runs.length ?? 0 })}
+                              ${session ? ` · ${t('transaction.startedAt', { time: formatTime(session.startedAt) })}` : ''}
+                            </span>
+                          </span>
+                          <i class="icon icon-chevron-down" aria-hidden="true"></i>
+                        </button>
+                        ${expanded
+                          ? html`
+                              <div class="txn-other-detail">
+                                ${this._renderTransactionRuns(profile.id)}
+                                <div class="txn-other-actions">
+                                  <button
+                                    type="button"
+                                    class="txn-switch"
+                                    @click=${() => this._switchToTransaction(profile.id, transaction.childDb)}
+                                  >
+                                    <i class="icon icon-database" aria-hidden="true"></i>${t('transaction.switchTo')}
+                                  </button>
+                                  ${transaction.failed
+                                    ? ''
+                                    : html`
+                                        <button type="button" class="txn-commit" @click=${() => this._endTransaction(profile.id, 'commit')}>
+                                          <i class="icon icon-check" aria-hidden="true"></i>${t('transaction.commit')}
+                                        </button>
+                                      `}
+                                  <button type="button" class="txn-rollback" @click=${() => this._endTransaction(profile.id, 'rollback')}>
+                                    <i class="icon icon-undo-2" aria-hidden="true"></i>${t('transaction.rollback')}
+                                  </button>
+                                </div>
+                              </div>
+                            `
+                          : ''}
+                      </section>
+                    `
+                  })}
+                </div>
+                <div class="txn-manager-foot">${t('transaction.otherScope')}</div>
               </div>
             `
           : ''}
@@ -1202,13 +1334,14 @@ export class WorkbenchScreen extends LitElement {
     const runDisabled = !running && (refreshing
       ? this._resultEditing.hasPendingChanges() || this._resultHasUnstagedJson
       : this._activeActionSurface !== 'editor' || !tab?.content.trim() || !this._hasExplicitRunTarget)
-    // The control follows the transaction, not the active profile: an open
-    // transaction on another connection must stay visible and endable, or
-    // its locks outlive any cue that it exists.
-    const activeTransaction = profile ? this._live.transaction(profile.id) : undefined
-    const transactionOwner = activeTransaction && profile
-      ? { profile, transaction: activeTransaction }
-      : this._transactionOwner()
+    // The full control always describes the active connection. Transactions
+    // on other connections stay visible behind +N, without implying that the
+    // database currently shown in the center owns them.
+    const transactionOwners = this._transactionOwners()
+    const primaryTransaction = transactionOwners.find((owner) => owner.profile.id === profile?.id)
+    const otherTransactions = primaryTransaction
+      ? transactionOwners.filter((owner) => owner.profile.id !== primaryTransaction.profile.id)
+      : transactionOwners
 
     return html`
       <header class="app-titlebar ${isMac ? 'macos' : ''}">
@@ -1263,7 +1396,8 @@ export class WorkbenchScreen extends LitElement {
             </button>
           </div>
           <div class="titlebar-right">
-            ${transactionOwner ? this._renderTransactionControl(transactionOwner.profile, transactionOwner.transaction) : ''}
+            ${primaryTransaction ? this._renderTransactionControl(primaryTransaction.profile, primaryTransaction.transaction) : ''}
+            ${this._renderTransactionOverflow(otherTransactions)}
             ${import.meta.env.DEV
               ? html`
                   <button type="button" class="update-preview">
@@ -2688,6 +2822,7 @@ export class WorkbenchScreen extends LitElement {
         --txn-tone: var(--transaction-fg);
         position: relative;
         height: 24px;
+        box-sizing: border-box;
         display: flex;
         align-items: center;
         color: color-mix(in srgb, var(--txn-tone) 85%, var(--text));
@@ -2779,7 +2914,7 @@ export class WorkbenchScreen extends LitElement {
         z-index: 40;
         top: 30px;
         right: 0;
-        width: min(390px, calc(100vw - 16px));
+        width: min(430px, calc(100vw - 16px));
         overflow: hidden;
         color: var(--text-2);
         background: var(--overlay-bg);
@@ -2792,7 +2927,7 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .txn-popover-head {
-        padding: 11px 12px 9px;
+        padding: 12px 14px 10px;
         border-bottom: 1px solid var(--border-subtle);
       }
 
@@ -2806,20 +2941,20 @@ export class WorkbenchScreen extends LitElement {
 
       .txn-popover-title strong {
         color: var(--text);
-        font-size: var(--font-size-sm);
+        font-size: var(--font-size);
         font-weight: 600;
       }
 
       .txn-popover-title > span:last-child {
         margin-left: auto;
         color: var(--text-3);
-        font-size: 10px;
+        font-size: var(--font-size-sm);
       }
 
       .txn-context {
         margin-top: 5px;
         color: var(--text-3);
-        font-size: 10px;
+        font-size: var(--font-size-sm);
       }
 
       .txn-context strong {
@@ -2831,16 +2966,16 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .txn-runs {
-        max-height: 280px;
+        max-height: 320px;
         overflow-y: auto;
-        padding: 5px;
+        padding: 6px;
       }
 
       .txn-run {
         display: grid;
-        grid-template-columns: 22px minmax(0, 1fr) auto;
-        gap: 7px;
-        padding: 8px 7px;
+        grid-template-columns: 24px minmax(0, 1fr) auto;
+        gap: 8px;
+        padding: 9px 8px;
         border-radius: 4px;
       }
 
@@ -2851,7 +2986,7 @@ export class WorkbenchScreen extends LitElement {
       .txn-run-index,
       .txn-duration {
         color: var(--text-3);
-        font: 10px var(--mono-font);
+        font: var(--font-size-sm) var(--mono-font);
       }
 
       .txn-run-index {
@@ -2867,7 +3002,7 @@ export class WorkbenchScreen extends LitElement {
         display: block;
         overflow: hidden;
         color: var(--text);
-        font: 11px/1.45 var(--mono-font);
+        font: var(--font-size-sm)/1.45 var(--mono-font);
         text-overflow: ellipsis;
         white-space: nowrap;
       }
@@ -2877,7 +3012,7 @@ export class WorkbenchScreen extends LitElement {
         margin-top: 3px;
         overflow: hidden;
         color: var(--text-3);
-        font-size: 10px;
+        font-size: var(--font-size-sm);
         text-overflow: ellipsis;
         white-space: nowrap;
       }
@@ -2895,7 +3030,7 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .txn-empty {
-        padding: 18px 12px;
+        padding: 22px 14px;
         color: var(--text-3);
         font-size: var(--font-size-sm);
         text-align: center;
@@ -2905,15 +3040,216 @@ export class WorkbenchScreen extends LitElement {
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 8px 12px;
+        padding: 9px 14px;
         color: var(--text-3);
         background: color-mix(in srgb, black 10%, transparent);
         border-top: 1px solid var(--border-subtle);
-        font-size: 10px;
+        font-size: var(--font-size-sm);
       }
 
       .txn-popover-foot .icon {
+        font-size: 13px;
+      }
+
+      .txn-overflow {
+        position: relative;
+        flex-shrink: 0;
+      }
+
+      .txn-overflow-trigger {
+        height: 24px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 7px;
+        color: color-mix(in srgb, var(--transaction-fg) 88%, var(--text));
+        background: color-mix(in srgb, var(--transaction-fg) 7%, transparent);
+        border: 1px solid color-mix(in srgb, var(--transaction-fg) 25%, transparent);
+        border-radius: 4px;
+        font-size: var(--font-size-sm);
+        font-weight: 600;
+      }
+
+      .txn-overflow-trigger:hover,
+      .txn-overflow-trigger[aria-expanded='true'] {
+        background: color-mix(in srgb, var(--transaction-fg) 13%, transparent);
+      }
+
+      .txn-overflow-trigger .icon {
         font-size: 11px;
+        transition: transform 120ms ease;
+      }
+
+      .txn-overflow-trigger[aria-expanded='true'] .icon {
+        transform: rotate(180deg);
+      }
+
+      .txn-manager {
+        position: absolute;
+        z-index: 40;
+        top: 30px;
+        right: 0;
+        width: min(460px, calc(100vw - 16px));
+        overflow: hidden;
+        color: var(--text-2);
+        background: var(--overlay-bg);
+        border: 1px solid var(--border-subtle);
+        border-radius: 8px;
+        box-shadow:
+          0 12px 32px rgba(0, 0, 0, 0.38),
+          0 1px 3px rgba(0, 0, 0, 0.2);
+        white-space: normal;
+      }
+
+      .txn-manager-head {
+        display: flex;
+        align-items: center;
+        padding: 12px 14px 10px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .txn-manager-head strong {
+        color: var(--text);
+        font-size: var(--font-size);
+        font-weight: 600;
+      }
+
+      .txn-manager-head span {
+        margin-left: auto;
+        color: var(--text-3);
+        font-size: var(--font-size-sm);
+      }
+
+      .txn-manager-list {
+        max-height: 440px;
+        overflow-y: auto;
+        padding: 6px;
+      }
+
+      .txn-other + .txn-other {
+        border-top: 1px solid var(--border-subtle);
+      }
+
+      .txn-other-main {
+        width: 100%;
+        min-height: 62px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 8px;
+        color: var(--text-2);
+        background: transparent;
+        border: none;
+        border-radius: 5px;
+        text-align: left;
+      }
+
+      .txn-other-main:hover {
+        background: color-mix(in srgb, var(--text) 4%, transparent);
+      }
+
+      .txn-other-copy {
+        min-width: 0;
+      }
+
+      .txn-other-copy strong,
+      .txn-other-copy > span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .txn-other-copy strong {
+        color: var(--text);
+        font-size: var(--font-size);
+        font-weight: 600;
+      }
+
+      .txn-failed-label {
+        color: var(--status-dot-error);
+      }
+
+      .txn-other-copy > span {
+        margin-top: 4px;
+        color: var(--text-3);
+        font-size: var(--font-size-sm);
+      }
+
+      .txn-other-main > .icon {
+        color: var(--text-3);
+        font-size: 14px;
+        transition: transform 120ms ease;
+      }
+
+      .txn-other.expanded .txn-other-main > .icon {
+        transform: rotate(180deg);
+      }
+
+      .txn-other-detail {
+        margin: 0 8px 10px;
+        overflow: hidden;
+        background: color-mix(in srgb, black 10%, transparent);
+        border: 1px solid var(--border-subtle);
+        border-radius: 5px;
+      }
+
+      .txn-other-detail > .txn-runs {
+        max-height: 260px;
+        padding: 4px;
+      }
+
+      .txn-other-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+        padding: 8px;
+        border-top: 1px solid var(--border-subtle);
+      }
+
+      .txn-other-actions button {
+        height: 28px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 10px;
+        color: var(--text-2);
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        font-size: var(--font-size-sm);
+      }
+
+      .txn-other-actions .txn-commit:hover {
+        color: var(--status-dot-connected);
+        background: color-mix(in srgb, var(--status-dot-connected) 8%, transparent);
+      }
+
+      .txn-other-actions .txn-switch {
+        margin-right: auto;
+      }
+
+      .txn-other-actions .txn-switch:hover {
+        color: var(--transaction-fg);
+        background: color-mix(in srgb, var(--transaction-fg) 9%, transparent);
+      }
+
+      .txn-other-actions .txn-rollback:hover {
+        color: var(--status-dot-error);
+        background: color-mix(in srgb, var(--status-dot-error) 7%, transparent);
+      }
+
+      .txn-other-actions .icon {
+        font-size: 13px;
+      }
+
+      .txn-manager-foot {
+        padding: 9px 14px;
+        color: var(--text-3);
+        background: color-mix(in srgb, black 10%, transparent);
+        border-top: 1px solid var(--border-subtle);
+        font-size: var(--font-size-sm);
       }
 
       /* A fixed box whatever it carries, so switching databases never moves the
@@ -3054,8 +3390,8 @@ export class WorkbenchScreen extends LitElement {
       }
 
       @media (max-width: 1200px) {
-        .txn-commit,
-        .txn-rollback {
+        .txn-control > .txn-commit,
+        .txn-control > .txn-rollback {
           width: 28px;
           justify-content: center;
           overflow: hidden;
@@ -3063,16 +3399,16 @@ export class WorkbenchScreen extends LitElement {
           font-size: 0 !important;
         }
 
-        .txn-commit .icon,
-        .txn-rollback .icon {
+        .txn-control > .txn-commit .icon,
+        .txn-control > .txn-rollback .icon {
           color: var(--text-2);
         }
 
-        .txn-commit:hover .icon {
+        .txn-control > .txn-commit:hover .icon {
           color: var(--status-dot-connected);
         }
 
-        .txn-rollback:hover .icon {
+        .txn-control > .txn-rollback:hover .icon {
           color: var(--status-dot-error);
         }
 

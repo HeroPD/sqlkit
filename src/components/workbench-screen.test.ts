@@ -887,18 +887,20 @@ describe('WorkbenchScreen title-bar actions', () => {
     expect(host.querySelector('.txn-control')).toBeNull()
   })
 
-  it('keeps the transaction control visible when another profile is active', () => {
+  it('collapses a transaction to +1 when another profile is active', () => {
     const screen = new WorkbenchScreen()
     const workbench = screen as never as {
       _config: { connections: ConnectionProfile[] }
       _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
       _live: { statuses: unknown; phase: ReturnType<typeof vi.fn>; endTransaction: ReturnType<typeof vi.fn> }
+      _transactionManagerOpen: boolean
+      _expandedTransactionProfileIds: Set<string>
       _renderTitlebar(): unknown
     }
     const other: ConnectionProfile = { ...profile, id: 'p2', name: 'Other' }
     workbench._config.connections = [profile, other]
-    // p2 is active, but p1 holds the open transaction: the control must
-    // still render (targeting p1) or its locks outlive any visible cue.
+    // p2 is active, but p1 holds the open transaction. Showing the full
+    // control would incorrectly imply that p2 owns it, so p1 lives under +1.
     workbench._ctx.switchInstance(other.id, 'db_a')
     workbench._live.phase = vi.fn(() => 'connected')
     workbench._live.statuses = {
@@ -906,13 +908,67 @@ describe('WorkbenchScreen title-bar actions', () => {
       p2: { profileId: 'p2', phase: 'connected' },
     }
     workbench._live.endTransaction = vi.fn(() => Promise.resolve({ success: true }))
+    workbench._transactionManagerOpen = true
+    workbench._expandedTransactionProfileIds = new Set(['p1'])
     const host = document.createElement('div')
     render(workbench._renderTitlebar(), host)
 
-    const control = host.querySelector<HTMLElement>('.txn-control')
-    expect(control).toBeTruthy()
-    control?.querySelector<HTMLButtonElement>('.txn-rollback')?.click()
+    expect(host.querySelector('.txn-control')).toBeNull()
+    expect(host.querySelector('.txn-overflow-trigger')?.textContent).toContain('+1')
+    expect(host.querySelector('.txn-manager')?.textContent).toContain('Postgres')
+    host.querySelector<HTMLButtonElement>('.txn-other .txn-rollback')?.click()
     expect(workbench._live.endTransaction).toHaveBeenCalledWith('p1', 'rollback')
+  })
+
+  it('keeps the active transaction instant and manages other transactions behind +N', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { activeDbId: string | null; activeChildDb: string | null; switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn>; endTransaction: ReturnType<typeof vi.fn> }
+      _transactionManagerOpen: boolean
+      _expandedTransactionProfileIds: Set<string>
+      _renderTitlebar(): unknown
+    }
+    const reporting: ConnectionProfile = { ...profile, id: 'p2', name: 'Reporting' }
+    const billing: ConnectionProfile = { ...profile, id: 'p3', name: 'Billing' }
+    workbench._config.connections = [profile, reporting, billing]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.statuses = {
+      p1: { profileId: 'p1', phase: 'connected', transaction: { childDb: 'db_a' } },
+      p2: { profileId: 'p2', phase: 'connected', transaction: { childDb: 'analytics' } },
+      p3: { profileId: 'p3', phase: 'connected', transaction: { childDb: 'billing', failed: true } },
+    }
+    workbench._live.endTransaction = vi.fn(() => Promise.resolve({ success: true }))
+    window.sqlkit.saveWorkspaceConfig = vi.fn(() => Promise.resolve({ success: true as const }))
+    workbench._transactionManagerOpen = true
+    workbench._expandedTransactionProfileIds = new Set(['p2', 'p3'])
+    const host = document.createElement('div')
+
+    render(workbench._renderTitlebar(), host)
+
+    expect(host.querySelector('.titlebar-right > .txn-control')?.textContent).toContain('Manual Tx')
+    expect(host.querySelector('.txn-overflow-trigger')?.textContent).toContain('+2')
+    expect(host.querySelector('.txn-manager')?.textContent).toContain('Reporting')
+    expect(host.querySelector('.txn-manager')?.textContent).toContain('Billing')
+    expect(host.querySelector('.txn-manager')?.textContent).toContain('Billing · Failed')
+    expect(host.querySelector('.txn-manager')?.textContent).not.toContain('Postgres')
+    const others = host.querySelectorAll<HTMLElement>('.txn-other')
+    expect(others).toHaveLength(2)
+    expect(others[0]?.querySelector('.txn-commit')).toBeTruthy()
+    expect(others[0]?.querySelector('.txn-switch')?.textContent).toContain('Switch to')
+    expect(others[1]?.classList.contains('failed')).toBe(true)
+    expect(others[1]?.querySelector('.txn-other-copy strong')?.textContent).toBe('Billing · Failed')
+    expect(others[1]?.querySelector('.txn-commit')).toBeNull()
+    others[0]?.querySelector<HTMLButtonElement>('.txn-switch')?.click()
+    expect(workbench._ctx.activeDbId).toBe('p2')
+    expect(workbench._ctx.activeChildDb).toBe('analytics')
+    expect(workbench._transactionManagerOpen).toBe(false)
+    others[0]?.querySelector<HTMLButtonElement>('.txn-commit')?.click()
+    others[1]?.querySelector<HTMLButtonElement>('.txn-rollback')?.click()
+    expect(workbench._live.endTransaction).toHaveBeenNthCalledWith(1, 'p2', 'commit')
+    expect(workbench._live.endTransaction).toHaveBeenNthCalledWith(2, 'p3', 'rollback')
   })
 
   it('refuses to move the UI to another child while a transaction is open', () => {
