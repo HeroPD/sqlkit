@@ -38,6 +38,7 @@ const api: SqlkitApi = {
     ipcRenderer.invoke('db:export-query', profileId, childDb, sql, params, sort, filter, format, suggestedName, executionId, sqlTable),
   closeSession: (sessionId) => ipcRenderer.invoke('db:close-session', sessionId),
   cancelQuery: (profileId, executionId) => ipcRenderer.invoke('db:cancel', profileId, executionId),
+  endTransaction: (profileId, mode) => ipcRenderer.invoke('db:end-transaction', profileId, mode),
   databaseCreateMeta: (profileId) => ipcRenderer.invoke('db:database-create-meta', profileId),
   createDatabase: (profileId, name, options) => ipcRenderer.invoke('db:create-database', profileId, name, options),
   dropDatabase: (profileId, name) => ipcRenderer.invoke('db:drop-database', profileId, name),

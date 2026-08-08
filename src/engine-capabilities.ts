@@ -6,8 +6,9 @@ export type EngineCapabilities = {
   cancellation: 'server' | 'request' | 'worker-restart'
   rowCount: 'exact-after-drain' | 'bounded-lower-bound'
   namespaceModel: 'database-and-schema' | 'database-is-schema' | 'flat-file'
-  /** Query calls intentionally do not preserve connection-scoped state. */
-  persistentSession: false
+  /** Whether a run that leaves a transaction open pins its connection for
+   * later runs (manual transactions). SQLite's single shared handle cannot. */
+  manualTransactions: boolean
   /** Live server load for the Tasks dashboard, or false where there is no
    * server to ask. `cancelSession` is false on engines whose only interrupt
    * ends the whole session, so the UI offers just one destructive action. */
@@ -20,7 +21,7 @@ export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> =
     cancellation: 'server',
     rowCount: 'exact-after-drain',
     namespaceModel: 'database-and-schema',
-    persistentSession: false,
+    manualTransactions: true,
     // pg_cancel_backend interrupts the statement, pg_terminate_backend drops it.
     serverActivity: { cancelSession: true },
   },
@@ -31,7 +32,7 @@ export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> =
     cancellation: 'server',
     rowCount: 'exact-after-drain',
     namespaceModel: 'database-is-schema',
-    persistentSession: false,
+    manualTransactions: true,
     // KILL QUERY vs KILL CONNECTION.
     serverActivity: { cancelSession: true },
   },
@@ -40,7 +41,7 @@ export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> =
     cancellation: 'request',
     rowCount: 'exact-after-drain',
     namespaceModel: 'database-and-schema',
-    persistentSession: false,
+    manualTransactions: true,
     // KILL always ends the session; there is no statement-only form.
     serverActivity: { cancelSession: false },
   },
@@ -49,7 +50,7 @@ export const ENGINE_CAPABILITIES: Readonly<Record<Engine, EngineCapabilities>> =
     cancellation: 'worker-restart',
     rowCount: 'bounded-lower-bound',
     namespaceModel: 'flat-file',
-    persistentSession: false,
+    manualTransactions: false,
     // A local file has no sessions, connections or uptime to report.
     serverActivity: false,
   },

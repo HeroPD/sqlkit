@@ -13,14 +13,30 @@ export { splitTopLevelStatements } from '../../src/sql-statements'
 // sides must classify a script identically or END counts wrong (see below).
 export const containsSqliteTrigger = (masked: string) => /\bcreate\s+(?:temp(?:orary)?\s+)?trigger\b/i.test(masked)
 
-// Pooled server queries cannot safely leave a transaction open for a later run:
-// that later run may get another connection. Self-contained transaction scripts
-// remain supported because one driver.query call keeps one checked-out connection.
-// Returns whether the script drives its own transaction control, so a caller can
-// avoid wrapping it in a redundant outer transaction.
-export function assertSelfContainedTransaction(sql: string, engine: Engine, mode?: SqlModeFlags): boolean {
+export type TransactionAnalysis = {
+  /** The script drives its own transaction control (BEGIN/COMMIT/ROLLBACK). */
+  sawControl: boolean
+  /** Net begins minus closes; negative when a lone COMMIT closes a pinned transaction. */
+  depth: number
+  /** A COMMIT/ROLLBACK ran with no BEGIN in this script (never set for T-SQL,
+   * where a close at depth 0 may sit in an unexecuted TRY/CATCH branch). */
+  closedAtDepthZero: boolean
+  /** T-SQL scripts consulting @@TRANCOUNT manage their own balance. */
+  managesTrancount: boolean
+  /** Last top-level control statement — the fallback transaction-state signal
+   * for engines whose wire protocol does not report it (MySQL). */
+  lastControl: 'begin' | 'close' | null
+}
+
+// Token-counts a script's transaction control without judging it. Server
+// engines pin the checked-out connection when a run leaves a transaction open
+// (manual transactions); SQLite still requires self-contained runs — see
+// assertSelfContainedTransaction below.
+export function analyzeTransactionControl(sql: string, engine: Engine, mode?: SqlModeFlags): TransactionAnalysis {
   let depth = 0
   let sawControl = false
+  let closedAtDepthZero = false
+  let lastControl: 'begin' | 'close' | null = null
   const script = splitScript(sql, engine, mode)
   // SQLite spells COMMIT as END too, but trigger bodies (BEGIN stmt; … END)
   // split at their inner semicolons here — their END is not a commit.
@@ -41,12 +57,14 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
       for (const match of controls) {
         if (match[1]) {
           sawControl = true
+          lastControl = 'begin'
           depth += 1
           if (match[2]) sqlServerTransactionNames.add(match[2].toLowerCase())
         } else if (match[3]) {
           sqlServerSavepoints.add(match[4]!.toLowerCase())
         } else if (match[5]) {
           sawControl = true
+          lastControl = 'close'
           if (depth > 0) depth -= 1
         } else if (depth > 0) {
           sawControl = true
@@ -54,8 +72,10 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
           // An unnamed rollback, or one naming the outer transaction, clears
           // SQL Server's entire transaction stack. A known savepoint rollback
           // leaves @@TRANCOUNT unchanged. Unknown named targets fail closed.
-          if (!rollbackName || sqlServerTransactionNames.has(rollbackName)) depth = 0
-          else if (sqlServerSavepoints.has(rollbackName)) continue
+          if (!rollbackName || sqlServerTransactionNames.has(rollbackName)) {
+            lastControl = 'close'
+            depth = 0
+          } else if (sqlServerSavepoints.has(rollbackName)) continue
         }
       }
       continue
@@ -72,12 +92,12 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
       || (/^rollback(?:\s+(?:work|transaction))?\b/.test(head) && !/^rollback\s+to\b/.test(head))
     if (begins) {
       sawControl = true
+      lastControl = 'begin'
       depth += 1
     } else if (closes) {
       sawControl = true
-      if (depth === 0) {
-        throw new Error(t('query.transactionNotActive'))
-      }
+      lastControl = 'close'
+      if (depth === 0) closedAtDepthZero = true
       depth -= 1
     }
   }
@@ -85,10 +105,20 @@ export function assertSelfContainedTransaction(sql: string, engine: Engine, mode
   // across exclusive branches — token counting cannot judge it, and the
   // session reset at release rolls back anything it truly leaks.
   const managesTrancount = engine === 'sqlserver' && /@@trancount/i.test(script.masked)
-  if (sawControl && depth !== 0 && !managesTrancount) {
+  return { sawControl, depth, closedAtDepthZero, managesTrancount, lastControl }
+}
+
+// SQLite's single shared worker handle cannot pin a per-run transaction, so
+// its scripts must begin and finish transactions in the same run. Returns
+// whether the script drives its own transaction control, so a caller can
+// avoid wrapping it in a redundant outer transaction.
+export function assertSelfContainedTransaction(sql: string, engine: Engine, mode?: SqlModeFlags): boolean {
+  const analysis = analyzeTransactionControl(sql, engine, mode)
+  if (analysis.closedAtDepthZero) throw new Error(t('query.transactionNotActive'))
+  if (analysis.sawControl && analysis.depth !== 0 && !analysis.managesTrancount) {
     throw new Error(t('query.transactionSameRun'))
   }
-  return sawControl
+  return analysis.sawControl
 }
 
 /** SQL Server's GO is a client batch separator, not T-SQL. Expands each batch by its repeat count. */
@@ -180,6 +210,8 @@ export type SqlRunPlan = {
   /** Native execution units. Only SQL Server's client-side GO creates several. */
   batches: string[]
   params: unknown[]
+  /** Transaction-control shape of the run, for pin/unpin decisions. */
+  transaction: TransactionAnalysis
 }
 
 // The authoritative preparation step between renderer-selected text and a
@@ -208,10 +240,13 @@ export function prepareSqlRun(args: {
     sql = dialectFor(args.engine).applyOrderBy(sql, args.sort, args.sqlMode)
   }
 
-  assertSelfContainedTransaction(sql, args.engine, args.sqlMode)
+  // Server engines pin the connection when a run leaves a transaction open;
+  // SQLite's shared handle cannot, so its runs must stay self-contained.
+  const transaction = analyzeTransactionControl(sql, args.engine, args.sqlMode)
+  if (args.engine === 'sqlite') assertSelfContainedTransaction(sql, args.engine, args.sqlMode)
   const batches = args.engine === 'sqlserver' ? splitSqlServerBatches(sql) : [sql]
   if (params.length && batches.length > 1) {
     throw new Error(t('query.parametersSingleBatch'))
   }
-  return { batches, params }
+  return { batches, params, transaction }
 }

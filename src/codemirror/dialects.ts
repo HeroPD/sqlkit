@@ -92,6 +92,10 @@ const COMMON_KEYWORDS = [
   'PRIMARY KEY',
   'FOREIGN KEY',
   'REFERENCES',
+
+  'BEGIN',
+  'COMMIT',
+  'ROLLBACK',
 ] as const
 
 // Completion.boost is documented as -99..99; keep every value in range.
@@ -116,12 +120,12 @@ export const SQL_DIALECTS: Record<SqlDialectName, SqlDialectConfig> = {
       ...PostgreSQL.spec, 
       doubleDollarQuotedStrings: false
     }),
-    keywords: [...COMMON_KEYWORDS, 'LIMIT', 'OFFSET', 'ILIKE', 'RETURNING', 'NOW'],
+    keywords: [...COMMON_KEYWORDS, 'LIMIT', 'OFFSET', 'ILIKE', 'RETURNING', 'NOW', 'START TRANSACTION'],
     quoteIdent: dialectFor('postgresql').quoteIdent,
   },
   mssql: {
     dialect: MSSQL,
-    keywords: [...COMMON_KEYWORDS, 'TOP', 'OUTPUT', 'IDENTITY', 'GETDATE'],
+    keywords: [...COMMON_KEYWORDS, 'TOP', 'OUTPUT', 'IDENTITY', 'GETDATE', 'BEGIN TRANSACTION'],
     quoteIdent: dialectFor('sqlserver').quoteIdent,
   },
   sqlite: {
@@ -131,7 +135,7 @@ export const SQL_DIALECTS: Record<SqlDialectName, SqlDialectConfig> = {
   },
   mysql: {
     dialect: MySQL,
-    keywords: [...COMMON_KEYWORDS, 'LIMIT', 'OFFSET', 'SHOW', 'AUTO_INCREMENT'],
+    keywords: [...COMMON_KEYWORDS, 'LIMIT', 'OFFSET', 'SHOW', 'AUTO_INCREMENT', 'START TRANSACTION'],
     quoteIdent: dialectFor('mysql').quoteIdent,
   },
 }

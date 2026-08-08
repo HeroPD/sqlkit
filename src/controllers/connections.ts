@@ -99,6 +99,21 @@ export class ConnectionsController implements ReactiveController {
     void this.loadTables(profileId)
   }
 
+  /** The open manual transaction on this connection, if any. */
+  transaction(profileId: string) {
+    const status = this.statuses[profileId]
+    return status?.phase === 'connected' ? status.transaction : undefined
+  }
+
+  /** Commits or rolls back the open manual transaction. */
+  async endTransaction(profileId: string, mode: 'commit' | 'rollback') {
+    const result = await window.sqlkit.endTransaction(profileId, mode)
+    // Committed work changes what the schema tree and grids should believe;
+    // the metadata refresh deferred during the transaction happens here.
+    if (result.success) this.refresh(profileId)
+    return result
+  }
+
   /** Switches an all-databases connection's active child and refetches its metadata. */
   async setActiveChild(profileId: string, database: string) {
     const result = await window.sqlkit.setActiveChildDb(profileId, database)

@@ -21,6 +21,7 @@ import {
   queryPayload,
   stringValue,
   tableReference,
+  transactionEndMode,
 } from './ipc-validation'
 import { hydrateConnectionProfile } from './workspace'
 
@@ -73,6 +74,13 @@ export function registerDbIpc(context: DbIpcContext) {
     }
   })
   ipcMain.handle('db:statuses', (event) => existingManager(event)?.statuses() ?? [])
+  ipcMain.handle('db:end-transaction', (event, profileId: unknown, mode: unknown) => {
+    try {
+      return manager(event).endTransaction(stringValue(profileId, 'Profile id', 200), transactionEndMode(mode))
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message }
+    }
+  })
   ipcMain.handle(
     'db:query',
     (event, profileId: unknown, childDb: unknown, sql: unknown, params?: unknown, sort?: unknown, filter?: unknown, executionId?: unknown) => {

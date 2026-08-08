@@ -33,10 +33,12 @@ export type Driver = {
   /** Opens the connection; resolves with the server version string. */
   connect(): Promise<string>
   disconnect(): Promise<void>
-  /** Executes one self-contained, stateless SQL run in `childDb` when provided,
-   * otherwise in the active database. Connection-scoped state is not preserved
-   * between calls; transactions must begin and finish in this call. `filter`
-   * and `sort` inject outer WHERE/ORDER BY clauses only for one SELECT. */
+  /** Executes one SQL run in `childDb` when provided, otherwise in the active
+   * database. Session state is reset between calls, with one exception: a run
+   * that leaves a transaction open pins its connection, and later runs use it
+   * until COMMIT/ROLLBACK (openTransaction/endTransaction). SQLite still
+   * requires self-contained transactions. `filter` and `sort` inject outer
+   * WHERE/ORDER BY clauses only for one SELECT. */
   query(
     sql: string,
     params?: unknown[],
@@ -113,11 +115,19 @@ export type Driver = {
   dropDatabase?(name: string): Promise<void>
   /** Switches the active child; false when the name is unknown. */
   useChild?(database: string): boolean
+  /** The open manual transaction on the pinned connection, if any. `failed`
+   * means a statement inside it errored and only ROLLBACK can end it usefully. */
+  openTransaction?(): { childDb: string; failed?: boolean } | null
+  /** Commits or rolls back the pinned manual transaction and releases its
+   * connection back to the pool. Throws when no transaction is open. */
+  endTransaction?(mode: 'commit' | 'rollback'): Promise<void>
 }
 
 export type DriverEvents = {
   /** Async failure outside a call (e.g. an idle pool client dropping). */
   onError(message: string): void
+  /** The pinned transaction ended outside a manager call (socket death). */
+  onTransactionChange?(): void
 }
 
 export { MAX_BUFFERED_ROWS } from './limits'

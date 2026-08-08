@@ -656,6 +656,169 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  describe('manual transactions', () => {
+    it('pins the connection on BEGIN and shares the transaction across runs', async () => {
+      const driver = await connectDriver()
+      const other = await connectDriver()
+      try {
+        await admin.query('drop table if exists sqlkit_it.txn_probe')
+        await admin.query('create table sqlkit_it.txn_probe (id int primary key)')
+        expect(driver.openTransaction!()).toBeNull()
+        await driver.query('BEGIN')
+        expect(driver.openTransaction!()).toMatchObject({ childDb: expect.any(String) })
+        await driver.query('insert into sqlkit_it.txn_probe values (1)')
+        expect((await driver.query('select count(*) from sqlkit_it.txn_probe')).rows).toEqual([['1']])
+        // Uncommitted work is invisible to a second connection.
+        expect((await other.query('select count(*) from sqlkit_it.txn_probe')).rows).toEqual([['0']])
+        await driver.endTransaction!('rollback')
+        expect(driver.openTransaction!()).toBeNull()
+        expect((await driver.query('select count(*) from sqlkit_it.txn_probe')).rows).toEqual([['0']])
+      } finally {
+        await admin.query('drop table if exists sqlkit_it.txn_probe').catch(() => {})
+        await other.disconnect()
+        await driver.disconnect()
+      }
+    })
+
+    it('a lone COMMIT run closes the pin and persists the work', async () => {
+      const driver = await connectDriver()
+      try {
+        await admin.query('drop table if exists sqlkit_it.txn_commit_probe')
+        await admin.query('create table sqlkit_it.txn_commit_probe (id int primary key)')
+        await driver.query('BEGIN; insert into sqlkit_it.txn_commit_probe values (1)')
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.query('COMMIT')
+        expect(driver.openTransaction!()).toBeNull()
+        expect((await admin.query('select count(*)::int as n from sqlkit_it.txn_commit_probe')).rows[0].n).toBe(1)
+      } finally {
+        await admin.query('drop table if exists sqlkit_it.txn_commit_probe').catch(() => {})
+        await driver.disconnect()
+      }
+    })
+
+    it('refuses runs against another database while pinned', async () => {
+      const driver = await connectDriver({ databaseMode: 'all' })
+      try {
+        const otherDb = driver.children!().find((child) => !child.inUse)?.name
+        await driver.query('BEGIN')
+        if (otherDb) {
+          await expect(driver.query('select 1', [], otherDb)).rejects.toThrow(/transaction is open/i)
+        }
+        await driver.endTransaction!('rollback')
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('a failed statement keeps the transaction pinned as failed until rollback', async () => {
+      const driver = await connectDriver()
+      try {
+        await expect(driver.query('BEGIN; select bogus_column_xyz')).rejects.toThrow()
+        expect(driver.openTransaction!()).toMatchObject({ failed: true })
+        // The server refuses further statements until the failed txn ends.
+        await expect(driver.query('select 1')).rejects.toThrow()
+        await driver.endTransaction!('rollback')
+        expect(driver.openTransaction!()).toBeNull()
+        expect((await driver.query('select 1')).rows).toEqual([[1]])
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('cancelling a statement inside the transaction leaves it failed but recoverable', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN')
+        const slow = driver.query('select pg_sleep(20)', [], null, null, null, 'txn-slow')
+        const rejection = expect(slow).rejects.toThrow('Query cancelled.')
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        await driver.cancel!('txn-slow')
+        await rejection
+        expect(driver.openTransaction!()).toMatchObject({ failed: true })
+        await driver.endTransaction!('rollback')
+        expect((await driver.query('select 1')).rows).toEqual([[1]])
+      } finally {
+        await driver.disconnect()
+      }
+    }, 30_000)
+
+    it('serializes concurrent runs on the pinned client', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN')
+        const [slow, fast] = await Promise.all([
+          driver.query('select 1 from pg_sleep(0.2)'),
+          driver.query('select 2'),
+        ])
+        expect(slow.rows).toEqual([[1]])
+        expect(fast.rows).toEqual([[2]])
+        await driver.endTransaction!('commit')
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('disconnects promptly with an open transaction', async () => {
+      const driver = await connectDriver()
+      await driver.query('BEGIN')
+      const started = Date.now()
+      await driver.disconnect()
+      expect(Date.now() - started).toBeLessThan(3_000)
+    })
+
+    it('refuses a second concurrent manual transaction instead of leaking it', async () => {
+      const driver = await connectDriver()
+      try {
+        const outcomes = await Promise.allSettled([driver.query('BEGIN'), driver.query('BEGIN')])
+        expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1)
+        const rejected = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult
+        expect((rejected.reason as Error).message).toMatch(/already open/i)
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.endTransaction!('rollback')
+        // The loser's client went back to the pool: no orphaned session, so
+        // disconnect (which drains) stays prompt.
+        const started = Date.now()
+        await driver.disconnect()
+        expect(Date.now() - started).toBeLessThan(3_000)
+      } finally {
+        await driver.disconnect().catch(() => {})
+      }
+    })
+
+    it('reroutes a run queued behind COMMIT to a fresh pooled connection', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN')
+        // Submitted back-to-back: the SELECT chains behind the COMMIT on the
+        // pinned client and must reroute once it finds the transaction ended.
+        const [, selected] = await Promise.all([driver.query('COMMIT'), driver.query('select 1')])
+        expect(selected.rows).toEqual([[1]])
+        expect(driver.openTransaction!()).toBeNull()
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('drops the pin when the server terminates the pinned backend', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN')
+        const pid = (await driver.query('select pg_backend_pid()')).rows[0]?.[0]
+        const slow = driver.query('select pg_sleep(10)')
+        const rejection = expect(slow).rejects.toThrow()
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        await admin.query('select pg_terminate_backend($1)', [pid])
+        await rejection
+        // FATAL termination means the client is dead: the pin must clear
+        // rather than leaving a corpse the UI keeps offering to roll back.
+        expect(driver.openTransaction!()).toBeNull()
+        expect((await driver.query('select 1')).rows).toEqual([[1]])
+      } finally {
+        await driver.disconnect()
+      }
+    }, 15_000)
+  })
+
 })
 
 // A transaction-pooling proxy in front of the same server. It hands each client

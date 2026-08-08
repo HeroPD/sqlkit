@@ -130,6 +130,9 @@ export type ConnectionStatus = {
   tunneled?: boolean
   /** Child databases (all-databases mode); exactly one is inUse. */
   children?: ChildDb[]
+  /** An open manual transaction pinning a connection to `childDb`. `failed`
+   * means a statement inside it errored; only rollback ends it usefully. */
+  transaction?: { childDb: string; failed?: boolean }
   error?: string
 }
 
@@ -468,6 +471,8 @@ export type SqlkitApi = {
   closeSession: (sessionId: string) => Promise<void>
   /** Cancels one in-flight execution; omit executionId only for connection teardown. */
   cancelQuery: (profileId: string, executionId?: string) => Promise<{ success: boolean; error?: string }>
+  /** Commits or rolls back the open manual transaction on this connection. */
+  endTransaction: (profileId: string, mode: 'commit' | 'rollback') => Promise<{ success: boolean; error?: string }>
   /** Engine-specific option values (collations, charsets, …) for the create dialog. */
   databaseCreateMeta: (profileId: string) => Promise<DatabaseCreateMetaResult>
   /** Server-side CREATE DATABASE on a connected profile, with engine-specific options. */

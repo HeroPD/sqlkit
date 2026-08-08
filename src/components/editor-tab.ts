@@ -77,6 +77,14 @@ export class EditorTab extends LitElement {
       border-bottom-color: var(--tab-active-bg);
     }
 
+    :host([active])::before {
+      content: '';
+      position: absolute;
+      inset: 0 0 auto;
+      height: 2px;
+      background: var(--accent);
+    }
+
     .label {
       flex: 1;
       overflow: hidden;

@@ -703,4 +703,114 @@ DELIMITER ;`)
     }
   })
 
+  describe('manual transactions', () => {
+    beforeAll(async () => {
+      await admin.query('drop table if exists txn_probe')
+      await admin.query('create table txn_probe (id int primary key) engine=InnoDB')
+    })
+
+    afterAll(async () => {
+      await admin.query('drop table if exists txn_probe').catch(() => {})
+    })
+
+    it('pins on BEGIN via the OK-packet flag and rolls back across runs', async () => {
+      const driver = await connectDriver()
+      try {
+        await admin.query('truncate table txn_probe')
+        await driver.query('BEGIN; insert into txn_probe values (1)')
+        expect(driver.openTransaction!()).toMatchObject({ childDb: expect.any(String) })
+        // In-txn work is visible on the pinned connection, not to admin.
+        expect((await driver.query('select count(*) from txn_probe')).rows).toEqual([[1]])
+        const [before] = await admin.query('select count(*) as n from txn_probe')
+        expect((before as Array<{ n: number }>)[0]?.n).toBe(0)
+        await driver.endTransaction!('rollback')
+        expect(driver.openTransaction!()).toBeNull()
+        expect((await driver.query('select count(*) from txn_probe')).rows).toEqual([[0]])
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('pins a run ending in SELECT via the last OK packet, commit persists', async () => {
+      const driver = await connectDriver()
+      try {
+        await admin.query('truncate table txn_probe')
+        // The trailing SELECT reports no status itself, but START TRANSACTION's
+        // own OK packet carried SERVER_STATUS_IN_TRANS and result sets cannot
+        // change transaction state, so the last OK value decides.
+        await driver.query('START TRANSACTION; select 1')
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.query('insert into txn_probe values (7)')
+        await driver.endTransaction!('commit')
+        expect(driver.openTransaction!()).toBeNull()
+        const [after] = await admin.query('select count(*) as n from txn_probe')
+        expect((after as Array<{ n: number }>)[0]?.n).toBe(1)
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('does not pin a phantom transaction after implicit-commit DDL', async () => {
+      const driver = await connectDriver()
+      try {
+        await admin.query('drop table if exists txn_ddl_probe')
+        // CREATE TABLE implicitly commits the transaction; the trailing SELECT
+        // must not resurrect it (the DDL's OK packet cleared the flag).
+        await driver.query('BEGIN; create table txn_ddl_probe (id int); select 1')
+        expect(driver.openTransaction!()).toBeNull()
+      } finally {
+        await admin.query('drop table if exists txn_ddl_probe').catch(() => {})
+        await driver.disconnect()
+      }
+    })
+
+    it('refuses a second concurrent manual transaction instead of leaking it', async () => {
+      const driver = await connectDriver()
+      try {
+        const outcomes = await Promise.allSettled([driver.query('BEGIN'), driver.query('BEGIN')])
+        expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1)
+        const rejected = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult
+        expect((rejected.reason as Error).message).toMatch(/already open/i)
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.endTransaction!('rollback')
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('reroutes a run queued behind COMMIT to a fresh pooled connection', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN')
+        const [, selected] = await Promise.all([driver.query('COMMIT'), driver.query('select 1')])
+        expect(selected.rows).toEqual([[1]])
+        expect(driver.openTransaction!()).toBeNull()
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('a lone COMMIT run closes the pin', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN')
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.query('COMMIT')
+        expect(driver.openTransaction!()).toBeNull()
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('disconnects promptly with an open transaction', async () => {
+      const driver = await connectDriver()
+      await driver.query('BEGIN; insert into txn_probe values (99)')
+      const started = Date.now()
+      await driver.disconnect()
+      expect(Date.now() - started).toBeLessThan(3_000)
+      const [rows] = await admin.query('select count(*) as n from txn_probe where id = 99')
+      expect((rows as Array<{ n: number }>)[0]?.n).toBe(0)
+    })
+  })
+
 })

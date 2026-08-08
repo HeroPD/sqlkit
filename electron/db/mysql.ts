@@ -29,7 +29,12 @@ type RawConnection = {
   query(options: { sql: string; values: unknown[]; rowsAsArray: boolean }): StreamableQuery
   pause(): void
   resume(): void
+  on(event: 'error', listener: (error: Error) => void): void
+  removeListener(event: 'error', listener: (error: Error) => void): void
 }
+
+// SERVER_STATUS_IN_TRANS in the OK packet's status flags.
+const SERVER_IN_TRANSACTION = 1
 
 type FieldMeta = { name: string; db?: string; schema?: string; orgTable?: string; orgName?: string; columnType?: number; type?: number }
 
@@ -158,11 +163,45 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     return pool
   }
 
+  // A manual transaction (the user ran BEGIN) pins its checked-out connection
+  // so later runs join it instead of drawing a fresh pooled one.
+  type Pin = { conn: mysql.PoolConnection; database: string; chain: Promise<unknown>; onError: (error: Error) => void }
+  let pin: Pin | null = null
+
+  const adoptPin = (conn: mysql.PoolConnection, database: string) => {
+    // A checked-out connection whose socket dies must not crash the process
+    // on an unhandled 'error'; drop the pin and clear the status indicator.
+    const onError = () => {
+      if (pin?.conn !== conn) return
+      pin = null
+      conn.destroy()
+      events.onTransactionChange?.()
+    }
+    rawOf(conn).on('error', onError)
+    pin = { conn, database, chain: Promise.resolve(), onError }
+  }
+
+  // Releasing lets resetOnRelease scrub the session (rolls back, clears SET
+  // and temp state); destroying severs the socket and aborts the txn.
+  const dropPin = (release: boolean) => {
+    if (!pin) return
+    const { conn, onError } = pin
+    pin = null
+    rawOf(conn).removeListener('error', onError)
+    if (release) conn.release()
+    else conn.destroy()
+  }
+
   // The pool for `database`, opening it on demand and retiring whichever other
   // one was live. end() drains rather than severs, so work already in flight on
   // the outgoing database finishes; the next call for it opens a fresh pool.
   const poolFor = (database: string) => {
     if (!pools) throw new Error(t('connection.notConnected'))
+    // A pinned transaction holds a connection of its database; resolving
+    // another database would retire that pool, whose end() would never drain.
+    if (pin && database !== pin.database) {
+      throw new Error(t('query.transactionOtherDatabase', { database: pin.database }))
+    }
     const existing = pools.get(database)
     if (existing) return existing
     for (const [name, pool] of pools) {
@@ -284,6 +323,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async disconnect() {
+      // Destroy the pinned connection first so pool.end()'s drain can finish.
+      dropPin(false)
       const closing = pools
       pools = null
       if (!closing) return
@@ -293,10 +334,66 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     async query(sql, params = [], childDb = null, sort = null, filter = null, executionId) {
       const started = performance.now()
       const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode })
+      // Database-mismatch guard, before the entry joins `running` so a
+      // refusal can't leak a phantom cancel target.
+      const pool = poolForQuery(childDb)
       // Checked out manually so the thread id is known while the statement
       // runs and cancel() has a KILL QUERY target.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
       running.add(entry)
+
+      const mapCancelled = (error: unknown) =>
+        isInterrupted(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
+
+      // A pinned transaction's connection can't multiplex: queue this run
+      // behind whatever the transaction is already doing and route it there.
+      // The unpin decision happens INSIDE the chain, so a queued run can
+      // never execute on a connection an earlier COMMIT already released —
+      // it observes the cleared pin at its own turn and reroutes below.
+      const pinned = pin
+      if (pinned) {
+        const run = pinned.chain.then(async () => {
+          if (pin !== pinned) return null
+          entry.threadId = rawOf(pinned.conn).threadId ?? null
+          if (entry.cancelRequested) throw new Error(t('query.cancelled'))
+          const sessionState = { inTransaction: null as boolean | null }
+          try {
+            const result = await streamQuery(rawOf(pinned.conn), plan.batches[0]!, plan.params, started, childDb ?? active, sessionState)
+            // The last OK packet is the wire truth; a pure-SELECT run reports
+            // nothing and cannot have changed transaction state.
+            if (pin === pinned && sessionState.inTransaction === false) dropPin(true)
+            return result
+          } catch (error) {
+            if (pin === pinned) {
+              if ((error as { fatal?: boolean }).fatal) {
+                // The connection died mid-run; a corpse must not stay pinned.
+                dropPin(false)
+              } else if (sessionState.inTransaction === false || (error as { errno?: number }).errno === 1213) {
+                // Statements before the failure closed the transaction (an OK
+                // packet said so), or InnoDB chose this transaction as a
+                // deadlock victim and rolled the whole thing back (1213).
+                dropPin(true)
+              }
+              // Otherwise a failed statement leaves the MySQL transaction
+              // open and usable: the pin survives (KILL QUERY included).
+            }
+            throw error
+          }
+        })
+        pinned.chain = run.catch(() => {})
+        try {
+          const result = await run
+          if (result) return result
+          // The transaction ended before this run's turn: fall through to a
+          // fresh pooled connection, as any run after COMMIT would get.
+        } catch (error) {
+          throw mapCancelled(error)
+        } finally {
+          running.delete(entry)
+        }
+        running.add(entry)
+      }
+
       let conn: mysql.PoolConnection | null = null
       // Leaves `running` before the connection re-enters the pool, so a late
       // KILL QUERY can never target this thread once another query has it.
@@ -306,20 +403,37 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         conn = null
       }
       try {
-        conn = await acquire(poolForQuery(childDb))
+        conn = await acquire(pool)
         const raw = rawOf(conn)
         entry.threadId = raw.threadId ?? null
         if (entry.cancelRequested) {
           releaseToPool()
           throw new Error(t('query.cancelled'))
         }
-        const result = await streamQuery(raw, plan.batches[0]!, plan.params, started, childDb ?? active)
+        const sessionState = { inTransaction: null as boolean | null }
+        const result = await streamQuery(raw, plan.batches[0]!, plan.params, started, childDb ?? active, sessionState)
+        // The run left a transaction open — the OK packet's word, which also
+        // catches a transaction opened inside CALL. Pin the connection for
+        // later runs instead of releasing it (resetOnRelease would roll it
+        // back). One pin per connection: a concurrent winner keeps its pin
+        // and this run's transaction is rolled back with an explicit error.
+        if (sessionState.inTransaction === true) {
+          if (pin) {
+            releaseToPool()
+            throw new Error(t('query.transactionAlreadyOpen'))
+          }
+          running.delete(entry)
+          const adopted = conn
+          conn = null
+          adoptPin(adopted, childDb ?? active)
+          return result
+        }
         releaseToPool()
         return result
       } catch (error) {
         // The connection may hold half-read results; drop it rather than reuse.
         conn?.destroy()
-        throw isInterrupted(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
+        throw mapCancelled(error)
       } finally {
         running.delete(entry)
       }
@@ -919,6 +1033,29 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       active = database
       return true
     },
+
+    openTransaction() {
+      return pin ? { childDb: pin.database } : null
+    },
+
+    async endTransaction(mode) {
+      const pinned = pin
+      if (!pinned) throw new Error(t('transaction.none'))
+      // Ending and unpinning happen inside the chain: a queued run behind
+      // this cannot start until the release has fully completed.
+      const run = pinned.chain.then(async () => {
+        if (pin !== pinned) return
+        try {
+          await pinned.conn.query(mode === 'commit' ? 'COMMIT' : 'ROLLBACK')
+          dropPin(true)
+        } catch (error) {
+          dropPin(false)
+          throw error as Error
+        }
+      })
+      pinned.chain = run.catch(() => {})
+      await run
+    },
   }
 }
 
@@ -932,6 +1069,12 @@ function streamQuery(
   params: unknown[],
   started: number,
   activeDb: string,
+  /** Collects the last OK packet's SERVER_STATUS_IN_TRANS flag. Result sets
+   * never update it (mysql2 hides EOF status flags), but they also cannot
+   * change explicit transaction state — every statement that can (BEGIN,
+   * COMMIT, DML, DDL, CALL's final packet) ends in an OK packet — so the
+   * last OK value stays authoritative; null means no statement reported. */
+  sessionState?: { inTransaction: boolean | null },
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     let columns: string[] = []
@@ -1002,6 +1145,10 @@ function streamQuery(
         total = (row as { affectedRows?: number }).affectedRows ?? 0
         limited = false
         active = true
+        const serverStatus = (row as { serverStatus?: number }).serverStatus
+        if (sessionState && serverStatus !== undefined) {
+          sessionState.inTransaction = (serverStatus & SERVER_IN_TRANSACTION) !== 0
+        }
       }
     })
     const finish = () => {

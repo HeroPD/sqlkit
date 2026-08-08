@@ -294,12 +294,16 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
-  it('rejects a transaction left open after rollback to a savepoint', async () => {
+  it('pins a transaction left open after rollback to a savepoint', async () => {
     const driver = await connectDriver()
     try {
-      await expect(driver.query(
-        'BEGIN TRAN; SAVE TRAN sqlkit_save; SELECT 1; ROLLBACK TRAN sqlkit_save;',
-      )).rejects.toThrow(/same query run/i)
+      // The savepoint rollback leaves the outer transaction open; it used to be
+      // rejected pre-flight, now it pins the connection as a manual transaction.
+      const result = await driver.query('BEGIN TRAN; SAVE TRAN sqlkit_save; SELECT 1; ROLLBACK TRAN sqlkit_save;')
+      expect(result.rows).toEqual([[1]])
+      expect(driver.openTransaction!()).not.toBeNull()
+      await driver.endTransaction!('rollback')
+      expect(driver.openTransaction!()).toBeNull()
     } finally {
       await driver.disconnect()
     }
@@ -376,18 +380,22 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
-  it('rolls back a transaction left open by a failed script before the connection is pooled', async () => {
+  it('pins a transaction left open by a failed script until the user rolls it back', async () => {
     const driver = await connectDriver()
     await fixtures.request().batch("drop table if exists lock_probe")
     await fixtures.request().batch("create table lock_probe (id int primary key, v nvarchar(10))")
     await fixtures.request().batch("insert into lock_probe values (1, 'a')")
     try {
-      // Textually balanced so the guard admits it; THROW aborts the batch after
-      // the UPDATE took its lock, so COMMIT never runs.
+      // THROW aborts the batch after the UPDATE took its lock, so COMMIT never
+      // runs. The open transaction now pins instead of being reset on release,
+      // so the user can inspect and roll it back deliberately.
       await expect(
         driver.query("begin tran update lock_probe set v = 'dirty' where id = 1; throw 50000, 'boom', 1; commit"),
       ).rejects.toThrow('boom')
-      // A second session must not find the row still locked by an abandoned txn.
+      expect(driver.openTransaction!()).not.toBeNull()
+      await driver.endTransaction!('rollback')
+      expect(driver.openTransaction!()).toBeNull()
+      // With the rollback done, a second session can take the lock again.
       const probe = await new sql.ConnectionPool(configFromUrl(dbUrl, TEST_DB)).connect()
       try {
         await probe.request().batch("set lock_timeout 2000 update lock_probe set v = 'probe' where id = 1")
@@ -396,7 +404,7 @@ describeDb('mssql driver (integration)', () => {
       }
       expect((await driver.query('select v from lock_probe')).rows).toEqual([['probe']])
     } finally {
-      // Disconnect first: it rolls back any leaked transaction, so the drop
+      // Disconnect first: it discards any pinned transaction, so the drop
       // below can't hang on its locks if this test ever regresses.
       await driver.disconnect()
       await fixtures.request().batch('drop table if exists lock_probe').catch(() => {})
@@ -791,6 +799,134 @@ describeDb('mssql driver (integration)', () => {
     } finally {
       await driver.disconnect()
     }
+  })
+
+  describe('manual transactions', () => {
+    beforeAll(async () => {
+      await fixtures.request().batch('create table txn_probe (id int primary key)')
+    })
+
+    afterAll(async () => {
+      await fixtures.request().batch('drop table if exists txn_probe').catch(() => {})
+    })
+
+    it('pins on BEGIN TRAN via tedious inTransaction and rolls back across runs', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN TRAN; insert into txn_probe values (1)')
+        expect(driver.openTransaction!()).toMatchObject({ childDb: expect.any(String) })
+        expect((await driver.query('select count(*) as n from txn_probe')).rows).toEqual([[1]])
+        // Invisible outside the transaction. READPAST skips the uncommitted
+        // row's lock instead of blocking on it (no MVCC under read committed).
+        const outside = await fixtures.request().query('select count(*) as n from txn_probe with (readpast)')
+        expect(outside.recordset[0]?.n).toBe(0)
+        await driver.endTransaction!('rollback')
+        expect(driver.openTransaction!()).toBeNull()
+        expect((await driver.query('select count(*) as n from txn_probe')).rows).toEqual([[0]])
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('a lone COMMIT run closes the pin and persists the work', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN TRANSACTION')
+        await driver.query('insert into txn_probe values (7)')
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.query('COMMIT')
+        expect(driver.openTransaction!()).toBeNull()
+        const outside = await fixtures.request().query('select count(*) as n from txn_probe where id = 7')
+        expect(outside.recordset[0]?.n).toBe(1)
+        await driver.query('delete from txn_probe where id = 7')
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('parameterized runs join the open transaction on the pinned connection', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN TRAN')
+        await driver.query('insert into txn_probe values (@p1)', [42])
+        // The bound SELECT sees the uncommitted row: it ran inside the txn.
+        expect((await driver.query('select count(*) as n from txn_probe where id = @p1', [42])).rows).toEqual([[1]])
+        await driver.endTransaction!('rollback')
+        expect((await driver.query('select count(*) as n from txn_probe where id = @p1', [42])).rows).toEqual([[0]])
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('a nested COMMIT keeps the outer transaction pinned', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN TRAN; BEGIN TRAN; insert into txn_probe values (77)')
+        // COMMIT at trancount 2 only decrements; unpinning here would let
+        // sp_reset_connection roll the outer transaction back silently.
+        await driver.endTransaction!('commit')
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.endTransaction!('rollback')
+        expect(driver.openTransaction!()).toBeNull()
+        const outside = await fixtures.request().query('select count(*) as n from txn_probe where id = 77')
+        expect(outside.recordset[0]?.n).toBe(0)
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('metadata reads run inside the pinned transaction instead of hanging', async () => {
+      const driver = await connectDriver()
+      try {
+        await fixtures.request().batch('drop table if exists txn_meta_probe')
+        // Uncommitted DDL holds Sch-M locks; a pooled metadata read would
+        // block on them forever. Routed through the pin it must both finish
+        // and see the uncommitted table.
+        await driver.query("BEGIN TRAN; create table txn_meta_probe (id int primary key, note nvarchar(20))")
+        const inspection = await driver.inspectTable({ schema: 'dbo', name: 'txn_meta_probe', kind: 'table' })
+        expect(inspection.columns.map((column) => column.name)).toEqual(['id', 'note'])
+        await driver.endTransaction!('rollback')
+      } finally {
+        await fixtures.request().batch('drop table if exists txn_meta_probe').catch(() => {})
+        await driver.disconnect()
+      }
+    }, 15_000)
+
+    it('refuses a second concurrent manual transaction instead of leaking it', async () => {
+      const driver = await connectDriver()
+      try {
+        const outcomes = await Promise.allSettled([driver.query('BEGIN TRAN'), driver.query('BEGIN TRAN')])
+        expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1)
+        const rejected = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult
+        expect((rejected.reason as Error).message).toMatch(/already open/i)
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.endTransaction!('rollback')
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('reroutes a run queued behind COMMIT to a fresh connection', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN TRAN')
+        const [, selected] = await Promise.all([driver.query('COMMIT'), driver.query('select 1 as v')])
+        expect(selected.rows).toEqual([[1]])
+        expect(driver.openTransaction!()).toBeNull()
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('disconnects promptly with an open transaction', async () => {
+      const driver = await connectDriver()
+      await driver.query('BEGIN TRAN; insert into txn_probe values (99)')
+      const started = Date.now()
+      await driver.disconnect()
+      expect(Date.now() - started).toBeLessThan(3_000)
+      const outside = await fixtures.request().query('select count(*) as n from txn_probe where id = 99')
+      expect(outside.recordset[0]?.n).toBe(0)
+    })
   })
 
 })

@@ -235,9 +235,20 @@ describe('prepareSqlRun', () => {
     })).toThrow(/Parameters.*multi-batch/i)
   })
 
-  it('enforces the stateless transaction contract for every caller', () => {
-    expect(() => prepareSqlRun({ engine: 'postgresql', sql: 'BEGIN; select 1' })).toThrow(/same query run/i)
-    expect(prepareSqlRun({ engine: 'postgresql', sql: 'BEGIN; select 1; COMMIT' }).batches)
-      .toEqual(['BEGIN; select 1; COMMIT'])
+  it('lets server engines leave a transaction open, reporting its shape', () => {
+    const open = prepareSqlRun({ engine: 'postgresql', sql: 'BEGIN; select 1' })
+    expect(open.transaction).toMatchObject({ sawControl: true, depth: 1, closedAtDepthZero: false, lastControl: 'begin' })
+    const close = prepareSqlRun({ engine: 'postgresql', sql: 'COMMIT' })
+    expect(close.transaction).toMatchObject({ depth: -1, closedAtDepthZero: true, lastControl: 'close' })
+    expect(prepareSqlRun({ engine: 'mysql', sql: 'START TRANSACTION; SELECT 1' }).transaction.lastControl).toBe('begin')
+    expect(prepareSqlRun({ engine: 'postgresql', sql: 'BEGIN; select 1; COMMIT' }).transaction)
+      .toMatchObject({ sawControl: true, depth: 0, lastControl: 'close' })
+    expect(prepareSqlRun({ engine: 'postgresql', sql: 'select 1' }).transaction)
+      .toMatchObject({ sawControl: false, depth: 0, lastControl: null })
+  })
+
+  it('still requires self-contained transactions on sqlite', () => {
+    expect(() => prepareSqlRun({ engine: 'sqlite', sql: 'BEGIN' })).toThrow(/same query run/i)
+    expect(() => prepareSqlRun({ engine: 'sqlite', sql: 'COMMIT' })).toThrow(/No transaction is active/i)
   })
 })

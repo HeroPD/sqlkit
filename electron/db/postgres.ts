@@ -125,11 +125,54 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     return pool
   }
 
+  // A manual transaction (the user ran BEGIN) pins its checked-out client so
+  // later runs join it instead of drawing a fresh pooled connection.
+  type Pin = { client: pg.PoolClient; database: string; chain: Promise<unknown>; onError: (error: Error) => void }
+  let pin: Pin | null = null
+
+  const adoptPin = (client: pg.PoolClient, database: string) => {
+    // A checked-out client whose socket dies emits 'error' with no listener,
+    // which would take down the main process: absorb it, drop the pin, and let
+    // the status indicator clear through onTransactionChange.
+    const onError = (error: Error) => {
+      if (pin?.client !== client) return
+      pin = null
+      client.release(error)
+      events.onTransactionChange?.()
+    }
+    client.on('error', onError)
+    pin = { client, database, chain: Promise.resolve(), onError }
+  }
+
+  // `release: false` destroys the client — severing the socket makes the
+  // server abort the transaction, so pool drains can't hang on it.
+  const dropPin = async (release: boolean, error?: Error) => {
+    if (!pin) return
+    const { client, onError } = pin
+    pin = null
+    client.removeListener('error', onError)
+    if (!release) {
+      client.release(error ?? new Error(t('query.cancelled')))
+      return
+    }
+    try {
+      await resetUserSession(client)
+      client.release()
+    } catch (resetError) {
+      client.release(resetError as Error)
+    }
+  }
+
   // The pool for `database`, opening it on demand and retiring whichever other
   // one was live. end() drains rather than severs, so a query already in flight
   // on the outgoing database finishes; the next call for it opens a fresh pool.
   const poolFor = (database: string) => {
     if (!pools) throw new Error(t('connection.notConnected'))
+    // A pinned transaction holds a client of its database; resolving another
+    // database would retire that pool, whose end() would then drain forever.
+    if (pin && database !== pin.database) {
+      throw new Error(t('query.transactionOtherDatabase', { database: pin.database }))
+    }
     const existing = pools.get(database)
     if (existing) return existing
     for (const [name, pool] of pools) {
@@ -268,6 +311,10 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     },
 
     async disconnect() {
+      // Destroy the pinned client first: pool.end() drains rather than severs,
+      // and a never-released client would hold the drain past the manager's
+      // teardown deadline. Severing the socket aborts the server-side txn.
+      await dropPin(false)
       const closing = pools
       pools = null
       if (!closing) return
@@ -282,6 +329,59 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       // while the statement runs and cancel() has a target.
       const entry = { executionId, pid: null as number | null, secret: null as number | null, cancelRequested: false }
       running.add(entry)
+
+      const mapCancelled = (error: unknown) =>
+        (error as { code?: string }).code === '57014' || (error as Error).message === t('query.cancelled')
+          ? new Error(t('query.cancelled'))
+          : error
+
+      // A pinned transaction's client can't multiplex: queue this run behind
+      // whatever the transaction is already doing and route it there. The
+      // unpin decision happens INSIDE the chain, so a queued run can never
+      // execute on a client an earlier COMMIT already released — it observes
+      // the cleared pin at its own turn (null result) and reroutes below.
+      const pinned = pin
+      if (pinned) {
+        const run = pinned.chain.then(async (): Promise<QueryResult | null> => {
+          if (pin !== pinned) return null
+          entry.pid = backendPid(pinned.client)
+          entry.secret = backendSecret(pinned.client)
+          if (entry.cancelRequested) throw new Error(t('query.cancelled'))
+          try {
+            const result = await streamQuery(pinned.client, plan.batches[0]!, plan.params, started, sourceCacheFor(childDb))
+            // COMMIT/ROLLBACK in this run closed the transaction: unpin.
+            if (pin === pinned && txStatus(pinned.client) === 'I') await dropPin(true)
+            return result
+          } catch (error) {
+            if (pin === pinned) {
+              // Severity ERROR means the statement failed but the connection
+              // lives (transaction stays open in state 'E' for rollback).
+              // Anything else — no severity (socket death; node-pg routes it
+              // to the active query, not the client's 'error' event) or
+              // FATAL/PANIC (backend terminated) — means the client is dead.
+              if ((error as { severity?: string }).severity !== 'ERROR') await dropPin(false, error as Error)
+              else if (txStatus(pinned.client) === 'I') await dropPin(true)
+            }
+            throw error
+          }
+        })
+        pinned.chain = run.catch(() => {})
+        try {
+          const result = await run
+          if (result) {
+            if (!isReadOnlyQuery(sql, 'postgresql')) sourceCacheFor(childDb).clear()
+            return result
+          }
+          // The transaction ended before this run's turn: fall through to a
+          // fresh pooled connection, as any run after COMMIT would get.
+        } catch (error) {
+          throw mapCancelled(error)
+        } finally {
+          running.delete(entry)
+        }
+        running.add(entry)
+      }
+
       let client: pg.PoolClient | null = null
       let released = false
       // Leaves `running` before the client re-enters the pool, so a late cancel
@@ -303,6 +403,28 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         // Anything that could have changed the catalog invalidates the cached
         // column-source lookups (a rename would otherwise map to stale names).
         if (!isReadOnlyQuery(sql, 'postgresql')) sourceCacheFor(childDb).clear()
+        // The run left a transaction open (manual BEGIN): pin the client for
+        // later runs instead of resetting it.
+        if (txStatus(client) !== 'I') {
+          // One pin per connection. If a concurrent run adopted one while this
+          // executed, keeping both would leak this client and its locks
+          // forever — roll this transaction back and report it instead.
+          if (pin) {
+            try {
+              await resetUserSession(client)
+              releaseToPool()
+            } catch (resetError) {
+              running.delete(entry)
+              client.release(resetError as Error)
+              released = true
+            }
+            throw new Error(t('query.transactionAlreadyOpen'))
+          }
+          running.delete(entry)
+          released = true
+          adoptPin(client, childDb ?? active)
+          return result
+        }
         try {
           await resetUserSession(client)
           releaseToPool()
@@ -315,11 +437,22 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         }
         return result
       } catch (error) {
-        // Mirror pool.query: an errored client is destroyed, not reused.
-        if (client && !released) client.release(error as Error)
-        throw (error as { code?: string }).code === '57014' || (error as Error).message === t('query.cancelled')
-          ? new Error(t('query.cancelled'))
-          : error
+        // `BEGIN; bad-statement` leaves a live transaction in state 'E' the
+        // user must roll back: pin it. Severity ERROR marks a statement-level
+        // failure on a live connection (FATAL/PANIC/no severity = dead). An
+        // existing pin wins (one per connection); the destroy below aborts
+        // this one.
+        if (
+          client && !released && !pin && plan.transaction.sawControl
+          && (error as { severity?: string }).severity === 'ERROR' && txStatus(client) !== 'I'
+        ) {
+          running.delete(entry)
+          adoptPin(client, childDb ?? active)
+        } else if (client && !released) {
+          // Mirror pool.query: an errored client is destroyed, not reused.
+          client.release(error as Error)
+        }
+        throw mapCancelled(error)
       } finally {
         running.delete(entry)
       }
@@ -1032,6 +1165,32 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       if (!childNames.includes(database)) return false
       active = database
       return true
+    },
+
+    openTransaction() {
+      if (!pin) return null
+      return { childDb: pin.database, ...(txStatus(pin.client) === 'E' ? { failed: true } : {}) }
+    },
+
+    async endTransaction(mode) {
+      const pinned = pin
+      if (!pinned) throw new Error(t('transaction.none'))
+      // COMMIT inside a failed transaction performs the rollback without
+      // erroring, so both modes resolve any transaction state. Ending and
+      // unpinning happen inside the chain: a queued run behind this cannot
+      // start until the release has fully completed.
+      const run = pinned.chain.then(async () => {
+        if (pin !== pinned) return
+        try {
+          await pinned.client.query(mode === 'commit' ? 'COMMIT' : 'ROLLBACK')
+          await dropPin(true)
+        } catch (error) {
+          await dropPin(false, error as Error)
+          throw error
+        }
+      })
+      pinned.chain = run.catch(() => {})
+      await run
     },
   }
 }

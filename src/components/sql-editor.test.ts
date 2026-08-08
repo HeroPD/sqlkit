@@ -132,6 +132,13 @@ test('explicit completion still lists multi-word keywords', async () => {
   expect(await completionsAt('SELECT * FROM users ')).toContain('GROUP BY')
 })
 
+test('transaction keywords complete', async () => {
+  expect(await completionsAt('BEG')).toContain('BEGIN')
+  expect(await completionsAt('COMM')).toContain('COMMIT')
+  expect(await completionsAt('ROLL')).toContain('ROLLBACK')
+  expect(await completionsAt('START T')).toContain('START TRANSACTION')
+})
+
 test('boosted keywords rank before table names for lowercase prefixes', async () => {
   const labels = await completionsAt('u')
   expect(labels).toContain('UPDATE')

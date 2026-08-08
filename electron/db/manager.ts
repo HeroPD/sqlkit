@@ -36,9 +36,19 @@ import { ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
 
 type ConnectionResources = { driver: Driver | null; tunnel: Tunnel | null }
+type OpenTransaction = { childDb: string; failed?: boolean }
 type Active =
   | ({ phase: 'connecting'; profileId: string } & ConnectionResources)
-  | { phase: 'connected'; profileId: string; engine: Engine; driver: Driver; tunnel: Tunnel | null; serverVersion: string }
+  | {
+      phase: 'connected'
+      profileId: string
+      engine: Engine
+      driver: Driver
+      tunnel: Tunnel | null
+      serverVersion: string
+      /** Mirror of the driver's pinned manual transaction, for db:status. */
+      transaction: OpenTransaction | null
+    }
   | ({ phase: 'error'; profileId: string; error: string } & ConnectionResources)
 
 export type ConnectionManager = ReturnType<typeof createConnectionManager>
@@ -65,12 +75,24 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       serverVersion: active.serverVersion,
       tunneled: active.tunnel !== null,
       children: active.driver.children?.(),
+      ...(active.transaction ? { transaction: active.transaction } : {}),
     }
   }
   const statuses = () => [...connections.values()].map(statusOf)
 
   const replace = (profileId: string, active: Active) => {
     connections.set(profileId, active)
+    broadcast(statuses())
+  }
+
+  // Re-reads the driver's pinned-transaction state and rebroadcasts on change,
+  // so the renderer's indicator tracks each run's BEGIN/COMMIT outcome.
+  const syncTransaction = (profileId: string) => {
+    const active = connections.get(profileId)
+    if (!active || active.phase !== 'connected') return
+    const transaction = active.driver.openTransaction?.() ?? null
+    if (active.transaction?.childDb === transaction?.childDb && active.transaction?.failed === transaction?.failed) return
+    active.transaction = transaction
     broadcast(statuses())
   }
 
@@ -183,7 +205,14 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
         await teardown()
         return { success: false, error: t('connection.superseded') }
       }
-      resources.driver = createDriver(profile, endpoint, { onError: onDriverError })
+      resources.driver = createDriver(profile, endpoint, {
+        onError: onDriverError,
+        // A pin dropped outside a manager call (socket death) must still clear
+        // the renderer's indicator — but only while this driver is current.
+        onTransactionChange: () => {
+          if (connectedDriver(profile.id) === resources.driver) syncTransaction(profile.id)
+        },
+      })
       if (isCurrent()) register({ phase: 'connecting', profileId: profile.id, ...resources })
       const serverVersion = await resources.driver.connect()
       if (!isCurrent()) {
@@ -197,6 +226,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
         serverVersion,
         driver: resources.driver,
         tunnel: resources.tunnel,
+        transaction: null,
       })
       return { success: true, serverVersion }
     } catch (error) {
@@ -235,11 +265,14 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       // (disconnect already swept this profile's sessions). Return a single
       // page, sessionless, so it can't leak.
       if (connectedDriver(profileId) !== driver) return { success: true, result: sessions.preview(raw) }
+      syncTransaction(profileId)
       // The driver buffers up to MAX_BUFFERED_ROWS; open() keeps that buffer and
       // returns just the first page (with a sessionId) so a big result doesn't
       // cross IPC all at once. The renderer pages the rest via fetchRows.
       return { success: true, result: sessions.open(profileId, raw) }
     } catch (error) {
+      // Errors matter here too: `BEGIN; bad-statement` opens a failed txn.
+      if (connectedDriver(profileId) === driver) syncTransaction(profileId)
       // Typed here — same process as the drivers' throw — so the renderer never
       // has to pattern-match the human-readable message.
       const message = (error as Error).message
@@ -263,6 +296,11 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
     if (!driver.runBatch) return { success: false, error: t('connection.atomicWritesUnsupported') }
+    // A save runs on its own connection: it would commit outside the user's
+    // open transaction and deadlock waiting on that transaction's own locks.
+    // Known window: a pin is adopted only when its opening run resolves, so a
+    // save racing an in-flight BEGIN script can slip past this check.
+    if (driver.openTransaction?.()) return { success: false, error: t('query.transactionSaveBlocked') }
     try {
       return await driver.runBatch(statements, childDb)
     } catch (error) {
@@ -275,6 +313,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
     if (!driver.runDdl) return { success: false, error: t('connection.schemaChangesUnsupported') }
+    // Same reasoning as runBatch: schema applies must not race the open txn.
+    if (driver.openTransaction?.()) return { success: false, error: t('query.transactionSaveBlocked') }
     try {
       return await driver.runDdl(statements, childDb)
     } catch (error) {
@@ -301,6 +341,9 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     if (active?.phase !== 'connected') return { success: false, error: t('connection.notConnected') }
     const driver = active.driver
     if (!driver.exportQuery) return { success: false, error: t('connection.exportUnsupported') }
+    // An export streams on its own connection: it would silently miss the
+    // open transaction's uncommitted rows (or block on its locks on mssql).
+    if (driver.openTransaction?.()) return { success: false, error: t('query.transactionExportBlocked') }
     if (!isReadOnlyQuery(sql, active.engine)) return { success: false, error: t('export.readOnlyOnly') }
     // The engine comes from the live connection, never the renderer, so exported
     // literals are always spelled for the database they were read from.
@@ -346,11 +389,32 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     if (!active || active.phase !== 'connected') {
       return { success: false, error: t('connection.notConnected') }
     }
+    // Switching away would retire the pinned transaction's pool mid-flight;
+    // switching to the transaction's own database is a no-op and stays legal.
+    const open = active.driver.openTransaction?.()
+    if (open && database !== open.childDb) {
+      return { success: false, error: t('query.transactionSwitchBlocked', { database: open.childDb }) }
+    }
     if (!active.driver.useChild?.(database)) {
       return { success: false, error: t('connection.databaseUnavailable', { database }) }
     }
     broadcast(statuses())
     return { success: true }
+  }
+
+  // Ends the pinned manual transaction and rebroadcasts the cleared status.
+  async function endTransaction(profileId: string, mode: 'commit' | 'rollback'): Promise<{ success: boolean; error?: string }> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (!driver.endTransaction) return { success: false, error: t('connection.engineUnsupported') }
+    try {
+      await driver.endTransaction(mode)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    } finally {
+      syncTransaction(profileId)
+    }
   }
 
   // Create/drop run through the driver (it owns the pools that must close
@@ -511,6 +575,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     serverActivity,
     endSession,
     setActiveChild,
+    endTransaction,
     createDatabase,
     databaseCreateMeta,
     dropDatabase,

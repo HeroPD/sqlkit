@@ -16,7 +16,7 @@ import { SchemaOpsController } from '../controllers/schema-ops'
 import { ConfigController } from '../controllers/config'
 import { FileOpsController } from '../controllers/file-ops'
 import { ContextsController, type EditorTabState } from '../controllers/contexts'
-import type { ConnectionProfile, Engine, FileInfo, MenuAction, SessionEndMode, TableRef } from '../electron'
+import type { ConnectionProfile, Engine, FileInfo, MenuAction, QueryResponse, SessionEndMode, TableRef } from '../electron'
 import { buildInsertBatches, type CellInput } from '../sql-write'
 import './activity-button'
 import './command-palette'
@@ -56,7 +56,7 @@ import { quoteQualified } from '../sql-write'
 import { isFilterableQuery } from '../sql-filter'
 import { isReadOnlyQuery, isReorderableQuery } from '../sql-order'
 import { analyzeDestructive, type DestructiveKind } from '../sql-destructive'
-import { splitTopLevelStatements } from '../sql-statements'
+import { splitScript, splitTopLevelStatements } from '../sql-statements'
 import { foreignKeyTargets } from '../foreign-keys'
 import { jsonColumns } from '../json-columns'
 import type { ExportFormat } from '../result-export'
@@ -69,7 +69,7 @@ import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail, FileRevealDe
 import type { ImportColumn, ImportConfirmDetail } from './import-dialog'
 import { bindParameterValues, queryParameters, type QueryParameter } from '../query-parameters'
 import type { ParametersConfirmDetail } from './parameter-dialog'
-import { t } from '../i18n'
+import { formatInteger, formatTime, rowWord, t } from '../i18n'
 
 // icon markup lives in ACTIVITY_ICONS (inline SVG, keyed by id) — see the
 // activity-bar render and `.activity-bar svg` styles.
@@ -110,6 +110,26 @@ type CsvImportState = {
   engine: Engine
   columns: ImportColumn[]
 }
+
+type TransactionRun = {
+  sql: string
+  tabName: string
+  success: boolean
+  durationMs: number
+  rowCount: number | null
+  error: string
+  createdAt: string
+}
+
+type TransactionSession = {
+  childDb: string
+  startedAt: string
+  runs: TransactionRun[]
+}
+
+const MAX_TRANSACTION_RUNS = 100
+
+const summarizeTransactionSql = (sql: string) => sql.replace(/\s+/g, ' ').trim().slice(0, 180)
 
 // Child database names become folder segments (connection/child/file.sql);
 // strip anything that isn't a safe path character.
@@ -170,6 +190,12 @@ export class WorkbenchScreen extends LitElement {
 
   @state()
   private _resultHasUnstagedJson = false
+
+  @state()
+  private _transactionPopoverProfileId: string | null = null
+
+  @state()
+  private _transactionSessions = new Map<string, TransactionSession>()
 
   @state()
   private _activeView: ViewId | null = 'explorer'
@@ -353,6 +379,7 @@ export class WorkbenchScreen extends LitElement {
     super.connectedCallback()
     this._unsubscribeMenu = window.sqlkit.onMenuAction((action) => this._onMenuAction(action))
     window.addEventListener('keydown', this._onGlobalKeydown)
+    window.addEventListener('pointerdown', this._onWindowPointerDown)
   }
 
   disconnectedCallback() {
@@ -360,6 +387,15 @@ export class WorkbenchScreen extends LitElement {
     this._unsubscribeMenu?.()
     this._unsubscribeMenu = null
     window.removeEventListener('keydown', this._onGlobalKeydown)
+    window.removeEventListener('pointerdown', this._onWindowPointerDown)
+  }
+
+  private _onWindowPointerDown = (event: PointerEvent) => {
+    if (this._transactionPopoverProfileId === null) return
+    const inside = event.composedPath().some(
+      (node) => node instanceof HTMLElement && node.classList.contains('txn-control'),
+    )
+    if (!inside) this._transactionPopoverProfileId = null
   }
 
   /** App-menu items (File > …) arriving from the main process. */
@@ -443,6 +479,8 @@ export class WorkbenchScreen extends LitElement {
       this._config.reset()
       this._cmdPalette.close()
       this._queries.reset()
+      this._transactionSessions = new Map()
+      this._transactionPopoverProfileId = null
       clearEditorStateCache()
       clearInspectDraftCache()
       this._inspectDirtyTabIds = new Set()
@@ -467,6 +505,9 @@ export class WorkbenchScreen extends LitElement {
     const tabId = this._restoreScrollTabId
     this._restoreScrollTabId = null
     if (tabId) void this._restoreTabScroll(tabId)
+    if (this._transactionPopoverProfileId && !this._live.transaction(this._transactionPopoverProfileId)) {
+      this._transactionPopoverProfileId = null
+    }
   }
 
   // --- workspace config + context -----------------------------------------
@@ -508,6 +549,16 @@ export class WorkbenchScreen extends LitElement {
     const child = childDb === undefined ? this._config.defaultChild(profile) : childDb
 
     if (this._ctx.activeDbId === profileId && this._ctx.activeChildDb === child) return
+
+    // A child switch the manager will refuse (open manual transaction on
+    // another database) must not move the UI either: every switch flow
+    // funnels through here, so this is the one place that keeps the
+    // workbench from claiming a database the driver never switched to.
+    const transaction = this._live.transaction(profileId)
+    if (transaction && child && child !== transaction.childDb) {
+      this._surfaceTransactionNotice(t('query.transactionSwitchBlocked', { database: transaction.childDb }))
+      return
+    }
 
     // Remember the pick so reopening the workspace lands on the same child.
     if (child) this._config.setLastChildDb(profileId, child)
@@ -570,6 +621,12 @@ export class WorkbenchScreen extends LitElement {
     if (event.defaultPrevented) return
     const key = event.key.toLowerCase()
     const hasMod = event.metaKey || event.ctrlKey
+
+    if (key === 'escape' && this._transactionPopoverProfileId !== null) {
+      event.preventDefault()
+      this._transactionPopoverProfileId = null
+      return
+    }
 
     if (key === 'f5' && !hasMod && !event.altKey && !event.shiftKey) {
       event.preventDefault()
@@ -713,6 +770,8 @@ export class WorkbenchScreen extends LitElement {
     // tabs or contexts before it finishes.
     const tabId = this._ctx.activeTabId
     if (!tabId) return
+    const sourceTab = this._ctx.tabs.find((entry) => entry.id === tabId)
+    const sourceTabName = sourceTab ? tabTitle(sourceTab).replace(/ •$/, '') : t('action.newQuery')
     // One run per tab: ignore re-triggers while this tab's query is in flight.
     if (this._queries.runFor(tabId).phase === 'running') return
 
@@ -729,6 +788,18 @@ export class WorkbenchScreen extends LitElement {
     // while it is open must not retarget the pending run.
     const childDb = this._ctx.activeChildDb
     const runContextKey = contextKey(profile.id, childDb)
+
+    // A run against another database would be refused deeper down anyway, but
+    // through _alignActiveChild its error reads as "database unavailable";
+    // refuse here with the actionable message instead.
+    const transaction = this._live.transaction(profile.id)
+    if (transaction && childDb && childDb !== transaction.childDb) {
+      this._queries.setRun(tabId, {
+        phase: 'error',
+        error: t('query.transactionOtherDatabase', { database: transaction.childDb }),
+      })
+      return
+    }
 
     let params = suppliedParams
     if (params === undefined) {
@@ -799,7 +870,9 @@ export class WorkbenchScreen extends LitElement {
       return
     }
 
-    await this._queries.execute({
+    const transactionBeforeRun = this._live.transaction(profile.id)
+    const runStartedAt = Date.now()
+    const response = await this._queries.execute({
       tabId,
       profile,
       childDb,
@@ -812,10 +885,97 @@ export class WorkbenchScreen extends LitElement {
       baseLine,
       ...(trail?.table ? { table: trail.table } : {}),
     })
+    if (response) {
+      const transactionAfterRun = this._live.transaction(profile.id)
+      // A run containing a top-level COMMIT/ROLLBACK ended the previous
+      // transaction even when a new one is open afterwards ('COMMIT; BEGIN'):
+      // the session log must restart rather than carry committed runs over.
+      const restarted = Boolean(transactionBeforeRun) && splitScript(sqlText, profile.engine).statements.some(
+        ({ masked }) => /^\s*(?:commit\b|rollback\b(?!\s+to\b))/i.test(masked),
+      )
+      this._updateTransactionSession({
+        profileId: profile.id,
+        childDb: transactionAfterRun?.childDb ?? transactionBeforeRun?.childDb ?? childDb ?? '',
+        sourceTabName,
+        sql: sqlText,
+        response,
+        runStartedAt,
+        wasOpen: Boolean(transactionBeforeRun),
+        isOpen: Boolean(transactionAfterRun),
+        restarted,
+      })
+    }
     // A run that could have changed the schema updates what the tree,
     // completions and grid editability believe — same as the Inspect apply
     // path. Refreshed even on error: a failed script may have half-applied.
-    if (!isReadOnlyQuery(sqlText, profile.engine)) this._live.refresh(profile.id)
+    // Deferred while a manual transaction is open (metadata reads could block
+    // on its uncommitted DDL locks); endTransaction refreshes on commit.
+    if (!isReadOnlyQuery(sqlText, profile.engine) && !this._live.transaction(profile.id)) {
+      this._live.refresh(profile.id)
+    }
+  }
+
+  private _updateTransactionSession(args: {
+    profileId: string
+    childDb: string
+    sourceTabName: string
+    sql: string
+    response: QueryResponse
+    runStartedAt: number
+    wasOpen: boolean
+    isOpen: boolean
+    /** The run closed the previous transaction (even if a new one is open). */
+    restarted: boolean
+  }) {
+    if (!args.isOpen) {
+      if (args.wasOpen && this._transactionSessions.has(args.profileId)) {
+        const next = new Map(this._transactionSessions)
+        next.delete(args.profileId)
+        this._transactionSessions = next
+        if (this._transactionPopoverProfileId === args.profileId) this._transactionPopoverProfileId = null
+      }
+      return
+    }
+
+    const existing = args.wasOpen && !args.restarted ? this._transactionSessions.get(args.profileId) : undefined
+    const session = existing?.childDb === args.childDb
+      ? existing
+      : { childDb: args.childDb, startedAt: new Date(args.runStartedAt).toISOString(), runs: [] }
+    const run: TransactionRun = {
+      sql: args.sql.slice(0, 10_000),
+      tabName: args.sourceTabName,
+      success: args.response.success,
+      durationMs: args.response.success ? args.response.result.durationMs : Math.max(1, Date.now() - args.runStartedAt),
+      rowCount: args.response.success ? args.response.result.rowCount : null,
+      error: args.response.success ? '' : args.response.error,
+      createdAt: new Date().toISOString(),
+    }
+    const next = new Map(this._transactionSessions)
+    next.set(args.profileId, { ...session, runs: [...session.runs, run].slice(-MAX_TRANSACTION_RUNS) })
+    this._transactionSessions = next
+  }
+
+  private async _endTransaction(profileId: string, mode: 'commit' | 'rollback') {
+    const result = await this._live.endTransaction(profileId, mode)
+    if (result.success) {
+      const next = new Map(this._transactionSessions)
+      next.delete(profileId)
+      this._transactionSessions = next
+      this._transactionPopoverProfileId = null
+    }
+    // Surface a failure where run errors already show; the control itself stays
+    // truthful through the status rebroadcast.
+    if (!result.success && result.error) this._surfaceTransactionNotice(result.error)
+  }
+
+  // Surfaces a transaction-guard message where run errors already show —
+  // but never over a tab whose query is still in flight, which would hide
+  // its spinner and defeat the one-run-per-tab guard.
+  private _surfaceTransactionNotice(message: string) {
+    const tabId = this._ctx.activeTabId
+    if (tabId && this._queries.runFor(tabId).phase !== 'running') {
+      this._queries.setRun(tabId, { phase: 'error', error: message })
+    }
   }
 
   private _cancelParameterPrompt = () => {
@@ -925,6 +1085,109 @@ export class WorkbenchScreen extends LitElement {
     this._cmdPalette.open('databases')
   }
 
+  // The first connected profile holding an open manual transaction, so the
+  // title-bar control stays reachable after switching to another connection.
+  private _transactionOwner(): { profile: ConnectionProfile; transaction: { childDb: string; failed?: boolean } } | null {
+    for (const candidate of this._config.connections) {
+      const transaction = this._live.transaction(candidate.id)
+      if (transaction) return { profile: candidate, transaction }
+    }
+    return null
+  }
+
+  private _renderTransactionControl(
+    profile: ConnectionProfile,
+    transaction: { childDb: string; failed?: boolean },
+  ) {
+    const session = this._transactionSessions.get(profile.id)
+    const runs = session?.runs ?? []
+    const open = this._transactionPopoverProfileId === profile.id
+    const label = transaction.failed ? t('transaction.failedShort') : t('transaction.manualShort')
+    return html`
+      <div class="txn-control ${transaction.failed ? 'failed' : ''}">
+        <button
+          type="button"
+          class="txn-status"
+          aria-label=${t('transaction.sessionAria', { state: label, count: runs.length })}
+          aria-haspopup="dialog"
+          aria-expanded=${String(open)}
+          @click=${() => {
+            this._transactionPopoverProfileId = open ? null : profile.id
+          }}
+        >
+          <span class="txn-dot" aria-hidden="true"></span>
+          <span>${label}</span>
+          <span class="txn-count">${runs.length}</span>
+          <i class="icon icon-chevron-down" aria-hidden="true"></i>
+        </button>
+        ${transaction.failed
+          ? ''
+          : html`
+              <span class="txn-divider" aria-hidden="true"></span>
+              <button
+                type="button"
+                class="txn-commit"
+                aria-label=${t('transaction.commit')}
+                data-tooltip=${t('transaction.commit')}
+                @click=${() => this._endTransaction(profile.id, 'commit')}
+              >
+                <i class="icon icon-check" aria-hidden="true"></i>${t('transaction.commit')}
+              </button>
+            `}
+        <span class="txn-divider" aria-hidden="true"></span>
+        <button
+          type="button"
+          class="txn-rollback"
+          aria-label=${t('transaction.rollback')}
+          data-tooltip=${t('transaction.rollback')}
+          @click=${() => this._endTransaction(profile.id, 'rollback')}
+        >
+          <i class="icon icon-undo-2" aria-hidden="true"></i>${t('transaction.rollback')}
+        </button>
+        ${open
+          ? html`
+              <div class="txn-popover" role="dialog" aria-label=${t('transaction.session')}>
+                <div class="txn-popover-head">
+                  <div class="txn-popover-title">
+                    <span class="txn-dot" aria-hidden="true"></span>
+                    <strong>${transaction.failed ? t('transaction.sessionFailed') : t('transaction.session')}</strong>
+                    ${session ? html`<span>${t('transaction.startedAt', { time: formatTime(session.startedAt) })}</span>` : ''}
+                  </div>
+                  <div class="txn-context">
+                    <strong>${profile.name}</strong><span aria-hidden="true">›</span><span>${transaction.childDb}</span>
+                  </div>
+                </div>
+                <div class="txn-runs">
+                  ${runs.length
+                    ? runs.map((run, index) => html`
+                        <div class="txn-run" title=${run.success ? run.sql : `${run.sql}\n\n${run.error}`}>
+                          <span class="txn-run-index">${index + 1}</span>
+                          <div class="txn-run-copy">
+                            <code>${summarizeTransactionSql(run.sql)}</code>
+                            <span>
+                              <span class="txn-outcome ${run.success ? 'ok' : 'error'}">
+                                ${run.success ? t('common.ok') : t('common.error')}
+                              </span>
+                              ${run.success
+                                ? html`${run.rowCount === null ? '' : ` · ${formatInteger(run.rowCount)} ${rowWord(run.rowCount)}`} · ${run.tabName}`
+                                : html` · ${run.error} · ${run.tabName}`}
+                            </span>
+                          </div>
+                          <span class="txn-duration">${Math.max(1, Math.round(run.durationMs))} ms</span>
+                        </div>
+                      `)
+                    : html`<p class="txn-empty">${t('transaction.sessionEmpty')}</p>`}
+                </div>
+                <div class="txn-popover-foot">
+                  <i class="icon icon-history" aria-hidden="true"></i>${t('transaction.sessionScope')}
+                </div>
+              </div>
+            `
+          : ''}
+      </div>
+    `
+  }
+
   private _renderTitlebar() {
     const profile = this._config.activeProfile()
     const database = this._ctx.activeChildDb ?? profile?.database.trim() ?? ''
@@ -939,6 +1202,13 @@ export class WorkbenchScreen extends LitElement {
     const runDisabled = !running && (refreshing
       ? this._resultEditing.hasPendingChanges() || this._resultHasUnstagedJson
       : this._activeActionSurface !== 'editor' || !tab?.content.trim() || !this._hasExplicitRunTarget)
+    // The control follows the transaction, not the active profile: an open
+    // transaction on another connection must stay visible and endable, or
+    // its locks outlive any cue that it exists.
+    const activeTransaction = profile ? this._live.transaction(profile.id) : undefined
+    const transactionOwner = activeTransaction && profile
+      ? { profile, transaction: activeTransaction }
+      : this._transactionOwner()
 
     return html`
       <header class="app-titlebar">
@@ -993,6 +1263,7 @@ export class WorkbenchScreen extends LitElement {
             </button>
           </div>
           <div class="titlebar-right">
+            ${transactionOwner ? this._renderTransactionControl(transactionOwner.profile, transactionOwner.transaction) : ''}
             ${import.meta.env.DEV
               ? html`
                   <button type="button" class="update-preview">
@@ -2335,11 +2606,8 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .titlebar-inner {
-        display: grid;
-        grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
-        /* Wide enough that a workspace name truncating at its track edge still
-           reads as separate from the database pill. */
-        gap: 20px;
+        position: relative;
+        display: flex;
       }
 
       .titlebar-left,
@@ -2351,6 +2619,7 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .titlebar-left {
+        width: calc(50% - 190px);
         gap: 5px;
         overflow: hidden;
         font-size: var(--font-size-sm);
@@ -2370,13 +2639,19 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .titlebar-center {
+        position: absolute;
+        left: 50%;
         justify-content: center;
         gap: 5px;
+        transform: translateX(-50%);
         -webkit-app-region: no-drag;
       }
 
       .titlebar-right {
+        width: calc(50% - 190px);
+        margin-left: auto;
         justify-content: flex-end;
+        gap: 6px;
         -webkit-app-region: no-drag;
       }
 
@@ -2403,6 +2678,238 @@ export class WorkbenchScreen extends LitElement {
 
       .update-preview .icon {
         font-size: 13px;
+      }
+
+      .txn-control {
+        --txn-tone: var(--staged-edit-fg);
+        position: relative;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        color: color-mix(in srgb, var(--txn-tone) 85%, var(--text));
+        background: color-mix(in srgb, var(--txn-tone) 7%, transparent);
+        border: 1px solid color-mix(in srgb, var(--txn-tone) 25%, transparent);
+        border-radius: 4px;
+        font-size: var(--font-size-sm);
+        white-space: nowrap;
+      }
+
+      .txn-control.failed {
+        --txn-tone: var(--status-dot-error);
+      }
+
+      .txn-control button {
+        align-self: stretch;
+        height: auto;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 8px;
+        border: none;
+        border-radius: 0;
+        color: var(--text-2);
+        background: transparent;
+        font-size: var(--font-size-sm);
+        white-space: nowrap;
+      }
+
+      .txn-control button:hover {
+        background: color-mix(in srgb, var(--txn-tone) 12%, transparent);
+      }
+
+      .txn-status {
+        color: color-mix(in srgb, var(--txn-tone) 90%, var(--text)) !important;
+        font-weight: 600;
+      }
+
+      .txn-status[aria-expanded='true'] {
+        background: color-mix(in srgb, var(--txn-tone) 14%, transparent);
+      }
+
+      .txn-status .icon {
+        margin-left: -2px;
+        font-size: 11px;
+        transition: transform 120ms ease;
+      }
+
+      .txn-status[aria-expanded='true'] .icon {
+        transform: rotate(180deg);
+      }
+
+      .txn-dot {
+        width: 7px;
+        height: 7px;
+        flex-shrink: 0;
+        border-radius: 50%;
+        background: var(--txn-tone);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--txn-tone) 9%, transparent);
+      }
+
+      .txn-count {
+        color: var(--text-3);
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .txn-divider {
+        width: 1px;
+        height: 12px;
+        flex-shrink: 0;
+        background: color-mix(in srgb, var(--txn-tone) 21%, var(--border));
+      }
+
+      .txn-control .txn-commit:hover {
+        color: var(--status-dot-connected);
+      }
+
+      .txn-control .txn-rollback:hover {
+        color: var(--status-dot-error);
+      }
+
+      .txn-control button > .icon {
+        font-size: 12px;
+      }
+
+      .txn-popover {
+        position: absolute;
+        z-index: 40;
+        top: 30px;
+        right: 0;
+        width: min(390px, calc(100vw - 16px));
+        overflow: hidden;
+        color: var(--text-2);
+        background: var(--overlay-bg);
+        border: 1px solid var(--border-subtle);
+        border-radius: 8px;
+        box-shadow:
+          0 12px 32px rgba(0, 0, 0, 0.38),
+          0 1px 3px rgba(0, 0, 0, 0.2);
+        white-space: normal;
+      }
+
+      .txn-popover-head {
+        padding: 11px 12px 9px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .txn-popover-title,
+      .txn-context {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+      }
+
+      .txn-popover-title strong {
+        color: var(--text);
+        font-size: var(--font-size-sm);
+        font-weight: 600;
+      }
+
+      .txn-popover-title > span:last-child {
+        margin-left: auto;
+        color: var(--text-3);
+        font-size: 10px;
+      }
+
+      .txn-context {
+        margin-top: 5px;
+        color: var(--text-3);
+        font-size: 10px;
+      }
+
+      .txn-context strong {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--text-2);
+        font-weight: 500;
+        text-overflow: ellipsis;
+      }
+
+      .txn-runs {
+        max-height: 280px;
+        overflow-y: auto;
+        padding: 5px;
+      }
+
+      .txn-run {
+        display: grid;
+        grid-template-columns: 22px minmax(0, 1fr) auto;
+        gap: 7px;
+        padding: 8px 7px;
+        border-radius: 4px;
+      }
+
+      .txn-run:hover {
+        background: color-mix(in srgb, var(--text) 4%, transparent);
+      }
+
+      .txn-run-index,
+      .txn-duration {
+        color: var(--text-3);
+        font: 10px var(--mono-font);
+      }
+
+      .txn-run-index {
+        line-height: 1.5;
+        text-align: right;
+      }
+
+      .txn-run-copy {
+        min-width: 0;
+      }
+
+      .txn-run-copy code {
+        display: block;
+        overflow: hidden;
+        color: var(--text);
+        font: 11px/1.45 var(--mono-font);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .txn-run-copy > span {
+        display: block;
+        margin-top: 3px;
+        overflow: hidden;
+        color: var(--text-3);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .txn-outcome.ok {
+        color: var(--status-dot-connected);
+      }
+
+      .txn-outcome.error {
+        color: var(--status-dot-error);
+      }
+
+      .txn-duration {
+        padding-top: 1px;
+      }
+
+      .txn-empty {
+        padding: 18px 12px;
+        color: var(--text-3);
+        font-size: var(--font-size-sm);
+        text-align: center;
+      }
+
+      .txn-popover-foot {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        color: var(--text-3);
+        background: color-mix(in srgb, black 10%, transparent);
+        border-top: 1px solid var(--border-subtle);
+        font-size: 10px;
+      }
+
+      .txn-popover-foot .icon {
+        font-size: 11px;
       }
 
       /* A fixed box whatever it carries, so switching databases never moves the
@@ -2542,9 +3049,38 @@ export class WorkbenchScreen extends LitElement {
         font-size: 16px;
       }
 
+      @media (max-width: 1200px) {
+        .txn-commit,
+        .txn-rollback {
+          width: 28px;
+          justify-content: center;
+          overflow: hidden;
+          color: transparent !important;
+          font-size: 0 !important;
+        }
+
+        .txn-commit .icon,
+        .txn-rollback .icon {
+          color: var(--text-2);
+        }
+
+        .txn-commit:hover .icon {
+          color: var(--status-dot-connected);
+        }
+
+        .txn-rollback:hover .icon {
+          color: var(--status-dot-error);
+        }
+
+        .update-preview span {
+          display: none;
+        }
+      }
+
       @media (max-width: 1000px) {
-        .titlebar-inner {
-          grid-template-columns: minmax(150px, 1fr) auto minmax(150px, 1fr);
+        .titlebar-left,
+        .titlebar-right {
+          width: calc(50% - 140px);
         }
 
         .database-target-wrap {

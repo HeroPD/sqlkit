@@ -621,7 +621,7 @@ export class QueriesController implements ReactiveController {
     /** Editable source of this result, when known — recorded on the run so it
      * survives independently of the tab's own table (see QueryRun). */
     table?: TableRef
-  }) {
+  }): Promise<QueryResponse | null> {
     const { tabId, profile, childDb, contextKey, sql, params, sort, filter } = args
     const executionId = args.executionId ?? crypto.randomUUID()
     if (sort) this.sorts.set(tabId, sort)
@@ -662,14 +662,14 @@ export class QueriesController implements ReactiveController {
     // never saw this run, so it couldn't close the session itself.
     if (this.generation !== gen) {
       if (response.success) this.closeResultSessions(response.result)
-      return
+      return null
     }
 
     if (!this.tabExists(tabId)) {
       if (response.success) this.closeResultSessions(response.result)
       this.finishTask(task.id, response, task.startedAt)
       this.host.requestUpdate()
-      return
+      return response
     }
 
     this.realignStaged(tabId, response.success ? response.result.columns.length : null)
@@ -702,6 +702,7 @@ export class QueriesController implements ReactiveController {
     )
     this.persistHistory()
     this.host.requestUpdate()
+    return response
   }
 
   /** Tracks a streaming export in the Tasks view, so a long one is visible and

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'lit'
-import type { ColumnRef, ConnectionProfile, TableRef } from '../electron'
+import type { ColumnRef, ConnectionProfile, QueryResponse, TableRef } from '../electron'
 import { WorkbenchScreen } from './workbench-screen'
 
 const profile: ConnectionProfile = {
@@ -829,6 +829,207 @@ describe('WorkbenchScreen title-bar actions', () => {
     expect(target?.style.getPropertyValue('--connection-label-color').trim()).toBe('#3f51b5')
     expect(target?.querySelector('.connection-dot.connected')).toBeTruthy()
     expect(host.querySelector<HTMLElement>('.database-target-wrap')?.dataset.tooltip).toBe('Postgres · db_a')
+  })
+
+  it('shows the segmented transaction control while a manual transaction is open', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn>; endTransaction: ReturnType<typeof vi.fn> }
+      _renderTitlebar(): unknown
+    }
+    workbench._config.connections = [profile]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', transaction: { childDb: 'db_a' } } }
+    workbench._live.endTransaction = vi.fn(() => Promise.resolve({ success: true }))
+    const host = document.createElement('div')
+
+    render(workbench._renderTitlebar(), host)
+
+    const control = host.querySelector<HTMLElement>('.txn-control')
+    expect(control?.textContent).toContain('Manual Tx')
+    expect(control?.querySelector('.txn-count')?.textContent).toBe('0')
+    expect(control?.classList.contains('failed')).toBe(false)
+    expect(host.querySelector('.titlebar-right > .txn-control')).toBe(control)
+    expect(host.querySelector('.titlebar-center > .database-target-wrap')).toBeTruthy()
+    expect(host.querySelector('.titlebar-center > .query-action')).toBeTruthy()
+    control?.querySelector<HTMLButtonElement>('.txn-commit')?.click()
+    control?.querySelector<HTMLButtonElement>('.txn-rollback')?.click()
+    expect(workbench._live.endTransaction).toHaveBeenNthCalledWith(1, 'p1', 'commit')
+    expect(workbench._live.endTransaction).toHaveBeenNthCalledWith(2, 'p1', 'rollback')
+  })
+
+  it('marks a failed transaction, removes commit, and is absent without one', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn> }
+      _renderTitlebar(): unknown
+    }
+    workbench._config.connections = [profile]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', transaction: { childDb: 'db_a', failed: true } } }
+    const host = document.createElement('div')
+    render(workbench._renderTitlebar(), host)
+
+    const control = host.querySelector<HTMLElement>('.txn-control')
+    expect(control?.classList.contains('failed')).toBe(true)
+    expect(control?.textContent).toContain('Failed Tx')
+    expect(control?.textContent).toContain('Roll back')
+    expect(control?.querySelector('.txn-commit')).toBeNull()
+
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected' } }
+    render(workbench._renderTitlebar(), host)
+    expect(host.querySelector('.txn-control')).toBeNull()
+  })
+
+  it('keeps the transaction control visible when another profile is active', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn>; endTransaction: ReturnType<typeof vi.fn> }
+      _renderTitlebar(): unknown
+    }
+    const other: ConnectionProfile = { ...profile, id: 'p2', name: 'Other' }
+    workbench._config.connections = [profile, other]
+    // p2 is active, but p1 holds the open transaction: the control must
+    // still render (targeting p1) or its locks outlive any visible cue.
+    workbench._ctx.switchInstance(other.id, 'db_a')
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.statuses = {
+      p1: { profileId: 'p1', phase: 'connected', transaction: { childDb: 'db_a' } },
+      p2: { profileId: 'p2', phase: 'connected' },
+    }
+    workbench._live.endTransaction = vi.fn(() => Promise.resolve({ success: true }))
+    const host = document.createElement('div')
+    render(workbench._renderTitlebar(), host)
+
+    const control = host.querySelector<HTMLElement>('.txn-control')
+    expect(control).toBeTruthy()
+    control?.querySelector<HTMLButtonElement>('.txn-rollback')?.click()
+    expect(workbench._live.endTransaction).toHaveBeenCalledWith('p1', 'rollback')
+  })
+
+  it('refuses to move the UI to another child while a transaction is open', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void; newQuery(): void; activeTabId: string; activeChildDb: string | null }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn> }
+      _queries: { runFor(tabId: string): { phase: string; error?: string } }
+      _setActiveDb(profileId: string, childDb?: string | null): void
+    }
+    workbench._config.connections = [profile]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._ctx.newQuery()
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', transaction: { childDb: 'db_a' } } }
+
+    workbench._setActiveDb('p1', 'db_b')
+
+    // The context stays on the transaction's database, with the refusal shown.
+    expect(workbench._ctx.activeChildDb).toBe('db_a')
+    const run = workbench._queries.runFor(workbench._ctx.activeTabId)
+    expect(run.phase).toBe('error')
+    expect(run.error).toContain('db_a')
+  })
+
+  it('shows the open transaction query session in a scrollable popover', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn> }
+      _transactionPopoverProfileId: string | null
+      _transactionSessions: Map<string, {
+        childDb: string
+        startedAt: string
+        runs: Array<{ sql: string; tabName: string; success: boolean; durationMs: number; rowCount: number | null; error: string; createdAt: string }>
+      }>
+      _renderTitlebar(): unknown
+    }
+    workbench._config.connections = [profile]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', transaction: { childDb: 'db_a' } } }
+    workbench._transactionPopoverProfileId = 'p1'
+    workbench._transactionSessions = new Map([['p1', {
+      childDb: 'db_a',
+      startedAt: '2026-08-08T12:00:00.000Z',
+      runs: [
+        { sql: 'BEGIN', tabName: 'customers.sql', success: true, durationMs: 2, rowCount: 0, error: '', createdAt: '2026-08-08T12:00:01.000Z' },
+        { sql: 'UPDATE missing SET value = 1', tabName: 'scratch.sql', success: false, durationMs: 4, rowCount: null, error: 'relation missing', createdAt: '2026-08-08T12:00:02.000Z' },
+      ],
+    }]])
+    const host = document.createElement('div')
+
+    render(workbench._renderTitlebar(), host)
+
+    expect(host.querySelector('.txn-status')?.getAttribute('aria-expanded')).toBe('true')
+    expect(host.querySelector('.txn-count')?.textContent).toBe('2')
+    expect(host.querySelectorAll('.txn-run')).toHaveLength(2)
+    expect(host.querySelector('.txn-runs')).toBeTruthy()
+    expect(host.querySelector('.txn-popover')?.textContent).toContain('customers.sql')
+    expect(host.querySelector('.txn-popover')?.textContent).toContain('scratch.sql')
+    expect(host.querySelector('.txn-popover')?.textContent).toContain('relation missing')
+    expect(host.querySelector('.txn-outcome.error')).toBeTruthy()
+  })
+
+  it('records and clears the renderer-local transaction session', () => {
+    const workbench = new WorkbenchScreen() as never as {
+      _transactionSessions: Map<string, { runs: Array<{ success: boolean; tabName: string }> }>
+      _updateTransactionSession(args: {
+        profileId: string; childDb: string; sourceTabName: string; sql: string; response: QueryResponse
+        runStartedAt: number; wasOpen: boolean; isOpen: boolean
+      }): void
+    }
+    const success: QueryResponse = {
+      success: true,
+      result: { columns: [], rows: [], rowCount: 1, durationMs: 3 },
+    }
+
+    workbench._updateTransactionSession({
+      profileId: 'p1', childDb: 'db_a', sourceTabName: 'customers.sql', sql: 'BEGIN', response: success,
+      runStartedAt: Date.now(), wasOpen: false, isOpen: true,
+    })
+
+    expect(workbench._transactionSessions.get('p1')?.runs).toHaveLength(1)
+    expect(workbench._transactionSessions.get('p1')?.runs[0]?.tabName).toBe('customers.sql')
+
+    workbench._updateTransactionSession({
+      profileId: 'p1', childDb: 'db_a', sourceTabName: 'customers.sql', sql: 'COMMIT', response: success,
+      runStartedAt: Date.now(), wasOpen: true, isOpen: false,
+    })
+    expect(workbench._transactionSessions.has('p1')).toBe(false)
+  })
+
+  it('refuses a run against another database while a transaction is open', async () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void; newQuery(): void; activeTabId: string }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn> }
+      _queries: { execute: ReturnType<typeof vi.fn>; runFor(tabId: string): { phase: string; error?: string } }
+      _runSql(sql: string): Promise<void>
+    }
+    workbench._config.connections = [profile]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._ctx.newQuery()
+    workbench._live.phase = vi.fn(() => 'connected')
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', transaction: { childDb: 'db_b' } } }
+    workbench._queries.execute = vi.fn(() => Promise.resolve())
+
+    await workbench._runSql('select 1')
+
+    expect(workbench._queries.execute).not.toHaveBeenCalled()
+    const run = workbench._queries.runFor(workbench._ctx.activeTabId)
+    expect(run.phase).toBe('error')
+    expect(run.error).toContain('db_b')
   })
 
   it('opens the same database picker as Cmd/Ctrl+K', () => {

@@ -47,6 +47,11 @@ export function databaseObjectKind(value: unknown): DbObjectKind {
   return value
 }
 
+export function transactionEndMode(value: unknown): 'commit' | 'rollback' {
+  if (value !== 'commit' && value !== 'rollback') throw new IpcValidationError('Transaction end mode is invalid')
+  return value
+}
+
 export function objectDdlReference(value: unknown): ObjectDdlRef {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Object DDL reference is invalid')
   const ref = value as Record<string, unknown>

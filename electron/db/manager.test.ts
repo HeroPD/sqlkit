@@ -533,3 +533,131 @@ describe('connection manager: runBatch', () => {
     })
   })
 })
+
+describe('connection manager: manual transactions', () => {
+  const openState: { value: { childDb: string; failed?: boolean } | null } = { value: null }
+
+  const transactionDriver = (overrides: Partial<Driver> = {}) => fakeDriver({
+    openTransaction: vi.fn(() => openState.value),
+    endTransaction: vi.fn(() => Promise.resolve()),
+    ...overrides,
+  })
+
+  beforeEach(() => {
+    openState.value = null
+  })
+
+  it('broadcasts the transaction after a run opens one, and only on change', async () => {
+    hoisted.driver = transactionDriver()
+    const broadcast = vi.fn()
+    const manager = createConnectionManager(broadcast)
+    await manager.connect(profile())
+
+    openState.value = { childDb: 'app' }
+    await manager.query('p1', null, 'BEGIN')
+    expect(manager.statuses()).toEqual([expect.objectContaining({ transaction: { childDb: 'app' } })])
+
+    // Unchanged state must not rebroadcast.
+    const broadcasts = broadcast.mock.calls.length
+    await manager.query('p1', null, 'select 1')
+    expect(broadcast.mock.calls.length).toBe(broadcasts)
+
+    openState.value = null
+    await manager.query('p1', null, 'COMMIT')
+    expect(manager.statuses()[0]).not.toHaveProperty('transaction')
+    expect(broadcast.mock.calls.length).toBe(broadcasts + 1)
+  })
+
+  it('syncs the transaction even when the run fails', async () => {
+    hoisted.driver = transactionDriver({ query: vi.fn(() => Promise.reject(new Error('boom'))) })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    openState.value = { childDb: 'app', failed: true }
+    expect(await manager.query('p1', null, 'BEGIN; bad')).toMatchObject({ success: false })
+    expect(manager.statuses()).toEqual([expect.objectContaining({ transaction: { childDb: 'app', failed: true } })])
+  })
+
+  it('refuses exports while a transaction is open', async () => {
+    hoisted.driver = transactionDriver({
+      exportQuery: vi.fn(() => Promise.resolve({ rowCount: 1 })),
+    })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    openState.value = { childDb: 'app' }
+    const outcome = await manager.exportQuery('p1', null, 'select 1', [], null, null, '/tmp/x.csv', 'csv', null)
+    expect(outcome).toMatchObject({ success: false, error: expect.stringContaining('before exporting') })
+    expect(hoisted.driver.exportQuery).not.toHaveBeenCalled()
+  })
+
+  it('refuses saves and schema applies while a transaction is open', async () => {
+    hoisted.driver = transactionDriver({
+      runBatch: vi.fn(() => Promise.resolve({ success: true as const, results: [] })),
+      runDdl: vi.fn(() => Promise.resolve({ success: true as const })),
+    })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    openState.value = { childDb: 'app' }
+    expect(await manager.runBatch('p1', null, [])).toMatchObject({ error: expect.stringContaining('manual transaction is open') })
+    expect(await manager.runDdl('p1', null, [])).toMatchObject({ error: expect.stringContaining('manual transaction is open') })
+    expect(hoisted.driver.runBatch).not.toHaveBeenCalled()
+    expect(hoisted.driver.runDdl).not.toHaveBeenCalled()
+  })
+
+  it('refuses switching to another child while open, but allows the pinned one', async () => {
+    hoisted.driver = transactionDriver({ useChild: vi.fn(() => true) })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    openState.value = { childDb: 'app' }
+    expect(manager.setActiveChild('p1', 'other')).toMatchObject({ error: expect.stringContaining('"app"') })
+    expect(manager.setActiveChild('p1', 'app')).toEqual({ success: true })
+  })
+
+  it('ends the transaction through the driver and resyncs status', async () => {
+    hoisted.driver = transactionDriver({
+      endTransaction: vi.fn(() => {
+        openState.value = null
+        return Promise.resolve()
+      }),
+    })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    openState.value = { childDb: 'app' }
+    await manager.query('p1', null, 'BEGIN')
+    expect(await manager.endTransaction('p1', 'rollback')).toEqual({ success: true })
+    expect(hoisted.driver.endTransaction).toHaveBeenCalledWith('rollback')
+    expect(manager.statuses()[0]).not.toHaveProperty('transaction')
+  })
+
+  it('reports unsupported and driver failures from endTransaction', async () => {
+    hoisted.driver = fakeDriver() // no endTransaction
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    expect(await manager.endTransaction('p1', 'commit')).toMatchObject({ success: false })
+
+    hoisted.driver = transactionDriver({ endTransaction: vi.fn(() => Promise.reject(new Error('no txn'))) })
+    const failing = createConnectionManager(vi.fn())
+    await failing.connect(profile({ id: 'p2' }))
+    expect(await failing.endTransaction('p2', 'commit')).toEqual({ success: false, error: 'no txn' })
+  })
+
+  it('rebroadcasts when the driver reports a transaction change out of band', async () => {
+    let onTransactionChange: (() => void) | undefined
+    hoisted.driver = transactionDriver()
+    hoisted.createImpl = (...args: unknown[]) => {
+      onTransactionChange = (args[2] as { onTransactionChange?: () => void }).onTransactionChange
+      return hoisted.driver
+    }
+    const broadcast = vi.fn()
+    const manager = createConnectionManager(broadcast)
+    await manager.connect(profile())
+
+    openState.value = { childDb: 'app' }
+    await manager.query('p1', null, 'BEGIN')
+    expect(manager.statuses()[0]).toHaveProperty('transaction')
+
+    // Socket death dropped the pin: the driver fires the event itself.
+    openState.value = null
+    onTransactionChange?.()
+    expect(manager.statuses()[0]).not.toHaveProperty('transaction')
+  })
+})

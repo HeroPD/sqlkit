@@ -1,5 +1,5 @@
 import sql from 'mssql'
-import { Request as TediousRequest } from 'tedious'
+import { Request as TediousRequest, TYPES as TediousTypes } from 'tedious'
 import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -27,6 +27,18 @@ export const toBindable = (value: unknown): unknown =>
   value instanceof Uint8Array && !Buffer.isBuffer(value)
     ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
     : value
+
+// Value-based TDS type inference for the tedious-level parameter path,
+// mirroring what node-mssql's Request.input does on the pooled path.
+const tediousTypeFor = (value: unknown) => {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && Math.abs(value) <= 2147483647 ? TediousTypes.Int : TediousTypes.Float
+  }
+  if (typeof value === 'boolean') return TediousTypes.Bit
+  if (value instanceof Date) return TediousTypes.DateTime
+  if (Buffer.isBuffer(value)) return TediousTypes.VarBinary
+  return TediousTypes.NVarChar
+}
 
 const mssqlTypeExpression = `concat(
   case when ty.is_user_defined = 1
@@ -179,11 +191,50 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     return pool
   }
 
+  // A manual transaction (the user ran BEGIN TRAN) pins its borrowed tedious
+  // connection so later runs join it instead of drawing a fresh one.
+  type Pin = { conn: TediousConnection; pool: AcquirablePool; database: string; chain: Promise<unknown>; onDrop: () => void }
+  let pin: Pin | null = null
+
+  const adoptPin = (conn: TediousConnection, pool: AcquirablePool, database: string) => {
+    // A dying socket must drop the pin (and clear the indicator) instead of
+    // leaving a stale one; close-before-release makes the pool discard it.
+    const onDrop = () => {
+      if (pin?.conn !== conn) return
+      pin = null
+      try { conn.close() } catch { /* already closed */ }
+      pool.release(conn)
+      events.onTransactionChange?.()
+    }
+    conn.on('error', onDrop)
+    conn.on('end', onDrop)
+    pin = { conn, pool, database, chain: Promise.resolve(), onDrop }
+  }
+
+  const dropPin = async (release: boolean) => {
+    if (!pin) return
+    const { conn, pool, onDrop } = pin
+    pin = null
+    conn.removeListener('error', onDrop)
+    conn.removeListener('end', onDrop)
+    if (release) {
+      await releaseClean(pool, conn)
+    } else {
+      try { conn.close() } catch { /* already closed */ }
+      pool.release(conn)
+    }
+  }
+
   // The pool for `database`, opening it on demand and retiring whichever other
   // one was live, so only the database in use spends the connection budget.
   const connectedPool = async (database: string) => {
     if (!pools) throw new Error(t('connection.notConnected'))
     if (!database) throw new Error(t('connection.notConnected'))
+    // A pinned transaction holds a connection of its database; resolving
+    // another database would retire that pool while it can never drain.
+    if (pin && database !== pin.database) {
+      throw new Error(t('query.transactionOtherDatabase', { database: pin.database }))
+    }
     let pool = pools.get(database)
     if (!pool) {
       if (!childNames.includes(database)) throw new Error(t('connection.databaseUnavailable', { database }))
@@ -221,7 +272,24 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     return request
   }
 
+  // QueryResult (array rows) → the object rows metadata callers expect.
+  const rowsAsObjects = <T>(result: QueryResult): T[] =>
+    result.rows.map((row) => Object.fromEntries(result.columns.map((column, index) => [column, row[index]])) as T)
+
   const metaRows = async <T>(sqlText: string, params: unknown[] = [], childDb?: string | null): Promise<T[]> => {
+    // While a transaction is pinned, same-database metadata must run on the
+    // pinned connection: any other connection would block behind the
+    // transaction's own Sch-M locks with no cancel target (requestTimeout 0).
+    const pinned = pin
+    if (pinned && databaseForQuery(childDb) === pinned.database) {
+      const run = pinned.chain.then(async () => {
+        if (pin !== pinned) return null
+        return rowsAsObjects<T>(await streamTediousBatch(pinned.conn, sqlText, performance.now(), { bytes: 0 }, params))
+      })
+      pinned.chain = run.catch(() => {})
+      const rows = await run
+      if (rows) return rows
+    }
     const pool = await poolForQuery(childDb)
     const result = await bind(pool.request(), params).query<T>(sqlText)
     return result.recordset
@@ -312,6 +380,8 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async disconnect() {
+      // Discard the pinned connection first so the pool close can't wait on it.
+      await dropPin(false)
       const closing = pools
       pools = null
       if (!closing) return
@@ -336,9 +406,78 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // session isolation. The common no-parameter path (every ad-hoc SELECT /
       // browse / re-run) instead borrows a pooled connection and resets its
       // session, so it pays no per-query login handshake.
+      const mapCancelled = (error: unknown) =>
+        isCancelled(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
+
       if (plan.params.length === 0) {
         const entry = { executionId, request: null as sql.Request | null, tediousCancel: null as (() => void) | null, cancelRequested: false }
         running.add(entry)
+
+        // A pinned transaction's connection can't multiplex: queue this run
+        // behind whatever the transaction is already doing and route it there.
+        // The unpin decision happens INSIDE the chain, so a queued run can
+        // never execute on a connection an earlier COMMIT already released —
+        // it observes the cleared pin at its own turn and reroutes below.
+        const pinned = pin
+        if (pinned) {
+          const database = databaseForQuery(childDb)
+          if (database !== pinned.database) {
+            running.delete(entry)
+            throw new Error(t('query.transactionOtherDatabase', { database: pinned.database }))
+          }
+          const run = pinned.chain.then(async () => {
+            if (pin !== pinned) return null
+            entry.tediousCancel = () => pinned.conn.cancel()
+            if (entry.cancelRequested) throw new Error(t('query.cancelled'))
+            const resultSets: QueryResultSet[] = []
+            let result: QueryResult = { columns: [], rows: [], rowCount: 0, durationMs: 0 }
+            const budget = { bytes: 0 }
+            try {
+              for (const batch of plan.batches) {
+                if (entry.cancelRequested) throw new Error(t('query.cancelled'))
+                result = await streamTediousBatch(pinned.conn, batch, started, budget)
+                collect(result, resultSets)
+              }
+              // COMMIT at @@TRANCOUNT > 1 sends no ENVCHANGE, so inTransaction
+              // stays truthful for nested transactions too.
+              if (pin === pinned && !pinned.conn.inTransaction) await dropPin(true)
+              return { result, resultSets }
+            } catch (error) {
+              if (pin === pinned) {
+                // A dead socket leaves inTransaction stale — never keep a
+                // corpse pinned; otherwise XACT_ABORT (or an ATTENTION-
+                // cancelled batch) may have rolled back server-side, and
+                // ENVCHANGE keeps the flag truthful.
+                if (pinned.conn.closed) await dropPin(false)
+                else if (!pinned.conn.inTransaction) await dropPin(true)
+              }
+              throw error
+            }
+          })
+          pinned.chain = run.catch(() => {})
+          try {
+            const outcome = await run
+            if (outcome) {
+              // No withColumnSources here: its catalog reads run on other
+              // connections and block on the transaction's own schema locks.
+              const selected = outcome.resultSets[outcome.resultSets.length - 1] ?? outcome.result
+              return {
+                ...selected,
+                durationMs: outcome.result.durationMs,
+                ...(outcome.resultSets.length > 1 ? { resultSets: outcome.resultSets } : {}),
+              }
+            }
+            // The transaction ended before this run's turn: fall through to a
+            // fresh pooled connection, as any run after COMMIT would get.
+          } catch (error) {
+            throw mapCancelled(error)
+          } finally {
+            running.delete(entry)
+          }
+          running.add(entry)
+        }
+
+        const database = databaseForQuery(childDb)
         const pool = (await poolForQuery(childDb)) as AcquirablePool
         let conn: TediousConnection | null = null
         try {
@@ -354,6 +493,20 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             result = await streamTediousBatch(conn, batch, started, budget)
             collect(result, resultSets)
           }
+          // The run left a transaction open (manual BEGIN TRAN): pin the
+          // connection for later runs instead of resetting it. Column sources
+          // are skipped for the same lock reason as above. One pin per
+          // connection: when a concurrent run adopted one meanwhile, the
+          // finally's releaseClean rolls this transaction back and the run
+          // reports it explicitly.
+          if (conn.inTransaction) {
+            if (pin) throw new Error(t('query.transactionAlreadyOpen'))
+            const adopted = conn
+            conn = null
+            adoptPin(adopted, pool, database)
+            const selected = resultSets[resultSets.length - 1] ?? result
+            return { ...selected, durationMs: result.durationMs, ...(resultSets.length > 1 ? { resultSets } : {}) }
+          }
           const selected = await withColumnSources(
             resultSets[resultSets.length - 1] ?? result,
             plan.batches,
@@ -363,7 +516,16 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           )
           return { ...selected, durationMs: result.durationMs, ...(resultSets.length > 1 ? { resultSets } : {}) }
         } catch (error) {
-          throw isCancelled(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
+          // `BEGIN TRAN; bad-statement` can leave the transaction open (no
+          // XACT_ABORT): pin it so the user can roll it back — but never a
+          // dead connection (inTransaction goes stale on socket death), and
+          // never over an existing pin (the finally rolls this one back).
+          if (conn && conn.inTransaction && !conn.closed && !pin) {
+            const adopted = conn
+            conn = null
+            adoptPin(adopted, pool, database)
+          }
+          throw mapCancelled(error)
         } finally {
           running.delete(entry)
           // Reset on release, not before use: a failed script's open transaction
@@ -373,8 +535,48 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         }
       }
 
-      const entry = { executionId, request: null as sql.Request | null, cancelRequested: false }
+      const entry = { executionId, request: null as sql.Request | null, tediousCancel: null as (() => void) | null, cancelRequested: false }
       running.add(entry)
+
+      // While pinned, a parameterized run joins the transaction through the
+      // tedious-level parameter path (execSql) on the pinned connection — the
+      // throwaway-pool path below would silently execute outside it.
+      const pinnedParams = pin
+      if (pinnedParams) {
+        const database = databaseForQuery(childDb)
+        if (database !== pinnedParams.database) {
+          running.delete(entry)
+          throw new Error(t('query.transactionOtherDatabase', { database: pinnedParams.database }))
+        }
+        const run = pinnedParams.chain.then(async () => {
+          if (pin !== pinnedParams) return null
+          entry.tediousCancel = () => pinnedParams.conn.cancel()
+          if (entry.cancelRequested) throw new Error(t('query.cancelled'))
+          try {
+            const result = await streamTediousBatch(pinnedParams.conn, plan.batches[0]!, started, { bytes: 0 }, plan.params)
+            if (pin === pinnedParams && !pinnedParams.conn.inTransaction) await dropPin(true)
+            return result
+          } catch (error) {
+            if (pin === pinnedParams) {
+              if (pinnedParams.conn.closed) await dropPin(false)
+              else if (!pinnedParams.conn.inTransaction) await dropPin(true)
+            }
+            throw error
+          }
+        })
+        pinnedParams.chain = run.catch(() => {})
+        try {
+          const result = await run
+          if (result) return result
+          // Transaction ended before this run's turn: use the normal path.
+        } catch (error) {
+          throw mapCancelled(error)
+        } finally {
+          running.delete(entry)
+        }
+        running.add(entry)
+      }
+
       let userPool: sql.ConnectionPool | null = null
       try {
         const pool = await openUserPool(childDb)
@@ -920,6 +1122,35 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       active = database
       return true
     },
+
+    openTransaction() {
+      return pin ? { childDb: pin.database } : null
+    },
+
+    async endTransaction(mode) {
+      const pinned = pin
+      if (!pinned) throw new Error(t('transaction.none'))
+      // Ending and unpinning happen inside the chain, so a queued run cannot
+      // start until the release has fully completed.
+      const run = pinned.chain.then(async () => {
+        if (pin !== pinned) return
+        try {
+          await streamTediousBatch(pinned.conn, mode === 'commit' ? 'COMMIT' : 'ROLLBACK', performance.now(), { bytes: 0 })
+          // COMMIT at @@TRANCOUNT > 1 only decrements the count: the outer
+          // transaction is still open, so the pin must survive — unpinning
+          // would let sp_reset_connection roll it back behind the user.
+          if (pin === pinned && !pinned.conn.inTransaction) await dropPin(true)
+        } catch (error) {
+          // A failed COMMIT on a live, still-open transaction (uncommittable,
+          // error 3930) leaves rollback as the way out: keep the pin. Only a
+          // dead or transaction-less connection forfeits it.
+          if (pin === pinned && (pinned.conn.closed || !pinned.conn.inTransaction)) await dropPin(false)
+          throw error as Error
+        }
+      })
+      pinned.chain = run.catch(() => {})
+      await run
+    },
   }
 }
 
@@ -1101,9 +1332,17 @@ type TediousRowColumn = { value: unknown; metadata: TediousColumnMeta }
 type TediousConnection = {
   reset(callback: (err?: Error | null) => void): void
   execSqlBatch(request: TediousRequest): void
+  execSql(request: TediousRequest): void
   cancel(): void
   /** Synchronously marks the connection closed; the pool's validate discards it. */
   close(): void
+  /** Maintained by tedious from ENVCHANGE tokens, so it tracks transactions
+   * opened by raw BEGIN TRAN in a batch, not just tedious's own API. */
+  inTransaction: boolean
+  /** True once the socket is gone; inTransaction goes stale then. */
+  closed: boolean
+  on(event: 'error' | 'end', listener: () => void): void
+  removeListener(event: 'error' | 'end', listener: () => void): void
 }
 // node-mssql's ConnectionPool acquires/releases the underlying tedious Connection
 // through these methods; the public types omit them, so assert at this boundary.
@@ -1173,11 +1412,19 @@ export function tediousToMssqlType(meta: TediousColumnMeta): { type?: unknown; p
   }
 }
 
-// Runs one no-parameter batch on a tedious connection and buffers it into the
-// shared QueryResult shape — the tedious-level twin of streamQuery, so both read
-// paths return identical results. rowsAffected is only surfaced for a batch with
-// no result set (a write), matching the node-mssql path.
-function streamTediousBatch(conn: TediousConnection, sqlText: string, started: number, budget: { bytes: number }): Promise<QueryResult> {
+// Runs one batch on a tedious connection and buffers it into the shared
+// QueryResult shape — the tedious-level twin of streamQuery, so both read
+// paths return identical results. With `params` it goes through execSql
+// (sp_executesql under the hood, @p1..@pN); without, the plain batch API.
+// rowsAffected is only surfaced for a batch with no result set (a write),
+// matching the node-mssql path.
+function streamTediousBatch(
+  conn: TediousConnection,
+  sqlText: string,
+  started: number,
+  budget: { bytes: number },
+  params?: unknown[],
+): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
     let columns: string[] = []
     let fields: MssqlColumn[] = []
@@ -1244,6 +1491,14 @@ function streamTediousBatch(conn: TediousConnection, sqlText: string, started: n
     const onDone = (rowCount: number | undefined) => { if (typeof rowCount === 'number') affected += rowCount }
     withEvents.on('done', onDone)
     withEvents.on('doneInProc', onDone)
-    conn.execSqlBatch(request)
+    if (params?.length) {
+      for (const [index, value] of params.entries()) {
+        const bindable = toBindable(typeof value === 'bigint' ? value.toString() : value)
+        request.addParameter(`p${index + 1}`, tediousTypeFor(bindable), bindable)
+      }
+      conn.execSql(request)
+    } else {
+      conn.execSqlBatch(request)
+    }
   })
 }
