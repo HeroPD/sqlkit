@@ -1211,7 +1211,7 @@ export class WorkbenchScreen extends LitElement {
       : this._transactionOwner()
 
     return html`
-      <header class="app-titlebar">
+      <header class="app-titlebar ${isMac ? 'macos' : ''}">
         <div class="titlebar-inner">
           <div class="titlebar-left">
             <span class="title-product">${t('app.name')}</span>
@@ -2610,6 +2610,10 @@ export class WorkbenchScreen extends LitElement {
         display: flex;
       }
 
+      .app-titlebar.macos .titlebar-inner {
+        padding-right: 18px;
+      }
+
       .titlebar-left,
       .titlebar-center,
       .titlebar-right {
@@ -2681,7 +2685,7 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .txn-control {
-        --txn-tone: var(--staged-edit-fg);
+        --txn-tone: var(--transaction-fg);
         position: relative;
         height: 24px;
         display: flex;
@@ -2746,7 +2750,7 @@ export class WorkbenchScreen extends LitElement {
       }
 
       .txn-count {
-        color: var(--text-3);
+        color: color-mix(in srgb, var(--txn-tone) 72%, var(--text-2));
         font-size: 10px;
         font-weight: 500;
       }

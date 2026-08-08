@@ -60,6 +60,7 @@
   --status-dot-connected: #73e05a;
   --status-dot-warning: #d18616;
   --status-dot-error: #f14c4c;
+  --transaction-fg: #b49bea;
   --grid-border: #232936;
   --row-alt: #171a22;
   --row-hover: #163452;
@@ -175,6 +176,7 @@
   --staged-edit-fg: #c5a36c;
   --staged-add-fg: #62b47e;
   --staged-delete-fg: #d17682;
+  --transaction-fg: #b99ae8;
   --syntax-keyword: #b07ac4;
   --syntax-name: #cf7c83;
   --syntax-literal: #d0b16e;
@@ -238,6 +240,7 @@
   --status-dot-connected: #82b36b;
   --status-dot-warning: #d29242;
   --status-dot-error: #d95d58;
+  --transaction-fg: #c89bd5;
   --syntax-keyword: #b57ac0;
   --syntax-name: #cc7774;
   --syntax-literal: #c9a65e;
@@ -299,6 +302,7 @@
   --staged-edit-fg: #855f24;
   --staged-add-fg: #337b3e;
   --staged-delete-fg: #ad3745;
+  --transaction-fg: #73539b;
   --scrollbar-thumb: rgba(80, 88, 100, 0.35);
   --scrollbar-thumb-hover: rgba(70, 78, 90, 0.55);
   --syntax-keyword: #7a2f91;
