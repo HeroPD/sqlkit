@@ -125,6 +125,13 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     // timeout); without a handler that exception takes down the main
     // process. The pool discards the client; surface it as a status update.
     pool.on('error', (error) => events.onError(error.message))
+    // pg-pool only guards idle clients — checkout strips that listener, and a
+    // client whose socket dies mid-flight emits 'error' as well as rejecting
+    // the in-flight query (pg-pool's own pool.query() re-attaches a guard;
+    // manual connect() gets nothing). 'connect' fires once per physical
+    // client: one permanent absorber covers every checkout for its lifetime,
+    // while callers keep seeing the failure through the rejection.
+    pool.on('connect', (client) => client.on('error', () => {}))
     return pool
   }
 
@@ -875,7 +882,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           ),
         ]
         const summary = stats.rows[0]
-        return {
+        const activity = {
           connections: { used: connections.rows[0]?.used ?? 0, max: connections.rows[0]?.max ?? null },
           stats: [
             ...(summary?.uptime_seconds ? [{ label: 'Uptime', value: formatUptime(Number(summary.uptime_seconds)) }] : []),
@@ -892,8 +899,12 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
             self: row.self,
           })),
         }
-      } finally {
         client.release()
+        return activity
+      } catch (error) {
+        // Mirror pool.query: an errored client is destroyed, not reused.
+        client.release(error as Error)
+        throw error
       }
     },
 
