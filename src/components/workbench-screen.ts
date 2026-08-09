@@ -1043,7 +1043,7 @@ export class WorkbenchScreen extends LitElement {
     // re-runs that tab's first statement, leaving any trailing edits untouched.
     const existing = this._ctx.tabs.find((tab) => tab.id === id)
     this._ctx.addTab({ id, kind: 'sql', name: `${table.name}.sql`, path: null, content: sqlText, savedContent: sqlText, table })
-    void this._runSql(existing?.kind === 'sql' ? firstStatement(existing.content) || sqlText : sqlText)
+    void this._runSql(existing?.kind === 'sql' ? firstStatement(existing.content, dialectForEngine[profile.engine]) || sqlText : sqlText)
   }
 
   // Quick-open table pick: reveal it in the Explorer (switching context if

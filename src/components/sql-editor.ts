@@ -506,7 +506,7 @@ export class SqlEditor extends LitElement {
   // Everything that captures `this` — rebound whenever a state lands in a view.
   private _handlerExtensions() {
     return [
-      runQuery((query, view) => this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)),
+      runQuery((query, view) => this._emitRun(query.sql, view.state.doc.lineAt(query.from).number), () => this.dialect),
       altShiftKeys({ KeyF: () => this.formatSql() }),
       this._changeListener,
     ]
@@ -675,7 +675,7 @@ export class SqlEditor extends LitElement {
   runCurrentQuery(): boolean {
     const view = this._view
     if (!view) return false
-    const query = queryToRun(view.state)
+    const query = queryToRun(view.state, this.dialect)
     if (!query) return false
     this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)
     return true
@@ -685,7 +685,7 @@ export class SqlEditor extends LitElement {
   runExplicitQuery(): boolean {
     const view = this._view
     if (!view?.hasFocus) return false
-    const query = explicitQueryToRun(view.state)
+    const query = explicitQueryToRun(view.state, this.dialect)
     if (!query) return false
     this._emitRun(query.sql, view.state.doc.lineAt(query.from).number)
     return true
@@ -937,7 +937,7 @@ export class SqlEditor extends LitElement {
       (context: CompletionContext) => {
         // Alias and FK scans see only the statement under the caret: bindings
         // in the script's other statements must not leak into suggestions.
-        const block = queryToRun(context.state)
+        const block = queryToRun(context.state, this.dialect)
         const statement = block?.sql ?? context.state.doc.toString()
         const statementStart = block?.from ?? 0
 

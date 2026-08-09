@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { EditorState } from '@codemirror/state'
 import { MSSQL, PostgreSQL, SQLite, sql, type SQLDialect } from '@codemirror/lang-sql'
 import { queryToRun } from './run-query'
-import { SQL_DIALECTS } from './dialects'
+import { SQL_DIALECTS, type SqlDialectName } from './dialects'
 
 // The app's postgres dialect: dollar-quoted bodies parse as plain SQL, so the
 // dollar-quote tests below exercise the span-based splitting, not the parser.
@@ -18,10 +18,10 @@ const stateAt = (
   })
 
 /** Cursor placed where `|` appears in the doc. */
-const queryAtCaret = (docWithCaret: string, dialect?: SQLDialect) => {
+const queryAtCaret = (docWithCaret: string, dialect?: SQLDialect, name?: SqlDialectName) => {
   const cursor = docWithCaret.indexOf('|')
   const doc = docWithCaret.replace('|', '')
-  return queryToRun(stateAt(doc, cursor, { dialect }))?.sql ?? ''
+  return queryToRun(stateAt(doc, cursor, { dialect }), name)?.sql ?? ''
 }
 
 describe('queryToRun', () => {
@@ -277,6 +277,55 @@ describe('queryToRun', () => {
 
       const body = 'CREATE FUNCTION f() RETURNS void AS $$\nBEGIN\nUPDATE t SET x = 1;|\nEND\n$$ LANGUAGE plpgsql;'
       expect(queryAtCaret(body)).toBe(body.replace('|', ''))
+    })
+  })
+
+  describe('lone BEGIN transactions', () => {
+    // Reported: manual transactions are typed as a lone BEGIN with the query
+    // on the next line and no semicolons. Both used to run as one statement -
+    // the server answered `syntax error at or near "SELECT"`.
+    const pg = SQL_DIALECTS.postgres.dialect
+    const scratch = 'BEGIN\nSELECT * FROM "public"."pos_transactions"\n  LIMIT 200'
+
+    it('runs a lone BEGIN alone instead of the query merged below it', () => {
+      expect(queryAtCaret(scratch.replace('BEGIN', 'BEGIN|'), pg, 'postgres')).toBe('BEGIN')
+    })
+
+    it('runs the query below a lone BEGIN without it', () => {
+      expect(queryAtCaret(scratch.replace('SELECT', 'SELECT|'), pg, 'postgres')).toBe(
+        'SELECT * FROM "public"."pos_transactions"\n  LIMIT 200',
+      )
+      expect(queryAtCaret(scratch.replace('LIMIT', 'LIMIT|'), pg, 'postgres')).toBe(
+        'SELECT * FROM "public"."pos_transactions"\n  LIMIT 200',
+      )
+    })
+
+    it('recognizes a lone BEGIN after a terminated statement', () => {
+      expect(queryAtCaret('COMMIT;\nBEGIN|\nUPDATE t SET x = 1;', pg, 'postgres')).toBe('BEGIN')
+      expect(queryAtCaret('COMMIT;\nBEGIN\nUPDATE| t SET x = 1;', pg, 'postgres')).toBe('UPDATE t SET x = 1;')
+    })
+
+    it('keeps a T-SQL block and its body attached under the mssql dialect', () => {
+      const doc = 'BEGIN\nUPDATE t SET y = 2\nEND'
+      expect(queryAtCaret(doc.replace('BEGIN', 'BEGIN|'), MSSQL, 'mssql')).toBe(doc)
+      expect(queryAtCaret(doc.replace('UPDATE', 'UPDATE|'), MSSQL, 'mssql')).toBe(doc)
+    })
+
+    it('keeps a SQLite trigger body under its unterminated header', () => {
+      const doc = 'CREATE TRIGGER trg AFTER INSERT ON t\nBEGIN\n  UPDATE t SET x = 1;|\nEND;'
+      expect(queryAtCaret(doc, SQLite, 'sqlite')).toBe(
+        'CREATE TRIGGER trg AFTER INSERT ON t\nBEGIN\n  UPDATE t SET x = 1;',
+      )
+    })
+
+    it('leaves a lone BEGIN inside a dollar-quoted body attached', () => {
+      const doc =
+        'CREATE FUNCTION f() RETURNS void AS $$\nDECLARE x int;\nBEGIN|\n  UPDATE t SET x = 1;\nEND\n$$ LANGUAGE plpgsql;'
+      expect(queryAtCaret(doc, pg, 'postgres')).toBe(doc.replace('|', ''))
+    })
+
+    it('keeps merging without a dialect', () => {
+      expect(queryAtCaret(scratch.replace('BEGIN', 'BEGIN|'))).toBe(scratch)
     })
   })
 
