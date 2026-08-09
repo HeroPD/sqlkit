@@ -228,7 +228,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   // the wait so they fail fast with a message instead.
   const ACQUIRE_TIMEOUT_MS = 8_000
 
-  const acquire = (pool: mysql.Pool): Promise<mysql.PoolConnection> =>
+  const checkout = (pool: mysql.Pool): Promise<mysql.PoolConnection> =>
     new Promise((resolve, reject) => {
       let timedOut = false
       const timer = setTimeout(() => {
@@ -249,6 +249,22 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         },
       )
     })
+
+  const acquire = async (pool: mysql.Pool): Promise<mysql.PoolConnection> => {
+    const conn = await checkout(pool)
+    if (!profile.readOnly) return conn
+    // Read-only guardrail, in the standard syntax MySQL and MariaDB share.
+    // RESET CONNECTION on release restores global defaults, so it has to be
+    // re-applied per checkout rather than once per socket; fail closed when
+    // the server refuses it.
+    try {
+      await conn.query('set session transaction read only')
+    } catch (error) {
+      conn.release()
+      throw error instanceof Error ? error : new Error(String(error))
+    }
+    return conn
+  }
 
   // Metadata helper: object rows, cast to the query's concrete shape. Checked out
   // explicitly (not pool.query) so the bounded acquire above applies.

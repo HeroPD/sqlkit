@@ -21,8 +21,8 @@ const profile = () => ({
 
 describe('IPC validation', () => {
   it('accepts and copies a valid profile/config', () => {
-    expect(connectionProfile({ ...profile(), labelColor: 'accent-01' })).toMatchObject({
-      id: 'p1', engine: 'postgresql', labelColor: 'accent-01',
+    expect(connectionProfile({ ...profile(), labelColor: 'accent-01', readOnly: true })).toMatchObject({
+      id: 'p1', engine: 'postgresql', labelColor: 'accent-01', readOnly: true,
     })
     expect(workspaceConfig({ version: 1, connections: [profile()] }).connections).toHaveLength(1)
   })
@@ -30,6 +30,7 @@ describe('IPC validation', () => {
   it('rejects invalid engines, malformed configs, and oversized collections', () => {
     expect(() => connectionProfile({ ...profile(), engine: 'oracle' })).toThrow(/engine/i)
     expect(() => connectionProfile({ ...profile(), labelColor: 'accent-99' })).toThrow(/label color/i)
+    expect(() => connectionProfile({ ...profile(), readOnly: 'yes' })).toThrow(/readOnly/i)
     expect(() => workspaceConfig({ version: 1, connections: {} })).toThrow(/connections/i)
     expect(() => queryPayload('select 1', Array.from({ length: 10_001 }), null, null, 'q1')).toThrow(/params/i)
     expect(() => queryPayload('select 1', [], null, 'x'.repeat(10_001), 'q1')).toThrow(/filter/i)

@@ -182,6 +182,23 @@ describe('ConnectionsController metadata', () => {
   })
 })
 
+describe('ConnectionsController manual transactions', () => {
+  it('refreshes metadata only after the transaction fully closes', async () => {
+    const endTransaction = vi.fn()
+      .mockResolvedValueOnce({ success: true, transaction: { childDb: 'db_a' } })
+      .mockResolvedValueOnce({ success: true })
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { endTransaction }
+    const controller = new ConnectionsController(host())
+    const refresh = vi.spyOn(controller, 'refresh').mockImplementation(() => {})
+
+    await controller.endTransaction('p1', 'commit')
+    expect(refresh).not.toHaveBeenCalled()
+
+    await controller.endTransaction('p1', 'commit')
+    expect(refresh).toHaveBeenCalledWith('p1')
+  })
+})
+
 describe('ConnectionsController.clearError', () => {
   const withClear = () => {
     const clearConnectionError = vi.fn(() => Promise.resolve())
@@ -206,5 +223,22 @@ describe('ConnectionsController.clearError', () => {
     await controller.clearError('missing')
 
     expect(clearConnectionError).not.toHaveBeenCalled()
+  })
+})
+
+describe('ConnectionsController.readOnly', () => {
+  it('reports the live session guardrail, only while connected', () => {
+    stubSqlkit()
+    const controller = new ConnectionsController(host())
+    controller.statuses = {
+      ro: { profileId: 'ro', phase: 'connected', readOnly: true },
+      rw: { profileId: 'rw', phase: 'connected' },
+      err: { profileId: 'err', phase: 'error', error: 'boom' },
+    }
+
+    expect(controller.readOnly('ro')).toBe(true)
+    expect(controller.readOnly('rw')).toBe(false)
+    expect(controller.readOnly('err')).toBe(false)
+    expect(controller.readOnly('missing')).toBe(false)
   })
 })

@@ -977,7 +977,7 @@ export class WorkbenchScreen extends LitElement {
 
   private async _endTransaction(profileId: string, mode: 'commit' | 'rollback') {
     const result = await this._live.endTransaction(profileId, mode)
-    if (result.success) {
+    if (result.success && !result.transaction) {
       const next = new Map(this._transactionSessions)
       next.delete(profileId)
       this._transactionSessions = next
@@ -1323,9 +1323,22 @@ export class WorkbenchScreen extends LitElement {
   private _renderTitlebar() {
     const profile = this._config.activeProfile()
     const database = this._ctx.activeChildDb ?? profile?.database.trim() ?? ''
-    const context = profile ? [profile.name, database].filter(Boolean).join(' · ') : t('action.switchDatabase')
     const phase = profile ? this._live.phase(profile.id) : null
     const labelColor = connectionLabelColorValue(profile?.labelColor)
+    // The badge tells the truth about the live session, which enforces what it
+    // captured at connect: a profile edit only takes effect on reconnect, so
+    // until then the saved flag is a pending change, not the state.
+    const liveReadOnly = profile ? this._live.readOnly(profile.id) : false
+    const readOnly = phase === 'connected' ? liveReadOnly : Boolean(profile?.readOnly)
+    const readOnlyPending = phase === 'connected' && Boolean(profile?.readOnly) !== liveReadOnly
+    const context = profile
+      ? [
+          profile.name,
+          database,
+          readOnly ? t('connection.readOnlyBadge') : '',
+          readOnlyPending ? t('connection.readOnlyPending') : '',
+        ].filter(Boolean).join(' · ')
+      : t('action.switchDatabase')
     const tab = this._ctx.activeSqlTab()
     const run = this._queries.runFor(this._ctx.activeTabId)
     const running = run.phase === 'running'
@@ -1374,6 +1387,7 @@ export class WorkbenchScreen extends LitElement {
                             <strong>${database}</strong>
                           `
                         : ''}
+                      ${readOnly ? html`<i class="icon icon-lock-keyhole target-readonly" aria-hidden="true"></i>` : ''}
                     `
                   : html`<strong>${t('action.switchDatabase')}</strong>`}
                 <i class="icon icon-chevron-down" aria-hidden="true"></i>
@@ -3316,7 +3330,13 @@ export class WorkbenchScreen extends LitElement {
         color: var(--text-3);
       }
 
-      .database-target .icon {
+      .target-readonly {
+        flex-shrink: 0;
+        font-size: 13px;
+        color: color-mix(in srgb, var(--transaction-fg) 76%, var(--text-3));
+      }
+
+      .database-target > .icon-chevron-down {
         flex-shrink: 0;
         margin-left: auto;
         font-size: 13px;

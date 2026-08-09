@@ -831,6 +831,59 @@ describe('WorkbenchScreen title-bar actions', () => {
     expect(host.querySelector<HTMLElement>('.database-target-wrap')?.dataset.tooltip).toBe('Postgres · db_a')
   })
 
+  it('shows read-only state as a lock icon while retaining its accessible text', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn> }
+      _renderTitlebar(): unknown
+    }
+    workbench._config.connections = [{ ...profile, readOnly: true }]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._live.phase = vi.fn(() => 'connected')
+    // The badge reports the live session's guardrail, not the saved profile.
+    workbench._live.statuses = { [profile.id]: { profileId: profile.id, phase: 'connected', readOnly: true } }
+    const host = document.createElement('div')
+
+    render(workbench._renderTitlebar(), host)
+
+    expect(host.querySelector('.target-readonly.icon-lock-keyhole')).toBeTruthy()
+    expect(host.querySelector('.target-readonly')?.textContent).toBe('')
+    expect(host.querySelector<HTMLElement>('.database-target-wrap')?.dataset.tooltip).toBe('Postgres · db_a · Read-only')
+    expect(host.querySelector('.database-target')?.getAttribute('aria-label')).toContain('Postgres · db_a · Read-only')
+  })
+
+  it('keeps the badge on the session truth when a profile edit has not been reconnected yet', () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
+      _live: { statuses: unknown; phase: ReturnType<typeof vi.fn> }
+      _renderTitlebar(): unknown
+    }
+    workbench._config.connections = [{ ...profile, readOnly: true }]
+    workbench._ctx.switchInstance(profile.id, 'db_a')
+    workbench._live.phase = vi.fn(() => 'connected')
+    // Saved read-only, but the live session connected without it: no lock —
+    // the tooltip carries the pending hint instead.
+    workbench._live.statuses = { [profile.id]: { profileId: profile.id, phase: 'connected' } }
+    const host = document.createElement('div')
+
+    render(workbench._renderTitlebar(), host)
+
+    expect(host.querySelector('.target-readonly')).toBeNull()
+    expect(host.querySelector<HTMLElement>('.database-target-wrap')?.dataset.tooltip).toBe(
+      'Postgres · db_a · Read-only change applies after reconnect',
+    )
+
+    // Disconnected: nothing is live, so the saved profile is the best truth.
+    workbench._live.phase = vi.fn(() => null)
+    workbench._live.statuses = {}
+    render(workbench._renderTitlebar(), host)
+    expect(host.querySelector('.target-readonly')).toBeTruthy()
+  })
+
   it('shows the segmented transaction control while a manual transaction is open', () => {
     const screen = new WorkbenchScreen()
     const workbench = screen as never as {
@@ -1062,6 +1115,30 @@ describe('WorkbenchScreen title-bar actions', () => {
       runStartedAt: Date.now(), wasOpen: true, isOpen: false,
     })
     expect(workbench._transactionSessions.has('p1')).toBe(false)
+  })
+
+  it('keeps session history when a nested SQL Server commit leaves the transaction open', async () => {
+    const workbench = new WorkbenchScreen() as never as {
+      _live: { endTransaction: ReturnType<typeof vi.fn> }
+      _transactionSessions: Map<string, { runs: unknown[] }>
+      _transactionPopoverProfileId: string | null
+      _expandedTransactionProfileIds: Set<string>
+      _endTransaction(profileId: string, mode: 'commit' | 'rollback'): Promise<void>
+    }
+    const session = { runs: [{ sql: 'BEGIN TRAN; BEGIN TRAN' }] }
+    workbench._transactionSessions = new Map([['p1', session]])
+    workbench._transactionPopoverProfileId = 'p1'
+    workbench._expandedTransactionProfileIds = new Set(['p1'])
+    workbench._live.endTransaction = vi.fn(() => Promise.resolve({
+      success: true,
+      transaction: { childDb: 'db_a' },
+    }))
+
+    await workbench._endTransaction('p1', 'commit')
+
+    expect(workbench._transactionSessions.get('p1')).toBe(session)
+    expect(workbench._transactionPopoverProfileId).toBe('p1')
+    expect(workbench._expandedTransactionProfileIds.has('p1')).toBe(true)
   })
 
   it('refuses a run against another database while a transaction is open', async () => {

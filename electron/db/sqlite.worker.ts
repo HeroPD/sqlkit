@@ -31,7 +31,7 @@ const handle = (request: SqliteRequest): SqliteResultByRequest[SqliteRequestType
       // Clear first: if openDatabase throws, a later request sees "Not connected"
       // rather than reusing the just-closed handle.
       db = null
-      db = openDatabase(request.file)
+      db = openDatabase(request.file, request.readOnly)
       return serverVersion(db)
     case 'query':
       return queryDatabase(requireDb(), request.sql, request.params)

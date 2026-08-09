@@ -146,7 +146,7 @@ export function createSqliteDriver(profile: ConnectionProfile, spawn: SqliteSpaw
 
   const open = (dbFile: string): Promise<string> => {
     spawnChannel()
-    return request({ type: 'open', file: dbFile }, OPEN_TIMEOUT_MS, undefined, true)
+    return request({ type: 'open', file: dbFile, readOnly: profile.readOnly ?? false }, OPEN_TIMEOUT_MS, undefined, true)
   }
 
   return {

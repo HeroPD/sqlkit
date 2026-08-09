@@ -84,6 +84,9 @@ export type ConnectionProfile = {
   ssl?: SslConfig
   /** SSH tunnel settings; absent means a direct connection. */
   ssh?: SshConfig
+  /** Guardrail against accidental writes: sessions open read-only where the
+   * engine supports it, and structured write endpoints refuse to run. */
+  readOnly?: boolean
 }
 
 export type ConnectionLabelColor =
@@ -121,6 +124,12 @@ export type WorkspaceConfigResult = {
 
 export type ConnectionPhase = 'connecting' | 'connected' | 'error'
 
+export type OpenTransaction = { childDb: string; failed?: boolean }
+
+export type EndTransactionResult =
+  | { success: true; transaction?: OpenTransaction }
+  | { success: false; error: string }
+
 /** Status of one live connection; profiles with no status are disconnected. */
 export type ConnectionStatus = {
   profileId: string
@@ -132,7 +141,10 @@ export type ConnectionStatus = {
   children?: ChildDb[]
   /** An open manual transaction pinning a connection to `childDb`. `failed`
    * means a statement inside it errored; only rollback ends it usefully. */
-  transaction?: { childDb: string; failed?: boolean }
+  transaction?: OpenTransaction
+  /** The read-only guardrail the live session actually enforces — captured at
+   * connect, so it can lag a profile edit until the next reconnect. */
+  readOnly?: boolean
   error?: string
 }
 
@@ -472,7 +484,7 @@ export type SqlkitApi = {
   /** Cancels one in-flight execution; omit executionId only for connection teardown. */
   cancelQuery: (profileId: string, executionId?: string) => Promise<{ success: boolean; error?: string }>
   /** Commits or rolls back the open manual transaction on this connection. */
-  endTransaction: (profileId: string, mode: 'commit' | 'rollback') => Promise<{ success: boolean; error?: string }>
+  endTransaction: (profileId: string, mode: 'commit' | 'rollback') => Promise<EndTransactionResult>
   /** Engine-specific option values (collations, charsets, …) for the create dialog. */
   databaseCreateMeta: (profileId: string) => Promise<DatabaseCreateMetaResult>
   /** Server-side CREATE DATABASE on a connected profile, with engine-specific options. */

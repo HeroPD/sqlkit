@@ -105,12 +105,20 @@ export class ConnectionsController implements ReactiveController {
     return status?.phase === 'connected' ? status.transaction : undefined
   }
 
+  /** The read-only guardrail the live session enforces — not what the saved
+   * profile asks for, which only applies on the next connect. */
+  readOnly(profileId: string): boolean {
+    const status = this.statuses[profileId]
+    return status?.phase === 'connected' ? status.readOnly === true : false
+  }
+
   /** Commits or rolls back the open manual transaction. */
   async endTransaction(profileId: string, mode: 'commit' | 'rollback') {
     const result = await window.sqlkit.endTransaction(profileId, mode)
-    // Committed work changes what the schema tree and grids should believe;
-    // the metadata refresh deferred during the transaction happens here.
-    if (result.success) this.refresh(profileId)
+    // Fully committed work changes what the schema tree and grids should
+    // believe. A nested SQL Server commit leaves the outer transaction open,
+    // so its deferred refresh must stay deferred too.
+    if (result.success && !result.transaction) this.refresh(profileId)
     return result
   }
 

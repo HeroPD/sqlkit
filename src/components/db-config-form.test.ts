@@ -101,6 +101,31 @@ describe('DbConfigForm draft editing', () => {
     expect(form.profile?.ssh?.password).toBe('')
     form.remove()
   })
+
+  it('toggles the read-only guardrail and clears it back to undefined', async () => {
+    const readOnlyToggle = (form: DbConfigForm) =>
+      [...form.shadowRoot!.querySelectorAll<HTMLLabelElement>('label.toggle')]
+        .find((label) => label.textContent?.includes('Read-only'))!
+        .querySelector('input')!
+
+    const on = setup()
+    document.body.appendChild(on.form)
+    await on.form.updateComplete
+    readOnlyToggle(on.form).click()
+    expect(on.changes.at(-1)?.readOnly).toBe(true)
+    on.form.remove()
+
+    // The toggle also renders for file-based engines, and unchecking drops the
+    // flag entirely rather than persisting readOnly: false.
+    const off = setup({ engine: 'sqlite', readOnly: true })
+    document.body.appendChild(off.form)
+    await off.form.updateComplete
+    const toggle = readOnlyToggle(off.form)
+    expect(toggle.checked).toBe(true)
+    toggle.click()
+    expect(off.changes.at(-1)?.readOnly).toBeUndefined()
+    off.form.remove()
+  })
 })
 
 describe('DbConfigForm engine switch port carry', () => {

@@ -110,6 +110,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       ssl,
       types: losslessTypes,
       application_name: APP_CONNECTION_NAME,
+      // Read-only guardrail: the server rejects writes on every pooled
+      // connection. A session-level default, so SET can still undo it.
+      ...(profile.readOnly ? { options: '-c default_transaction_read_only=on' } : {}),
       max: MAX_POOL_CONNECTIONS,
       idleTimeoutMillis: POOL_IDLE_MS,
       connectionTimeoutMillis: 8000,

@@ -11,11 +11,13 @@ import type {
   DbObjectKind,
   DdlResult,
   Engine,
+  EndTransactionResult,
   FetchRowsResult,
   InspectResult,
   ObjectDdlRef,
   ObjectDdlResult,
   ObjectsResult,
+  OpenTransaction,
   QueryResponse,
   QuerySort,
   ServerActivityResult,
@@ -29,6 +31,7 @@ import type {
 import { unlink } from 'node:fs/promises'
 import type { ExportFormat } from '../../src/result-export'
 import { isReadOnlyQuery } from '../../src/sql-order'
+import { isReadOnlyScript } from '../../src/sql-readonly'
 import { t } from '../../src/i18n'
 import { createDriver, type Driver } from './driver'
 import { queryErrorLine } from './error-line'
@@ -36,7 +39,6 @@ import { ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
 
 type ConnectionResources = { driver: Driver | null; tunnel: Tunnel | null }
-type OpenTransaction = { childDb: string; failed?: boolean }
 type Active =
   | ({ phase: 'connecting'; profileId: string } & ConnectionResources)
   | {
@@ -48,6 +50,8 @@ type Active =
       serverVersion: string
       /** Mirror of the driver's pinned manual transaction, for db:status. */
       transaction: OpenTransaction | null
+      /** Read-only guardrail: structured write endpoints refuse to run. */
+      readOnly: boolean
     }
   | ({ phase: 'error'; profileId: string; error: string } & ConnectionResources)
 
@@ -76,6 +80,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       tunneled: active.tunnel !== null,
       children: active.driver.children?.(),
       ...(active.transaction ? { transaction: active.transaction } : {}),
+      ...(active.readOnly ? { readOnly: true } : {}),
     }
   }
   const statuses = () => [...connections.values()].map(statusOf)
@@ -227,6 +232,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
         driver: resources.driver,
         tunnel: resources.tunnel,
         transaction: null,
+        readOnly: profile.readOnly ?? false,
       })
       return { success: true, serverVersion }
     } catch (error) {
@@ -248,6 +254,11 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     return active?.phase === 'connected' ? active.driver : null
   }
 
+  const isReadOnly = (profileId: string) => {
+    const active = connections.get(profileId)
+    return active?.phase === 'connected' && active.readOnly
+  }
+
   async function query(
     profileId: string,
     childDb: string | null,
@@ -257,8 +268,15 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     filter?: string | null,
     executionId?: string,
   ): Promise<QueryResponse> {
-    const driver = connectedDriver(profileId)
-    if (!driver) return { success: false, error: t('connection.notConnected') }
+    const active = connections.get(profileId)
+    const driver = active?.phase === 'connected' ? active.driver : null
+    if (!active || !driver) return { success: false, error: t('connection.notConnected') }
+    // SQL Server sessions can't be opened read-only the way the other engines'
+    // can, so free-form SQL is vetted here instead: read statements only.
+    // Elsewhere the session guard lets the server do the refusing.
+    if (active.phase === 'connected' && active.readOnly && active.engine === 'sqlserver' && !isReadOnlyScript(sql, active.engine)) {
+      return { success: false, error: t('query.readOnlyBlocked') }
+    }
     try {
       const raw = await driver.query(sql, params, childDb, sort, filter, executionId)
       // Disconnected mid-query: don't register a buffer no one can page or free
@@ -295,6 +313,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   async function runBatch(profileId: string, childDb: string | null, statements: BatchStatement[]): Promise<BatchResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (isReadOnly(profileId)) return { success: false, error: t('query.readOnlyBlocked') }
     if (!driver.runBatch) return { success: false, error: t('connection.atomicWritesUnsupported') }
     // A save runs on its own connection: it would commit outside the user's
     // open transaction and deadlock waiting on that transaction's own locks.
@@ -312,6 +331,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   async function runDdl(profileId: string, childDb: string | null, statements: string[]): Promise<DdlResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
+    if (isReadOnly(profileId)) return { success: false, error: t('query.readOnlyBlocked') }
     if (!driver.runDdl) return { success: false, error: t('connection.schemaChangesUnsupported') }
     // Same reasoning as runBatch: schema applies must not race the open txn.
     if (driver.openTransaction?.()) return { success: false, error: t('query.transactionSaveBlocked') }
@@ -403,13 +423,14 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   }
 
   // Ends the pinned manual transaction and rebroadcasts the cleared status.
-  async function endTransaction(profileId: string, mode: 'commit' | 'rollback'): Promise<{ success: boolean; error?: string }> {
+  async function endTransaction(profileId: string, mode: 'commit' | 'rollback'): Promise<EndTransactionResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
     if (!driver.endTransaction) return { success: false, error: t('connection.engineUnsupported') }
     try {
       await driver.endTransaction(mode)
-      return { success: true }
+      const transaction = driver.openTransaction?.() ?? null
+      return { success: true, ...(transaction ? { transaction } : {}) }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     } finally {
@@ -422,6 +443,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   async function mutateDatabase(profileId: string, run: (driver: Driver) => Promise<void> | undefined) {
     const active = connections.get(profileId)
     if (active?.phase !== 'connected') return { success: false, error: t('connection.notConnected') }
+    if (active.readOnly) return { success: false, error: t('query.readOnlyBlocked') }
     try {
       const pending = run(active.driver)
       if (!pending) return { success: false, error: t('connection.engineUnsupported') }
@@ -523,6 +545,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
   async function endSession(profileId: string, sessionId: string, mode: SessionEndMode): Promise<SessionEndResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
+    // Killing someone's query or session mutates server state all the same.
+    if (isReadOnly(profileId)) return { success: false, error: t('query.readOnlyBlocked') }
     if (!driver.endSession) return { success: false, error: t('connection.noServerActivity') }
     try {
       await driver.endSession(sessionId, mode)

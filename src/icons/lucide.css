@@ -75,6 +75,7 @@
 .icon-link::before { content: "\e102"; }
 .icon-list::before { content: "\e106"; }
 .icon-loader-circle::before { content: "\e10a"; }
+.icon-lock-keyhole::before { content: "\e531"; }
 .icon-panel-bottom::before { content: "\e42c"; }
 .icon-panel-left::before { content: "\e12a"; }
 .icon-plug::before { content: "\e37f"; }

@@ -534,6 +534,91 @@ describe('connection manager: runBatch', () => {
   })
 })
 
+describe('connection manager: read-only profiles', () => {
+  const readOnlyProfile = (overrides: Partial<ConnectionProfile> = {}) => profile({ readOnly: true, ...overrides })
+
+  it('refuses runBatch and runDdl without touching the driver', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true as const }))
+    const runDdl = vi.fn(() => Promise.resolve({ success: true as const }))
+    hoisted.driver = fakeDriver({ runBatch, runDdl })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(readOnlyProfile())
+
+    expect(await manager.runBatch('p1', null, [{ sql: 'update t set a = 1', params: [] }])).toEqual({
+      success: false,
+      error: 'This connection is read-only.',
+    })
+    expect(await manager.runDdl('p1', null, ['alter table t add c int'])).toEqual({
+      success: false,
+      error: 'This connection is read-only.',
+    })
+    expect(runBatch).not.toHaveBeenCalled()
+    expect(runDdl).not.toHaveBeenCalled()
+  })
+
+  it('refuses create/drop database and session termination', async () => {
+    const createDatabase = vi.fn(() => Promise.resolve())
+    const dropDatabase = vi.fn(() => Promise.resolve())
+    const endSession = vi.fn(() => Promise.resolve())
+    hoisted.driver = fakeDriver({ createDatabase, dropDatabase, endSession, children: vi.fn(() => []) })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(readOnlyProfile())
+
+    expect(await manager.createDatabase('p1', 'newdb')).toEqual({ success: false, error: 'This connection is read-only.' })
+    expect(await manager.dropDatabase('p1', 'olddb')).toEqual({ success: false, error: 'This connection is read-only.' })
+    expect(await manager.endSession('p1', '42', 'terminate')).toEqual({ success: false, error: 'This connection is read-only.' })
+    expect(createDatabase).not.toHaveBeenCalled()
+    expect(dropDatabase).not.toHaveBeenCalled()
+    expect(endSession).not.toHaveBeenCalled()
+  })
+
+  it('vets free-form SQL on SQL Server, where no session guard exists', async () => {
+    const query = vi.fn(() => Promise.resolve(rowsResult(1)))
+    hoisted.driver = fakeDriver({ query })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(readOnlyProfile({ engine: 'sqlserver' }))
+
+    expect(await manager.query('p1', null, 'UPDATE t SET a = 1')).toEqual({
+      success: false,
+      error: 'This connection is read-only.',
+    })
+    expect((await manager.query('p1', null, 'SELECT 1\nGO\nDELETE FROM t')).success).toBe(false)
+    expect(query).not.toHaveBeenCalled()
+    expect((await manager.query('p1', null, 'SELECT * FROM t')).success).toBe(true)
+    expect((await manager.query('p1', null, 'SELECT * FROM c FOR JSON PATH')).success).toBe(true)
+    expect((await manager.query('p1', null, 'SELECT 1; SELECT 2;')).success).toBe(true)
+    expect(query).toHaveBeenCalledTimes(3)
+  })
+
+  it('reports the enforced guardrail in statuses', async () => {
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(readOnlyProfile())
+    await manager.connect(profile({ id: 'p2', name: 'p2' }))
+
+    expect(manager.statuses().find((s) => s.profileId === 'p1')).toMatchObject({ phase: 'connected', readOnly: true })
+    expect(manager.statuses().find((s) => s.profileId === 'p2')).not.toHaveProperty('readOnly')
+  })
+
+  it('leaves free-form SQL to the session guard on the other engines', async () => {
+    const query = vi.fn(() => Promise.resolve(rowsResult(1)))
+    hoisted.driver = fakeDriver({ query })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(readOnlyProfile())
+
+    expect((await manager.query('p1', null, 'UPDATE t SET a = 1')).success).toBe(true)
+    expect(query).toHaveBeenCalled()
+  })
+
+  it('does not gate a profile without the flag', async () => {
+    const runBatch = vi.fn(() => Promise.resolve({ success: true as const }))
+    hoisted.driver = fakeDriver({ runBatch })
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+
+    expect(await manager.runBatch('p1', null, [{ sql: 'update t set a = 1', params: [] }])).toEqual({ success: true })
+  })
+})
+
 describe('connection manager: manual transactions', () => {
   const openState: { value: { childDb: string; failed?: boolean } | null } = { value: null }
 
@@ -626,6 +711,20 @@ describe('connection manager: manual transactions', () => {
     expect(await manager.endTransaction('p1', 'rollback')).toEqual({ success: true })
     expect(hoisted.driver.endTransaction).toHaveBeenCalledWith('rollback')
     expect(manager.statuses()[0]).not.toHaveProperty('transaction')
+  })
+
+  it('reports a transaction that remains open after a nested commit', async () => {
+    hoisted.driver = transactionDriver()
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    openState.value = { childDb: 'app' }
+    await manager.query('p1', null, 'BEGIN TRAN; BEGIN TRAN')
+
+    expect(await manager.endTransaction('p1', 'commit')).toEqual({
+      success: true,
+      transaction: { childDb: 'app' },
+    })
+    expect(manager.statuses()).toEqual([expect.objectContaining({ transaction: { childDb: 'app' } })])
   })
 
   it('reports unsupported and driver failures from endTransaction', async () => {

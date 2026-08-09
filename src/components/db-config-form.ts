@@ -226,8 +226,26 @@ export class DbConfigForm extends LitElement {
           `,
           t('config.allDatabasesHelp'),
         )}
+        ${this._readOnlyField(draft)}
       </section>
     `
+  }
+
+  private _readOnlyField(draft: ConnectionProfile) {
+    return this._field(
+      t('config.access'),
+      html`
+        <label class="toggle">
+          <input
+            type="checkbox"
+            .checked=${draft.readOnly ?? false}
+            @change=${(e: Event) => this._patch({ readOnly: (e.target as HTMLInputElement).checked || undefined })}
+          />
+          <span>${t('config.readOnlyToggle')}</span>
+        </label>
+      `,
+      t('config.readOnlyHelp'),
+    )
   }
 
   private _sqliteSection(draft: ConnectionProfile) {
@@ -248,6 +266,7 @@ export class DbConfigForm extends LitElement {
           `,
           t('config.filePathHelp'),
         )}
+        ${this._readOnlyField(draft)}
       </section>
     `
   }

@@ -94,6 +94,7 @@ export function connectionProfile(value: unknown): ConnectionProfile {
     folder: stringValue(profile.folder, 'Workspace folder', 2_000),
   }
   if (profile.passwordSaved !== undefined) parsed.passwordSaved = booleanValue(profile.passwordSaved, 'passwordSaved')
+  if (profile.readOnly !== undefined) parsed.readOnly = booleanValue(profile.readOnly, 'readOnly')
   if (profile.labelColor !== undefined) {
     if (!isConnectionLabelColor(profile.labelColor)) throw new IpcValidationError('Connection label color is invalid')
     parsed.labelColor = profile.labelColor

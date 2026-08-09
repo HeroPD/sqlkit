@@ -3,7 +3,7 @@ import type { ExportFormat, SqlExportTarget } from '../../src/result-export'
 import type { SqliteParam } from './sqlite-engine'
 
 export type SqliteRequestBodyByType = {
-  open: { type: 'open'; file: string }
+  open: { type: 'open'; file: string; readOnly?: boolean }
   query: { type: 'query'; sql: string; params: SqliteParam[] }
   runBatch: { type: 'runBatch'; statements: { sql: string; params: SqliteParam[]; expectedRows?: number }[] }
   runDdl: { type: 'runDdl'; statements: string[] }

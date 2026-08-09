@@ -15,7 +15,9 @@ import { assertSelfContainedTransaction, containsSqliteTrigger } from './sql-scr
 
 export type SqliteParam = string | number | bigint | null | Uint8Array
 
-export const openDatabase = (file: string): DatabaseSync => new DatabaseSync(file, { readBigInts: true })
+// readOnly opens the file with SQLITE_OPEN_READONLY — the engine itself
+// rejects writes, and a missing file errors instead of being created.
+export const openDatabase = (file: string, readOnly = false): DatabaseSync => new DatabaseSync(file, { readBigInts: true, readOnly })
 
 export const serverVersion = (db: DatabaseSync): string => {
   const row = db.prepare('select sqlite_version() as version').get() as { version: string }
