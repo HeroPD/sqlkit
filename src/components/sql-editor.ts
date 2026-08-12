@@ -50,9 +50,10 @@ import {
   addCursorsToLineEnds,
   type SelectionCommandId,
 } from '../codemirror/selection-commands'
-import type { ColumnRef } from '../electron'
+import type { ColumnRef, Engine } from '../electron'
 import { quoteStyleFor } from '../dialect'
 import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
+import { maskSql } from '../sql-mask'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 import { softHighlightStyle } from '../codemirror/highlight'
 import { isMac, mod } from '../platform'
@@ -332,12 +333,58 @@ function normIdent(seg: string): string {
 
 const CLAUSE_KEYWORDS = /\b(from|join|where|on|select|set|group|order|having|union|intersect|except|limit|offset|values|returning|update|into|window|with)\b/gi
 
-// Whether the nearest clause keyword before `index` is FROM — comma aliases only bind there.
-function inFromList(sql: string, index: number): boolean {
-  let last: string | undefined
-  for (const match of sql.slice(0, index).matchAll(CLAUSE_KEYWORDS)) last = match[1]?.toLowerCase()
-  return last === 'from'
+const MASK_ENGINE: Record<SqlDialectName, Engine> = {
+  postgres: 'postgresql',
+  mysql: 'mysql',
+  mssql: 'sqlserver',
+  sqlite: 'sqlite',
 }
+
+type ClauseContext = { clause: string; queryDepth: number; queryStart: number }
+
+// Clause at the caret and the parenthesis depth of the SELECT/UPDATE/etc. that
+// owns it. Child expression parens inherit their parent's clause; a nested
+// SELECT replaces it until its parens close. Masking keeps quoted identifiers,
+// strings and comments from impersonating structural keywords.
+function clauseBefore(sql: string, index: number, dialect: SqlDialectName): ClauseContext | undefined {
+  const masked = maskSql(sql, MASK_ENGINE[dialect]).slice(0, Math.max(0, index))
+  const contexts = new Map<number, ClauseContext>()
+  const tokens = new RegExp(`[()]|${CLAUSE_KEYWORDS.source}`, 'gi')
+  let depth = 0
+  for (const match of masked.matchAll(tokens)) {
+    const token = match[0].toLowerCase()
+    if (token === '(') {
+      const inherited = contexts.get(depth)
+      depth += 1
+      if (inherited) contexts.set(depth, inherited)
+    } else if (token === ')') {
+      contexts.delete(depth)
+      depth = Math.max(0, depth - 1)
+    } else {
+      const previous = contexts.get(depth)
+      contexts.set(depth, token === 'select' || !previous
+        ? { clause: token, queryDepth: depth, queryStart: match.index ?? 0 }
+        : { ...previous, clause: token })
+    }
+  }
+  return contexts.get(depth)
+}
+
+function parenDepthInMasked(masked: string, index: number): number {
+  let depth = 0
+  for (const char of masked.slice(0, Math.max(0, index))) {
+    if (char === '(') depth += 1
+    else if (char === ')') depth = Math.max(0, depth - 1)
+  }
+  return depth
+}
+
+// Whether the nearest clause keyword before `index` is FROM — comma aliases only bind there.
+function inFromList(sql: string, index: number, dialect: SqlDialectName): boolean {
+  return clauseBefore(sql, index, dialect)?.clause === 'from'
+}
+
+const SELECT_FUNCTIONS = new Set(['count', 'sum', 'avg', 'min', 'max'])
 
 // A FROM/JOIN/UPDATE/INTO clause (or FROM-list comma) binding a table to an alias.
 const ALIAS_BINDINGS = new RegExp(
@@ -347,14 +394,24 @@ const ALIAS_BINDINGS = new RegExp(
 
 // Finds what table `alias` (unquoted, lowercased) is bound to in FROM/JOIN/UPDATE/INTO
 // clauses or old-style FROM lists. Returns `schema.table` or `table`, lowercased.
-function findAliasTarget(sql: string, alias: string): string | null {
+function findAliasTarget(
+  sql: string,
+  alias: string,
+  dialect: SqlDialectName,
+  queryDepth: number,
+  queryStart: number,
+): string | null {
+  const masked = maskSql(sql, MASK_ENGINE[dialect])
   for (const match of sql.matchAll(ALIAS_BINDINGS)) {
     const [, comma, first, second, aliasSeg] = match
     if (first === undefined || aliasSeg === undefined) continue
+    if (!/\S/.test(masked[match.index ?? 0] ?? '')) continue
+    if (parenDepthInMasked(masked, match.index ?? 0) !== queryDepth) continue
+    if (clauseBefore(sql, match.index ?? 0, dialect)?.queryStart !== queryStart) continue
     const candidate = normIdent(aliasSeg)
     if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
     // A select-list comma must not bind "select a, b c" as alias c → table b.
-    if (comma !== undefined && !inFromList(sql, match.index ?? 0)) continue
+    if (comma !== undefined && !inFromList(sql, match.index ?? 0, dialect)) continue
     return second !== undefined ? `${normIdent(first)}.${normIdent(second)}` : normIdent(first)
   }
   return null
@@ -374,14 +431,18 @@ const TABLE_BINDINGS = new RegExp(
 )
 
 // All alias names already bound in `sql`, so a suggested alias picks a fresh one.
-function boundAliases(sql: string): Set<string> {
+function boundAliases(sql: string, dialect: SqlDialectName, queryDepth: number, queryStart: number): Set<string> {
   const taken = new Set<string>()
+  const masked = maskSql(sql, MASK_ENGINE[dialect])
   for (const match of sql.matchAll(ALIAS_BINDINGS)) {
     const [, comma, first, , aliasSeg] = match
     if (first === undefined || aliasSeg === undefined) continue
+    if (!/\S/.test(masked[match.index ?? 0] ?? '')) continue
+    if (parenDepthInMasked(masked, match.index ?? 0) !== queryDepth) continue
+    if (clauseBefore(sql, match.index ?? 0, dialect)?.queryStart !== queryStart) continue
     const candidate = normIdent(aliasSeg)
     if (ALIAS_STOPWORDS.has(candidate)) continue
-    if (comma !== undefined && !inFromList(sql, match.index ?? 0)) continue
+    if (comma !== undefined && !inFromList(sql, match.index ?? 0, dialect)) continue
     taken.add(candidate)
   }
   return taken
@@ -940,16 +1001,55 @@ export class SqlEditor extends LitElement {
         const block = queryToRun(context.state, this.dialect)
         const statement = block?.sql ?? context.state.doc.toString()
         const statementStart = block?.from ?? 0
+        const maskedStatement = maskSql(statement, MASK_ENGINE[this.dialect])
+        const statementContext = (pos: number) => clauseBefore(statement, pos - statementStart, this.dialect)
+        const queryContextAt = (pos: number): ClauseContext => statementContext(pos) ?? {
+          clause: '',
+          queryDepth: parenDepthInMasked(maskedStatement, pos - statementStart),
+          queryStart: 0,
+        }
+
+        const bindingCache = new Map<string, Array<{ seg: string; qualified?: string; alias?: string; table: string }>>()
+        const tableBindings = (query: ClauseContext) => {
+          const cacheKey = `${query.queryDepth}:${query.queryStart}`
+          const cached = bindingCache.get(cacheKey)
+          if (cached) return cached
+          const bindings: Array<{ seg: string; qualified?: string; alias?: string; table: string }> = []
+          for (const match of statement.matchAll(TABLE_BINDINGS)) {
+            const [, seg, qualified, alias] = match
+            const table = qualified ?? seg
+            if (seg === undefined || table === undefined) continue
+            if (!/\S/.test(maskedStatement[match.index ?? 0] ?? '')) continue
+            if (parenDepthInMasked(maskedStatement, match.index ?? 0) !== query.queryDepth) continue
+            if (clauseBefore(statement, match.index ?? 0, this.dialect)?.queryStart !== query.queryStart) continue
+            bindings.push({ seg, qualified, alias, table })
+          }
+          // TABLE_BINDINGS covers explicit JOINs; add aliased old-style FROM
+          // list entries (`FROM a x, b y`) without mistaking SELECT commas for
+          // table bindings.
+          for (const match of statement.matchAll(ALIAS_BINDINGS)) {
+            const [, comma, seg, qualified, alias] = match
+            if (comma === undefined || seg === undefined || alias === undefined) continue
+            if (!/\S/.test(maskedStatement[match.index ?? 0] ?? '')) continue
+            if (parenDepthInMasked(maskedStatement, match.index ?? 0) !== query.queryDepth) continue
+            if (clauseBefore(statement, match.index ?? 0, this.dialect)?.queryStart !== query.queryStart) continue
+            if (!inFromList(statement, match.index ?? 0, this.dialect)) continue
+            bindings.push({ seg, qualified, alias, table: qualified ?? seg })
+          }
+          bindingCache.set(cacheKey, bindings)
+          return bindings
+        }
 
         // Whether `pos` sits right after FROM/JOIN (or a FROM-list comma),
         // where a completed table should bring an alias along.
         const inTableClause = (pos: number) => {
           const before = context.state.sliceDoc(Math.max(0, pos - 200), pos)
           if (/\b(?:from|join)\s+$/i.test(before)) return true
-          return /,\s*$/.test(before) && inFromList(statement, pos - statementStart)
+          return /,\s*$/.test(before) && inFromList(statement, pos - statementStart, this.dialect)
         }
-        const takenAliases = () => {
-          const taken = boundAliases(statement)
+        const takenAliases = (pos: number) => {
+          const query = queryContextAt(pos)
+          const taken = boundAliases(statement, this.dialect, query.queryDepth, query.queryStart)
           for (const name of tableNames.keys()) taken.add(name)
           return taken
         }
@@ -957,15 +1057,49 @@ export class SqlEditor extends LitElement {
         // Aliases bound in the statement complete like names and rank above
         // tables and columns: they are what a qualified reference here starts
         // with. The dim detail names the table each alias stands for.
-        const aliasOptions = (): Completion[] => {
+        const aliasOptions = (query: ClauseContext): Completion[] => {
           const options: Completion[] = []
           const seen = new Set<string>()
-          for (const match of statement.matchAll(TABLE_BINDINGS)) {
-            const [, seg, qualified, alias] = match
-            const table = qualified ?? seg
-            if (alias === undefined || table === undefined || seen.has(alias)) continue
+          for (const { alias, table } of tableBindings(query)) {
+            if (alias === undefined || seen.has(alias)) continue
             seen.add(alias)
             options.push({ label: alias, type: 'variable', boost: 70, detail: tableNames.get(normIdent(table)) ?? table })
+          }
+          return options
+        }
+
+        // Columns belonging to the FROM/JOIN bindings of this statement. The
+        // statement scan intentionally includes bindings after the caret: in a
+        // normal SELECT list, FROM has not been reached yet in document order.
+        const boundColumnOptions = (query: ClauseContext): Completion[] => {
+          const groups: Array<{ ref: string; options: Completion[] }> = []
+          const counts = new Map<string, number>()
+          for (const { seg, qualified, alias, table } of tableBindings(query)) {
+            const tableKey = qualified === undefined || seg === undefined
+              ? normIdent(table)
+              : `${normIdent(seg)}.${normIdent(table)}`
+            const columns = columnsByTable.get(tableKey) ?? columnsByTable.get(normIdent(table)) ?? []
+            groups.push({ ref: alias ?? table, options: columns })
+            for (const option of columns) {
+              const key = option.label.toLowerCase()
+              counts.set(key, (counts.get(key) ?? 0) + 1)
+            }
+          }
+          const options: Completion[] = []
+          for (const group of groups) {
+            for (const option of group.options) {
+              if ((counts.get(option.label.toLowerCase()) ?? 0) === 1) {
+                options.push(option)
+                continue
+              }
+              const column = typeof option.apply === 'string' ? option.apply : option.label
+              options.push({
+                label: `${group.ref}.${option.label}`,
+                type: 'property',
+                boost: option.boost,
+                apply: `${group.ref}.${column}`,
+              })
+            }
           }
           return options
         }
@@ -981,10 +1115,7 @@ export class SqlEditor extends LitElement {
           const joinKey = normIdent(joinTable)
           const joinRef = joinAlias ?? joinTable
           const conditions = new Set<string>()
-          for (const match of statement.matchAll(TABLE_BINDINGS)) {
-            const [, seg, qualified, alias] = match
-            const table = qualified ?? seg
-            if (table === undefined) continue
+          for (const { alias, table } of tableBindings(queryContextAt(pos))) {
             const tableKey = normIdent(table)
             const ref = alias ?? table
             // Skip the joined binding itself, but keep self-joins under other aliases.
@@ -1025,14 +1156,21 @@ export class SqlEditor extends LitElement {
           }
           let cols = columnsByTable.get(baseKey)
           if (!cols) {
-            const target = findAliasTarget(context.state.doc.toString(), baseKey)
+            const query = queryContextAt(dotted.from)
+            const target = findAliasTarget(
+              statement,
+              baseKey,
+              this.dialect,
+              query.queryDepth,
+              query.queryStart,
+            )
             if (target) cols = columnsByTable.get(target) ?? columnsByTable.get(target.slice(target.lastIndexOf('.') + 1))
           }
           if (cols) return member(cols)
           const schemaTables = tablesBySchema.get(baseKey)
           if (schemaTables) {
             if (requote || !inTableClause(dotted.from)) return member(schemaTables)
-            const taken = takenAliases()
+            const taken = takenAliases(dotted.from)
             return member(schemaTables.map((option) => aliasedOption(option, taken)))
           }
           // Unique prefix: complete `use.` as `users.<col>`, replacing the whole token.
@@ -1066,17 +1204,47 @@ export class SqlEditor extends LitElement {
 
         const options: Completion[] = []
         if (!unprompted) {
-          const taken = inTableClause(from) ? takenAliases() : null
-          for (const [lower, option] of entries) {
-            if (!lower.startsWith(typed)) continue
-            // In FROM/JOIN position, bare column names are noise.
-            if (taken && option.type === 'property') continue
-            options.push(taken && option.type === 'type' ? aliasedOption(option, taken) : option)
-          }
-          // A table position binds new aliases; everywhere else offers the bound ones.
-          if (!taken) {
-            for (const option of aliasOptions()) {
-              if (option.label.toLowerCase().startsWith(typed)) options.push(option)
+          const taken = inTableClause(from) ? takenAliases(from) : null
+          const activeContext = statementContext(from)
+          const selectList = !taken && activeContext?.clause === 'select'
+          const query = activeContext ?? queryContextAt(from)
+          const aliases = selectList ? aliasOptions(query) : []
+          const boundColumns = selectList ? boundColumnOptions(query) : []
+          if (selectList && (aliases.length || boundColumns.length)) {
+            const seen = new Set<string>()
+            const add = (option: Completion, boost: number) => {
+              const lower = option.label.toLowerCase()
+              const member = lower.slice(lower.lastIndexOf('.') + 1)
+              if ((!lower.startsWith(typed) && !member.startsWith(typed)) || seen.has(lower)) return
+              seen.add(lower)
+              options.push({ ...option, boost })
+            }
+            for (const option of aliases) add(option, 99)
+            boundColumns.forEach((option, index) => add(option, 85 - index * 0.01))
+            for (const option of keywordOptions) {
+              if (SELECT_FUNCTIONS.has(option.label.toLowerCase())) add(option, 60)
+            }
+            // Keep the full explicit list available, but below the names and
+            // expressions that are useful at this SELECT-list cursor. Global
+            // bare columns are omitted: they either duplicate the scoped set
+            // or belong to a table that this query cannot reference.
+            for (const [, option] of entries) {
+              if (option.type === 'property') continue
+              const boost = option.type === 'keyword' ? 0 : option.type === 'type' ? -10 : -20
+              add(option, boost)
+            }
+          } else {
+            for (const [lower, option] of entries) {
+              if (!lower.startsWith(typed)) continue
+              // In FROM/JOIN position, bare column names are noise.
+              if (taken && option.type === 'property') continue
+              options.push(taken && option.type === 'type' ? aliasedOption(option, taken) : option)
+            }
+            // A table position binds new aliases; everywhere else offers the bound ones.
+            if (!taken) {
+              for (const option of aliasOptions(query)) {
+                if (option.label.toLowerCase().startsWith(typed)) options.push(option)
+              }
             }
           }
         }
@@ -1123,6 +1291,16 @@ export class SqlEditor extends LitElement {
       (context: CompletionContext) => {
         const line = context.state.doc.lineAt(context.pos)
         const before = line.text.slice(0, context.pos - line.from)
+        const block = queryToRun(context.state, this.dialect)
+        const statement = block?.sql ?? context.state.doc.toString()
+        const statementStart = block?.from ?? 0
+        const wordAtCursor = context.matchBefore(/[A-Za-z_][\w$]*/)
+        const selectList = clauseBefore(
+          statement,
+          (wordAtCursor?.from ?? context.pos) - statementStart,
+          this.dialect,
+        )?.clause === 'select'
+        const ranked = (option: Completion): Completion => selectList ? { ...option, boost: -1 } : option
         const tokens = [...before.matchAll(/[A-Za-z_][\w$]*/g)]
         // Longest phrase first: "is not n" must beat "not n" (NOT IN).
         for (const back of [3, 2, 1]) {
@@ -1134,18 +1312,18 @@ export class SqlEditor extends LitElement {
           const phrase = before.slice(token.index)
           if (!phrasePattern.test(phrase)) continue
           const prefix = phrase.toLowerCase().replace(/\s+/g, ' ')
-          const options = multiKeywords.filter(({ lower }) => lower.startsWith(prefix)).map(({ option }) => option)
+          const options = multiKeywords.filter(({ lower }) => lower.startsWith(prefix)).map(({ option }) => ranked(option))
           if (options.length) return { from: line.from + token.index, options, validFor: phrasePattern }
         }
         // Explicit completion still offers the multi-word set, except after a
         // dot/quote where member completion owns the spot.
         if (context.explicit) {
-          const word = context.matchBefore(/[A-Za-z_][\w$]*/)
+          const word = wordAtCursor
           const preceding = before[(word ? word.from : context.pos) - line.from - 1]
           if (preceding === undefined || !/["'`.[\]]/.test(preceding)) {
             return {
               from: word ? word.from : context.pos,
-              options: multiKeywords.map(({ option }) => option),
+              options: multiKeywords.map(({ option }) => ranked(option)),
               validFor: phrasePattern,
             }
           }

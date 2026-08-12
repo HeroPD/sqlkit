@@ -188,6 +188,85 @@ test('bound aliases complete first outside FROM/JOIN', async () => {
   expect(await completionsAt('SELECT * FROM postings pt JOIN p')).not.toContain('pt')
 })
 
+test('SELECT-list completion ranks aliases and bound columns before functions and keywords', async () => {
+  const doc = 'SELECT id,  FROM "public"."postings" p LIMIT 200'
+  const labels = await completionsAt(doc, doc.indexOf(',') + 2)
+  expect(labels).toContain('p')
+  expect(labels).toContain('id')
+  expect(labels).toContain('SUM')
+  expect(labels).toContain('SELECT')
+  expect(labels).toContain('ORDER BY')
+  expect(labels.indexOf('p')).toBeLessThan(labels.indexOf('id'))
+  expect(labels.indexOf('id')).toBeLessThan(labels.indexOf('SUM'))
+  expect(labels.indexOf('SUM')).toBeLessThan(labels.indexOf('SELECT'))
+  expect(labels.indexOf('SUM')).toBeLessThan(labels.indexOf('ORDER BY'))
+})
+
+test('SELECT-list completion ignores clause words in strings and quoted identifiers', async () => {
+  for (const doc of [
+    `SELECT 'FROM users u',  FROM postings p`,
+    'SELECT p."sort order",  FROM postings p',
+  ]) {
+    const labels = await completionsAt(doc, doc.indexOf(',') + 2)
+    expect(labels[0]).toBe('p')
+    expect(labels).toContain('item_count')
+    expect(labels).not.toContain('u')
+    expect(labels).not.toContain('user_name')
+  }
+})
+
+test('SELECT-list completion returns to the outer scope after a nested query', async () => {
+  const doc = 'SELECT (SELECT max(id) FROM users u),  FROM postings p'
+  const labels = await completionsAt(doc, doc.indexOf(',') + 2)
+  expect(labels[0]).toBe('p')
+  expect(labels).toContain('item_count')
+  expect(labels).not.toContain('u')
+  expect(labels).not.toContain('user_name')
+})
+
+test('SELECT-list completion does not leak bindings out of a CTE', async () => {
+  const doc = 'WITH recent AS (SELECT * FROM users u) SELECT id,  FROM postings p'
+  const labels = await completionsAt(doc, doc.indexOf(',') + 2)
+  expect(labels[0]).toBe('p')
+  expect(labels).toContain('item_count')
+  expect(labels).not.toContain('u')
+  expect(labels).not.toContain('user_name')
+})
+
+test('SELECT-list completion does not leak bindings across UNION branches', async () => {
+  const doc = 'SELECT id,  FROM postings p UNION SELECT id FROM users u'
+  const labels = await completionsAt(doc, doc.indexOf(',') + 2)
+  expect(labels[0]).toBe('p')
+  expect(labels).toContain('item_count')
+  expect(labels).not.toContain('u')
+  expect(labels).not.toContain('user_name')
+})
+
+test('ambiguous joined columns complete with their aliases', async () => {
+  const doc = 'SELECT  FROM postings p JOIN users u ON u.id = p.author'
+  const labels = await completionsAt(doc, 'SELECT '.length)
+  expect(labels.slice(0, 2)).toEqual(['p', 'u'])
+  expect(labels).toContain('p.id')
+  expect(labels).toContain('u.id')
+  expect(labels).not.toContain('id')
+  expect(labels).toContain('item_count')
+  expect(labels).toContain('user_name')
+
+  const typed = 'SELECT id FROM postings p JOIN users u ON u.id = p.author'
+  const idLabels = await completionsAt(typed, 'SELECT id'.length)
+  expect(idLabels).toContain('p.id')
+  expect(idLabels).toContain('u.id')
+})
+
+test('SELECT-list completion includes aliased old-style FROM bindings', async () => {
+  const doc = 'SELECT  FROM postings p, users u'
+  const labels = await completionsAt(doc, 'SELECT '.length)
+  expect(labels.slice(0, 2)).toEqual(['p', 'u'])
+  expect(labels).toContain('p.id')
+  expect(labels).toContain('u.id')
+  expect(labels).toContain('user_name')
+})
+
 test('FROM/JOIN suggestions omit bare column names', async () => {
   const labels = await completionsAt('SELECT * FROM us')
   expect(labels).toContain('users')
