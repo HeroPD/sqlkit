@@ -289,6 +289,32 @@ test('SELECT-list completion does not leak bindings across UNION branches', asyn
   expect(labels).not.toContain('user_name')
 })
 
+test('a parenthesized join group binds into the query around it', async () => {
+  const group = 'SELECT  FROM (postings p JOIN users u ON u.id = p.author)'
+  const labels = await completionsAt(group, 'SELECT '.length)
+  expect(labels.slice(0, 2)).toEqual(['p', 'u'])
+  expect(labels).toContain('p.id')
+  expect(labels).toContain('u.id')
+  expect(labels).toContain('item_count')
+
+  // the FK condition and alias members resolve inside the group too
+  const on = 'SELECT * FROM (postings p JOIN users u ON '
+  expect((await completionsAt(on, on.length))[0]).toBe('u.id = p.author')
+  expect(await completionsAt('SELECT * FROM (postings p JOIN users u ON u.')).toEqual(['id', 'user_name'])
+})
+
+test('a derived table keeps its bindings out of the query around it', async () => {
+  const outer = 'SELECT  FROM (SELECT id FROM users u) x'
+  const outerLabels = await completionsAt(outer, 'SELECT '.length)
+  expect(outerLabels).not.toContain('u')
+  expect(outerLabels).not.toContain('u.id')
+  // the subquery's own SELECT list still sees it
+  const inner = 'SELECT * FROM (SELECT  FROM users u) x'
+  const innerLabels = await completionsAt(inner, inner.indexOf('(SELECT ') + '(SELECT '.length)
+  expect(innerLabels[0]).toBe('u')
+  expect(innerLabels).toContain('user_name')
+})
+
 test('ambiguous joined columns complete with their aliases', async () => {
   const doc = 'SELECT  FROM postings p JOIN users u ON u.id = p.author'
   const labels = await completionsAt(doc, 'SELECT '.length)

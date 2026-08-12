@@ -423,25 +423,26 @@ function inFromList(structure: SqlStructure, index: number): boolean {
 
 const SELECT_FUNCTIONS = new Set(['count', 'sum', 'avg', 'min', 'max'])
 
+// A parenthesized join group (`FROM (a x JOIN b y ON …)`) binds into the query
+// around it, so the binding scans step over its parens. A paren opening a
+// subquery instead is left alone: its keyword is no table name.
+const GROUP_OPEN = `\\s*(?:\\(\\s*)*(?!(?:select|with|values)\\b)`
+
 // A FROM/JOIN/UPDATE/INTO clause (or FROM-list comma) binding a table to an alias.
 const ALIAS_BINDINGS = new RegExp(
-  `(?:\\b(?:from|join|update|into)\\b|(,))\\s*(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?\\s+(?:as\\s+)?(${IDENT_SEG})`,
+  `(?:\\b(?:from|join|update|into)\\b|(,))${GROUP_OPEN}(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?\\s+(?:as\\s+)?(${IDENT_SEG})`,
   'gi',
 )
 
 // Finds what table `alias` (unquoted, lowercased) is bound to in FROM/JOIN/UPDATE/INTO
 // clauses or old-style FROM lists. Returns `schema.table` or `table`, lowercased.
-function findAliasTarget(
-  structure: SqlStructure,
-  alias: string,
-  queryDepth: number,
-  queryStart: number,
-): string | null {
+function findAliasTarget(structure: SqlStructure, alias: string, queryStart: number): string | null {
   for (const match of structure.sql.matchAll(ALIAS_BINDINGS)) {
     const [, comma, first, second, aliasSeg] = match
     if (first === undefined || aliasSeg === undefined) continue
     if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
-    if (depthAt(structure, match.index ?? 0) !== queryDepth) continue
+    // Scope is the owning query, not the paren depth: a join group sits deeper
+    // than the query it binds into.
     if (clauseAt(structure, match.index ?? 0)?.queryStart !== queryStart) continue
     const candidate = normIdent(aliasSeg)
     if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
@@ -461,7 +462,7 @@ const JOIN_ON_TARGET = new RegExp(
 // Every FROM/JOIN table binding with its optional alias; the lookahead keeps a
 // following keyword (`FROM users JOIN …`) from being read as users's alias.
 const TABLE_BINDINGS = new RegExp(
-  `\\b(?:from|join)\\s+(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
+  `\\b(?:from|join)\\b${GROUP_OPEN}(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
   'gi',
 )
 
@@ -1055,7 +1056,8 @@ export class SqlEditor extends LitElement {
             const table = qualified ?? seg
             if (seg === undefined || table === undefined) continue
             if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
-            if (depthAt(structure, match.index ?? 0) !== query.queryDepth) continue
+            // The owning query decides scope, not the paren depth: a join group
+            // binds into the query around it from one level deeper.
             if (clauseAt(structure, match.index ?? 0)?.queryStart !== query.queryStart) continue
             bindings.push({ seg, qualified, alias, table })
           }
@@ -1066,7 +1068,6 @@ export class SqlEditor extends LitElement {
             const [, comma, seg, qualified, alias] = match
             if (comma === undefined || seg === undefined || alias === undefined) continue
             if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
-            if (depthAt(structure, match.index ?? 0) !== query.queryDepth) continue
             if (clauseAt(structure, match.index ?? 0)?.queryStart !== query.queryStart) continue
             if (!inFromList(structure, match.index ?? 0)) continue
             bindings.push({ seg, qualified, alias, table: qualified ?? seg })
@@ -1192,7 +1193,7 @@ export class SqlEditor extends LitElement {
           let cols = columnsByTable.get(baseKey)
           if (!cols) {
             const query = queryContextAt(dotted.from)
-            const target = findAliasTarget(structure, baseKey, query.queryDepth, query.queryStart)
+            const target = findAliasTarget(structure, baseKey, query.queryStart)
             if (target) cols = columnsByTable.get(target) ?? columnsByTable.get(target.slice(target.lastIndexOf('.') + 1))
           }
           if (cols) return member(cols)
