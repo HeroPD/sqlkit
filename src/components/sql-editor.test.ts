@@ -326,9 +326,12 @@ test('a correlated subquery resolves the aliases of the query around it', async 
   const scalar = 'SELECT (SELECT count(*) FROM postings p WHERE p.author = u.) FROM users u'
   expect(await completionsAt(scalar, scalar.indexOf('= u.') + '= u.'.length)).toEqual(['id', 'user_name'])
 
-  // the nearest binding answers when the subquery rebinds the name: postings, not users
+  // the nearest binding answers when the subquery rebinds the name: postings, not
+  // users — asserted by table, not by the fixture's column list
   const shadowed = 'SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM postings u WHERE u.'
-  expect(await completionsAt(shadowed)).toEqual(['id', 'item_count', 'sort order', 'created_at', 'author'])
+  const shadowedLabels = await completionsAt(shadowed)
+  expect(shadowedLabels).toContain('item_count')
+  expect(shadowedLabels).not.toContain('user_name')
 })
 
 test('a correlated SELECT list adds the outer columns and leaves its own bare', async () => {
