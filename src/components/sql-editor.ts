@@ -1094,7 +1094,8 @@ export class SqlEditor extends LitElement {
               }
               const column = typeof option.apply === 'string' ? option.apply : option.label
               options.push({
-                label: `${group.ref}.${option.label}`,
+                label: option.label,
+                displayLabel: `${group.ref}.${option.label}`,
                 type: 'property',
                 boost: option.boost,
                 apply: `${group.ref}.${column}`,
@@ -1213,11 +1214,16 @@ export class SqlEditor extends LitElement {
           if (selectList && (aliases.length || boundColumns.length)) {
             const seen = new Set<string>()
             const add = (option: Completion, boost: number) => {
-              const lower = option.label.toLowerCase()
+              const lower = (option.displayLabel ?? option.label).toLowerCase()
               const member = lower.slice(lower.lastIndexOf('.') + 1)
               if ((!lower.startsWith(typed) && !member.startsWith(typed)) || seen.has(lower)) return
               seen.add(lower)
-              options.push({ ...option, boost })
+              // CM matches the label alone, so a word reaching for the ref
+              // (`p` → `p.id`) only survives if the qualified form is the label.
+              const qualified = typed && !member.startsWith(typed) ? option.displayLabel : undefined
+              options.push(qualified === undefined
+                ? { ...option, boost }
+                : { ...option, label: qualified, displayLabel: undefined, boost })
             }
             for (const option of aliases) add(option, 99)
             boundColumns.forEach((option, index) => add(option, 85 - index * 0.01))
@@ -1260,9 +1266,18 @@ export class SqlEditor extends LitElement {
         return {
           from,
           options,
-          // An unprompted result re-queries per keystroke, so typing past the
-          // popup brings back the full keyword/column list.
-          validFor: unprompted ? undefined : /^[A-Za-z_][A-Za-z0-9_$]*$/,
+          // A qualified label matches on its bare member, so shift the
+          // highlight past the `ref.` that only displayLabel carries.
+          getMatch: (option, matched = []) => {
+            const offset = option.displayLabel?.endsWith(option.label)
+              ? option.displayLabel.length - option.label.length
+              : 0
+            return matched.map((bound) => bound + offset)
+          },
+          // Without a word, both the unprompted and the explicit list are built
+          // for an empty prefix — one keystroke re-queries, which brings back
+          // the full keyword/column list and lets a typed ref reach `ref.col`.
+          validFor: word ? /^[A-Za-z_][A-Za-z0-9_$]*$/ : undefined,
         }
       },
     )

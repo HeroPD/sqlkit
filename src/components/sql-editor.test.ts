@@ -53,6 +53,14 @@ const optionLabels = (el: HTMLElement) =>
     (label) => label.textContent,
   )
 
+// The label of each option with its matched characters wrapped in <>.
+const optionMatches = (el: HTMLElement) =>
+  [...el.shadowRoot!.querySelectorAll('.cm-tooltip-autocomplete li .cm-completionLabel')].map((label) =>
+    [...label.childNodes]
+      .map((node) => (node.nodeName === 'SPAN' ? `<${node.textContent}>` : node.textContent))
+      .join(''),
+  )
+
 // Opens completion at `cursor` (default: end of `doc`) and returns the option labels.
 async function completionsAt(doc: string, cursor?: number) {
   const { el } = await mountCompletion(doc, cursor)
@@ -252,10 +260,40 @@ test('ambiguous joined columns complete with their aliases', async () => {
   expect(labels).toContain('item_count')
   expect(labels).toContain('user_name')
 
+  const oneChar = 'SELECT i FROM postings p JOIN users u ON u.id = p.author'
+  const oneCharLabels = await completionsAt(oneChar, 'SELECT i'.length)
+  expect(oneCharLabels).toContain('p.id')
+  expect(oneCharLabels).toContain('u.id')
+  expect(oneCharLabels).not.toContain('id')
+
   const typed = 'SELECT id FROM postings p JOIN users u ON u.id = p.author'
   const idLabels = await completionsAt(typed, 'SELECT id'.length)
   expect(idLabels).toContain('p.id')
   expect(idLabels).toContain('u.id')
+
+  // a word reaching for the alias keeps its qualified columns
+  const alias = 'SELECT p FROM postings p JOIN users u ON u.id = p.author'
+  const aliasLabels = await completionsAt(alias, 'SELECT p'.length)
+  expect(aliasLabels).toContain('p.id')
+  expect(aliasLabels).not.toContain('u.id')
+})
+
+test('the aliases stay reachable in a popup opened before the word', async () => {
+  const doc = 'SELECT  FROM postings p JOIN users u ON u.id = p.author'
+  const at = 'SELECT '.length
+  const { el, view } = await mountCompletion(doc, at)
+  view.dispatch({ changes: { from: at, insert: 'p' }, selection: { anchor: at + 1 }, userEvent: 'input.type' })
+  await completionOpen(view)
+  expect(optionLabels(el)).toContain('p.id')
+  el.remove()
+})
+
+test('a qualified option highlights the typed part of its column', async () => {
+  const doc = 'SELECT i FROM postings p JOIN users u ON u.id = p.author'
+  const { el } = await mountCompletion(doc, 'SELECT i'.length)
+  // the match sits on the column, not on the ref that only the display carries
+  expect(optionMatches(el).slice(0, 3)).toEqual(['p.<i>d', '<i>tem_count', 'u.<i>d'])
+  el.remove()
 })
 
 test('SELECT-list completion includes aliased old-style FROM bindings', async () => {
