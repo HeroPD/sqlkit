@@ -340,19 +340,26 @@ const MASK_ENGINE: Record<SqlDialectName, Engine> = {
   sqlite: 'sqlite',
 }
 
-type ClauseContext = { clause: string; queryDepth: number; queryStart: number }
+const STRUCTURE_TOKENS = new RegExp(`[()]|${CLAUSE_KEYWORDS.source}`, 'gi')
 
-// Clause at the caret and the parenthesis depth of the SELECT/UPDATE/etc. that
-// owns it. Child expression parens inherit their parent's clause; a nested
-// SELECT replaces it until its parens close. Masking keeps quoted identifiers,
-// strings and comments from impersonating structural keywords.
-function clauseBefore(sql: string, index: number, dialect: SqlDialectName): ClauseContext | undefined {
-  const masked = maskSql(sql, MASK_ENGINE[dialect]).slice(0, Math.max(0, index))
+type ClauseContext = { clause: string; queryDepth: number; queryStart: number }
+// What a prefix scan reaches once the token ending at `end` is consumed.
+type ClauseState = { end: number; depth: number; context: ClauseContext | undefined }
+type SqlStructure = { sql: string; masked: string; states: ClauseState[] }
+
+// Clause and parenthesis depth at each structural token, so a caret or a match
+// index resolves by lookup instead of a rescan. Child expression parens inherit
+// their parent's clause; a nested SELECT replaces it until its parens close.
+// Masking keeps quoted identifiers, strings and comments from impersonating
+// structural keywords.
+function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
+  const masked = maskSql(sql, MASK_ENGINE[dialect])
+  const states: ClauseState[] = []
   const contexts = new Map<number, ClauseContext>()
-  const tokens = new RegExp(`[()]|${CLAUSE_KEYWORDS.source}`, 'gi')
   let depth = 0
-  for (const match of masked.matchAll(tokens)) {
+  for (const match of masked.matchAll(STRUCTURE_TOKENS)) {
     const token = match[0].toLowerCase()
+    const at = match.index ?? 0
     if (token === '(') {
       const inherited = contexts.get(depth)
       depth += 1
@@ -363,25 +370,47 @@ function clauseBefore(sql: string, index: number, dialect: SqlDialectName): Clau
     } else {
       const previous = contexts.get(depth)
       contexts.set(depth, token === 'select' || !previous
-        ? { clause: token, queryDepth: depth, queryStart: match.index ?? 0 }
+        ? { clause: token, queryDepth: depth, queryStart: at }
         : { ...previous, clause: token })
     }
+    states.push({ end: at + token.length, depth, context: contexts.get(depth) })
   }
-  return contexts.get(depth)
+  return { sql, masked, states }
 }
 
-function parenDepthInMasked(masked: string, index: number): number {
-  let depth = 0
-  for (const char of masked.slice(0, Math.max(0, index))) {
-    if (char === '(') depth += 1
-    else if (char === ')') depth = Math.max(0, depth - 1)
-  }
-  return depth
+// Both completion sources scan the same statement per keystroke, and each
+// binding match resolves against it, so the last scan is reused.
+let lastScan: { key: string; structure: SqlStructure } | undefined
+function sqlStructure(sql: string, dialect: SqlDialectName): SqlStructure {
+  const key = `${dialect}:${sql}`
+  if (lastScan?.key !== key) lastScan = { key, structure: scanSql(sql, dialect) }
+  return lastScan.structure
 }
+
+// The last token ending at or before `index`; a token straddling it is unread,
+// as it would be by a scan of the prefix.
+function stateAt(structure: SqlStructure, index: number): ClauseState | undefined {
+  let low = 0
+  let high = structure.states.length - 1
+  let found: ClauseState | undefined
+  while (low <= high) {
+    const mid = (low + high) >> 1
+    const state = structure.states[mid]
+    if (state === undefined || state.end > index) high = mid - 1
+    else {
+      found = state
+      low = mid + 1
+    }
+  }
+  return found
+}
+
+const clauseAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.context
+const depthAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.depth ?? 0
 
 // Whether the nearest clause keyword before `index` is FROM — comma aliases only bind there.
-function inFromList(sql: string, index: number, dialect: SqlDialectName): boolean {
-  return clauseBefore(sql, index, dialect)?.clause === 'from'
+function inFromList(structure: SqlStructure, index: number): boolean {
+  return clauseAt(structure, index)?.clause === 'from'
 }
 
 const SELECT_FUNCTIONS = new Set(['count', 'sum', 'avg', 'min', 'max'])
@@ -395,23 +424,21 @@ const ALIAS_BINDINGS = new RegExp(
 // Finds what table `alias` (unquoted, lowercased) is bound to in FROM/JOIN/UPDATE/INTO
 // clauses or old-style FROM lists. Returns `schema.table` or `table`, lowercased.
 function findAliasTarget(
-  sql: string,
+  structure: SqlStructure,
   alias: string,
-  dialect: SqlDialectName,
   queryDepth: number,
   queryStart: number,
 ): string | null {
-  const masked = maskSql(sql, MASK_ENGINE[dialect])
-  for (const match of sql.matchAll(ALIAS_BINDINGS)) {
+  for (const match of structure.sql.matchAll(ALIAS_BINDINGS)) {
     const [, comma, first, second, aliasSeg] = match
     if (first === undefined || aliasSeg === undefined) continue
-    if (!/\S/.test(masked[match.index ?? 0] ?? '')) continue
-    if (parenDepthInMasked(masked, match.index ?? 0) !== queryDepth) continue
-    if (clauseBefore(sql, match.index ?? 0, dialect)?.queryStart !== queryStart) continue
+    if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
+    if (depthAt(structure, match.index ?? 0) !== queryDepth) continue
+    if (clauseAt(structure, match.index ?? 0)?.queryStart !== queryStart) continue
     const candidate = normIdent(aliasSeg)
     if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
     // A select-list comma must not bind "select a, b c" as alias c → table b.
-    if (comma !== undefined && !inFromList(sql, match.index ?? 0, dialect)) continue
+    if (comma !== undefined && !inFromList(structure, match.index ?? 0)) continue
     return second !== undefined ? `${normIdent(first)}.${normIdent(second)}` : normIdent(first)
   }
   return null
@@ -431,18 +458,17 @@ const TABLE_BINDINGS = new RegExp(
 )
 
 // All alias names already bound in `sql`, so a suggested alias picks a fresh one.
-function boundAliases(sql: string, dialect: SqlDialectName, queryDepth: number, queryStart: number): Set<string> {
+function boundAliases(structure: SqlStructure, queryDepth: number, queryStart: number): Set<string> {
   const taken = new Set<string>()
-  const masked = maskSql(sql, MASK_ENGINE[dialect])
-  for (const match of sql.matchAll(ALIAS_BINDINGS)) {
+  for (const match of structure.sql.matchAll(ALIAS_BINDINGS)) {
     const [, comma, first, , aliasSeg] = match
     if (first === undefined || aliasSeg === undefined) continue
-    if (!/\S/.test(masked[match.index ?? 0] ?? '')) continue
-    if (parenDepthInMasked(masked, match.index ?? 0) !== queryDepth) continue
-    if (clauseBefore(sql, match.index ?? 0, dialect)?.queryStart !== queryStart) continue
+    if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
+    if (depthAt(structure, match.index ?? 0) !== queryDepth) continue
+    if (clauseAt(structure, match.index ?? 0)?.queryStart !== queryStart) continue
     const candidate = normIdent(aliasSeg)
     if (ALIAS_STOPWORDS.has(candidate)) continue
-    if (comma !== undefined && !inFromList(sql, match.index ?? 0, dialect)) continue
+    if (comma !== undefined && !inFromList(structure, match.index ?? 0)) continue
     taken.add(candidate)
   }
   return taken
@@ -1001,11 +1027,11 @@ export class SqlEditor extends LitElement {
         const block = queryToRun(context.state, this.dialect)
         const statement = block?.sql ?? context.state.doc.toString()
         const statementStart = block?.from ?? 0
-        const maskedStatement = maskSql(statement, MASK_ENGINE[this.dialect])
-        const statementContext = (pos: number) => clauseBefore(statement, pos - statementStart, this.dialect)
+        const structure = sqlStructure(statement, this.dialect)
+        const statementContext = (pos: number) => clauseAt(structure, pos - statementStart)
         const queryContextAt = (pos: number): ClauseContext => statementContext(pos) ?? {
           clause: '',
-          queryDepth: parenDepthInMasked(maskedStatement, pos - statementStart),
+          queryDepth: depthAt(structure, pos - statementStart),
           queryStart: 0,
         }
 
@@ -1019,9 +1045,9 @@ export class SqlEditor extends LitElement {
             const [, seg, qualified, alias] = match
             const table = qualified ?? seg
             if (seg === undefined || table === undefined) continue
-            if (!/\S/.test(maskedStatement[match.index ?? 0] ?? '')) continue
-            if (parenDepthInMasked(maskedStatement, match.index ?? 0) !== query.queryDepth) continue
-            if (clauseBefore(statement, match.index ?? 0, this.dialect)?.queryStart !== query.queryStart) continue
+            if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
+            if (depthAt(structure, match.index ?? 0) !== query.queryDepth) continue
+            if (clauseAt(structure, match.index ?? 0)?.queryStart !== query.queryStart) continue
             bindings.push({ seg, qualified, alias, table })
           }
           // TABLE_BINDINGS covers explicit JOINs; add aliased old-style FROM
@@ -1030,10 +1056,10 @@ export class SqlEditor extends LitElement {
           for (const match of statement.matchAll(ALIAS_BINDINGS)) {
             const [, comma, seg, qualified, alias] = match
             if (comma === undefined || seg === undefined || alias === undefined) continue
-            if (!/\S/.test(maskedStatement[match.index ?? 0] ?? '')) continue
-            if (parenDepthInMasked(maskedStatement, match.index ?? 0) !== query.queryDepth) continue
-            if (clauseBefore(statement, match.index ?? 0, this.dialect)?.queryStart !== query.queryStart) continue
-            if (!inFromList(statement, match.index ?? 0, this.dialect)) continue
+            if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
+            if (depthAt(structure, match.index ?? 0) !== query.queryDepth) continue
+            if (clauseAt(structure, match.index ?? 0)?.queryStart !== query.queryStart) continue
+            if (!inFromList(structure, match.index ?? 0)) continue
             bindings.push({ seg, qualified, alias, table: qualified ?? seg })
           }
           bindingCache.set(cacheKey, bindings)
@@ -1045,11 +1071,11 @@ export class SqlEditor extends LitElement {
         const inTableClause = (pos: number) => {
           const before = context.state.sliceDoc(Math.max(0, pos - 200), pos)
           if (/\b(?:from|join)\s+$/i.test(before)) return true
-          return /,\s*$/.test(before) && inFromList(statement, pos - statementStart, this.dialect)
+          return /,\s*$/.test(before) && inFromList(structure, pos - statementStart)
         }
         const takenAliases = (pos: number) => {
           const query = queryContextAt(pos)
-          const taken = boundAliases(statement, this.dialect, query.queryDepth, query.queryStart)
+          const taken = boundAliases(structure, query.queryDepth, query.queryStart)
           for (const name of tableNames.keys()) taken.add(name)
           return taken
         }
@@ -1158,13 +1184,7 @@ export class SqlEditor extends LitElement {
           let cols = columnsByTable.get(baseKey)
           if (!cols) {
             const query = queryContextAt(dotted.from)
-            const target = findAliasTarget(
-              statement,
-              baseKey,
-              this.dialect,
-              query.queryDepth,
-              query.queryStart,
-            )
+            const target = findAliasTarget(structure, baseKey, query.queryDepth, query.queryStart)
             if (target) cols = columnsByTable.get(target) ?? columnsByTable.get(target.slice(target.lastIndexOf('.') + 1))
           }
           if (cols) return member(cols)
@@ -1312,10 +1332,9 @@ export class SqlEditor extends LitElement {
         const statement = block?.sql ?? context.state.doc.toString()
         const statementStart = block?.from ?? 0
         const wordAtCursor = context.matchBefore(/[A-Za-z_][\w$]*/)
-        const selectList = clauseBefore(
-          statement,
+        const selectList = clauseAt(
+          sqlStructure(statement, this.dialect),
           (wordAtCursor?.from ?? context.pos) - statementStart,
-          this.dialect,
         )?.clause === 'select'
         const ranked = (option: Completion): Completion => selectList ? { ...option, boost: -1 } : option
         const tokens = [...before.matchAll(/[A-Za-z_][\w$]*/g)]
