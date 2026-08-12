@@ -342,7 +342,9 @@ const MASK_ENGINE: Record<SqlDialectName, Engine> = {
 
 const STRUCTURE_TOKENS = new RegExp(`[()]|${CLAUSE_KEYWORDS.source}`, 'gi')
 
-type ClauseContext = { clause: string; queryDepth: number; queryStart: number }
+// `parent` is the query this one may reference outward — set for a correlated
+// subquery, absent for a derived table, which cannot see the query around it.
+type ClauseContext = { clause: string; queryDepth: number; queryStart: number; parent?: ClauseContext }
 // What a prefix scan reaches once the token ending at `end` is consumed.
 type ClauseState = {
   end: number
@@ -361,6 +363,11 @@ function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
   const masked = maskSql(sql, MASK_ENGINE[dialect])
   const states: ClauseState[] = []
   const contexts = new Map<number, ClauseContext>()
+  // The query a paren's own SELECT may reference outward, per depth. A paren
+  // opened in FROM/JOIN holds a derived table and gets none: it cannot see the
+  // query around it. Kept for the paren's life, so both branches of a
+  // `IN (SELECT … UNION SELECT …)` reach the same outer query.
+  const enclosing: Array<ClauseContext | undefined> = []
   let depth = 0
   for (const match of masked.matchAll(STRUCTURE_TOKENS)) {
     const token = match[0].toLowerCase()
@@ -369,13 +376,15 @@ function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
       const inherited = contexts.get(depth)
       depth += 1
       if (inherited) contexts.set(depth, inherited)
+      enclosing[depth] = inherited?.clause === 'from' || inherited?.clause === 'join' ? undefined : inherited
     } else if (token === ')') {
       contexts.delete(depth)
+      enclosing[depth] = undefined
       depth = Math.max(0, depth - 1)
     } else {
       const previous = contexts.get(depth)
       contexts.set(depth, token === 'select' || !previous
-        ? { clause: token, queryDepth: depth, queryStart: at }
+        ? { clause: token, queryDepth: depth, queryStart: at, parent: enclosing[depth] }
         : { ...previous, clause: token })
     }
     // An inherited context repeats per depth; consumers key it, so leave it.
@@ -414,6 +423,14 @@ function stateAt(structure: SqlStructure, index: number): ClauseState | undefine
 
 const clauseAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.context
 const depthAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.depth ?? 0
+
+// `query` and the queries it may reference outward, nearest first: a name bound
+// closer to the caret shadows the same name further out.
+function scopeChain(query: ClauseContext): ClauseContext[] {
+  const chain: ClauseContext[] = []
+  for (let scope: ClauseContext | undefined = query; scope; scope = scope.parent) chain.push(scope)
+  return chain
+}
 const queryScopesAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.queryScopes ?? []
 
 // Whether the nearest clause keyword before `index` is FROM — comma aliases only bind there.
@@ -436,19 +453,28 @@ const ALIAS_BINDINGS = new RegExp(
 
 // Finds what table `alias` (unquoted, lowercased) is bound to in FROM/JOIN/UPDATE/INTO
 // clauses or old-style FROM lists. Returns `schema.table` or `table`, lowercased.
-function findAliasTarget(structure: SqlStructure, alias: string, queryStart: number): string | null {
-  for (const match of structure.sql.matchAll(ALIAS_BINDINGS)) {
-    const [, comma, first, second, aliasSeg] = match
-    if (first === undefined || aliasSeg === undefined) continue
-    if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
-    // Scope is the owning query, not the paren depth: a join group sits deeper
-    // than the query it binds into.
-    if (clauseAt(structure, match.index ?? 0)?.queryStart !== queryStart) continue
-    const candidate = normIdent(aliasSeg)
-    if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
-    // A select-list comma must not bind "select a, b c" as alias c → table b.
-    if (comma !== undefined && !inFromList(structure, match.index ?? 0)) continue
-    return second !== undefined ? `${normIdent(first)}.${normIdent(second)}` : normIdent(first)
+function findAliasTarget(structure: SqlStructure, alias: string, query: ClauseContext): string | null {
+  const inScope = (queryStart: number): string | null => {
+    for (const match of structure.sql.matchAll(ALIAS_BINDINGS)) {
+      const [, comma, first, second, aliasSeg] = match
+      if (first === undefined || aliasSeg === undefined) continue
+      if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
+      // Scope is the owning query, not the paren depth: a join group sits deeper
+      // than the query it binds into.
+      if (clauseAt(structure, match.index ?? 0)?.queryStart !== queryStart) continue
+      const candidate = normIdent(aliasSeg)
+      if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
+      // A select-list comma must not bind "select a, b c" as alias c → table b.
+      if (comma !== undefined && !inFromList(structure, match.index ?? 0)) continue
+      return second !== undefined ? `${normIdent(first)}.${normIdent(second)}` : normIdent(first)
+    }
+    return null
+  }
+  // Each scope is exhausted before the next, so the nearest binding of the name
+  // answers even when a correlated subquery rebinds it.
+  for (const scope of scopeChain(query)) {
+    const target = inScope(scope.queryStart)
+    if (target !== null) return target
   }
   return null
 }
@@ -1089,16 +1115,35 @@ export class SqlEditor extends LitElement {
           return taken
         }
 
+        // The caret's own bindings, then those of the queries it may reference
+        // outward. A ref the nearer scope already owns hides the outer one, so a
+        // rebound alias never suggests the wrong table's columns.
+        const visibleBindings = (query: ClauseContext) => {
+          const visible: Array<{ seg: string; qualified?: string; alias?: string; table: string; outer: boolean }> = []
+          const owned = new Set<string>()
+          scopeChain(query).forEach((scope, index) => {
+            for (const binding of tableBindings(scope)) {
+              const ref = normIdent(binding.alias ?? binding.table)
+              if (index > 0 && owned.has(ref)) continue
+              owned.add(ref)
+              visible.push({ ...binding, outer: index > 0 })
+            }
+          })
+          return visible
+        }
+
         // Aliases bound in the statement complete like names and rank above
         // tables and columns: they are what a qualified reference here starts
         // with. The dim detail names the table each alias stands for.
         const aliasOptions = (query: ClauseContext): Completion[] => {
           const options: Completion[] = []
           const seen = new Set<string>()
-          for (const { alias, table } of tableBindings(query)) {
+          for (const { alias, table } of visibleBindings(query)) {
             if (alias === undefined || seen.has(alias)) continue
             seen.add(alias)
-            options.push({ label: alias, type: 'variable', boost: 70, detail: tableNames.get(normIdent(table)) ?? table })
+            // Decay keeps the caret's own aliases above the outer query's.
+            const boost = 70 - options.length * 0.01
+            options.push({ label: alias, type: 'variable', boost, detail: tableNames.get(normIdent(table)) ?? table })
           }
           return options
         }
@@ -1107,14 +1152,17 @@ export class SqlEditor extends LitElement {
         // statement scan intentionally includes bindings after the caret: in a
         // normal SELECT list, FROM has not been reached yet in document order.
         const boundColumnOptions = (query: ClauseContext): Completion[] => {
-          const groups: Array<{ ref: string; options: Completion[] }> = []
+          const groups: Array<{ ref: string; outer: boolean; options: Completion[] }> = []
           const counts = new Map<string, number>()
-          for (const { seg, qualified, alias, table } of tableBindings(query)) {
+          for (const { seg, qualified, alias, table, outer } of visibleBindings(query)) {
             const tableKey = qualified === undefined || seg === undefined
               ? normIdent(table)
               : `${normIdent(seg)}.${normIdent(table)}`
             const columns = columnsByTable.get(tableKey) ?? columnsByTable.get(normIdent(table)) ?? []
-            groups.push({ ref: alias ?? table, options: columns })
+            groups.push({ ref: alias ?? table, outer, options: columns })
+            // Only the caret's own scope decides ambiguity: an unqualified name
+            // resolves there first, and an outer column carries its ref anyway.
+            if (outer) continue
             for (const option of columns) {
               const key = option.label.toLowerCase()
               counts.set(key, (counts.get(key) ?? 0) + 1)
@@ -1123,7 +1171,7 @@ export class SqlEditor extends LitElement {
           const options: Completion[] = []
           for (const group of groups) {
             for (const option of group.options) {
-              if ((counts.get(option.label.toLowerCase()) ?? 0) === 1) {
+              if (!group.outer && (counts.get(option.label.toLowerCase()) ?? 0) === 1) {
                 options.push(option)
                 continue
               }
@@ -1193,7 +1241,7 @@ export class SqlEditor extends LitElement {
           let cols = columnsByTable.get(baseKey)
           if (!cols) {
             const query = queryContextAt(dotted.from)
-            const target = findAliasTarget(structure, baseKey, query.queryStart)
+            const target = findAliasTarget(structure, baseKey, query)
             if (target) cols = columnsByTable.get(target) ?? columnsByTable.get(target.slice(target.lastIndexOf('.') + 1))
           }
           if (cols) return member(cols)
@@ -1256,7 +1304,7 @@ export class SqlEditor extends LitElement {
                 ? { ...option, boost }
                 : { ...option, label: qualified, displayLabel: undefined, boost })
             }
-            for (const option of aliases) add(option, 99)
+            aliases.forEach((option, index) => add(option, 99 - index * 0.01))
             boundColumns.forEach((option, index) => add(option, 85 - index * 0.01))
             for (const option of keywordOptions) {
               if (SELECT_FUNCTIONS.has(option.label.toLowerCase())) add(option, 60)

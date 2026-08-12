@@ -315,6 +315,49 @@ test('a derived table keeps its bindings out of the query around it', async () =
   expect(innerLabels).toContain('user_name')
 })
 
+test('a correlated subquery resolves the aliases of the query around it', async () => {
+  const exists = 'SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM postings p WHERE p.author = u.'
+  expect(await completionsAt(exists)).toEqual(['id', 'user_name'])
+
+  const inList = 'SELECT * FROM users u WHERE u.id IN (SELECT p.author FROM postings p WHERE p.item_count > u.'
+  expect(await completionsAt(inList)).toEqual(['id', 'user_name'])
+
+  // a scalar subquery whose outer FROM comes after the caret
+  const scalar = 'SELECT (SELECT count(*) FROM postings p WHERE p.author = u.) FROM users u'
+  expect(await completionsAt(scalar, scalar.indexOf('= u.') + '= u.'.length)).toEqual(['id', 'user_name'])
+
+  // the nearest binding answers when the subquery rebinds the name: postings, not users
+  const shadowed = 'SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM postings u WHERE u.'
+  expect(await completionsAt(shadowed)).toEqual(['id', 'item_count', 'sort order', 'created_at', 'author'])
+})
+
+test('a correlated SELECT list adds the outer columns and leaves its own bare', async () => {
+  const doc = 'SELECT * FROM users u WHERE EXISTS (SELECT  FROM postings p)'
+  const labels = await completionsAt(doc, doc.indexOf('SELECT  FROM') + 'SELECT '.length)
+  expect(labels.slice(0, 2)).toEqual(['p', 'u'])
+  // unambiguous in the subquery's own scope, where an unqualified name resolves first
+  expect(labels).toContain('id')
+  expect(labels).not.toContain('p.id')
+  // the outer query's columns carry their alias and rank below
+  expect(labels).toContain('u.id')
+  expect(labels).toContain('u.user_name')
+  expect(labels.indexOf('id')).toBeLessThan(labels.indexOf('u.id'))
+
+  const word = 'SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM postings p WHERE u'
+  expect(await completionsAt(word)).toContain('u')
+})
+
+test('a derived table and an ON clause keep the outer query out', async () => {
+  // without LATERAL a derived table cannot reference the query around it
+  const derived = 'SELECT * FROM users u JOIN (SELECT  FROM postings p) d ON d.id = u.id'
+  const inner = await completionsAt(derived, derived.indexOf('(SELECT ') + '(SELECT '.length)
+  expect(inner).not.toContain('u')
+  expect(inner).not.toContain('u.id')
+  // FK conditions stay on the joins of the query being written
+  const on = 'SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM postings p JOIN users u2 ON '
+  expect((await completionsAt(on))[0]).toBe('u2.id = p.author')
+})
+
 test('ambiguous joined columns complete with their aliases', async () => {
   const doc = 'SELECT  FROM postings p JOIN users u ON u.id = p.author'
   const labels = await completionsAt(doc, 'SELECT '.length)
