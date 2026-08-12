@@ -81,8 +81,8 @@ async function completionsWithCountColumn(doc: string, cursor?: number) {
 }
 
 // Accepts the option with `label` and returns the resulting document.
-async function acceptAt(doc: string, label: string) {
-  const { el, view } = await mountCompletion(doc)
+async function acceptAt(doc: string, label: string, cursor = doc.length) {
+  const { el, view } = await mountCompletion(doc, cursor)
   const selected = () => el.shadowRoot!.querySelector('li[aria-selected] .cm-completionLabel')?.textContent
   // the tooltip's selection marker updates asynchronously, so settle after each move
   for (let i = 0; i < 40 && selected() !== label; i++) {
@@ -177,6 +177,19 @@ test('a table completed after FROM or JOIN inserts a fresh alias', async () => {
   expect(await acceptAt('SELECT * FROM us', 'users')).toBe('SELECT * FROM users u')
   // u is taken by the first join, so the second falls back to a longer prefix
   expect(await acceptAt('SELECT * FROM users u JOIN us', 'users')).toBe('SELECT * FROM users u JOIN users us')
+})
+
+test('a table completed in a subquery does not shadow an outer alias', async () => {
+  expect(await acceptAt(
+    'SELECT * FROM users u WHERE u.id IN (SELECT author FROM us',
+    'users',
+  )).toBe('SELECT * FROM users u WHERE u.id IN (SELECT author FROM users us')
+
+  const correlated = 'SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM us WHERE postings.author = u.id)'
+  const cursor = correlated.indexOf('us WHERE') + 'us'.length
+  expect(await acceptAt(correlated, 'users', cursor)).toBe(
+    'SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM users us WHERE postings.author = u.id)',
+  )
 })
 
 test('FROM-list commas and schema-qualified tables alias too', async () => {

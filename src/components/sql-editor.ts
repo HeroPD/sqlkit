@@ -344,7 +344,12 @@ const STRUCTURE_TOKENS = new RegExp(`[()]|${CLAUSE_KEYWORDS.source}`, 'gi')
 
 type ClauseContext = { clause: string; queryDepth: number; queryStart: number }
 // What a prefix scan reaches once the token ending at `end` is consumed.
-type ClauseState = { end: number; depth: number; context: ClauseContext | undefined }
+type ClauseState = {
+  end: number
+  depth: number
+  context: ClauseContext | undefined
+  queryScopes: ClauseContext[]
+}
 type SqlStructure = { sql: string; masked: string; states: ClauseState[] }
 
 // Clause and parenthesis depth at each structural token, so a caret or a match
@@ -373,7 +378,9 @@ function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
         ? { clause: token, queryDepth: depth, queryStart: at }
         : { ...previous, clause: token })
     }
-    states.push({ end: at + token.length, depth, context: contexts.get(depth) })
+    // An inherited context repeats per depth; consumers key it, so leave it.
+    const queryScopes = [...contexts.values()]
+    states.push({ end: at + token.length, depth, context: contexts.get(depth), queryScopes })
   }
   return { sql, masked, states }
 }
@@ -407,6 +414,7 @@ function stateAt(structure: SqlStructure, index: number): ClauseState | undefine
 
 const clauseAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.context
 const depthAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.depth ?? 0
+const queryScopesAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.queryScopes ?? []
 
 // Whether the nearest clause keyword before `index` is FROM — comma aliases only bind there.
 function inFromList(structure: SqlStructure, index: number): boolean {
@@ -458,14 +466,15 @@ const TABLE_BINDINGS = new RegExp(
 )
 
 // All alias names already bound in `sql`, so a suggested alias picks a fresh one.
-function boundAliases(structure: SqlStructure, queryDepth: number, queryStart: number): Set<string> {
+function boundAliases(structure: SqlStructure, queryScopes: ClauseContext[]): Set<string> {
   const taken = new Set<string>()
+  const visible = new Set(queryScopes.map((query) => `${query.queryDepth}:${query.queryStart}`))
   for (const match of structure.sql.matchAll(ALIAS_BINDINGS)) {
     const [, comma, first, , aliasSeg] = match
     if (first === undefined || aliasSeg === undefined) continue
     if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
-    if (depthAt(structure, match.index ?? 0) !== queryDepth) continue
-    if (clauseAt(structure, match.index ?? 0)?.queryStart !== queryStart) continue
+    const query = clauseAt(structure, match.index ?? 0)
+    if (!query || !visible.has(`${query.queryDepth}:${query.queryStart}`)) continue
     const candidate = normIdent(aliasSeg)
     if (ALIAS_STOPWORDS.has(candidate)) continue
     if (comma !== undefined && !inFromList(structure, match.index ?? 0)) continue
@@ -1074,8 +1083,7 @@ export class SqlEditor extends LitElement {
           return /,\s*$/.test(before) && inFromList(structure, pos - statementStart)
         }
         const takenAliases = (pos: number) => {
-          const query = queryContextAt(pos)
-          const taken = boundAliases(structure, query.queryDepth, query.queryStart)
+          const taken = boundAliases(structure, queryScopesAt(structure, pos - statementStart))
           for (const name of tableNames.keys()) taken.add(name)
           return taken
         }
