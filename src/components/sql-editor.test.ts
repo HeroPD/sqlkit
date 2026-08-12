@@ -413,6 +413,37 @@ test('SELECT-list completion includes aliased old-style FROM bindings', async ()
   expect(labels).toContain('user_name')
 })
 
+test('SELECT-list completion includes unaliased old-style FROM bindings', async () => {
+  const doc = 'SELECT  FROM postings, users'
+  const labels = await completionsAt(doc, 'SELECT '.length)
+  expect(labels).toContain('postings.id')
+  expect(labels).toContain('users.id')
+  expect(labels).toContain('item_count')
+  expect(labels).toContain('user_name')
+
+  const qualified = 'SELECT  FROM postings, public.users'
+  expect(await completionsAt(qualified, 'SELECT '.length)).toContain('user_name')
+})
+
+test('a parenthesized FROM list binds its comma items, a call argument does not', async () => {
+  const group = 'SELECT  FROM (postings p, users u)'
+  const labels = await completionsAt(group, 'SELECT '.length)
+  expect(labels.slice(0, 2)).toEqual(['p', 'u'])
+  expect(labels).toContain('p.id')
+  expect(labels).toContain('u.id')
+  expect(labels).toContain('item_count')
+  expect(labels).toContain('user_name')
+
+  // a table function's arguments are expressions: `users` here is no binding,
+  // so postings stays the only table and its columns keep completing bare
+  const call = 'SELECT  FROM postings p, unnest(users, postings) x'
+  const callLabels = await completionsAt(call, 'SELECT '.length)
+  expect(callLabels).toContain('id')
+  expect(callLabels).not.toContain('postings.id')
+  expect(callLabels).not.toContain('users.id')
+  expect(callLabels).not.toContain('user_name')
+})
+
 test('FROM/JOIN suggestions omit bare column names', async () => {
   const labels = await completionsAt('SELECT * FROM us')
   expect(labels).toContain('users')

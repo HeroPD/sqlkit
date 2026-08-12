@@ -342,6 +342,11 @@ const MASK_ENGINE: Record<SqlDialectName, Engine> = {
 
 const STRUCTURE_TOKENS = new RegExp(`[()]|${CLAUSE_KEYWORDS.source}`, 'gi')
 
+// What sits before a paren that groups FROM items (`FROM (a x, b y)`, `, (…)`,
+// or another such paren). Anything else before a paren — a function name above
+// all — makes its commas argument separators.
+const GROUPING_PAREN = /(?:\b(?:from|join)\b|,|\()\s*$/i
+
 // `parent` is the query this one may reference outward — set for a correlated
 // subquery, absent for a derived table, which cannot see the query around it.
 type ClauseContext = { clause: string; queryDepth: number; queryStart: number; parent?: ClauseContext }
@@ -351,6 +356,8 @@ type ClauseState = {
   depth: number
   context: ClauseContext | undefined
   queryScopes: ClauseContext[]
+  /** Depth of the innermost open function-call paren, 0 when none is open. */
+  callDepth: number
 }
 type SqlStructure = { sql: string; masked: string; states: ClauseState[] }
 
@@ -368,6 +375,9 @@ function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
   // query around it. Kept for the paren's life, so both branches of a
   // `IN (SELECT … UNION SELECT …)` reach the same outer query.
   const enclosing: Array<ClauseContext | undefined> = []
+  // Depths of the open parens that hold arguments rather than FROM items, so a
+  // comma inside `unnest(a, b)` is told apart from one inside `(a x, b y)`.
+  const calls: number[] = []
   let depth = 0
   for (const match of masked.matchAll(STRUCTURE_TOKENS)) {
     const token = match[0].toLowerCase()
@@ -377,9 +387,11 @@ function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
       depth += 1
       if (inherited) contexts.set(depth, inherited)
       enclosing[depth] = inherited?.clause === 'from' || inherited?.clause === 'join' ? undefined : inherited
+      if (!GROUPING_PAREN.test(masked.slice(Math.max(0, at - 64), at))) calls.push(depth)
     } else if (token === ')') {
       contexts.delete(depth)
       enclosing[depth] = undefined
+      if (calls[calls.length - 1] === depth) calls.pop()
       depth = Math.max(0, depth - 1)
     } else {
       const previous = contexts.get(depth)
@@ -389,7 +401,8 @@ function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
     }
     // An inherited context repeats per depth; consumers key it, so leave it.
     const queryScopes = [...contexts.values()]
-    states.push({ end: at + token.length, depth, context: contexts.get(depth), queryScopes })
+    const callDepth = calls[calls.length - 1] ?? 0
+    states.push({ end: at + token.length, depth, context: contexts.get(depth), queryScopes, callDepth })
   }
   return { sql, masked, states }
 }
@@ -423,6 +436,7 @@ function stateAt(structure: SqlStructure, index: number): ClauseState | undefine
 
 const clauseAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.context
 const depthAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.depth ?? 0
+const callDepthAt = (structure: SqlStructure, index: number) => stateAt(structure, index)?.callDepth ?? 0
 
 // `query` and the queries it may reference outward, nearest first: a name bound
 // closer to the caret shadows the same name further out.
@@ -489,6 +503,13 @@ const JOIN_ON_TARGET = new RegExp(
 // following keyword (`FROM users JOIN …`) from being read as users's alias.
 const TABLE_BINDINGS = new RegExp(
   `\\b(?:from|join)\\b${GROUP_OPEN}(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
+  'gi',
+)
+
+// A comma-separated FROM item, with or without an alias. Scope and depth
+// checks keep SELECT-list and function-argument commas out of the bindings.
+const COMMA_BINDINGS = new RegExp(
+  `,${GROUP_OPEN}(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
   'gi',
 )
 
@@ -1087,15 +1108,16 @@ export class SqlEditor extends LitElement {
             if (clauseAt(structure, match.index ?? 0)?.queryStart !== query.queryStart) continue
             bindings.push({ seg, qualified, alias, table })
           }
-          // TABLE_BINDINGS covers explicit JOINs; add aliased old-style FROM
-          // list entries (`FROM a x, b y`) without mistaking SELECT commas for
-          // table bindings.
-          for (const match of statement.matchAll(ALIAS_BINDINGS)) {
-            const [, comma, seg, qualified, alias] = match
-            if (comma === undefined || seg === undefined || alias === undefined) continue
+          // TABLE_BINDINGS covers explicit JOINs; add old-style FROM-list items.
+          for (const match of statement.matchAll(COMMA_BINDINGS)) {
+            const [, seg, qualified, alias] = match
+            if (seg === undefined) continue
             if (!/\S/.test(structure.masked[match.index ?? 0] ?? '')) continue
             if (clauseAt(structure, match.index ?? 0)?.queryStart !== query.queryStart) continue
             if (!inFromList(structure, match.index ?? 0)) continue
+            // A FROM item may sit inside a join group, never inside a call's
+            // argument list — `unnest(a, b)` names no tables.
+            if (callDepthAt(structure, match.index ?? 0) > query.queryDepth) continue
             bindings.push({ seg, qualified, alias, table: qualified ?? seg })
           }
           bindingCache.set(cacheKey, bindings)
