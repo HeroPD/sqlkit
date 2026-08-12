@@ -8,7 +8,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { sql } from '@codemirror/lang-sql'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 import type { Engine } from '../electron'
-import { dialectForEngine, KEYWORD_BOOSTS, resolveDialect } from '../codemirror/dialects'
+import { dialectForEngine, KEYWORD_BOOSTS, SQL_FUNCTIONS, resolveDialect } from '../codemirror/dialects'
 import { softHighlightStyle } from '../codemirror/highlight'
 
 const configCompartment = new Compartment()
@@ -30,7 +30,7 @@ export function expressionCompletionOptions(engine: Engine, columns: string[]): 
   }))
   const keywordOptions = [...new Set(config.keywords)].filter((keyword) => EXPRESSION_TERMS.has(keyword)).map((keyword) => ({
     label: keyword,
-    type: /^(COUNT|SUM|AVG|MIN|MAX|COALESCE|NULLIF|NOW|GETDATE)$/i.test(keyword) ? 'function' : 'keyword',
+    type: SQL_FUNCTIONS.has(keyword) ? 'function' : 'keyword',
     boost: KEYWORD_BOOSTS[keyword] ?? 0,
   }))
   return [...columnOptions, ...keywordOptions]

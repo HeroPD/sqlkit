@@ -17,6 +17,15 @@ describe('SQL expression completion', () => {
     expect(options).toContainEqual(expect.objectContaining({ label: 'order', apply: '[order]' }))
   })
 
+  it('shares callable-function classification across dialects', () => {
+    const postgres = expressionCompletionOptions('postgresql', [])
+    const sqlserver = expressionCompletionOptions('sqlserver', [])
+
+    expect(postgres).toContainEqual(expect.objectContaining({ label: 'NOW', type: 'function' }))
+    expect(postgres).toContainEqual(expect.objectContaining({ label: 'CURRENT_DATE', type: 'keyword' }))
+    expect(sqlserver).toContainEqual(expect.objectContaining({ label: 'GETDATE', type: 'function' }))
+  })
+
   it('submits and cancels a compact expression with Enter and Escape', async () => {
     const editor = document.createElement('sql-expression-editor')
     editor.compact = true

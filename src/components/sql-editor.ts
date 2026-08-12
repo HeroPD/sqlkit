@@ -52,7 +52,7 @@ import {
 } from '../codemirror/selection-commands'
 import type { ColumnRef } from '../electron'
 import { quoteStyleFor } from '../dialect'
-import { KEYWORD_BOOSTS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
+import { KEYWORD_BOOSTS, SQL_FUNCTIONS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import {
   IDENT_SEG,
   boundAliases,
@@ -324,8 +324,6 @@ const QUOTE_VALID: Record<string, RegExp> = {
   '`': /^`[^`]*`?$/,
   '[': /^\[[^\]]*\]?$/,
 }
-
-const SELECT_FUNCTIONS = new Set(['count', 'sum', 'avg', 'min', 'max'])
 
 // The `JOIN table [alias] ON ` the cursor sits directly after.
 const JOIN_ON_TARGET = new RegExp(
@@ -1082,7 +1080,7 @@ export class SqlEditor extends LitElement {
             aliases.forEach((option, index) => add(option, 99 - index * 0.01))
             boundColumns.forEach((option, index) => add(option, 85 - index * 0.01))
             for (const option of keywordOptions) {
-              if (SELECT_FUNCTIONS.has(option.label.toLowerCase())) add(option, 60)
+              if (SQL_FUNCTIONS.has(option.label.toUpperCase())) add(option, 60)
             }
             // Keep the full explicit list available, but below the names and
             // expressions that are useful at this SELECT-list cursor. Global

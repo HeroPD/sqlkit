@@ -114,6 +114,12 @@ export const KEYWORD_BOOSTS: Record<string, number> = {
   DELETE: 65,
 }
 
+/** Callable functions among the dialect keywords. Membership drives two things:
+ * the completion type in the expression editor, and the SELECT-list boost tier. */
+export const SQL_FUNCTIONS = new Set([
+  'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'COALESCE', 'NULLIF', 'NOW', 'GETDATE',
+])
+
 export const SQL_DIALECTS: Record<SqlDialectName, SqlDialectConfig> = {
   postgres: {
     dialect: SQLDialect.define({

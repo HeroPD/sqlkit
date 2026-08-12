@@ -252,6 +252,14 @@ test('SELECT-list completion ranks aliases and bound columns before functions an
   expect(labels.indexOf('SUM')).toBeLessThan(labels.indexOf('ORDER BY'))
 })
 
+test('SELECT-list completion boosts scalar functions above plain keywords', async () => {
+  // NULL sorts before NULLIF, so only the function boost can invert the pair.
+  const doc = 'SELECT id, nu FROM "public"."postings" p'
+  const labels = await completionsAt(doc, 'SELECT id, nu'.length)
+  expect(labels).toContain('NULLIF')
+  expect(labels.indexOf('NULLIF')).toBeLessThan(labels.indexOf('NULL'))
+})
+
 test('a bound column does not suppress a same-named aggregate keyword', async () => {
   const doc = 'SELECT cou FROM stats s'
   const labels = await completionsWithCountColumn(doc, 'SELECT cou'.length)
