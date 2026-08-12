@@ -1216,8 +1216,10 @@ export class SqlEditor extends LitElement {
             const add = (option: Completion, boost: number) => {
               const lower = (option.displayLabel ?? option.label).toLowerCase()
               const member = lower.slice(lower.lastIndexOf('.') + 1)
-              if ((!lower.startsWith(typed) && !member.startsWith(typed)) || seen.has(lower)) return
-              seen.add(lower)
+              // Keyed by kind: a column named `count` must not swallow COUNT().
+              const key = `${option.type ?? ''}:${lower}`
+              if ((!lower.startsWith(typed) && !member.startsWith(typed)) || seen.has(key)) return
+              seen.add(key)
               // CM matches the label alone, so a word reaching for the ref
               // (`p` → `p.id`) only survives if the qualified form is the label.
               const qualified = typed && !member.startsWith(typed) ? option.displayLabel : undefined

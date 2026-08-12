@@ -12,7 +12,7 @@ beforeAll(stubEditorLayout)
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // Mounts an editor with fixture metadata; completion is opened by the caller.
-async function mountWithMeta(doc: string) {
+async function mountWithMeta(doc: string, withCountColumn = false) {
   const el = document.createElement('sql-editor')
   el.tabId = `completion:${doc}`
   el.value = doc
@@ -29,6 +29,10 @@ async function mountWithMeta(doc: string) {
     { schema: 'public', table: 'users', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
     { schema: 'public', table: 'users', name: 'user_name', dataType: 'text', nullable: true, primaryKey: false, foreignKey: false },
   ]
+  if (withCountColumn) {
+    el.tables.push({ schema: 'public', name: 'stats' })
+    el.columns.push({ schema: 'public', table: 'stats', name: 'count', dataType: 'integer', nullable: false, primaryKey: false, foreignKey: false })
+  }
   document.body.append(el)
   await el.updateComplete
   const view = (el as unknown as { _view: EditorView })._view
@@ -36,8 +40,8 @@ async function mountWithMeta(doc: string) {
 }
 
 // Mounts an editor and opens completion at `cursor` (default: end of `doc`).
-async function mountCompletion(doc: string, cursor = doc.length) {
-  const { el, view } = await mountWithMeta(doc)
+async function mountCompletion(doc: string, cursor = doc.length, withCountColumn = false) {
+  const { el, view } = await mountWithMeta(doc, withCountColumn)
   view.dispatch({ selection: { anchor: cursor } })
   startCompletion(view)
   await completionOpen(view)
@@ -64,6 +68,13 @@ const optionMatches = (el: HTMLElement) =>
 // Opens completion at `cursor` (default: end of `doc`) and returns the option labels.
 async function completionsAt(doc: string, cursor?: number) {
   const { el } = await mountCompletion(doc, cursor)
+  const labels = optionLabels(el)
+  el.remove()
+  return labels
+}
+
+async function completionsWithCountColumn(doc: string, cursor?: number) {
+  const { el } = await mountCompletion(doc, cursor, true)
   const labels = optionLabels(el)
   el.remove()
   return labels
@@ -208,6 +219,12 @@ test('SELECT-list completion ranks aliases and bound columns before functions an
   expect(labels.indexOf('id')).toBeLessThan(labels.indexOf('SUM'))
   expect(labels.indexOf('SUM')).toBeLessThan(labels.indexOf('SELECT'))
   expect(labels.indexOf('SUM')).toBeLessThan(labels.indexOf('ORDER BY'))
+})
+
+test('a bound column does not suppress a same-named aggregate keyword', async () => {
+  const doc = 'SELECT cou FROM stats s'
+  const labels = await completionsWithCountColumn(doc, 'SELECT cou'.length)
+  expect(labels.filter((label) => label.toLowerCase() === 'count')).toEqual(['count', 'COUNT'])
 })
 
 test('SELECT-list completion ignores clause words in strings and quoted identifiers', async () => {
