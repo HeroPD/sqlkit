@@ -1153,6 +1153,7 @@ export class SqlEditor extends LitElement {
           boost: KEYWORD_BOOSTS[keyword] ?? 0,
         },
       }))
+    const columnTables = new Set((this.columns ?? []).map((column) => column.table.toLowerCase()))
     const phrasePattern = /^[A-Za-z_][\w$]*(?:\s+[\w$]*)*$/
 
     return ifNotIn(
@@ -1164,11 +1165,16 @@ export class SqlEditor extends LitElement {
         const statement = block?.sql ?? context.state.doc.toString()
         const statementStart = block?.from ?? 0
         const wordAtCursor = context.matchBefore(/[A-Za-z_][\w$]*/)
-        const selectList = clauseAt(
-          sqlStructure(statement, this.dialect),
+        const structure = sqlStructure(statement, this.dialect)
+        const query = clauseAt(
+          structure,
           (wordAtCursor?.from ?? context.pos) - statementStart,
-        )?.clause === 'select'
-        const ranked = (option: Completion): Completion => selectList ? { ...option, boost: -1 } : option
+        )
+        // Match the main source's scoped SELECT-list mode: metadata-less and
+        // FROM-less queries keep the dialect keyword boosts.
+        const scopedSelectList = query?.clause === 'select' && visibleBindings(structure, query)
+          .some(({ table }) => columnTables.has(normIdent(table)))
+        const ranked = (option: Completion): Completion => scopedSelectList ? { ...option, boost: -1 } : option
         const tokens = [...before.matchAll(/[A-Za-z_][\w$]*/g)]
         // Longest phrase first: "is not n" must beat "not n" (NOT IN).
         for (const back of [3, 2, 1]) {

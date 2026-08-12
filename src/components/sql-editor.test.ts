@@ -151,6 +151,24 @@ test('explicit completion still lists multi-word keywords', async () => {
   expect(await completionsAt('SELECT * FROM users ')).toContain('GROUP BY')
 })
 
+test('FROM-less SELECT keeps normal multi-word keyword boosts', async () => {
+  const labels = await completionsAt('SELECT id, name ')
+  expect(labels).toContain('LEFT JOIN')
+  expect(labels).toContain('ORDER BY')
+  expect(labels).toContain('GROUP BY')
+  expect(labels.indexOf('LEFT JOIN')).toBeLessThan(labels.indexOf('TRUE'))
+  expect(labels.indexOf('ORDER BY')).toBeLessThan(labels.indexOf('TRUE'))
+  expect(labels.indexOf('GROUP BY')).toBeLessThan(labels.indexOf('TRUE'))
+})
+
+test('a FROM without metadata keeps normal multi-word keyword boosts', async () => {
+  // Column metadata gates the demotion, not the binding alone: mystery_tbl binds but has none.
+  const doc = 'SELECT id,  FROM mystery_tbl'
+  const labels = await completionsAt(doc, doc.indexOf(',') + 2)
+  expect(labels).toContain('ORDER BY')
+  expect(labels.indexOf('ORDER BY')).toBeLessThan(labels.indexOf('TRUE'))
+})
+
 test('transaction keywords complete', async () => {
   expect(await completionsAt('BEG')).toContain('BEGIN')
   expect(await completionsAt('COMM')).toContain('COMMIT')
