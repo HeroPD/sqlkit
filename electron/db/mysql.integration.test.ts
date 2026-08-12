@@ -7,8 +7,9 @@ import type { ConnectionProfile } from '../../src/electron'
 import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
-import { createMysqlDriver } from './mysql'
+import { createMysqlDriver, mysqlVersion } from './mysql'
 import { endpointFor, profileFromUrl, testMysqlUrl } from './test-db'
+import { explainFlavors, explainStatement } from '../../src/sql-explain'
 
 const url = testMysqlUrl()
 const describeDb = url ? describe : describe.skip
@@ -66,6 +67,21 @@ describeDb('mysql driver (integration)', () => {
       expect(byName.get('a')?.generated).toBe(false)
     } finally {
       await admin.query('drop table if exists gen_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  // The History explain flavors are gated on the version banner this driver
+  // reports, so the gate is checked against what the live server accepts.
+  it('runs the explain flavors its reported version claims', async () => {
+    const driver = await connectDriver()
+    try {
+      const serverVersion = mysqlVersion(String((await driver.query('select version() as v')).rows[0]![0]))
+      for (const flavor of explainFlavors('mysql', serverVersion)) {
+        const result = await driver.query(explainStatement({ engine: 'mysql', serverVersion, flavor, sql: 'select name from authors' }))
+        expect(result.rows.length).toBeGreaterThan(0)
+      }
+    } finally {
       await driver.disconnect()
     }
   })

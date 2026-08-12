@@ -182,6 +182,18 @@ function classify(masked: string, engine?: Engine): DestructiveKind[] {
   return found
 }
 
+const SHOWPLAN_MODES = new Set(['showplan_all', 'showplan_xml', 'showplan_text'])
+
+/** The SHOWPLAN switch this statement flips, if any. SQL Server's estimated
+ * plan — what History's Explain sends — turns it on, and every statement after
+ * it is compiled rather than run until the matching OFF. */
+function showplanSwitch(masked: string): 'on' | 'off' | undefined {
+  const scan = words(masked)
+  if (scan.length !== 3 || scan[0]!.text !== 'set' || !SHOWPLAN_MODES.has(scan[1]!.text)) return undefined
+  const mode = scan[2]!.text
+  return mode === 'on' || mode === 'off' ? mode : undefined
+}
+
 /**
  * The kinds of irreversible statement in `sql`, worst first and deduplicated —
  * a preflight names each risk once however many statements carry it. Classified
@@ -206,9 +218,14 @@ export function analyzeDestructive(sql: string, engine?: Engine, mode?: SqlModeF
   // own: analysing per batch keeps a routine body in one batch from suppressing
   // the statements in the next, which the executor will still run.
   const batches = engine === 'sqlserver' ? scanGoBatches(sql).map((batch) => batch.sql).filter(Boolean) : [sql]
+  // Carried across batches, because the switch is session state: the SET owns
+  // its batch, and the statement it spares is in the next one.
+  let compiledOnly = false
   for (const batch of batches) {
     for (const statement of splitScript(batch, engine, mode).statements) {
-      for (const kind of classify(statement.masked, engine)) found.add(kind)
+      const showplan = showplanSwitch(statement.masked)
+      if (showplan) compiledOnly = showplan === 'on'
+      else if (!compiledOnly) for (const kind of classify(statement.masked, engine)) found.add(kind)
     }
   }
   return SEVERITY.filter((kind) => found.has(kind))

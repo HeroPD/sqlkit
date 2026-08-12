@@ -110,6 +110,16 @@ describe('analyzeDestructive', () => {
     expect(analyzeDestructive('EXPLAIN SELECT analyze FROM t', 'postgresql')).toEqual([])
   })
 
+  // SQL Server's estimated plan is a session switch, not a wrapper keyword.
+  it('leaves statements SET SHOWPLAN only compiles alone, and judges the rest', () => {
+    expect(analyzeDestructive('set showplan_all on\nGO\ndelete from users', 'sqlserver')).toEqual([])
+    expect(analyzeDestructive('SET SHOWPLAN_XML ON\nGO\ndrop table users\nGO\nSET SHOWPLAN_XML OFF', 'sqlserver')).toEqual([])
+    // Past the OFF the server executes again, and a plan that really runs the
+    // statement (STATISTICS PROFILE) never suppressed anything.
+    expect(analyzeDestructive('set showplan_all on\nGO\nselect 1\nGO\nset showplan_all off\nGO\ndelete from users', 'sqlserver')).toEqual(['deleteAll'])
+    expect(analyzeDestructive('set statistics profile on; delete from users; set statistics profile off', 'sqlserver')).toEqual(['deleteAll'])
+  })
+
   it('sees past T-SQL batch separators and optional semicolons', () => {
     expect(analyzeDestructive('delete from a where id = 1\nGO\ndrop table b', 'sqlserver')).toEqual(['drop'])
     expect(analyzeDestructive('delete from a delete from b', 'sqlserver')).toEqual(['deleteAll'])

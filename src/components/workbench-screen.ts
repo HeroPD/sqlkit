@@ -63,7 +63,7 @@ import type { ExportFormat } from '../result-export'
 import type { FollowForeignKeyDetail, ResultNavigateDetail, SortColumnDetail } from './results-panel'
 import type { SelectionStats } from '../result-aggregate'
 import type { ColumnRef, ColumnReference, QueryResult, QuerySort } from '../electron'
-import { stripExplain } from '../sql-types'
+import { explainFlavors, explainStatement } from '../sql-explain'
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail, FileRevealDetail } from './file-tree'
 import type { ImportColumn, ImportConfirmDetail } from './import-dialog'
@@ -1751,10 +1751,11 @@ export class WorkbenchScreen extends LitElement {
     }
     if (view.id === 'history') {
       const key = this._activeContextKey()
+      const profile = this._config.activeProfile()
       return html`
         <history-view
           .items=${this._queries.history.filter((item) => item.contextKey === key)}
-          .engine=${this._config.activeProfile()?.engine ?? null}
+          .flavors=${profile ? explainFlavors(profile.engine, this._live.statuses[profile.id]?.serverVersion ?? null) : []}
           @history-open=${this._onHistoryOpen}
           @history-open-permanent=${this._onHistoryOpenPermanent}
           @history-explain=${this._onHistoryExplain}
@@ -1786,14 +1787,19 @@ export class WorkbenchScreen extends LitElement {
     this._ctx.openPreview(sql)
   }
 
-  // Right-click explain: the prefixed statement lands in the preview tab and
-  // runs immediately, so the plan arrives with its SQL visible.
+  // Right-click explain: the engine's explain statement lands in the preview
+  // tab and runs immediately, so the plan arrives with its SQL visible.
   private _onHistoryExplain(event: Event) {
-    const { sql, analyze } = (event as CustomEvent<HistoryExplainDetail>).detail
+    const { sql, flavor } = (event as CustomEvent<HistoryExplainDetail>).detail
     const profile = this._config.activeProfile()
     if (!profile) return
-    const prefix = profile.engine === 'sqlite' ? 'explain query plan ' : analyze ? 'explain analyze ' : 'explain '
-    const statement = prefix + stripExplain(sql)
+    const statement = explainStatement({
+      engine: profile.engine,
+      serverVersion: this._live.statuses[profile.id]?.serverVersion ?? null,
+      flavor,
+      sql,
+      inTransaction: !!this._live.transaction(profile.id),
+    })
     this._ctx.openPreview(statement)
     void this._runSql(statement)
   }

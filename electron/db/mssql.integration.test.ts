@@ -12,6 +12,7 @@ const inspectColumnFixture = (name: string): InspectColumn =>
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { acquireConnection, createMssqlDriver, resetConnection, type AcquirablePool } from './mssql'
+import { explainStatement } from '../../src/sql-explain'
 import { endpointFor, profileFromUrl, testMssqlUrl } from './test-db'
 
 type PooledConn = Awaited<ReturnType<typeof acquireConnection>>
@@ -319,6 +320,53 @@ describeDb('mssql driver (integration)', () => {
         { columns: ['a'], rows: [[1]] },
         { columns: ['b'], rows: [[2]] },
       ])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('runs both History explain flavors, leaving the plan as the last result set', async () => {
+    const driver = await connectDriver()
+    const explain = (flavor: 'plan' | 'analyze') =>
+      explainStatement({ engine: 'sqlserver', serverVersion: null, flavor, sql: 'select name from authors' })
+    try {
+      // The estimated plan: SHOWPLAN_ALL owns its batch, so this is the GO
+      // script, and the query itself never executes.
+      const plan = await driver.query(explain('plan'))
+      expect(plan.columns).toContain('StmtText')
+      expect(plan.rows.length).toBeGreaterThan(0)
+      // The switch must not outlive the run: the pool reset clears it, so the
+      // next query returns rows again rather than another plan.
+      expect((await driver.query('select name from authors order by name')).columns).toEqual(['name'])
+
+      // The actual plan: one batch, self-restoring, counters alongside estimates.
+      const analyzed = await driver.query(explain('analyze'))
+      expect(analyzed.columns).toContain('Rows')
+      expect(analyzed.columns).toContain('StmtText')
+      expect(analyzed.rows.length).toBeGreaterThan(0)
+      expect((await driver.query('select name from authors order by name')).columns).toEqual(['name'])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('restores the session when an explain runs inside a manual transaction', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('begin tran')
+      const statement = explainStatement({
+        engine: 'sqlserver',
+        serverVersion: null,
+        flavor: 'plan',
+        sql: 'select name from authors',
+        inTransaction: true,
+      })
+      const plan = await driver.query(statement)
+      // The pinned connection is never reset, so the script's own restore is
+      // what keeps the rest of the transaction executing instead of compiling.
+      expect(plan.resultSets?.some((set) => set.columns.includes('StmtText'))).toBe(true)
+      expect((await driver.query('select name from authors order by name')).columns).toEqual(['name'])
+      await driver.endTransaction!('rollback')
     } finally {
       await driver.disconnect()
     }

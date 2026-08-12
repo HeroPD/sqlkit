@@ -1,9 +1,9 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { icons, controls, scrollbars, typography } from '../shared-styles'
-import type { Engine } from '../electron'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
+import type { ExplainFlavor } from '../sql-explain'
 import { formatInteger, formatTime, rowWord, t } from '../i18n'
 
 // One run in the query history. Runtime-only, like the reference app: capped
@@ -13,7 +13,7 @@ import type { HistoryItem } from '../electron'
 export type { HistoryItem }
 
 export type HistoryOpenDetail = { sql: string }
-export type HistoryExplainDetail = { sql: string; analyze: boolean }
+export type HistoryExplainDetail = { sql: string; flavor: ExplainFlavor }
 
 const summarize = (sql: string) => sql.replace(/\s+/g, ' ').trim().slice(0, 120)
 
@@ -25,9 +25,9 @@ export class HistoryView extends LitElement {
   @property({ attribute: false })
   items: HistoryItem[] = []
 
-  /** Engine of the active context; decides which explain flavors exist. */
-  @property()
-  engine: Engine | null = null
+  /** Plan flavors the live server understands, from `explainFlavors`. */
+  @property({ attribute: false })
+  flavors: ExplainFlavor[] = []
 
   @state()
   private _menu: { x: number; y: number; item: HistoryItem } | null = null
@@ -46,14 +46,12 @@ export class HistoryView extends LitElement {
   private _renderMenu() {
     const menu = this._menu
     if (!menu) return ''
+    // The analyze flavor really runs the query, so it only appears where the
+    // server has a form of it; a disconnected context offers neither.
     const items: MenuItem[] = [
-      { id: 'explain', label: t('history.explain') },
-      // ANALYZE actually executes the query — Postgres and MySQL 8.0.18+;
-      // SQLite's counterpart is the single `explain query plan` mode.
-      ...(this.engine === 'postgresql' || this.engine === 'mysql'
-        ? [{ id: 'explain-analyze', label: t('history.explainAnalyze') }]
-        : []),
-      { id: 'copy-sql', label: t('history.copySql'), separatorBefore: true },
+      ...(this.flavors.includes('plan') ? [{ id: 'explain', label: t('history.explain') }] : []),
+      ...(this.flavors.includes('analyze') ? [{ id: 'explain-analyze', label: t('history.explainAnalyze') }] : []),
+      { id: 'copy-sql', label: t('history.copySql'), separatorBefore: this.flavors.length > 0 },
     ]
     return html`
       <context-menu
@@ -73,7 +71,7 @@ export class HistoryView extends LitElement {
     }
     this.dispatchEvent(
       new CustomEvent<HistoryExplainDetail>('history-explain', {
-        detail: { sql: item.sql, analyze: action === 'explain-analyze' },
+        detail: { sql: item.sql, flavor: action === 'explain-analyze' ? 'analyze' : 'plan' },
         bubbles: true,
         composed: true,
       }),
