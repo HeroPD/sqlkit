@@ -241,6 +241,15 @@ test('SELECT-list completion does not leak bindings out of a CTE', async () => {
   expect(labels).not.toContain('user_name')
 })
 
+test('SELECT-list completion falls back to bare columns for a metadata-less CTE', async () => {
+  const doc = 'WITH recent AS (SELECT * FROM postings) SELECT  FROM recent r'
+  const labels = await completionsAt(doc, doc.indexOf('  FROM') + 1)
+  expect(labels).toContain('r')
+  expect(labels).toContain('id')
+  expect(labels).toContain('item_count')
+  expect(labels).toContain('user_name')
+})
+
 test('SELECT-list completion does not leak bindings across UNION branches', async () => {
   const doc = 'SELECT id,  FROM postings p UNION SELECT id FROM users u'
   const labels = await completionsAt(doc, doc.indexOf(',') + 2)

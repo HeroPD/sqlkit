@@ -1211,7 +1211,7 @@ export class SqlEditor extends LitElement {
           const query = activeContext ?? queryContextAt(from)
           const aliases = selectList ? aliasOptions(query) : []
           const boundColumns = selectList ? boundColumnOptions(query) : []
-          if (selectList && (aliases.length || boundColumns.length)) {
+          if (selectList && boundColumns.length) {
             const seen = new Set<string>()
             const add = (option: Completion, boost: number) => {
               const lower = (option.displayLabel ?? option.label).toLowerCase()
