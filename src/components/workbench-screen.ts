@@ -161,6 +161,8 @@ const COMMANDS: ReadonlyArray<{ id: string; label: string; keybind?: string }> =
   { id: 'quick-open', label: t('action.quickOpen'), keybind: mod('P') },
   { id: 'switch-database', label: t('action.switchDatabase'), keybind: mod('K') },
   { id: 'add-database', label: t('action.addDatabase') },
+  { id: 'connect-database', label: t('action.connectDatabase') },
+  { id: 'disconnect-database', label: t('action.disconnectDatabase') },
   { id: 'disconnect-all', label: t('action.disconnectAll') },
   { id: 'refresh-files', label: t('action.refreshFiles') },
   { id: 'toggle-sidebar', label: t('action.toggleSidebar'), keybind: mod('B') },
@@ -291,6 +293,8 @@ export class WorkbenchScreen extends LitElement {
     saveActiveTab: () => void this._fileOps.saveActive(),
     formatActiveTab: () => this.renderRoot.querySelector('sql-editor')?.formatSql(),
     addDatabase: () => this._onAddDatabase(),
+    connectProfile: (profileId) => void this._connectProfile(profileId),
+    disconnectProfile: (profileId) => void this._live.disconnect(profileId),
     refreshFiles: () => void this._workspaceFiles.reload(),
     toggleSidebar: () => this._toggleSidebar(),
     toggleResultsPanel: () => this._layout.togglePanelCollapse(),
@@ -1596,6 +1600,7 @@ export class WorkbenchScreen extends LitElement {
         .entries=${this._cmdPalette.entries()}
         @palette-close=${() => this._cmdPalette.close()}
         @palette-pick=${this._cmdPalette.onPick}
+        @palette-action=${this._cmdPalette.onAction}
       ></command-palette>
 
       ${this._dialogs.confirm

@@ -41,6 +41,8 @@ const enUS = {
   'action.quickOpen': 'Quick Open…',
   'action.switchDatabase': 'Switch Database…',
   'action.addDatabase': 'Add Database',
+  'action.connectDatabase': 'Connect Database',
+  'action.disconnectDatabase': 'Disconnect Database',
   'action.disconnectAll': 'Disconnect All Databases',
   'action.refreshFiles': 'Refresh Files',
   'action.toggleSidebar': 'Toggle Sidebar',

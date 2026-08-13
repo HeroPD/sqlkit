@@ -37,6 +37,8 @@ function setup(opts: Opts = {}) {
     saveActiveTab: vi.fn(),
     formatActiveTab: vi.fn(),
     addDatabase: vi.fn(),
+    connectProfile: vi.fn(),
+    disconnectProfile: vi.fn(),
     refreshFiles: vi.fn(),
     toggleSidebar: vi.fn(),
     toggleResultsPanel: vi.fn(),
@@ -48,6 +50,7 @@ function setup(opts: Opts = {}) {
     statuses: opts.statuses ?? {},
     setActiveChild: vi.fn(),
     connect: vi.fn(() => Promise.resolve({ success: true })),
+    disconnect: vi.fn(),
     disconnectAll: vi.fn(),
   }
   const ctrl = new CommandPaletteController(host(), {
@@ -55,6 +58,8 @@ function setup(opts: Opts = {}) {
     commands: [
       { id: 'new-query', label: 'New Query' },
       { id: 'toggle-sidebar', label: 'Toggle Sidebar' },
+      { id: 'connect-database', label: 'Connect Database' },
+      { id: 'disconnect-database', label: 'Disconnect Database' },
     ],
     files: () => opts.files ?? [],
     connections: () => opts.connections ?? [],
@@ -89,6 +94,24 @@ describe('CommandPaletteController entries', () => {
     ctrl.open('commands')
     expect(ctrl.entries().map((e) => e.id)).toEqual(['new-query', 'toggle-sidebar'])
     expect(ctrl.entries().every((entry) => entry.icon === undefined)).toBe(true)
+  })
+
+  it('offers disconnect for the active connected profile', () => {
+    const profile = { id: 'p1', name: 'Production' } as ConnectionProfile
+    const { ctrl } = setup({ activeProfile: profile, connections: [profile], phase: 'connected' })
+    ctrl.open('commands')
+
+    expect(ctrl.entries()).toContainEqual({ id: 'disconnect-database', label: 'Disconnect Database', detail: 'Production' })
+    expect(ctrl.entries().some((entry) => entry.id === 'connect-database')).toBe(false)
+  })
+
+  it('offers connect for the active disconnected profile', () => {
+    const profile = { id: 'p1', name: 'Local' } as ConnectionProfile
+    const { ctrl } = setup({ activeProfile: profile, connections: [profile], phase: 'disconnected' })
+    ctrl.open('commands')
+
+    expect(ctrl.entries()).toContainEqual({ id: 'connect-database', label: 'Connect Database', detail: 'Local' })
+    expect(ctrl.entries().some((entry) => entry.id === 'disconnect-database')).toBe(false)
   })
 
   it('lists files and the in-use context tables in quick mode', () => {
@@ -126,6 +149,7 @@ describe('CommandPaletteController entries', () => {
         status: 'connected',
         statusLabel: 'Connected',
         inUse: true,
+        action: { id: 'disconnect', label: 'Disconnect Database', icon: 'icon-unplug' },
       }),
     ])
   })
@@ -153,6 +177,7 @@ describe('CommandPaletteController entries', () => {
         accentColor: '#c45b18',
         status: 'connected',
         statusLabel: 'Connected',
+        action: { id: 'disconnect', label: 'Disconnect Database', icon: 'icon-unplug' },
       }),
       expect.objectContaining({ id: 'child:p1:app', inUse: false }),
       expect.objectContaining({ id: 'child:p1:analytics', inUse: true }),
@@ -188,6 +213,17 @@ describe('CommandPaletteController pick dispatch', () => {
     expect(ctrl.mode).toBe('quick')
   })
 
+  it('connects or disconnects the active profile directly', () => {
+    const profile = { id: 'p1', name: 'Local', engine: 'postgresql' } as ConnectionProfile
+    const disconnected = setup({ activeProfile: profile, connections: [profile], phase: 'disconnected' })
+    disconnected.ctrl.onPick(pick('commands', 'connect-database'))
+    expect(disconnected.actions.connectProfile).toHaveBeenCalledWith('p1')
+
+    const connected = setup({ activeProfile: profile, connections: [profile], phase: 'connected' })
+    connected.ctrl.onPick(pick('commands', 'disconnect-database'))
+    expect(connected.actions.disconnectProfile).toHaveBeenCalledWith('p1')
+  })
+
   it('opens the picked file', () => {
     const f = file('a.sql', 'a.sql')
     const { ctrl, actions } = setup({ files: [f] })
@@ -211,6 +247,26 @@ describe('CommandPaletteController pick dispatch', () => {
     expect(actions.setActiveDb).toHaveBeenCalledWith('p1', 'analytics')
     expect(live.setActiveChild).toHaveBeenCalledWith('p1', 'analytics')
     expect(ctrl.mode).toBeNull()
+  })
+
+  it('disconnects a connected profile from a database-switcher row action', () => {
+    const { ctrl, live } = setup({ phase: 'connected' })
+
+    ctrl.onAction(new CustomEvent('palette-action', {
+      detail: { mode: 'databases', id: 'hdr:p1', action: 'disconnect' },
+    }))
+
+    expect(live.disconnect).toHaveBeenCalledWith('p1')
+  })
+
+  it('ignores database row actions after the connection is no longer connected', () => {
+    const { ctrl, live } = setup({ phase: 'disconnected' })
+
+    ctrl.onAction(new CustomEvent('palette-action', {
+      detail: { mode: 'databases', id: 'db:p1', action: 'disconnect' },
+    }))
+
+    expect(live.disconnect).not.toHaveBeenCalled()
   })
 
   it('activates a connected single-db connection', () => {

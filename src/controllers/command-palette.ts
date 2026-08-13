@@ -22,6 +22,8 @@ type Deps = {
   saveActiveTab: () => void
   formatActiveTab: () => void
   addDatabase: () => void
+  connectProfile: (profileId: string) => void
+  disconnectProfile: (profileId: string) => void
   refreshFiles: () => void
   toggleSidebar: () => void
   toggleResultsPanel: () => void
@@ -75,7 +77,19 @@ export class CommandPaletteController implements ReactiveController {
   }
 
   entries(): PaletteEntry[] {
-    if (this.mode === 'commands') return [...this.deps.commands]
+    if (this.mode === 'commands') {
+      const active = this.deps.activeProfile()
+      const phase = active ? this.deps.live.phase(active.id) : null
+      return this.deps.commands.flatMap((command): PaletteEntry[] => {
+        if (command.id === 'connect-database') {
+          return active && phase !== 'connected' && phase !== 'connecting' ? [{ ...command, detail: active.name }] : []
+        }
+        if (command.id === 'disconnect-database') {
+          return active && phase === 'connected' ? [{ ...command, detail: active.name }] : []
+        }
+        return [command]
+      })
+    }
 
     if (this.mode === 'quick') {
       const files = this.deps
@@ -120,6 +134,7 @@ export class CommandPaletteController implements ReactiveController {
               status: 'connected',
               statusLabel: t('palette.connected'),
               header: true,
+              action: { id: 'disconnect', label: t('action.disconnectDatabase'), icon: 'icon-unplug' },
             },
             ...children.map((child) => ({
               id: `child:${connection.id}:${child.name}`,
@@ -153,6 +168,9 @@ export class CommandPaletteController implements ReactiveController {
             statusLabel: label,
             statusError: phase === 'error' ? this.deps.live.statuses[connection.id]?.error : undefined,
             inUse: this.deps.activeDbId() === connection.id,
+            ...(phase === 'connected'
+              ? { action: { id: 'disconnect', label: t('action.disconnectDatabase'), icon: 'icon-unplug' } }
+              : {}),
           },
         ]
       })
@@ -217,6 +235,14 @@ export class CommandPaletteController implements ReactiveController {
     void this.connect(profile)
   }
 
+  onAction = (event: Event) => {
+    const { mode, id, action } = (event as CustomEvent<{ mode: PaletteMode; id: string; action: string }>).detail
+    if (mode !== 'databases' || action !== 'disconnect') return
+    const separator = id.indexOf(':')
+    const profileId = separator < 0 ? '' : id.slice(separator + 1)
+    if (profileId && this.deps.live.phase(profileId) === 'connected') void this.deps.live.disconnect(profileId)
+  }
+
   private runCommand(id: string) {
     switch (id) {
       case 'new-query':
@@ -243,6 +269,18 @@ export class CommandPaletteController implements ReactiveController {
       case 'add-database':
         this.deps.addDatabase()
         break
+      case 'connect-database': {
+        const active = this.deps.activeProfile()
+        if (active && this.deps.live.phase(active.id) !== 'connected' && this.deps.live.phase(active.id) !== 'connecting') {
+          this.deps.connectProfile(active.id)
+        }
+        break
+      }
+      case 'disconnect-database': {
+        const active = this.deps.activeProfile()
+        if (active && this.deps.live.phase(active.id) === 'connected') this.deps.disconnectProfile(active.id)
+        break
+      }
       case 'disconnect-all':
         void this.deps.live.disconnectAll()
         break

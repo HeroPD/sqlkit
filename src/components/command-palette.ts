@@ -37,6 +37,8 @@ export type PaletteEntry = {
   header?: boolean
   /** Renders nested under a group header. */
   indent?: boolean
+  /** Optional trailing row action that does not pick the entry. */
+  action?: { id: string; label: string; icon: string }
 }
 
 const PLACEHOLDERS: Record<PaletteMode, string> = {
@@ -142,10 +144,10 @@ export class CommandPalette extends LitElement {
   }
 
   protected updated(changed: PropertyValues) {
-    if ((changed.has('open') || changed.has('mode')) && this.open) {
-      const input = this.shadowRoot?.querySelector('input')
-      input?.focus()
-    }
+    if (!this.open) return
+    const root = this.shadowRoot
+    const shouldFocus = changed.has('open') || changed.has('mode') || (changed.has('entries') && !root?.activeElement)
+    if (shouldFocus) root?.querySelector('input')?.focus()
   }
 
   render() {
@@ -198,11 +200,9 @@ export class CommandPalette extends LitElement {
 
   private _emptyMessage() {
     if (this.entries.length) return t('palette.noMatches')
-    return this.mode === 'quick'
-      ? t('palette.noFiles')
-      : this.mode === 'databases'
-        ? t('palette.noDatabases')
-        : t('palette.noCommands')
+    if (this.mode === 'quick') return t('palette.noFiles')
+    if (this.mode === 'databases') return t('palette.noDatabases')
+    return t('palette.noCommands')
   }
 
   private _renderEntry(entry: PaletteEntry, index: number, active: number) {
@@ -218,6 +218,7 @@ export class CommandPalette extends LitElement {
         class="row ${entry.connection ? 'connection' : ''} ${entry.indent ? 'indent' : ''} ${entry.status ? 'has-status' : ''} ${entry.statusError ? 'error-row' : ''} ${index === active ? 'active' : ''}"
         role="option"
         aria-selected=${index === active}
+        @mousedown=${(event: MouseEvent) => event.preventDefault()}
         @click=${() => this._pick(entry)}
         @mousemove=${() => this._setActive(index)}
       >
@@ -260,6 +261,19 @@ export class CommandPalette extends LitElement {
         : ''}
       ${entry.keybind ? html`<span class="keybind">${entry.keybind}</span>` : ''}
       ${entry.statusError ? html`<span class="status-error">${entry.statusError}</span>` : ''}
+      ${entry.action
+        ? html`
+            <button
+              class="row-action"
+              title=${entry.action.label}
+              aria-label=${entry.action.label}
+              @mousedown=${(event: MouseEvent) => event.preventDefault()}
+              @click=${(event: MouseEvent) => this._action(event, entry)}
+            >
+              <i class="icon ${entry.action.icon}" aria-hidden="true"></i>
+            </button>
+          `
+        : nothing}
     `
   }
 
@@ -311,7 +325,7 @@ export class CommandPalette extends LitElement {
       const step = event.key === 'ArrowDown' ? 1 : -1
       this._active = pickable(filtered, active + step, step)
       void this.updateComplete.then(() => {
-        this.shadowRoot?.querySelector('.row.active')?.scrollIntoView({ block: 'nearest' })
+        this.shadowRoot?.querySelector('.row.active')?.scrollIntoView?.({ block: 'nearest' })
       })
       return
     }
@@ -334,6 +348,18 @@ export class CommandPalette extends LitElement {
     this.dispatchEvent(
       new CustomEvent('palette-pick', {
         detail: { mode: this.mode, id: entry.id },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+  }
+
+  private _action(event: MouseEvent, entry: PaletteEntry) {
+    event.stopPropagation()
+    if (!entry.action) return
+    this.dispatchEvent(
+      new CustomEvent('palette-action', {
+        detail: { mode: this.mode, id: entry.id, action: entry.action.id },
         bubbles: true,
         composed: true,
       }),
@@ -434,7 +460,7 @@ export class CommandPalette extends LitElement {
       .row.group {
         display: grid;
         min-height: 30px;
-        grid-template-columns: 3px 19px minmax(0, 1fr) minmax(12px, 32px) 104px 72px;
+        grid-template-columns: 3px 19px minmax(0, 1fr) minmax(12px, 32px) 104px 72px 26px;
         column-gap: 7px;
       }
 
@@ -602,6 +628,34 @@ export class CommandPalette extends LitElement {
       .in-use .icon {
         color: currentColor;
         font-size: 11px;
+      }
+
+      .row-action {
+        grid-column: 7;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text-3);
+        opacity: 0;
+      }
+
+      .row:hover .row-action,
+      .row.active .row-action,
+      .row-action:focus-visible {
+        opacity: 1;
+      }
+
+      .row-action:hover {
+        background: color-mix(in srgb, var(--status-dot-error) 12%, transparent);
+        color: var(--status-dot-error);
+      }
+
+      .row-action .icon {
+        color: currentColor;
+        font-size: 14px;
       }
 
       .keybind {
