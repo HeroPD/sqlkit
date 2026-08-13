@@ -16,7 +16,7 @@ import { SchemaOpsController } from '../controllers/schema-ops'
 import { ConfigController } from '../controllers/config'
 import { FileOpsController } from '../controllers/file-ops'
 import { ContextsController, type EditorTabState } from '../controllers/contexts'
-import type { ConnectionProfile, Engine, FileInfo, MenuAction, QueryResponse, SessionEndMode, TableRef } from '../electron'
+import type { ConnectionPhase, ConnectionProfile, Engine, FileInfo, MenuAction, QueryResponse, SessionEndMode, TableRef } from '../electron'
 import { buildInsertBatches, type CellInput } from '../sql-write'
 import './activity-button'
 import './command-palette'
@@ -607,10 +607,17 @@ export class WorkbenchScreen extends LitElement {
   ): Promise<'aligned' | 'redirected' | 'unavailable'> {
     if (!childDb) return 'aligned'
     const children = this._live.statuses[profileId]?.children ?? []
-    if (children.length < 2) return 'aligned'
+    // Decided by the profile's mode rather than the child count, falling back to
+    // the count only when the profile is unknown. An empty list also means "the
+    // status has not reported children yet", and reading that as aligned left
+    // the driver on whichever database it opened while the titlebar named the
+    // one the workspace remembered — metadata then loaded for a database the
+    // user was not looking at.
+    const mode = this._config.byId(profileId)?.databaseMode ?? (children.length > 1 ? 'all' : 'single')
+    if (mode !== 'all') return 'aligned'
     const inUse = children.find((child) => child.inUse)?.name
     if (inUse === childDb) return 'aligned'
-    if (children.some((child) => child.name === childDb)) {
+    if (!children.length || children.some((child) => child.name === childDb)) {
       return (await this._live.setActiveChild(profileId, childDb)).success ? 'aligned' : 'unavailable'
     }
     if (options.followMissing && inUse) {
@@ -1367,6 +1374,7 @@ export class WorkbenchScreen extends LitElement {
             ${this.workspace?.name ? html`<span class="title-workspace">— ${this.workspace.name}</span>` : ''}
           </div>
           <div class="titlebar-center">
+            ${this._renderConnectionAction(profile, phase)}
             <span
               class="database-target-wrap tooltip-start"
               data-tooltip=${context}
@@ -1427,6 +1435,58 @@ export class WorkbenchScreen extends LitElement {
         </div>
       </header>
     `
+  }
+
+  /**
+   * The connection verb for the database the titlebar names. The dot beside it
+   * already carries the state — including the error colour — so this button
+   * only ever spells the action: connect, or disconnect. Connecting is the one
+   * case it shows for itself, because motion says "working" in a way a static
+   * amber dot cannot.
+   */
+  private _renderConnectionAction(profile: ConnectionProfile | null, phase: ConnectionPhase | null) {
+    const connecting = phase === 'connecting'
+    const connected = phase === 'connected'
+    const label = connected ? t('database.disconnect') : t('database.connect')
+    return html`
+      <button
+        type="button"
+        class="connection-action ${connected ? 'live' : ''}"
+        data-tooltip=${profile ? `${label}: ${profile.name}` : label}
+        aria-label=${profile ? `${label}: ${profile.name}` : label}
+        ?disabled=${!profile || connecting}
+        @pointerdown=${(event: PointerEvent) => event.preventDefault()}
+        @click=${this._onTitlebarConnection}
+      >
+        ${connecting
+          ? html`<i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i>`
+          : html`<i class="icon ${connected ? 'icon-unplug' : 'icon-plug'}" aria-hidden="true"></i>`}
+      </button>
+    `
+  }
+
+  private _onTitlebarConnection() {
+    const profile = this._config.activeProfile()
+    if (!profile) return
+    if (this._live.phase(profile.id) !== 'connected') {
+      void this._connectProfile(profile.id)
+      return
+    }
+    // Two pixels from Run, so an open transaction is named before it dies with
+    // the connection — the Databases list can disconnect bare because getting
+    // there is already deliberate.
+    const transaction = this._live.transaction(profile.id)
+    if (!transaction) {
+      void this._live.disconnect(profile.id)
+      return
+    }
+    this._dialogs.confirm = {
+      message: t('connection.disconnectTransactionTitle', { name: profile.name }),
+      detail: t('connection.disconnectTransactionDetail', { database: transaction.childDb }),
+      confirmLabel: t('database.disconnect'),
+      danger: true,
+      action: () => void this._live.disconnect(profile.id),
+    }
   }
 
   render() {
@@ -1997,19 +2057,26 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private async _onDbConnect(event: Event) {
-    const { id } = (event as CustomEvent<{ id: string }>).detail
+    await this._connectProfile((event as CustomEvent<{ id: string }>).detail.id)
+  }
+
+  // Shared by the Databases list and the titlebar's connection button, so both
+  // land on the same context and child rather than two near-identical flows.
+  private async _connectProfile(id: string) {
     const connection = this._config.byId(id)
     if (!connection) return
+    // The database to land in, read before connecting: once the status arrives,
+    // defaultChild() prefers whichever child the driver happened to open, which
+    // would silently discard the one this workspace was left in.
+    const wanted = this._ctx.activeDbId === id ? this._ctx.activeChildDb : this._config.defaultChild(connection)
     // Failures surface through the status push (error dot + message).
     const result = await this._live.connect(connection)
     if (!result.success) return
-    // Preserve the original behavior: only align when reconnecting the
-    // already-active profile (its current child); a freshly-connected,
-    // not-yet-active profile is aligned by _setActiveDb below.
-    await this._alignActiveChild(id, this._ctx.activeDbId === id ? this._ctx.activeChildDb : null, { followMissing: true })
+    const outcome = await this._alignActiveChild(id, wanted, { followMissing: true })
     // A successful connect becomes the in-use context, but stays on the
-    // Databases view — no jumping to the Explorer uninvited.
-    this._setActiveDb(id)
+    // Databases view — no jumping to the Explorer uninvited. 'redirected'
+    // already moved the context to the child that does exist.
+    if (outcome !== 'redirected') this._setActiveDb(id, wanted ?? undefined)
   }
 
   private async _onDbDisconnect(event: Event) {
@@ -3391,6 +3458,40 @@ export class WorkbenchScreen extends LitElement {
 
       .connection-dot.error {
         background: var(--status-dot-error);
+      }
+
+      /* Leads the group, left of the database it acts on: the target label then
+         sits between disconnect and Run, so the destructive verb is never
+         adjacent to the one pressed all day. */
+      .connection-action {
+        width: 26px;
+        height: 24px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        padding: 0;
+        color: var(--text-2);
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        -webkit-app-region: no-drag;
+      }
+
+      .connection-action:hover:not(:disabled) {
+        color: var(--text);
+        background: var(--btn-secondary-hover);
+      }
+
+      /* Disconnect is the destructive half, so it warms only on intent. */
+      .connection-action.live:hover:not(:disabled) {
+        color: color-mix(in srgb, var(--status-dot-error) 82%, white);
+        background: color-mix(in srgb, var(--status-dot-error) 11%, transparent);
+      }
+
+      .connection-action:disabled {
+        color: color-mix(in srgb, var(--text-3) 45%, transparent);
+        cursor: default;
       }
 
       .query-action {

@@ -222,6 +222,38 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     return poolFor(childDb)
   }
 
+  /**
+   * The refusals poolForQuery would raise, without resolving a pool — so a
+   * caller can validate up front without triggering a switch it is not ready
+   * to use yet.
+   */
+  const assertQueryable = (childDb?: string | null) => {
+    if (!pools) throw new Error(t('connection.notConnected'))
+    if (childDb && !childNames.includes(childDb)) {
+      throw new Error(t('connection.databaseUnavailable', { database: childDb }))
+    }
+    const database = childDb ?? active
+    if (pin && database !== pin.database) {
+      throw new Error(t('query.transactionOtherDatabase', { database: pin.database }))
+    }
+  }
+
+  /**
+   * Resolves a pool and checks a client out of it as one indivisible step.
+   *
+   * Only the database in use holds a pool, so resolving one retires the others.
+   * A caller that resolved a pool and had not yet checked out would find it
+   * ended the moment anyone else resolved a different child, and fail having
+   * done nothing wrong. Serialising the pair makes a switch atomic with respect
+   * to everyone about to use one; end() then drains the clients already out.
+   */
+  let poolGate: Promise<unknown> = Promise.resolve()
+  const clientFor = (childDb?: string | null): Promise<pg.PoolClient> => {
+    const next = poolGate.then(() => poolForQuery(childDb).connect())
+    poolGate = next.then(() => undefined, () => undefined)
+    return next
+  }
+
   const dialect = dialectFor(profile.engine)
 
   // Cached result-column → source-column lookups, per child database (attrelid
@@ -354,7 +386,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     async query(sql, params = [], childDb = null, sort = null, filter = null, executionId) {
       const started = performance.now()
       const plan = prepareSqlRun({ engine: 'postgresql', sql, params, sort, filter })
-      const pool = poolForQuery(childDb)
+      // Validated without resolving a pool: the switch happens at checkout, so
+      // nothing is retired for a run that may still be refused or cancelled.
+      assertQueryable(childDb)
       // Checked out manually (not pool.query) so the backend PID is known
       // while the statement runs and cancel() has a target.
       const entry = { executionId, pid: null as number | null, secret: null as number | null, cancelRequested: false }
@@ -422,7 +456,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         released = true
       }
       try {
-        client = await pool.connect()
+        client = await clientFor(childDb)
         entry.pid = backendPid(client)
         entry.secret = backendSecret(client)
         if (entry.cancelRequested) {
@@ -490,10 +524,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
     async runBatch(statements, childDb = null) {
       if (!statements.length) return { success: true }
-      const pool = poolForQuery(childDb)
       // One checked-out client for the whole batch: a pool-routed sequence would
       // spread the statements across backends, so BEGIN/COMMIT couldn't bind them.
-      const client = await pool.connect()
+      const client = await clientFor(childDb)
       const entry = { pid: backendPid(client), secret: backendSecret(client), cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the client re-enters the pool (see query()).
@@ -538,8 +571,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
 
     async runDdl(statements, childDb = null) {
       if (!statements.length) return { success: true }
-      const pool = poolForQuery(childDb)
-      const client = await pool.connect()
+      const client = await clientFor(childDb)
       const entry = { pid: backendPid(client), secret: backendSecret(client), cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the client re-enters the pool (see query()).
@@ -669,7 +701,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       let client: pg.PoolClient | null = null
       const writer = openExportWriter(filePath, format, sqlTarget)
       try {
-        client = await poolForQuery(childDb).connect()
+        client = await clientFor(childDb)
         entry.pid = backendPid(client)
         entry.secret = backendSecret(client)
         if (entry.cancelRequested) throw new Error(t('query.cancelled'))
@@ -882,12 +914,11 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
     },
 
     async serverActivity(childDb = null) {
-      const pool = poolForQuery(childDb)
       // All three reads share one connection, sequentially. Running them in
       // parallel took three pooled connections, which both inflated the
       // connection gauge the panel is reporting and left the other two visible
       // in its own session list — pg_backend_pid() only excludes the one.
-      const client = await pool.connect()
+      const client = await clientFor(childDb)
       try {
         const [connections, stats, sessions] = [
           await client.query<{ used: number; max: number }>(

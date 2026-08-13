@@ -565,6 +565,32 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
+  it('survives a concurrent switch to another child mid-checkout', async () => {
+    // Only the database in use holds a long-lived pool, so resolving one
+    // retires the others. A caller that had resolved a pool but not yet issued
+    // against it used to find it closed the moment anyone resolved a different
+    // child — metadata reads racing a query run failed for a database that was
+    // perfectly reachable.
+    const driver = await connectDriver({ databaseMode: 'all' })
+    try {
+      const children = driver.children?.() ?? []
+      const other = children.find((child) => !child.inUse)?.name
+      const mine = children.find((child) => child.inUse)?.name
+      if (!other || !mine) return
+      const results = await Promise.allSettled([
+        driver.query('select 1 as a', [], mine),
+        driver.listTables(other),
+        driver.query('select 2 as a', [], mine),
+        driver.listTables(mine),
+        driver.listColumns(other),
+      ])
+      const failures = results.flatMap((r) => (r.status === 'rejected' ? [String(r.reason?.message ?? r.reason)] : []))
+      expect(failures).toEqual([])
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('reports allocated table and index sizes', async () => {
     const driver = await connectDriver()
     try {

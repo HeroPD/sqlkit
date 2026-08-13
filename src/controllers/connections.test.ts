@@ -193,10 +193,14 @@ describe('ConnectionsController metadata', () => {
 
     emit([status('db_b')])
     expect(controller.objects.p1).toBeUndefined()
-    expect(api.listTables).toHaveBeenCalledTimes(3)
+    // The child switch does not race the refresh already in flight: its read is
+    // held until that one lands, so the two never target different children at
+    // once and retire each other's connection pool.
+    expect(api.listTables).toHaveBeenCalledTimes(2)
 
     await resolveMetadata(1, 'fn_only_in_a_refreshed', null)
     expect(controller.objects.p1).toBeUndefined()
+    expect(api.listTables).toHaveBeenCalledTimes(3)
 
     await resolveMetadata(2, 'fn_only_in_b', 1)
     expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_b'])
@@ -238,6 +242,27 @@ describe('ConnectionsController metadata', () => {
     // Absent rather than [], so the explorer can drop its size column instead
     // of ruling a dash down every row.
     expect(controller.tableStats.p1).toBeUndefined()
+  })
+})
+
+describe('ConnectionsController metadata concurrency', () => {
+  it('runs one metadata read at a time, collapsing the rest into a single follow-up', async () => {
+    const { api, emit } = stubSqlkit()
+    const controller = new ConnectionsController(host())
+    controller.hostConnected()
+
+    emit([status('db_a')])
+    expect(api.listTables).toHaveBeenCalledTimes(1)
+
+    // A driver keeps a pool for the child in use and retires the others, so two
+    // loads for different children retire each other's pool and both come back
+    // "Pool is closed" for a database that has tables. Requests made mid-read
+    // wait rather than racing.
+    controller.refresh('p1')
+    controller.refresh('p1')
+    controller.refresh('p1')
+    await Promise.resolve()
+    expect(api.listTables).toHaveBeenCalledTimes(1)
   })
 })
 

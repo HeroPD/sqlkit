@@ -39,6 +39,16 @@ export class ConnectionsController implements ReactiveController {
   private statsKey: Record<string, string> = {}
   /** In-flight connect per profile, so two cold tabs don't open two tunnels/pools. */
   private connecting = new Map<string, Promise<ConnectResult>>()
+  /**
+   * Metadata reads run one at a time per profile, with at most one more queued.
+   *
+   * A driver keeps a pool for the child in use and retires the others, so two
+   * loads for different children retire each other's pool and both come back
+   * "Pool is closed" — for a database that has tables. Overlapping loads were
+   * never wanted anyway: only the newest one's answer is kept.
+   */
+  private loading = new Set<string>()
+  private queued = new Set<string>()
 
   constructor(host: ReactiveControllerHost) {
     this.host = host
@@ -108,7 +118,7 @@ export class ConnectionsController implements ReactiveController {
   /** Re-fetches a connected database's tables and columns. */
   refresh(profileId: string) {
     if (this.statuses[profileId]?.phase !== 'connected') return
-    void this.loadTables(profileId)
+    void this.queueLoad(profileId)
   }
 
   /** The open manual transaction on this connection, if any. */
@@ -138,9 +148,18 @@ export class ConnectionsController implements ReactiveController {
   async setActiveChild(profileId: string, database: string) {
     const result = await window.sqlkit.setActiveChildDb(profileId, database)
     if (result.success) {
-      this.invalidateMetadata(profileId)
-      this.host.requestUpdate()
-      void this.loadTables(profileId)
+      // Same reason as runConnect: the status naming the new in-use child is a
+      // separate push. A caller that reads inUseChild() right after this
+      // resolves — connect does, to pick the context — would otherwise pick the
+      // database we just switched away from, and then disagree with the driver.
+      this.apply(await window.sqlkit.getConnectionStatuses())
+      // apply() drops and refetches this profile's metadata when it sees the
+      // child change; force it only when the status did not report one.
+      if (profileId in this.tables) {
+        this.invalidateMetadata(profileId)
+        this.host.requestUpdate()
+        void this.queueLoad(profileId)
+      }
     }
     return result
   }
@@ -190,10 +209,29 @@ export class ConnectionsController implements ReactiveController {
     this.objects = objects
     for (const status of statuses) {
       if (status.phase === 'connected' && !(status.profileId in this.tables)) {
-        void this.loadTables(status.profileId)
+        void this.queueLoad(status.profileId)
       }
     }
     this.host.requestUpdate()
+  }
+
+  /**
+   * Runs a metadata load, or marks one to follow if this profile is mid-read.
+   * The follow-up re-reads whatever child is current when it starts, so a
+   * request made during a load is never simply dropped.
+   */
+  private async queueLoad(profileId: string) {
+    if (this.loading.has(profileId)) {
+      this.queued.add(profileId)
+      return
+    }
+    this.loading.add(profileId)
+    try {
+      await this.loadTables(profileId)
+    } finally {
+      this.loading.delete(profileId)
+      if (this.queued.delete(profileId)) void this.queueLoad(profileId)
+    }
   }
 
   private async loadTables(profileId: string) {

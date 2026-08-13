@@ -517,6 +517,35 @@ DELIMITER ;`)
     }
   })
 
+  it('survives a concurrent switch to another child mid-checkout', async () => {
+    // Only the database in use holds a pool, so resolving one retires the
+    // others. A caller that had resolved a pool but not yet checked out used to
+    // find it closed the moment anyone resolved a different child — a query run
+    // racing the explorer's metadata reads failed with "Pool is closed" for a
+    // database that was perfectly reachable.
+    const driver = await connectDriver({ database: '', databaseMode: 'all' })
+    try {
+      const children = driver.children?.() ?? []
+      const other = children.find((child) => !child.inUse)?.name
+      const mine = children.find((child) => child.inUse)!.name
+      if (!other) return
+      const results = await Promise.allSettled([
+        driver.query('select 1 as a', [], mine),
+        driver.listTables(other),
+        driver.query('select 2 as a', [], mine),
+        driver.listTables(mine),
+        driver.query('select 3 as a', [], other),
+      ])
+      const closed = results.filter(
+        (r) => r.status === 'rejected' && /pool is closed/i.test(String(r.reason?.message ?? r.reason)),
+      )
+      expect(closed).toEqual([])
+      expect(results.every((r) => r.status === 'fulfilled')).toBe(true)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('reports estimated table and index sizes', async () => {
     const driver = await connectDriver()
     try {

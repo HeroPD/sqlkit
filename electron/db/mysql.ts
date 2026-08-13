@@ -222,6 +222,40 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     return poolFor(childDb)
   }
 
+  /**
+   * The refusals poolForQuery would raise, without resolving a pool — so a
+   * caller can validate up front without triggering a switch it is not ready
+   * to use yet.
+   */
+  const assertQueryable = (childDb?: string | null) => {
+    if (!pools) throw new Error(t('connection.notConnected'))
+    if (childDb && !childNames.includes(childDb)) {
+      throw new Error(t('connection.databaseUnavailable', { database: childDb }))
+    }
+    const database = childDb ?? active
+    if (pin && database !== pin.database) {
+      throw new Error(t('query.transactionOtherDatabase', { database: pin.database }))
+    }
+  }
+
+  /**
+   * Resolves a pool and checks a connection out of it as one indivisible step.
+   *
+   * Only the database in use holds a pool, so resolving one retires the others.
+   * A caller that resolved a pool and had not yet checked out would find it
+   * closed the moment anyone else resolved a different child — failing with
+   * "Pool is closed" having done nothing wrong, which is what a query run
+   * racing the explorer's metadata reads used to hit. Serialising the pair
+   * makes a switch atomic with respect to everyone about to use one: once a
+   * connection is checked out, end() drains it rather than severing it.
+   */
+  let poolGate: Promise<unknown> = Promise.resolve()
+  const checkoutFor = (childDb?: string | null): Promise<mysql.PoolConnection> => {
+    const next = poolGate.then(() => acquire(poolForQuery(childDb)))
+    poolGate = next.then(() => undefined, () => undefined)
+    return next
+  }
+
   // mysql2's pool has no acquire timeout (pg bounds the wait with
   // connectionTimeoutMillis, node-mssql through tarn's acquireTimeoutMillis), so
   // four long user queries would queue every metadata read behind them forever —
@@ -270,7 +304,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   // Metadata helper: object rows, cast to the query's concrete shape. Checked out
   // explicitly (not pool.query) so the bounded acquire above applies.
   const metaRows = async <T>(sql: string, params: unknown[] = [], childDb?: string | null): Promise<T[]> => {
-    const conn = await acquire(poolForQuery(childDb))
+    const conn = await checkoutFor(childDb)
     try {
       const [rows] = await conn.query(sql, params)
       return rows as unknown as T[]
@@ -352,8 +386,10 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const started = performance.now()
       const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode })
       // Database-mismatch guard, before the entry joins `running` so a
-      // refusal can't leak a phantom cancel target.
-      const pool = poolForQuery(childDb)
+      // refusal can't leak a phantom cancel target. Validated without resolving
+      // a pool: the switch happens at checkout, so nothing is retired for a run
+      // that may still be refused or cancelled before it gets that far.
+      assertQueryable(childDb)
       // Checked out manually so the thread id is known while the statement
       // runs and cancel() has a KILL QUERY target.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
@@ -420,7 +456,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         conn = null
       }
       try {
-        conn = await acquire(pool)
+        conn = await checkoutFor(childDb)
         const raw = rawOf(conn)
         entry.threadId = raw.threadId ?? null
         if (entry.cancelRequested) {
@@ -460,7 +496,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       if (!statements.length) return { success: true }
       // One checked-out connection for the whole batch so the transaction binds
       // every statement.
-      const conn = await acquire(poolForQuery(childDb))
+      const conn = await checkoutFor(childDb)
       const entry = { threadId: rawOf(conn).threadId ?? null, cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the connection re-enters the pool (see query()).
@@ -539,7 +575,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       if (!statements.length) return { success: true }
       // No transaction: MySQL DDL commits implicitly, so statements run one by
       // one and a failure reports how far it got rather than rolling back.
-      const conn = await acquire(poolForQuery(childDb))
+      const conn = await checkoutFor(childDb)
       const entry = { threadId: rawOf(conn).threadId ?? null, cancelRequested: false }
       running.add(entry)
       // Leaves `running` before the connection re-enters the pool (see query()).
@@ -647,7 +683,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       let conn: mysql.PoolConnection | null = null
       const writer = openExportWriter(filePath, format, sqlTarget)
       try {
-        conn = await acquire(poolForQuery(childDb))
+        conn = await checkoutFor(childDb)
         entry.threadId = rawOf(conn).threadId ?? null
         if (entry.cancelRequested) throw new Error(t('query.cancelled'))
         await streamMysqlExport(rawOf(conn), plan.batches[0]!, plan.params, writer)

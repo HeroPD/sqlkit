@@ -272,6 +272,36 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   // shares. Metadata reads keep using the long-lived pools.
   const openUserPool = async (childDb?: string | null) => makePool(databaseForQuery(childDb), 1).connect()
 
+  /**
+   * Resolving a long-lived pool retires the others, so a caller that resolved
+   * one and had not yet issued against it would find it closed the moment
+   * anyone resolved a different child — failing having done nothing wrong.
+   * These two run the resolve and the first use as one indivisible step, which
+   * makes a switch atomic with respect to everyone about to use a pool; once a
+   * connection is out or a request is issued, close() drains rather than severs.
+   *
+   * The throwaway pools behind openUserPool need none of this: they are never
+   * in `pools`, so a switch neither retires them nor is delayed by them.
+   */
+  let poolGate: Promise<unknown> = Promise.resolve()
+  const gated = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = poolGate.then(run)
+    poolGate = next.then(() => undefined, () => undefined)
+    return next
+  }
+
+  // Returns the pool alongside the connection: releasing and adopting a pin
+  // both need the pool it actually came from, which a later resolve might no
+  // longer be.
+  const checkoutFor = (childDb?: string | null): Promise<{ pool: AcquirablePool; conn: TediousConnection }> =>
+    gated(async () => {
+      const pool = (await poolForQuery(childDb)) as AcquirablePool
+      return { pool, conn: await acquireConnection(pool) }
+    })
+
+  const requestOn = <T>(childDb: string | null | undefined, run: (request: sql.Request) => Promise<T>): Promise<T> =>
+    gated(async () => run((await poolForQuery(childDb)).request()))
+
   const bind = (request: sql.Request, params: unknown[]) => {
     params.forEach((value, index) => request.input(`p${index + 1}`, toBindable(value)))
     return request
@@ -295,8 +325,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       const rows = await run
       if (rows) return rows
     }
-    const pool = await poolForQuery(childDb)
-    const result = await bind(pool.request(), params).query<T>(sqlText)
+    const result = await requestOn(childDb, (request) => bind(request, params).query<T>(sqlText))
     return result.recordset
   }
 
@@ -496,10 +525,14 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         }
 
         const database = databaseForQuery(childDb)
-        const pool = (await poolForQuery(childDb)) as AcquirablePool
         let conn: TediousConnection | null = null
+        // Null until the checkout lands, so a failure there still runs the
+        // catch and finally below rather than escaping them.
+        let pool: AcquirablePool | null = null
         try {
-          conn = await acquireConnection(pool)
+          const checkout = await checkoutFor(childDb)
+          pool = checkout.pool
+          conn = checkout.conn
           const active = conn
           entry.tediousCancel = () => active.cancel()
           if (entry.cancelRequested) throw new Error(t('query.cancelled'))
@@ -540,7 +573,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           // XACT_ABORT): pin it so the user can roll it back — but never a
           // dead connection (inTransaction goes stale on socket death), and
           // never over an existing pin (the finally rolls this one back).
-          if (conn && conn.inTransaction && !conn.closed && !pin) {
+          if (pool && conn && conn.inTransaction && !conn.closed && !pin) {
             const adopted = conn
             conn = null
             adoptPin(adopted, pool, database)
@@ -551,7 +584,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           // Reset on release, not before use: a failed script's open transaction
           // rolls back now instead of holding locks while the connection idles,
           // and metadata reads borrowing from this pool always start clean.
-          if (conn) await releaseClean(pool, conn)
+          if (pool && conn) await releaseClean(pool, conn)
         }
       }
 
@@ -729,10 +762,9 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async createDatabase(name, options) {
-      const pool = await poolForQuery()
       const collate = options?.collation ? ` collate ${sqlOptionToken(options.collation)}` : ''
       // CREATE DATABASE refuses transactions and sp_executesql; plain batch.
-      await pool.request().batch(`create database ${dialect.quoteIdent(name)}${collate}`)
+      await requestOn(null, (request) => request.batch(`create database ${dialect.quoteIdent(name)}${collate}`))
       // Browsable straight away; its pool opens when the user switches to it.
       if (profile.databaseMode === 'all' && pools && !childNames.includes(name)) {
         childNames = [...childNames, name].sort()
@@ -751,8 +783,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       }
       // A refused drop (e.g. other sessions) propagates: the database stays in
       // childNames, so it remains browsable and re-opens its pool on demand.
-      const activeDb = await poolForQuery()
-      await activeDb.request().batch(`drop database ${dialect.quoteIdent(name)}`)
+      await requestOn(null, (request) => request.batch(`drop database ${dialect.quoteIdent(name)}`))
       childNames = childNames.filter((child) => child !== name)
     },
 

@@ -1487,3 +1487,187 @@ describe('WorkbenchScreen drop of the active child database', () => {
     expect(workbench._ctx.tabs).toEqual([])
   })
 })
+
+describe('WorkbenchScreen titlebar connection button', () => {
+  type ConnectionInternals = {
+    _config: { connections: ConnectionProfile[] }
+    _live: {
+      statuses: unknown
+      phase(profileId: string): string | null
+      transaction(profileId: string): { childDb: string } | undefined
+      disconnect: ReturnType<typeof vi.fn>
+      connect: ReturnType<typeof vi.fn>
+    }
+    _dialogs: { confirm: { detail: string; action: () => void } | null }
+    _onTitlebarConnection(): void
+  }
+
+  const setup = (phase: string | null, transaction?: { childDb: string }) => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as ConnectionInternals
+    workbench._config.connections = [profile]
+    workbench._live.phase = () => phase
+    workbench._live.transaction = () => transaction
+    workbench._live.disconnect = vi.fn(() => Promise.resolve())
+    workbench._live.connect = vi.fn(() => Promise.resolve({ success: false, error: 'nope' }))
+    ;(screen as never as { _ctx: { switchInstance(a: string, b: string): void } })._ctx.switchInstance(profile.id, 'db_a')
+    return workbench
+  }
+
+  it('disconnects straight away when no transaction is open', () => {
+    const workbench = setup('connected')
+
+    workbench._onTitlebarConnection()
+
+    expect(workbench._live.disconnect).toHaveBeenCalledWith('p1')
+    expect(workbench._dialogs.confirm).toBeNull()
+  })
+
+  it('names the transaction it would roll back before disconnecting', () => {
+    const workbench = setup('connected', { childDb: 'db_a' })
+
+    workbench._onTitlebarConnection()
+
+    // Two pixels from Run: an open transaction must not die to one stray click.
+    expect(workbench._live.disconnect).not.toHaveBeenCalled()
+    expect(workbench._dialogs.confirm?.detail).toContain('db_a')
+
+    workbench._dialogs.confirm!.action()
+    expect(workbench._live.disconnect).toHaveBeenCalledWith('p1')
+  })
+
+  it('connects when the named database is not live', () => {
+    const workbench = setup(null)
+
+    workbench._onTitlebarConnection()
+
+    expect(workbench._live.connect).toHaveBeenCalled()
+    expect(workbench._live.disconnect).not.toHaveBeenCalled()
+  })
+
+  it('treats an errored connection as something to connect, not disconnect', () => {
+    const workbench = setup('error')
+
+    workbench._onTitlebarConnection()
+
+    expect(workbench._live.connect).toHaveBeenCalled()
+    expect(workbench._live.disconnect).not.toHaveBeenCalled()
+  })
+})
+
+describe('WorkbenchScreen connect entrance', () => {
+  const allDatabases: ConnectionProfile = { ...profile, databaseMode: 'all', database: 'app' }
+
+  it('lands on the child it switched to, not the one the driver started on', async () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(a: string | null, b: string | null): void; activeChildDb: string | null }
+      _live: { statuses: Record<string, unknown> }
+      _connectProfile(id: string): Promise<void>
+    }
+    // The driver opens on db_a; the workspace restored db_b as the context.
+    let inUse = 'db_a'
+    const statuses = () => [
+      { profileId: 'p1', phase: 'connected', children: [
+        { name: 'db_a', inUse: inUse === 'db_a' },
+        { name: 'db_b', inUse: inUse === 'db_b' },
+      ] },
+    ]
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
+      connectDatabase: vi.fn(() => Promise.resolve({ success: true })),
+      getConnectionStatuses: vi.fn(() => Promise.resolve(statuses())),
+      // The manager moves the pin, and the next status read reports it.
+      setActiveChildDb: vi.fn((_id: string, database: string) => {
+        inUse = database
+        return Promise.resolve({ success: true })
+      }),
+      listTables: vi.fn(() => Promise.resolve({ success: true, tables: [] })),
+      listColumns: vi.fn(() => Promise.resolve({ success: true, columns: [] })),
+      listObjects: vi.fn(() => Promise.resolve({ success: true, objects: { functions: [], types: [] } })),
+      listTableStats: vi.fn(() => Promise.resolve({ success: true, stats: [] })),
+    }
+    workbench._config.connections = [allDatabases]
+    workbench._ctx.switchInstance('p1', 'db_b')
+
+    await workbench._connectProfile('p1')
+
+    // Reading the in-use child before the switch's status landed used to leave
+    // the context on db_a while the driver sat on db_b — the explorer then
+    // judged its metadata stale and showed nothing at all.
+    expect(workbench._ctx.activeChildDb).toBe('db_b')
+  })
+})
+
+describe('WorkbenchScreen connect lands in the remembered database', () => {
+  // Measured against the live MySQL server: an all-databases connection opens
+  // on its own pick (app_db, empty) rather than the child last worked in
+  // (testsqlkit, 12 tables).
+  const mysqlAll = {
+    ...profile, engine: 'mysql', databaseMode: 'all', database: '', lastChildDb: 'testsqlkit',
+  } as ConnectionProfile
+
+  const setup = (reportChildrenAtConnect: boolean) => {
+    let inUse = 'app_db'
+    let reported = reportChildrenAtConnect
+    const names = ['app_db', 'test123', 'testsqlkit']
+    const tableCount: Record<string, number> = { app_db: 0, test123: 0, testsqlkit: 12 }
+    const listTables = vi.fn((_id: string, child: string | null) =>
+      Promise.resolve({
+        success: true,
+        tables: Array.from({ length: tableCount[child ?? inUse] ?? 0 }, (_, i) => ({ schema: null, name: `t${i}`, kind: 'table' })),
+      }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
+      connectDatabase: vi.fn(() => Promise.resolve({ success: true })),
+      getConnectionStatuses: vi.fn(() => Promise.resolve([{
+        profileId: 'p1',
+        phase: 'connected',
+        children: reported ? names.map((name) => ({ name, inUse: name === inUse })) : [],
+      }])),
+      setActiveChildDb: vi.fn((_id: string, database: string) => {
+        inUse = database
+        reported = true
+        return Promise.resolve({ success: true })
+      }),
+      listTables,
+      listColumns: vi.fn(() => Promise.resolve({ success: true, columns: [] })),
+      listObjects: vi.fn(() => Promise.resolve({ success: true, objects: { functions: [], types: [] } })),
+      listTableStats: vi.fn(() => Promise.resolve({ success: true, stats: [] })),
+    }
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(a: string | null, b: string | null): void; activeChildDb: string | null }
+      _live: { tables: Record<string, unknown[]> }
+      _connectProfile(id: string): Promise<void>
+    }
+    workbench._config.connections = [mysqlAll]
+    workbench._ctx.switchInstance('p1', 'testsqlkit')
+    return { workbench, driverChild: () => inUse }
+  }
+
+  const settle = async () => { for (let i = 0; i < 60; i += 1) await Promise.resolve() }
+
+  it('moves the driver off the database it opened itself', async () => {
+    const { workbench, driverChild } = setup(true)
+    await workbench._connectProfile('p1')
+    await settle()
+    expect(driverChild()).toBe('testsqlkit')
+    expect(workbench._ctx.activeChildDb).toBe('testsqlkit')
+    expect(workbench._live.tables.p1).toHaveLength(12)
+  })
+
+  it('still aligns when the status has not reported children yet', async () => {
+    // The empty child list used to read as "nothing to align", so the driver
+    // stayed on app_db while the titlebar kept naming testsqlkit — and the
+    // explorer showed "No tables" for a database holding twelve.
+    const { workbench, driverChild } = setup(false)
+    await workbench._connectProfile('p1')
+    await settle()
+    expect(driverChild()).toBe('testsqlkit')
+    expect(workbench._ctx.activeChildDb).toBe('testsqlkit')
+    expect(workbench._live.tables.p1).toHaveLength(12)
+  })
+})

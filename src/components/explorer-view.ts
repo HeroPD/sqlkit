@@ -496,8 +496,10 @@ export class ExplorerView extends LitElement {
     if (this.awaitingDatabaseSelection) {
       return html`<p class="muted hint">${t('explorer.selectDatabase', { shortcut: mod('K') })}</p>`
     }
+    // Stating the fact, not pointing anywhere: the titlebar's connection
+    // button is the verb, and it is visible from every view.
     if (this.tables === null || !this.profileId) {
-      return html`<p class="muted hint">${t('explorer.connectDatabase', { shortcut: mod('K') })}</p>`
+      return html`<p class="muted hint">${t('explorer.notConnected')}</p>`
     }
     if (!this.tables.length) return html`<p class="muted hint">${t('explorer.noTables')}</p>`
     const profileId = this.profileId

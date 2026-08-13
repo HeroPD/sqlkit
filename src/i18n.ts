@@ -198,7 +198,7 @@ const enUS = {
   'explorer.dropObject': 'Drop {kind}…',
   'explorer.inspect': 'Inspect',
   'explorer.selectDatabase': 'Select a database to see its tables ({shortcut}).',
-  'explorer.connectDatabase': 'Connect a database to see tables ({shortcut}).',
+  'explorer.notConnected': 'Not connected.',
   'explorer.noTables': 'No tables.',
   'explorer.tableOptions': 'Table options',
   'explorer.sortName': 'Sort by name',
@@ -719,6 +719,9 @@ const enUS = {
   'connection.sqlServerCaUnsupported': 'SQL Server does not support CA-only verification; use Verify full to verify the certificate and hostname.',
   'connection.notConnected': 'Not connected',
   'connection.tableStatsUnsupported': 'This engine does not report table sizes',
+  'connection.disconnectTransactionTitle': 'Disconnect {name}?',
+  'connection.disconnectTransactionDetail':
+    'An open transaction on {database} will be rolled back. Uncommitted changes are lost.',
   'query.cancelled': 'Query cancelled.',
   'query.saveCancelled': 'Save cancelled.',
   'database.cannotDropCurrent': 'Cannot drop the database currently in use — switch to another one first.',
