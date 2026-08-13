@@ -25,6 +25,7 @@ import type {
   SessionEndMode,
   SessionEndResult,
   TableRef,
+  TableStatsResult,
   TablesResult,
   TestConnectionResult,
 } from '../../src/electron'
@@ -482,6 +483,20 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     }
   }
 
+  async function listTableStats(profileId: string, childDb: string | null = null): Promise<TableStatsResult> {
+    const driver = connectedDriver(profileId)
+    if (!driver) return { success: false, error: t('connection.notConnected') }
+    // Reported as a failure rather than as no tables: an engine that cannot
+    // size its tables and a database whose tables are all empty must not look
+    // the same to the explorer, which drops its size column for the first.
+    if (!driver.listTableStats) return { success: false, error: t('connection.tableStatsUnsupported') }
+    try {
+      return { success: true, stats: await driver.listTableStats(childDb) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
   async function listObjects(profileId: string, childDb: string | null = null): Promise<ObjectsResult> {
     const driver = connectedDriver(profileId)
     if (!driver) return { success: false, error: t('connection.notConnected') }
@@ -590,6 +605,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     closeSession,
     cancelQuery,
     listTables,
+    listTableStats,
     listColumns,
     listObjects,
     inspectTable,

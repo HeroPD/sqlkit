@@ -4,6 +4,8 @@ import { icons, controls, scrollbars, typography } from '../shared-styles'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import type { ExplainFlavor } from '../sql-explain'
+import type { Engine } from '../electron'
+import { isSingleStatement } from '../sql-statements'
 import { formatInteger, formatTime, rowWord, t } from '../i18n'
 
 // One run in the query history. Runtime-only, like the reference app: capped
@@ -29,6 +31,10 @@ export class HistoryView extends LitElement {
   @property({ attribute: false })
   flavors: ExplainFlavor[] = []
 
+  /** The context's engine, which decides how an entry's SQL splits. */
+  @property({ attribute: false })
+  engine: Engine | null = null
+
   @state()
   private _menu: { x: number; y: number; item: HistoryItem } | null = null
 
@@ -47,11 +53,15 @@ export class HistoryView extends LitElement {
     const menu = this._menu
     if (!menu) return ''
     // The analyze flavor really runs the query, so it only appears where the
-    // server has a form of it; a disconnected context offers neither.
+    // server has a form of it; a disconnected context offers neither. A
+    // multi-statement entry offers neither either: EXPLAIN wraps the first
+    // statement and the rest of the script would simply run.
+    const plannable = isSingleStatement(menu.item.sql, this.engine ?? undefined)
+    const flavors = plannable ? this.flavors : []
     const items: MenuItem[] = [
-      ...(this.flavors.includes('plan') ? [{ id: 'explain', label: t('history.explain') }] : []),
-      ...(this.flavors.includes('analyze') ? [{ id: 'explain-analyze', label: t('history.explainAnalyze') }] : []),
-      { id: 'copy-sql', label: t('history.copySql'), separatorBefore: this.flavors.length > 0 },
+      ...(flavors.includes('plan') ? [{ id: 'explain', label: t('history.explain') }] : []),
+      ...(flavors.includes('analyze') ? [{ id: 'explain-analyze', label: t('history.explainAnalyze') }] : []),
+      { id: 'copy-sql', label: t('history.copySql'), separatorBefore: flavors.length > 0 },
     ]
     return html`
       <context-menu

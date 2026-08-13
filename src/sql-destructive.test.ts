@@ -134,6 +134,24 @@ describe('analyzeDestructive', () => {
     expect(analyzeDestructive(merge, 'sqlserver')).toEqual([])
   })
 
+  it('judges the statement MariaDB ANALYZE runs, not the wrapper', () => {
+    // MariaDB's ANALYZE really executes what it wraps, unlike plain EXPLAIN.
+    expect(analyzeDestructive('analyze delete from users', 'mysql')).toEqual(['deleteAll'])
+    expect(analyzeDestructive('analyze format=json delete from users', 'mysql')).toEqual(['deleteAll'])
+    expect(analyzeDestructive('analyze update users set seen = 1', 'mysql')).toEqual(['updateAll'])
+    expect(analyzeDestructive('explain delete from users', 'mysql')).toEqual([])
+    // The statistics statements that merely share the keyword.
+    expect(analyzeDestructive('analyze table users', 'mysql')).toEqual([])
+    expect(analyzeDestructive('analyze users', 'postgresql')).toEqual([])
+  })
+
+  it('reads the SHOWPLAN switch only on the engine that has one', () => {
+    // Elsewhere that SET spares nothing, so honouring it would disarm the preflight.
+    expect(analyzeDestructive('set showplan_all on; delete from users', 'postgresql')).toEqual(['deleteAll'])
+    expect(analyzeDestructive('set showplan_all on; delete from users', 'mysql')).toEqual(['deleteAll'])
+    expect(analyzeDestructive('set showplan_all on; delete from users', 'sqlite')).toEqual(['deleteAll'])
+  })
+
   it('does not mistake an identifier or variable for a keyword', () => {
     expect(analyzeDestructive('select @delete from t', 'sqlserver')).toEqual([])
     expect(analyzeDestructive('select dropped from t')).toEqual([])

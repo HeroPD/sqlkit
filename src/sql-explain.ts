@@ -4,9 +4,15 @@ import type { Engine } from './electron'
  * `analyze` runs it and reports what the server actually did. */
 export type ExplainFlavor = 'plan' | 'analyze'
 
+/** MariaDB 10+ prepends a fake `5.5.5-` to version() so pre-10 clients still
+ * parse it. It is not the server's version, and taking it would read every
+ * modern MariaDB as 5.5.5. */
+const MARIADB_COMPAT_PREFIX = /\b5\.5\.5-(?=\d)/
+
 /** Leading version numbers of a serverVersion banner ("MySQL 8.0.18" → [8, 0, 18]). */
 const versionParts = (serverVersion: string): number[] =>
-  (/(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(serverVersion)?.slice(1) ?? []).map((part) => Number(part ?? 0))
+  (/(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(serverVersion.replace(MARIADB_COMPAT_PREFIX, ''))?.slice(1) ?? [])
+    .map((part) => Number(part ?? 0))
 
 const atLeast = (serverVersion: string, ...minimum: number[]): boolean => {
   const parts = versionParts(serverVersion)
@@ -49,12 +55,12 @@ const trimStatement = (sql: string) => sql.trim().replace(/;+\s*$/, '')
 /** SQL Server has no EXPLAIN: a plan comes from a session SET that makes the
  * statements after it report themselves, so each flavor is a small script.
  *
- * SET SHOWPLAN_ALL has to own its batch, hence the GO, and the restoring SET is
- * left out — a batch that returns nothing still counts as a result set, and the
- * plan has to be the run's last one or the results panel opens on an empty grid.
- * Releasing the pooled connection resets it (sp_reset_connection), which clears
- * the switch; a connection pinned by a manual transaction is never reset, so
- * there the script restores the session itself.
+ * SET SHOWPLAN_ALL has to own its batch, hence the GO. Releasing the pooled
+ * connection resets it (sp_reset_connection), which clears the switch; a
+ * connection pinned by a manual transaction is never reset, so there the script
+ * restores the session itself. Each SET batch returns nothing, which would
+ * otherwise count as a result set and leave the run ending on an empty grid —
+ * the driver drops those columnless sets, so the plan stays the run's last one.
  *
  * SET STATISTICS PROFILE carries no batch rule, so the analyze flavor turns
  * itself back off inside its single batch — which is also what lets it run with

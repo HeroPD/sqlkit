@@ -42,6 +42,13 @@ const STATEMENT_HEADS = new Set([
   'select', 'show', 'table', 'truncate', 'update', 'upsert', 'values', 'with',
 ])
 
+/**
+ * What MariaDB's bare ANALYZE may wrap. Narrower than STATEMENT_HEADS on
+ * purpose: ANALYZE TABLE (MySQL) and ANALYZE <table> (Postgres) maintain
+ * statistics and run no wrapped statement, so they must not be unwrapped.
+ */
+const ANALYZE_BODIES = new Set(['delete', 'insert', 'replace', 'select', 'update', 'with'])
+
 type Word = { text: string; depth: number }
 
 /**
@@ -115,7 +122,14 @@ function dropObject(scan: Word[], index: number): string {
  * a parenthesised list (EXPLAIN (ANALYZE, BUFFERS) …), so the wrapped statement
  * is found by its own head keyword rather than by enumerating option names.
  */
-function explainBody(scan: Word[]): number {
+function explainBody(scan: Word[], engine?: Engine): number {
+  // MariaDB has no EXPLAIN ANALYZE: it spells the running form `ANALYZE
+  // <statement>` (with an optional FORMAT=JSON), and that really runs the write
+  // it wraps — so it is judged by the wrapped statement, like EXPLAIN ANALYZE.
+  if (engine === 'mysql' && scan[0]?.text === 'analyze') {
+    const index = scan[1]?.text === 'format' ? 3 : 1
+    return ANALYZE_BODIES.has(scan[index]?.text ?? '') ? index : 0
+  }
   if (scan[0]?.text !== 'explain') return 0
   let analyze = false
   for (let index = 1; index < scan.length; index += 1) {
@@ -128,7 +142,7 @@ function explainBody(scan: Word[]): number {
 
 function classify(masked: string, engine?: Engine): DestructiveKind[] {
   const all = words(masked)
-  const scan = all.slice(explainBody(all))
+  const scan = all.slice(explainBody(all, engine))
   const head = scan[0]
   if (!head) return []
 
@@ -219,11 +233,13 @@ export function analyzeDestructive(sql: string, engine?: Engine, mode?: SqlModeF
   // the statements in the next, which the executor will still run.
   const batches = engine === 'sqlserver' ? scanGoBatches(sql).map((batch) => batch.sql).filter(Boolean) : [sql]
   // Carried across batches, because the switch is session state: the SET owns
-  // its batch, and the statement it spares is in the next one.
+  // its batch, and the statement it spares is in the next one. SHOWPLAN is
+  // T-SQL only — on every other engine that SET is not a statement that spares
+  // anything, so reading one there would silently disarm the whole preflight.
   let compiledOnly = false
   for (const batch of batches) {
     for (const statement of splitScript(batch, engine, mode).statements) {
-      const showplan = showplanSwitch(statement.masked)
+      const showplan = engine === 'sqlserver' ? showplanSwitch(statement.masked) : undefined
       if (showplan) compiledOnly = showplan === 'on'
       else if (!compiledOnly) for (const kind of classify(statement.masked, engine)) found.add(kind)
     }

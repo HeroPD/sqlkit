@@ -5,12 +5,13 @@ import path from 'node:path'
 import net from 'node:net'
 import tls from 'node:tls'
 import type { ConnectionOptions } from 'node:tls'
-import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef, TableStat } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
+import { byteCount } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -74,6 +75,25 @@ const clientSocket = (client: pg.PoolClient): { pause(): void; resume(): void } 
 // 'T' in transaction, 'E' failed). node-postgres records it but doesn't type it.
 const txStatus = (client: pg.PoolClient): string | null =>
   (client as pg.PoolClient & { _txStatus?: string | null })._txStatus ?? null
+
+/** What the explorer lists: ordinary and partitioned tables, views, materialized
+ * views, foreign tables. information_schema.tables would miss matviews entirely. */
+const LISTED_RELKINDS = `'r', 'p', 'v', 'm', 'f'`
+
+/** Of those, the ones that occupy storage: a view has none of its own. */
+const SIZED_RELKINDS = `'r', 'p', 'm'`
+
+/**
+ * The relation scope every listing shares, so tables, columns and sizes cannot
+ * drift apart. Assumes pg_class as `c` joined to its pg_namespace as `n`. An
+ * individual partition is left out — its parent stands for the whole set, and
+ * counting both would double every partitioned table.
+ */
+const userRelations = (relkinds: string) =>
+  `c.relkind in (${relkinds})
+           and not coalesce(c.relispartition, false)
+           and n.nspname !~ '^pg_'
+           and n.nspname <> 'information_schema'`
 
 export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpoint, events: DriverEvents): Driver {
   let pools: Map<string, pg.Pool> | null = null
@@ -690,10 +710,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         `select n.nspname as table_schema, c.relname as table_name, c.relkind as relkind
          from pg_catalog.pg_class c
          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-         where c.relkind in ('r', 'p', 'v', 'm', 'f')
-           and not coalesce(c.relispartition, false)
-           and n.nspname !~ '^pg_'
-           and n.nspname <> 'information_schema'
+         where ${userRelations(LISTED_RELKINDS)}
          order by table_schema, table_name`,
       )
       const kinds: Record<string, TableRef['kind']> = { r: 'table', p: 'table', v: 'view', m: 'matview', f: 'foreign' }
@@ -704,6 +721,28 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
           kind: kinds[row.relkind] ?? 'table',
         }),
       )
+    },
+
+    async listTableStats(childDb = null) {
+      const result = await poolForQuery(childDb).query(
+        `select n.nspname as table_schema, c.relname as table_name,
+                case when c.relkind = 'p' then
+                  (select coalesce(sum(pg_catalog.pg_total_relation_size(tree.relid)), 0)
+                   from pg_catalog.pg_partition_tree(c.oid) tree)
+                else pg_catalog.pg_total_relation_size(c.oid)
+                end::text as total_bytes
+         from pg_catalog.pg_class c
+         join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+         where ${userRelations(SIZED_RELKINDS)}
+         order by table_schema, table_name`,
+      )
+      return result.rows.flatMap((row: { table_schema: string; table_name: string; total_bytes: string | null }) => {
+        // pg_total_relation_size() answers NULL for a relation dropped between
+        // the catalog scan and the size call; Number(null) is 0, which would
+        // report a live table as empty rather than as unmeasured.
+        const totalBytes = byteCount(row.total_bytes)
+        return totalBytes === null ? [] : [{ schema: row.table_schema, name: row.table_name, totalBytes } satisfies TableStat]
+      })
     },
 
     async listColumns(childDb = null) {
@@ -739,10 +778,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
            order by fk.conname
            limit 1
          ) ref on true
-         where c.relkind in ('r', 'p', 'v', 'm', 'f')
-           and not coalesce(c.relispartition, false)
-           and n.nspname !~ '^pg_'
-           and n.nspname <> 'information_schema'
+         where ${userRelations(LISTED_RELKINDS)}
            and a.attnum > 0
            and not a.attisdropped
          order by table_schema, table_name, a.attnum`,

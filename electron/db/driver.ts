@@ -18,6 +18,7 @@ import type {
   SessionEndMode,
   TableInspection,
   TableRef,
+  TableStat,
 } from '../../src/electron'
 import type { ExportFormat, SqlExportTarget } from '../../src/result-export'
 import type { Endpoint } from './transport'
@@ -85,6 +86,8 @@ export type Driver = {
   // contract as query(), so listings never silently follow a different child
   // than the one the caller asked for.
   listTables(childDb?: string | null): Promise<TableRef[]>
+  /** Allocated table data plus indexes; optional when the engine cannot report it reliably. */
+  listTableStats?(childDb?: string | null): Promise<TableStat[]>
   /** Columns of every listed table, in table order then column position. */
   listColumns(childDb?: string | null): Promise<ColumnRef[]>
   /** One table's structure: columns plus engine-specific sections. */

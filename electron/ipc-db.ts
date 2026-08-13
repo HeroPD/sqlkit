@@ -175,6 +175,8 @@ export function registerDbIpc(context: DbIpcContext) {
     manager(event).dropDatabase(stringValue(profileId, 'Profile id', 200), stringValue(name, 'Database name', 2_000)))
   ipcMain.handle('db:list-tables', (event, profileId: unknown, childDb: unknown) =>
     manager(event).listTables(stringValue(profileId, 'Profile id', 200), nullableStringValue(childDb, 'Database name', 2_000)))
+  ipcMain.handle('db:list-table-stats', (event, profileId: unknown, childDb: unknown) =>
+    manager(event).listTableStats(stringValue(profileId, 'Profile id', 200), nullableStringValue(childDb, 'Database name', 2_000)))
   ipcMain.handle('db:list-columns', (event, profileId: unknown, childDb: unknown) =>
     manager(event).listColumns(stringValue(profileId, 'Profile id', 200), nullableStringValue(childDb, 'Database name', 2_000)))
   ipcMain.handle('db:inspect-table', (event, profileId: unknown, childDb: unknown, table: unknown) =>

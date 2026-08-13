@@ -18,6 +18,7 @@ const internals = (view: ExplorerView) =>
     _tableColumns(table: TableRef): ColumnRef[] | null
     _onTableMenu(event: MouseEvent, table: TableRef): void
     _onTableMenuPick(id: string, table: TableRef): void
+    _tableSort: 'name' | 'size'
   }
 
 const table = (name: string, schema: string | null = 'public'): TableRef => ({ schema, name, kind: 'table' })
@@ -94,6 +95,73 @@ describe('ExplorerView database selection', () => {
 
     expect(view.shadowRoot?.textContent).toContain('Select a database to see its tables')
     expect(view.shadowRoot?.textContent).not.toContain('users')
+    view.remove()
+  })
+})
+
+describe('ExplorerView table sizes', () => {
+  it('shows total size labels and marks estimated catalog values', async () => {
+    const view = new ExplorerView()
+    view.profileId = 'p1'
+    view.tables = [table('users'), { ...table('active_users'), kind: 'view' }]
+    view.tableStats = [{ schema: 'public', name: 'users', totalBytes: 12.4 * 1_024 * 1_024, approximate: true }]
+    document.body.append(view)
+
+    await view.updateComplete
+
+    const sizes = [...view.shadowRoot!.querySelectorAll('.table-size')].map((node) => node.textContent)
+    expect(sizes).toEqual(['—', '~12.4 MB'])
+    expect(view.shadowRoot!.textContent).toContain('users')
+    view.remove()
+  })
+
+  it('drops the size column outright when the engine reports no sizes', async () => {
+    const view = new ExplorerView()
+    view.profileId = 'p1'
+    view.tables = [table('users')]
+    view.tableStats = null
+    document.body.append(view)
+
+    await view.updateComplete
+
+    // A column of nothing but dashes — SQLite, or a refused read — is worse
+    // than no column, and the size sort would have nothing to order by.
+    expect(view.shadowRoot!.querySelector('.table-size')).toBeNull()
+    expect(view.shadowRoot!.textContent).toContain('users')
+    view.remove()
+  })
+
+  it('keeps the row tooltip on tables whose size is unknown', async () => {
+    const view = new ExplorerView()
+    view.profileId = 'p1'
+    view.tables = [table('users')]
+    view.tableStats = []
+    document.body.append(view)
+
+    await view.updateComplete
+
+    // An empty title would mean "no advisory information" and suppress the
+    // row's own tooltip rather than letting it show through.
+    expect(view.shadowRoot!.querySelector('.table-size')!.hasAttribute('title')).toBe(false)
+    expect(view.shadowRoot!.querySelector('.etable-row')!.getAttribute('title')).toContain('users')
+    view.remove()
+  })
+
+  it('sorts known sizes descending and leaves unavailable sizes last', async () => {
+    const view = new ExplorerView()
+    view.profileId = 'p1'
+    view.tables = [table('small'), table('unknown'), table('large')]
+    view.tableStats = [
+      { schema: 'public', name: 'small', totalBytes: 10 },
+      { schema: 'public', name: 'large', totalBytes: 100 },
+    ]
+    internals(view)._tableSort = 'size'
+    document.body.append(view)
+
+    await view.updateComplete
+
+    const names = [...view.shadowRoot!.querySelectorAll('.table-name')].map((node) => node.textContent)
+    expect(names).toEqual(['large', 'small', 'unknown'])
     view.remove()
   })
 })

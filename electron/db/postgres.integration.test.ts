@@ -442,6 +442,17 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  it('reports allocated table and index sizes', async () => {
+    const driver = await connectDriver()
+    try {
+      const stats = await driver.listTableStats!()
+      expect(stats.find((stat) => stat.schema === 'sqlkit_it' && stat.name === 'books')?.totalBytes).toBeGreaterThan(0)
+      expect(stats.some((stat) => stat.name === 'book_titles')).toBe(false)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('reports column type, nullability and key flags', async () => {
     const driver = await connectDriver()
     try {

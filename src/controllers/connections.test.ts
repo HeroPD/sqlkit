@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactiveControllerHost } from 'lit'
-import type { ColumnsResult, ConnectionProfile, ConnectResult, ConnectionStatus, DbObjects, ObjectsResult, TablesResult } from '../electron'
+import type { ColumnsResult, ConnectionProfile, ConnectResult, ConnectionStatus, DbObjects, ObjectsResult, TableRef, TableStatsResult, TablesResult } from '../electron'
 import { ConnectionsController } from './connections'
 
 const host = (): ReactiveControllerHost =>
@@ -29,11 +29,14 @@ const status = (active: 'db_a' | 'db_b'): ConnectionStatus => ({
 
 const objectsWith = (name: string): DbObjects => ({ functions: [{ schema: 'public', name, detail: '' }], types: [] })
 
+const tableRef = (name: string): TableRef => ({ schema: 'public', name, kind: 'table' })
+
 function stubSqlkit() {
   let listener: ((statuses: ConnectionStatus[]) => void) | null = null
   const tableCalls: Array<Deferred<TablesResult>> = []
   const columnCalls: Array<Deferred<ColumnsResult>> = []
   const objectCalls: Array<Deferred<ObjectsResult>> = []
+  const statCalls: Array<Deferred<TableStatsResult>> = []
 
   const api = {
     onConnectionStatus: vi.fn((next: (statuses: ConnectionStatus[]) => void) => {
@@ -56,26 +59,43 @@ function stubSqlkit() {
       objectCalls.push(call)
       return call.promise
     }),
+    listTableStats: vi.fn(() => {
+      const call = defer<TableStatsResult>()
+      statCalls.push(call)
+      return call.promise
+    }),
   }
   ;(window as unknown as { sqlkit: unknown }).sqlkit = api
 
   const emit = (statuses: ConnectionStatus[]) => listener?.(statuses)
-  // The three reads are issued one after another (they share a single database
-  // connection), so each call only exists once the previous one has settled.
+  // Reads are issued one after another (they share a single database connection),
+  // with optional table statistics last so essential metadata renders first.
   const settle = async <T>(calls: Array<Deferred<T>>, index: number, value: T) => {
     for (let i = 0; i < 50 && !calls[index]; i += 1) await Promise.resolve()
     calls[index]!.resolve(value)
     await calls[index]!.promise
     await Promise.resolve()
   }
-  const resolveMetadata = async (index: number, functionName: string) => {
-    await settle(tableCalls, index, { success: true, tables: [] })
+  const resolveMetadata = async (
+    index: number,
+    functionName: string,
+    statIndex: number | null = index,
+    tables: TableRef[] = [],
+  ) => {
+    await settle(tableCalls, index, { success: true, tables })
     await settle(columnCalls, index, { success: true, columns: [] })
     await settle(objectCalls, index, { success: true, objects: objectsWith(functionName) })
+    if (statIndex !== null) {
+      await settle(statCalls, statIndex, {
+        success: true,
+        stats: [{ schema: 'public', name: 'users', totalBytes: index + 1 }],
+      })
+    }
     await Promise.resolve()
   }
+  const settleStats = (index: number, result: TableStatsResult) => settle(statCalls, index, result)
 
-  return { api, emit, resolveMetadata }
+  return { api, emit, resolveMetadata, settleStats }
 }
 
 afterEach(() => {
@@ -149,6 +169,7 @@ describe('ConnectionsController metadata', () => {
     expect(api.listTables).toHaveBeenCalledTimes(1)
     await resolveMetadata(0, 'fn_only_in_a')
     expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_a'])
+    expect(controller.tableStats.p1?.[0]?.totalBytes).toBe(1)
 
     emit([status('db_b')])
     expect(controller.objects.p1).toBeUndefined()
@@ -174,11 +195,49 @@ describe('ConnectionsController metadata', () => {
     expect(controller.objects.p1).toBeUndefined()
     expect(api.listTables).toHaveBeenCalledTimes(3)
 
-    await resolveMetadata(1, 'fn_only_in_a_refreshed')
+    await resolveMetadata(1, 'fn_only_in_a_refreshed', null)
     expect(controller.objects.p1).toBeUndefined()
 
-    await resolveMetadata(2, 'fn_only_in_b')
+    await resolveMetadata(2, 'fn_only_in_b', 1)
     expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_b'])
+  })
+
+  it('re-reads table sizes only when the table list changed', async () => {
+    const { api, emit, resolveMetadata } = stubSqlkit()
+    const controller = new ConnectionsController(host())
+    controller.hostConnected()
+
+    emit([status('db_a')])
+    await resolveMetadata(0, 'fn', 0, [tableRef('users')])
+    expect(api.listTableStats).toHaveBeenCalledTimes(1)
+    expect(controller.tableStats.p1?.[0]?.totalBytes).toBe(1)
+
+    // Sizing every relation is the priciest metadata read there is, and
+    // refresh() runs after each commit — an unchanged list keeps what it has.
+    controller.refresh('p1')
+    await resolveMetadata(1, 'fn', null, [tableRef('users')])
+    expect(api.listTableStats).toHaveBeenCalledTimes(1)
+    expect(controller.tableStats.p1?.[0]?.totalBytes).toBe(1)
+
+    // A table appearing or vanishing does re-read them.
+    controller.refresh('p1')
+    await resolveMetadata(2, 'fn', 1, [tableRef('users'), tableRef('orders')])
+    expect(api.listTableStats).toHaveBeenCalledTimes(2)
+    expect(controller.tableStats.p1?.[0]?.totalBytes).toBe(3)
+  })
+
+  it('leaves sizes absent, not empty, when the engine cannot report them', async () => {
+    const { emit, resolveMetadata, settleStats } = stubSqlkit()
+    const controller = new ConnectionsController(host())
+    controller.hostConnected()
+
+    emit([status('db_a')])
+    await resolveMetadata(0, 'fn', null, [tableRef('users')])
+    await settleStats(0, { success: false, error: 'unsupported' })
+
+    // Absent rather than [], so the explorer can drop its size column instead
+    // of ruling a dash down every row.
+    expect(controller.tableStats.p1).toBeUndefined()
   })
 })
 

@@ -43,6 +43,7 @@ const api: SqlkitApi = {
   createDatabase: (profileId, name, options) => ipcRenderer.invoke('db:create-database', profileId, name, options),
   dropDatabase: (profileId, name) => ipcRenderer.invoke('db:drop-database', profileId, name),
   listTables: (profileId, childDb) => ipcRenderer.invoke('db:list-tables', profileId, childDb),
+  listTableStats: (profileId, childDb) => ipcRenderer.invoke('db:list-table-stats', profileId, childDb),
   listColumns: (profileId, childDb) => ipcRenderer.invoke('db:list-columns', profileId, childDb),
   inspectTable: (profileId, childDb, table) => ipcRenderer.invoke('db:inspect-table', profileId, childDb, table),
   listObjects: (profileId, childDb) => ipcRenderer.invoke('db:list-objects', profileId, childDb),

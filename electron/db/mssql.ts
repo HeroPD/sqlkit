@@ -3,10 +3,11 @@ import { Request as TediousRequest, TYPES as TediousTypes } from 'tedious'
 import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef, TableStat } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
+import { byteCount } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -138,6 +139,10 @@ export function mssqlTls(profile: ConnectionProfile): { encrypt: boolean; trustS
     throw new Error(`Failed to read SSL CA certificate at ${caPath}: ${(error as Error).message}`, { cause: error })
   }
 }
+
+/** A SHOWPLAN switch anywhere in a run: while one is on, statements are
+ * compiled and reported rather than executed. */
+const SHOWPLAN_SWITCH = /\bset\s+showplan_(?:all|xml|text)\s+(?:on|off)\b/i
 
 // SQL Server with all-databases support, mirroring the postgres driver: one
 // connection pool per child database. Unlike MySQL, SQL Server has real
@@ -391,6 +396,18 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     async query(sqlText, params = [], childDb = null, sort = null, filter = null, executionId) {
       const started = performance.now()
       const plan = prepareSqlRun({ engine: 'sqlserver', sql: sqlText, params, sort, filter })
+      // SET SHOWPLAN_x must own its batch, so an estimated-plan run is always
+      // `SET … ON / GO / statement`, and a pinned transaction adds `GO / SET …
+      // OFF` to restore the session it would otherwise strand. Each of those
+      // SET batches returns nothing, which still counts as a result set — and
+      // the trailing one would make the run's last result an empty grid. Under
+      // SHOWPLAN no statement executes, so a columnless set can only be one of
+      // those SETs: dropping them leaves the plan as the run's only result.
+      const shown = (resultSets: QueryResultSet[]) => {
+        if (!SHOWPLAN_SWITCH.test(sqlText)) return resultSets
+        const plans = resultSets.filter((set) => set.columns.length > 0)
+        return plans.length ? plans : resultSets
+      }
       const collect = (result: QueryResult, resultSets: QueryResultSet[]) =>
         resultSets.push(...(result.resultSets ?? [{
           columns: result.columns,
@@ -460,11 +477,12 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             if (outcome) {
               // No withColumnSources here: its catalog reads run on other
               // connections and block on the transaction's own schema locks.
-              const selected = outcome.resultSets[outcome.resultSets.length - 1] ?? outcome.result
+              const sets = shown(outcome.resultSets)
+              const selected = sets[sets.length - 1] ?? outcome.result
               return {
                 ...selected,
                 durationMs: outcome.result.durationMs,
-                ...(outcome.resultSets.length > 1 ? { resultSets: outcome.resultSets } : {}),
+                ...(sets.length > 1 ? { resultSets: sets } : {}),
               }
             }
             // The transaction ended before this run's turn: fall through to a
@@ -504,17 +522,19 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             const adopted = conn
             conn = null
             adoptPin(adopted, pool, database)
-            const selected = resultSets[resultSets.length - 1] ?? result
-            return { ...selected, durationMs: result.durationMs, ...(resultSets.length > 1 ? { resultSets } : {}) }
+            const pinnedSets = shown(resultSets)
+            const selected = pinnedSets[pinnedSets.length - 1] ?? result
+            return { ...selected, durationMs: result.durationMs, ...(pinnedSets.length > 1 ? { resultSets: pinnedSets } : {}) }
           }
+          const sets = shown(resultSets)
           const selected = await withColumnSources(
-            resultSets[resultSets.length - 1] ?? result,
+            sets[sets.length - 1] ?? result,
             plan.batches,
-            resultSets.length,
+            sets.length,
             0,
             childDb,
           )
-          return { ...selected, durationMs: result.durationMs, ...(resultSets.length > 1 ? { resultSets } : {}) }
+          return { ...selected, durationMs: result.durationMs, ...(sets.length > 1 ? { resultSets: sets } : {}) }
         } catch (error) {
           // `BEGIN TRAN; bad-statement` can leave the transaction open (no
           // XACT_ABORT): pin it so the user can roll it back — but never a
@@ -594,17 +614,18 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         // A followed foreign key runs through here (its value is bound), so the
         // parameterized path needs sources too or the followed result could
         // neither be edited safely nor followed further.
+        const sets = shown(resultSets)
         const selected = await withColumnSources(
-          resultSets[resultSets.length - 1] ?? result,
+          sets[sets.length - 1] ?? result,
           plan.batches,
-          resultSets.length,
+          sets.length,
           plan.params.length,
           childDb,
         )
         return {
           ...selected,
           durationMs: result.durationMs,
-          ...(resultSets.length > 1 ? { resultSets } : {}),
+          ...(sets.length > 1 ? { resultSets: sets } : {}),
         }
       } catch (error) {
         throw isCancelled(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
@@ -785,6 +806,27 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return rows.map(
         (row): TableRef => ({ schema: row.table_schema, name: row.name, kind: row.type === 'VIEW' ? 'view' : 'table' }),
       )
+    },
+
+    async listTableStats(childDb = null) {
+      const rows = await metaRows<{ table_schema: string; name: string; total_bytes: string | number | null }>(
+        `select s.name as table_schema, t.name as name,
+                sum(cast(a.total_pages as bigint)) * 8192 as total_bytes
+         from sys.tables t
+         join sys.schemas s on s.schema_id = t.schema_id
+         join sys.indexes i on i.object_id = t.object_id
+         join sys.partitions p on p.object_id = i.object_id and p.index_id = i.index_id
+         join sys.allocation_units a
+           on a.container_id = case when a.type in (1, 3) then p.hobt_id else p.partition_id end
+         group by s.name, t.name
+         order by s.name, t.name`,
+        [],
+        childDb,
+      )
+      return rows.flatMap((row) => {
+        const totalBytes = byteCount(row.total_bytes)
+        return totalBytes === null ? [] : [{ schema: row.table_schema, name: row.name, totalBytes } satisfies TableStat]
+      })
     },
 
     async listColumns(childDb = null) {

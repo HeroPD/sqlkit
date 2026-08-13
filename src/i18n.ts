@@ -200,7 +200,11 @@ const enUS = {
   'explorer.selectDatabase': 'Select a database to see its tables ({shortcut}).',
   'explorer.connectDatabase': 'Connect a database to see tables ({shortcut}).',
   'explorer.noTables': 'No tables.',
-  'explorer.filterKinds': 'Filter by type',
+  'explorer.tableOptions': 'Table options',
+  'explorer.sortName': 'Sort by name',
+  'explorer.sortSize': 'Sort by total size',
+  'explorer.totalSize': 'Total size: {size}',
+  'explorer.approximateSize': 'Total size: approximately {size}',
   'explorer.allHidden': 'All object types hidden — adjust the filter.',
   'explorer.loadingColumns': 'Loading columns…',
   'explorer.noColumns': 'No columns.',
@@ -714,6 +718,7 @@ const enUS = {
   'connection.caTooLarge': 'Certificate file exceeds 5 MB',
   'connection.sqlServerCaUnsupported': 'SQL Server does not support CA-only verification; use Verify full to verify the certificate and hostname.',
   'connection.notConnected': 'Not connected',
+  'connection.tableStatsUnsupported': 'This engine does not report table sizes',
   'query.cancelled': 'Query cancelled.',
   'query.saveCancelled': 'Save cancelled.',
   'database.cannotDropCurrent': 'Cannot drop the database currently in use — switch to another one first.',
@@ -824,6 +829,19 @@ export function t(key: MessageKey, values: Record<string, MessageValue> = {}): s
 }
 
 export const formatInteger = (value: number) => new Intl.NumberFormat(activeLocale).format(value)
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const formatted = new Intl.NumberFormat(activeLocale, { maximumFractionDigits: unit === 0 ? 0 : 1 }).format(value)
+  return `${formatted} ${units[unit]}`
+}
 
 /** Headline figures stay short enough for a sidebar tile: 1,284 → 1,284; 12,900 → 12.9K. */
 export const formatCompact = (value: number) =>

@@ -56,14 +56,17 @@ import { quoteQualified } from '../sql-write'
 import { isFilterableQuery } from '../sql-filter'
 import { isReadOnlyQuery, isReorderableQuery } from '../sql-order'
 import { analyzeDestructive, type DestructiveKind } from '../sql-destructive'
-import { splitScript, splitTopLevelStatements } from '../sql-statements'
+import { isSingleStatement, splitScript, splitTopLevelStatements } from '../sql-statements'
 import { foreignKeyTargets } from '../foreign-keys'
 import { jsonColumns } from '../json-columns'
 import type { ExportFormat } from '../result-export'
 import type { FollowForeignKeyDetail, ResultNavigateDetail, SortColumnDetail } from './results-panel'
 import type { SelectionStats } from '../result-aggregate'
 import type { ColumnRef, ColumnReference, QueryResult, QuerySort } from '../electron'
-import { explainFlavors, explainStatement } from '../sql-explain'
+import { explainFlavors, explainStatement, type ExplainFlavor } from '../sql-explain'
+
+// Stable identity for the disconnected case, so history-view sees no change.
+const NO_FLAVORS: ExplainFlavor[] = []
 import type { SearchOpenDetail } from './search-view'
 import type { FileCreateDetail, FileDeleteDetail, FileRenameDetail, FileRevealDetail } from './file-tree'
 import type { ImportColumn, ImportConfirmDetail } from './import-dialog'
@@ -1736,6 +1739,7 @@ export class WorkbenchScreen extends LitElement {
           .profileId=${context?.id ?? null}
           .engine=${context?.engine ?? null}
           .tables=${metadataMatchesContext ? (this._live.tables[live.id] ?? []) : null}
+          .tableStats=${metadataMatchesContext ? (this._live.tableStats[live.id] ?? null) : null}
           .columns=${metadataMatchesContext ? (this._live.columns[live.id] ?? null) : null}
           .objects=${metadataMatchesContext ? (this._live.objects[live.id] ?? null) : null}
           .activeChildName=${metadataMatchesContext ? activeChild : null}
@@ -1755,7 +1759,8 @@ export class WorkbenchScreen extends LitElement {
       return html`
         <history-view
           .items=${this._queries.history.filter((item) => item.contextKey === key)}
-          .flavors=${profile ? explainFlavors(profile.engine, this._live.statuses[profile.id]?.serverVersion ?? null) : []}
+          .flavors=${this._explainFlavors()}
+          .engine=${profile?.engine ?? null}
           @history-open=${this._onHistoryOpen}
           @history-open-permanent=${this._onHistoryOpenPermanent}
           @history-explain=${this._onHistoryExplain}
@@ -1787,12 +1792,31 @@ export class WorkbenchScreen extends LitElement {
     this._ctx.openPreview(sql)
   }
 
+  // Recomputed only when the engine or the live server version changes: Lit
+  // compares by identity, so a fresh array here would re-render every history
+  // row on every workbench update.
+  private _flavorCache: { engine: Engine; version: string | null; flavors: ExplainFlavor[] } | null = null
+
+  private _explainFlavors(): ExplainFlavor[] {
+    const profile = this._config.activeProfile()
+    if (!profile) return NO_FLAVORS
+    const version = this._live.statuses[profile.id]?.serverVersion ?? null
+    const cached = this._flavorCache
+    if (cached && cached.engine === profile.engine && cached.version === version) return cached.flavors
+    const flavors = explainFlavors(profile.engine, version)
+    this._flavorCache = { engine: profile.engine, version, flavors }
+    return flavors
+  }
+
   // Right-click explain: the engine's explain statement lands in the preview
-  // tab and runs immediately, so the plan arrives with its SQL visible.
+  // tab and runs immediately, so the plan arrives with its SQL visible. The
+  // menu already hides itself for multi-statement entries; this is the guard
+  // that keeps a stale menu from running the tail of one for real.
   private _onHistoryExplain(event: Event) {
     const { sql, flavor } = (event as CustomEvent<HistoryExplainDetail>).detail
     const profile = this._config.activeProfile()
     if (!profile) return
+    if (!isSingleStatement(sql, profile.engine)) return
     const statement = explainStatement({
       engine: profile.engine,
       serverVersion: this._live.statuses[profile.id]?.serverVersion ?? null,

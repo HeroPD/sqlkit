@@ -362,9 +362,12 @@ describeDb('mssql driver (integration)', () => {
         inTransaction: true,
       })
       const plan = await driver.query(statement)
+      // The plan is the run's result, not one grid among the empty ones the
+      // SET batches return — the panel must not open on a blank grid.
+      expect(plan.columns).toContain('StmtText')
+      expect(plan.resultSets).toBeUndefined()
       // The pinned connection is never reset, so the script's own restore is
       // what keeps the rest of the transaction executing instead of compiling.
-      expect(plan.resultSets?.some((set) => set.columns.includes('StmtText'))).toBe(true)
       expect((await driver.query('select name from authors order by name')).columns).toEqual(['name'])
       await driver.endTransaction!('rollback')
     } finally {
@@ -557,6 +560,20 @@ describeDb('mssql driver (integration)', () => {
           { schema: 'dbo', name: 'book_titles', kind: 'view' },
         ]),
       )
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
+  it('reports allocated table and index sizes', async () => {
+    const driver = await connectDriver()
+    try {
+      const stats = await driver.listTableStats!()
+      // SQL Server allocates a table's first pages on its first insert, so the
+      // size has to be read off one that has rows — `books` is created empty.
+      expect(stats.find((stat) => stat.schema === 'dbo' && stat.name === 'authors')?.totalBytes).toBeGreaterThan(0)
+      expect(stats.find((stat) => stat.schema === 'dbo' && stat.name === 'books')?.totalBytes).toBe(0)
+      expect(stats.some((stat) => stat.name === 'book_titles')).toBe(false)
     } finally {
       await driver.disconnect()
     }

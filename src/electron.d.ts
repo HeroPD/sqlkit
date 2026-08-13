@@ -243,6 +243,18 @@ export type TableRef = {
 
 export type TablesResult = { success: true; tables: TableRef[] } | { success: false; error: string }
 
+/** Refreshable storage metadata kept separate from TableRef object identity. */
+export type TableStat = {
+  schema: string | null
+  name: string
+  /** Allocated table data plus indexes, in bytes. */
+  totalBytes: number
+  /** Catalog value is an estimate rather than measured allocation. */
+  approximate?: boolean
+}
+
+export type TableStatsResult = { success: true; stats: TableStat[] } | { success: false; error: string }
+
 export type ColumnRef = {
   /** Schema of the owning table; null for engines without one. */
   schema: string | null
@@ -494,6 +506,8 @@ export type SqlkitApi = {
   // Metadata is scoped to a specific child database (all-databases mode), like
   // runQuery — pass null to target the connection's active child.
   listTables: (profileId: string, childDb: string | null) => Promise<TablesResult>
+  /** Best-effort allocated size of each table; an empty list means unavailable. */
+  listTableStats: (profileId: string, childDb: string | null) => Promise<TableStatsResult>
   /** Columns of every table in the database, one round trip. */
   listColumns: (profileId: string, childDb: string | null) => Promise<ColumnsResult>
   /** Structure of one table: columns, constraints, indexes, triggers, …. */

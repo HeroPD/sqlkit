@@ -1,8 +1,9 @@
 import mysql from 'mysql2/promise'
-import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef } from '../../src/electron'
+import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef, TableStat } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
+import { byteCount } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -676,6 +677,21 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         childDb,
       )
       return rows.map((row): TableRef => ({ schema: null, name: row.name, kind: row.type === 'VIEW' ? 'view' : 'table' }))
+    },
+
+    async listTableStats(childDb = null) {
+      const rows = await metaRows<{ name: string; total_bytes: string | number | null }>(
+        `select table_name as name, coalesce(data_length, 0) + coalesce(index_length, 0) as total_bytes
+         from information_schema.tables
+         where table_schema = database() and table_type = 'BASE TABLE'
+         order by table_name`,
+        [],
+        childDb,
+      )
+      return rows.flatMap((row) => {
+        const totalBytes = byteCount(row.total_bytes)
+        return totalBytes === null ? [] : [{ schema: null, name: row.name, totalBytes, approximate: true } satisfies TableStat]
+      })
     },
 
     async listColumns(childDb = null) {

@@ -1,16 +1,16 @@
-import { LitElement, css, html, type PropertyValues } from 'lit'
+import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { icons, popover, scrollbars, typography } from '../shared-styles'
 import { mod } from '../platform'
 import { abbreviateType } from '../sql-types'
 import { TABLE_KIND_ICONS, tableKindLabel } from '../table-kinds'
-import type { ColumnRef, DbObject, DbObjectKind, DbObjects, Engine, FileInfo, ObjectDdlRef, TableRef } from '../electron'
+import type { ColumnRef, DbObject, DbObjectKind, DbObjects, Engine, FileInfo, ObjectDdlRef, TableRef, TableStat } from '../electron'
 import { dialectFor } from '../dialect'
 import { quoteQualified } from '../sql-write'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 import './file-tree'
-import { t } from '../i18n'
+import { formatBytes, t } from '../i18n'
 
 export const tableKey = (profileId: string, table: TableRef) => `${profileId}:${table.schema ?? ''}:${table.name}`
 
@@ -25,8 +25,11 @@ const objectIcon = (label: 'Functions' | 'Types', object: DbObject) =>
 type FilterKind = TableRef['kind'] | DbObjectKind
 const FILTER_KINDS: FilterKind[] = ['table', 'view', 'matview', 'foreign', 'function', 'type']
 const FILTER_STORAGE_KEY = 'sqlkit-explorer-hidden-kinds'
+const SORT_STORAGE_KEY = 'sqlkit-explorer-table-sort'
 const filterKindLabel = (kind: FilterKind) =>
   kind === 'function' ? t('explorer.functions') : kind === 'type' ? t('explorer.types') : tableKindLabel(kind)
+type TableSort = 'name' | 'size'
+const statKey = (schema: string | null, name: string) => `${schema ?? ''}:${name}`
 
 export type TableSelectDetail = { key: string }
 export type ObjectInspectDetail = { object: DbObject; objectKind: DbObjectKind }
@@ -89,6 +92,10 @@ export class ExplorerView extends LitElement {
   @property({ attribute: false })
   tables: TableRef[] | null = null
 
+  /** Refreshable allocated sizes; null while unavailable or loading. */
+  @property({ attribute: false })
+  tableStats: TableStat[] | null = null
+
   /** Columns of every context table; tables expand to show theirs. */
   @property({ attribute: false })
   columns: ColumnRef[] | null = null
@@ -120,6 +127,9 @@ export class ExplorerView extends LitElement {
   @state()
   private _hiddenKinds = new Set<FilterKind>()
 
+  @state()
+  private _tableSort: TableSort = 'name'
+
   /** Anchor position of the open kind-filter popover, or null when closed. */
   @state()
   private _filterMenu: { right: number; top: number } | null = null
@@ -133,6 +143,10 @@ export class ExplorerView extends LitElement {
     try {
       const raw = localStorage.getItem(FILTER_STORAGE_KEY)
       if (raw) this._hiddenKinds = new Set((JSON.parse(raw) as FilterKind[]).filter((k) => FILTER_KINDS.includes(k)))
+      // Persisted next to the filter it shares a popover with: a sort that
+      // reset every launch while the filter survived would read as a bug.
+      const sort = localStorage.getItem(SORT_STORAGE_KEY)
+      if (sort === 'name' || sort === 'size') this._tableSort = sort
     } catch {
       // A corrupt value just means no filter.
     }
@@ -151,6 +165,7 @@ export class ExplorerView extends LitElement {
 
   // Columns grouped per table, rebuilt only when the columns array changes.
   private _columnsByTable: { source: ColumnRef[] | null; map: Map<string, ColumnRef[]> } | null = null
+  private _statsByTable: { source: TableStat[] | null; map: Map<string, TableStat> } | null = null
 
   private _patchTree(partial: Partial<TreeState>) {
     this._tree = { ...this._tree, ...partial }
@@ -211,6 +226,16 @@ export class ExplorerView extends LitElement {
     }
   }
 
+  private _setTableSort(sort: TableSort) {
+    this._tableSort = sort
+    try {
+      if (sort === 'name') localStorage.removeItem(SORT_STORAGE_KEY)
+      else localStorage.setItem(SORT_STORAGE_KEY, sort)
+    } catch {
+      // Blocked storage still leaves the sort working for the session.
+    }
+  }
+
   // Kinds actually present in the current metadata — no empty toggles.
   private _presentKinds(): FilterKind[] {
     const present = new Set<FilterKind>()
@@ -252,7 +277,7 @@ export class ExplorerView extends LitElement {
     const kinds = this._presentKinds()
     return html`
       <div class="pop-backdrop" @mousedown=${() => (this._filterMenu = null)}></div>
-      <div class="pop kinds" style="right: ${menu.right}px; top: ${menu.top}px" role="menu" aria-label=${t('explorer.filterKinds')}>
+      <div class="pop kinds" style="right: ${menu.right}px; top: ${menu.top}px" role="menu" aria-label=${t('explorer.tableOptions')}>
         ${kinds.map(
           (kind) => html`
             <button
@@ -271,6 +296,25 @@ export class ExplorerView extends LitElement {
             </button>
           `,
         )}
+        ${this._hasSizes()
+          ? html`
+              <div class="pop-separator" role="separator"></div>
+              ${(['name', 'size'] as const).map(
+                (sort) => html`
+                  <button
+                    class="pop-item"
+                    role="menuitemradio"
+                    aria-checked=${this._tableSort === sort ? 'true' : 'false'}
+                    @mousedown=${(event: MouseEvent) => event.preventDefault()}
+                    @click=${() => this._setTableSort(sort)}
+                  >
+                    <i class="icon check ${this._tableSort === sort ? 'icon-check' : ''}" aria-hidden="true"></i>
+                    <span class="label">${t(sort === 'name' ? 'explorer.sortName' : 'explorer.sortSize')}</span>
+                  </button>
+                `,
+              )}
+            `
+          : ''}
       </div>
     `
   }
@@ -325,8 +369,8 @@ export class ExplorerView extends LitElement {
             ? html`
                 <button
                   class="head-action ${this._hiddenKinds.size ? 'filtered' : ''}"
-                  title=${t('explorer.filterKinds')}
-                  aria-label=${t('explorer.filterKinds')}
+                  title=${t('explorer.tableOptions')}
+                  aria-label=${t('explorer.tableOptions')}
                   aria-haspopup="menu"
                   aria-expanded=${this._filterMenu ? 'true' : 'false'}
                   @click=${this._toggleFilterMenu}
@@ -460,13 +504,14 @@ export class ExplorerView extends LitElement {
 
     // Kind filter: hide rows of hidden kinds. If it empties the whole list, say
     // so — the accented funnel plus this hint keep it from looking like data loss.
-    const visibleTables = this.tables.filter((table) => !this._hiddenKinds.has(table.kind))
+    const visibleTables = this._sortTables(this.tables.filter((table) => !this._hiddenKinds.has(table.kind)))
     if (!visibleTables.length && !this._anyObjectsVisible(null)) {
       return html`<p class="muted hint">${this._hiddenKinds.size ? t('explorer.allHidden') : t('explorer.noTables')}</p>`
     }
 
-    // Group by schema, preserving the driver's order. With one schema (or
-    // none — SQLite) the list stays flat: a lone group header is just noise.
+    // Group by schema, in the driver's order; the tables inside each group are
+    // then sorted by _sortTables. With one schema (or none — SQLite) the list
+    // stays flat: a lone group header is just noise.
     const groups = new Map<string, TableRef[]>()
     for (const table of this.tables) {
       const schema = table.schema ?? ''
@@ -486,7 +531,7 @@ export class ExplorerView extends LitElement {
     return html`
       <div class="etable-list">
         ${[...groups.entries()].map(([schema, tables]) => {
-          const visible = tables.filter((table) => !this._hiddenKinds.has(table.kind))
+          const visible = this._sortTables(tables.filter((table) => !this._hiddenKinds.has(table.kind)))
           // Drop a schema group only when the filter leaves it nothing at all.
           if (!visible.length && !this._anyObjectsVisible(schema)) return ''
           const groupKey = `${profileId}:${schema}`
@@ -625,10 +670,14 @@ export class ExplorerView extends LitElement {
   private _renderTableRow(profileId: string, table: TableRef, nested: boolean) {
     const key = tableKey(profileId, table)
     const expanded = this._tree.expandedTables.has(key)
+    const stat = this._tableStat(table)
+    const sizeTitle = stat
+      ? t(stat.approximate ? 'explorer.approximateSize' : 'explorer.totalSize', { size: formatBytes(stat.totalBytes) })
+      : ''
     return html`
       <div
         class="etable-row ${nested ? 'nested' : ''} ${this.selectedTable === key ? 'selected' : ''}"
-        title="${tableLabel(table)}${table.kind !== 'table' ? ` · ${tableKindLabel(table.kind)}` : ''} — ${t('explorer.doubleClickBrowse')}"
+        title="${tableLabel(table)}${table.kind !== 'table' ? ` · ${tableKindLabel(table.kind)}` : ''}${sizeTitle ? ` · ${sizeTitle}` : ''} — ${t('explorer.doubleClickBrowse')}"
         @click=${() => this._select(key)}
         @dblclick=${() => this._browse(table)}
         @contextmenu=${(event: MouseEvent) => this._onTableMenu(event, table)}
@@ -640,10 +689,46 @@ export class ExplorerView extends LitElement {
           @dblclick=${(event: Event) => event.stopPropagation()}
         ></i>
         <i class="icon ${TABLE_KIND_ICONS[table.kind] ?? 'icon-table'}" aria-hidden="true"></i>
-        <span>${table.name}</span>
+        <span class="table-name">${table.name}</span>
+        ${this._hasSizes()
+          ? html`<span class="table-size" title=${sizeTitle || nothing}
+              >${stat ? `${stat.approximate ? '~' : ''}${formatBytes(stat.totalBytes)}` : '—'}</span
+            >`
+          : ''}
       </div>
       ${expanded ? this._renderColumns(table, nested) : ''}
     `
+  }
+
+  /** Whether this connection reports sizes at all — SQLite and a refused read
+   * report none, and a size column of nothing but dashes is worse than none. */
+  private _hasSizes(): boolean {
+    return this.tableStats !== null
+  }
+
+  private _tableStat(table: TableRef): TableStat | undefined {
+    if (this._statsByTable?.source !== this.tableStats) {
+      this._statsByTable = {
+        source: this.tableStats,
+        map: new Map((this.tableStats ?? []).map((stat) => [statKey(stat.schema, stat.name), stat])),
+      }
+    }
+    return this._statsByTable.map.get(statKey(table.schema, table.name))
+  }
+
+  private _sortTables(tables: TableRef[]): TableRef[] {
+    return [...tables].sort((a, b) => {
+      if (this._tableSort === 'size') {
+        const aSize = this._tableStat(a)?.totalBytes
+        const bSize = this._tableStat(b)?.totalBytes
+        if (aSize !== undefined || bSize !== undefined) {
+          if (aSize === undefined) return 1
+          if (bSize === undefined) return -1
+          if (aSize !== bSize) return bSize - aSize
+        }
+      }
+      return a.name.localeCompare(b.name)
+    })
   }
 
   private _renderColumns(table: TableRef, nested: boolean) {
@@ -890,6 +975,12 @@ export class ExplorerView extends LitElement {
         color: var(--text-2);
       }
 
+      .pop-separator {
+        height: 1px;
+        margin: 4px 6px;
+        background: var(--border-subtle);
+      }
+
       .section-head-row {
         display: flex;
         align-items: center;
@@ -1134,6 +1225,22 @@ export class ExplorerView extends LitElement {
       .etable-row span {
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+
+      .table-name {
+        min-width: 0;
+      }
+
+      .etable-row .table-size {
+        margin-left: auto;
+        flex-shrink: 0;
+        color: var(--text-3);
+        font-size: var(--font-size-sm);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .etable-row.selected .table-size {
+        color: color-mix(in srgb, var(--list-selection-fg) 72%, transparent);
       }
     `,
   ]

@@ -78,3 +78,18 @@ export function scanGoBatches(sql: string): GoBatch[] {
   if (tail) batches.push({ sql: tail, repeat: undefined })
   return batches
 }
+
+/**
+ * Whether `sql` holds exactly one runnable statement. An EXPLAIN wrapper only
+ * covers the statement it heads, so anything past the first one in a script
+ * would be sent to the server as itself — planned for the caller, run for real.
+ */
+export function isSingleStatement(sql: string, engine?: Engine): boolean {
+  const batches = engine === 'sqlserver' ? scanGoBatches(sql).map((batch) => batch.sql).filter(Boolean) : [sql]
+  let count = 0
+  for (const batch of batches) {
+    count += splitScript(batch, engine).statements.length
+    if (count > 1) return false
+  }
+  return count === 1
+}

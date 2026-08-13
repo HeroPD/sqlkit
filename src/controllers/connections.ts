@@ -1,8 +1,11 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectResult, ConnectionStatus, DbObjects, TableRef } from '../electron'
+import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectResult, ConnectionStatus, DbObjects, TableRef, TableStat } from '../electron'
 
 const activeChildName = (status: ConnectionStatus | undefined): string | null =>
   status?.phase === 'connected' ? (status.children?.find((child) => child.inUse)?.name ?? null) : null
+
+/** Identity of a table list, so sizes can be re-read only when it changes. */
+const tableListKey = (tables: TableRef[]): string => tables.map((table) => `${table.schema ?? ''}.${table.name}`).join('\n')
 
 // Owns the live-connection picture pushed from the main process: statuses by
 // profile id, and the table/column metadata of every connected database
@@ -18,6 +21,13 @@ export class ConnectionsController implements ReactiveController {
   /** Columns of every table, keyed by profile id (loaded with the tables). */
   columns: Record<string, ColumnRef[]> = {}
 
+  /**
+   * Allocated sizes, keyed by profile id. An absent entry means the engine
+   * cannot report them (SQLite) or the read was refused — the explorer drops
+   * its size column rather than ruling a dash down every row.
+   */
+  tableStats: Record<string, TableStat[]> = {}
+
   /** Schema objects (functions, types), keyed by profile id. */
   objects: Record<string, DbObjects> = {}
 
@@ -25,6 +35,8 @@ export class ConnectionsController implements ReactiveController {
   private unsubscribe: (() => void) | null = null
   /** Per-profile metadata-load token; a newer load invalidates older ones. */
   private metaGen: Record<string, number> = {}
+  /** The table list each profile's sizes were read for, so an unchanged list skips the re-read. */
+  private statsKey: Record<string, string> = {}
   /** In-flight connect per profile, so two cold tabs don't open two tunnels/pools. */
   private connecting = new Map<string, Promise<ConnectResult>>()
 
@@ -153,6 +165,7 @@ export class ConnectionsController implements ReactiveController {
     // freshly connected ones.
     const tables: Record<string, TableRef[]> = {}
     const columns: Record<string, ColumnRef[]> = {}
+    const tableStats: Record<string, TableStat[]> = {}
     const objects: Record<string, DbObjects> = {}
     for (const [id, list] of Object.entries(this.tables)) {
       if (byId[id]?.phase === 'connected' && !childChanged.has(id)) tables[id] = list
@@ -160,11 +173,20 @@ export class ConnectionsController implements ReactiveController {
     for (const [id, list] of Object.entries(this.columns)) {
       if (byId[id]?.phase === 'connected' && !childChanged.has(id)) columns[id] = list
     }
+    for (const [id, list] of Object.entries(this.tableStats)) {
+      if (byId[id]?.phase === 'connected' && !childChanged.has(id)) tableStats[id] = list
+    }
+    // Drop the cached list identity wherever the sizes went, so a reconnect
+    // onto the same schema reads them again instead of skipping as unchanged.
+    for (const id of Object.keys(this.statsKey)) {
+      if (!(id in tableStats)) delete this.statsKey[id]
+    }
     for (const [id, list] of Object.entries(this.objects)) {
       if (byId[id]?.phase === 'connected' && !childChanged.has(id)) objects[id] = list
     }
     this.tables = tables
     this.columns = columns
+    this.tableStats = tableStats
     this.objects = objects
     for (const status of statuses) {
       if (status.phase === 'connected' && !(status.profileId in this.tables)) {
@@ -201,6 +223,30 @@ export class ConnectionsController implements ReactiveController {
     if (columns.success) this.columns = { ...this.columns, [profileId]: columns.columns }
     if (objects.success) this.objects = { ...this.objects, [profileId]: objects.objects }
     if (tables.success || columns.success || objects.success) this.host.requestUpdate()
+
+    // Storage statistics are optional and sometimes permission-gated. Essential
+    // explorer metadata is already visible before this best-effort read starts.
+    //
+    // Sizing every relation is the most expensive metadata read there is — on
+    // Postgres it stats each one on disk — and refresh() runs after every
+    // committed transaction. So it is re-read only when the table list itself
+    // changed shape; rows added to a table already listed move its size too
+    // little to be worth a full scan per commit.
+    const key = tables.success ? tableListKey(tables.tables) : null
+    if (key === null || this.statsKey[profileId] === key) return
+    let stats: Awaited<ReturnType<typeof window.sqlkit.listTableStats>>
+    try {
+      stats = await window.sqlkit.listTableStats(profileId, childDb)
+    } catch {
+      return
+    }
+    if (this.metaGen[profileId] !== gen || this.statuses[profileId]?.phase !== 'connected') return
+    // Leave the entry absent when sizes are unavailable, so the explorer can
+    // tell "this engine has no sizes" from "every table is empty".
+    if (!stats.success) return
+    this.statsKey[profileId] = key
+    this.tableStats = { ...this.tableStats, [profileId]: stats.stats }
+    this.host.requestUpdate()
   }
 
   private bumpMetadataGeneration(profileId: string) {
@@ -215,6 +261,10 @@ export class ConnectionsController implements ReactiveController {
     const columns = { ...this.columns }
     delete columns[profileId]
     this.columns = columns
+    const tableStats = { ...this.tableStats }
+    delete tableStats[profileId]
+    this.tableStats = tableStats
+    delete this.statsKey[profileId]
     const objects = { ...this.objects }
     delete objects[profileId]
     this.objects = objects

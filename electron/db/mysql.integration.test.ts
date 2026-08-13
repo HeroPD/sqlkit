@@ -517,6 +517,17 @@ DELIMITER ;`)
     }
   })
 
+  it('reports estimated table and index sizes', async () => {
+    const driver = await connectDriver()
+    try {
+      const stat = (await driver.listTableStats!()).find((entry) => entry.name === 'books')
+      expect(stat?.totalBytes).toBeGreaterThan(0)
+      expect(stat?.approximate).toBe(true)
+    } finally {
+      await driver.disconnect()
+    }
+  })
+
   it('reports column type, nullability and key flags', async () => {
     const driver = await connectDriver()
     try {

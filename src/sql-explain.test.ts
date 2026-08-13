@@ -24,6 +24,13 @@ describe('explainFlavors', () => {
     expect(explainFlavors('mysql', 'MariaDB 10.0.38')).toEqual(['plan'])
   })
 
+  it('reads past the 5.5.5- prefix MariaDB 10+ prepends for old clients', () => {
+    expect(explainFlavors('mysql', 'MariaDB 5.5.5-10.11.2')).toEqual(['plan', 'analyze'])
+    expect(explainFlavors('mysql', 'MariaDB 5.5.5-10.0.38')).toEqual(['plan'])
+    // A server really on 5.5.5 has no digits after the dash to prefer.
+    expect(explainFlavors('mysql', 'MariaDB 5.5.5')).toEqual(['plan'])
+  })
+
   it('withholds analyze when the server version is unknown', () => {
     expect(explainFlavors('mysql', null)).toEqual(['plan'])
     expect(explainFlavors('mysql', 'MySQL unreleased')).toEqual(['plan'])
