@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { expressionCompletionOptions } from './sql-expression-editor'
+import { expressionCompletionOptions, SqlExpressionEditor } from './sql-expression-editor'
 
 describe('SQL expression completion', () => {
   it('offers table columns and dialect keywords', () => {
@@ -38,11 +38,26 @@ describe('SQL expression completion', () => {
     await editor.updateComplete
 
     const content = editor.shadowRoot!.querySelector<HTMLElement>('.cm-content')!
+    content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }))
+    expect(editor.value).toBe('\n')
+    expect(submit).not.toHaveBeenCalled()
     content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
     content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 
     expect(submit).toHaveBeenCalledOnce()
     expect(cancel).toHaveBeenCalledOnce()
+    editor.remove()
+  })
+
+  it('auto-grows compact expressions up to four lines before scrolling', async () => {
+    const editor = document.createElement('sql-expression-editor')
+    editor.compact = true
+    document.body.append(editor)
+    await editor.updateComplete
+
+    expect(editor.hasAttribute('compact')).toBe(true)
+    expect(SqlExpressionEditor.styles.cssText).toContain('max-height: 84px')
+    expect(SqlExpressionEditor.styles.cssText).toContain('overflow-y: auto')
     editor.remove()
   })
 })

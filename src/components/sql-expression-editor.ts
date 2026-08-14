@@ -198,17 +198,21 @@ export class SqlExpressionEditor extends LitElement {
     }
 
     :host([compact]) {
+      box-sizing: border-box;
       min-width: 0;
       overflow: visible;
       border-radius: 3px;
     }
 
     :host([compact]) .host .cm-editor {
-      height: 22px;
+      height: auto;
+      min-height: 22px;
+      max-height: 84px;
     }
 
     :host([compact]) .host .cm-scroller {
-      overflow: hidden;
+      overflow-x: hidden;
+      overflow-y: auto;
     }
 
     :host([compact]) .host .cm-content {

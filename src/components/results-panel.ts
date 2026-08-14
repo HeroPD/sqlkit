@@ -3578,12 +3578,13 @@ export class ResultsPanel extends LitElement {
       }
 
       .filter-bar {
-        height: 34px;
+        min-height: 34px;
         flex-shrink: 0;
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 0 8px 0 12px;
+        padding: 4px 8px 4px 12px;
+        box-sizing: border-box;
         background: var(--header-bg);
         border-bottom: 1px solid var(--border-subtle);
         color: var(--text-3);
@@ -3597,7 +3598,7 @@ export class ResultsPanel extends LitElement {
       .filter-input {
         flex: 1;
         min-width: 0;
-        height: 24px;
+        min-height: 24px;
       }
 
       .filter-apply,
