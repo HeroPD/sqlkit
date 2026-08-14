@@ -331,6 +331,11 @@ const JOIN_ON_TARGET = new RegExp(
   'i',
 )
 
+// Clauses whose words are column expressions over the statement's own tables.
+// A bare name there resolves against those tables alone, so every other table's
+// columns are noise — `WHERE DATE(` must not offer some unrelated table's date.
+const EXPRESSION_CLAUSES = new Set(['select', 'where', 'on', 'set', 'group', 'order', 'having', 'returning', 'window'])
+
 @customElement('sql-editor')
 export class SqlEditor extends LitElement {
   @property()
@@ -1057,11 +1062,11 @@ export class SqlEditor extends LitElement {
         if (!unprompted) {
           const taken = inTableClause(from) ? takenAliases(from) : null
           const activeContext = statementContext(from)
-          const selectList = !taken && activeContext?.clause === 'select'
+          const expression = !taken && EXPRESSION_CLAUSES.has(activeContext?.clause ?? '')
           const query = activeContext ?? queryContextAt(from)
-          const aliases = selectList ? aliasOptions(query) : []
-          const boundColumns = selectList ? boundColumnOptions(query) : []
-          if (selectList && boundColumns.length) {
+          const aliases = expression ? aliasOptions(query) : []
+          const boundColumns = expression ? boundColumnOptions(query) : []
+          if (expression && boundColumns.length) {
             const seen = new Set<string>()
             const add = (option: Completion, boost: number) => {
               const lower = (option.displayLabel ?? option.label).toLowerCase()
@@ -1083,7 +1088,7 @@ export class SqlEditor extends LitElement {
               if (SQL_FUNCTIONS.has(option.label.toUpperCase())) add(option, 60)
             }
             // Keep the full explicit list available, but below the names and
-            // expressions that are useful at this SELECT-list cursor. Global
+            // expressions that are useful at this expression cursor. Global
             // bare columns are omitted: they either duplicate the scoped set
             // or belong to a table that this query cannot reference.
             for (const [, option] of entries) {

@@ -3,6 +3,7 @@ import { beforeAll, expect, test, vi } from 'vitest'
 import { startCompletion, completionStatus, acceptCompletion, moveCompletionSelection } from '@codemirror/autocomplete'
 import { EditorSelection } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
+import type { ColumnRef } from '../electron'
 import { stubEditorLayout } from '../test/dom-stubs'
 import './sql-editor'
 import type { SqlEditor } from './sql-editor'
@@ -11,24 +12,61 @@ beforeAll(stubEditorLayout)
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * The fixture schema, as `table: columns`. Ten tables, because completion's
+ * failure modes only appear among neighbours: a column of an unbound table to
+ * leak into a WHERE, a prefix that two tables share, an alias already taken.
+ * `!` marks a primary key, `-> table.column` a foreign key.
+ */
+const SCHEMA: Record<string, string[]> = {
+  postings: ['id!', 'item_count', 'sort order', 'created_at', 'author -> users.id'],
+  users: ['id!', 'user_name'],
+  merchants: ['id!', 'merchant_name', 'status_id', 'created_at'],
+  admins: [
+    'id!', 'merchant_id -> merchants.id', 'permission_group_id -> permission_groups.id',
+    'email', 'first_name', 'last_name', 'status_id', 'last_login_at', 'created_at', 'updated_at',
+  ],
+  permission_groups: ['id!', 'group_name', 'created_at'],
+  orders: ['id!', 'merchant_id -> merchants.id', 'user_id -> users.id', 'total_amount', 'tran_date', 'created_at'],
+  order_items: ['id!', 'order_id -> orders.id', 'posting_id -> postings.id', 'quantity', 'unit_price'],
+  payments: ['id!', 'order_id -> orders.id', 'amount', 'paid_at', 'tran_date'],
+  sessions: ['id!', 'user_id -> users.id', 'token', 'start_date', 'end_date'],
+  campaigns: ['id!', 'merchant_id -> merchants.id', 'campaign_name', 'date_to_activate', 'start_date', 'end_date'],
+}
+
+const fixtureTables = () => Object.keys(SCHEMA).map((name) => ({ schema: 'public', name }))
+
+// Completion reads only schema/table/name/references; the rest of ColumnRef is
+// filled plausibly so the fixture still reads like real metadata.
+const fixtureColumns = (): ColumnRef[] =>
+  Object.entries(SCHEMA).flatMap(([table, specs]) =>
+    specs.map((spec) => {
+      const [left = '', target] = spec.split(' -> ')
+      const [refTable, refColumn] = target?.split('.') ?? []
+      const primaryKey = left.endsWith('!')
+      const name = primaryKey ? left.slice(0, -1) : left
+      return {
+        schema: 'public',
+        table,
+        name,
+        dataType: 'text',
+        nullable: !primaryKey,
+        primaryKey,
+        foreignKey: target !== undefined,
+        ...(refTable !== undefined && refColumn !== undefined
+          ? { references: { schema: 'public', table: refTable, column: refColumn, constraint: `${table}_${name}_fkey` } }
+          : {}),
+      }
+    }),
+  )
+
 // Mounts an editor with fixture metadata; completion is opened by the caller.
 async function mountWithMeta(doc: string, withCountColumn = false) {
   const el = document.createElement('sql-editor')
   el.tabId = `completion:${doc}`
   el.value = doc
-  el.tables = [
-    { schema: 'public', name: 'postings' },
-    { schema: 'public', name: 'users' },
-  ]
-  el.columns = [
-    { schema: 'public', table: 'postings', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
-    { schema: 'public', table: 'postings', name: 'item_count', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: false },
-    { schema: 'public', table: 'postings', name: 'sort order', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: false },
-    { schema: 'public', table: 'postings', name: 'created_at', dataType: 'timestamptz', nullable: true, primaryKey: false, foreignKey: false },
-    { schema: 'public', table: 'postings', name: 'author', dataType: 'integer', nullable: true, primaryKey: false, foreignKey: true, references: { schema: 'public', table: 'users', column: 'id', constraint: 'postings_author_fkey' } },
-    { schema: 'public', table: 'users', name: 'id', dataType: 'integer', nullable: false, primaryKey: true, foreignKey: false },
-    { schema: 'public', table: 'users', name: 'user_name', dataType: 'text', nullable: true, primaryKey: false, foreignKey: false },
-  ]
+  el.tables = fixtureTables()
+  el.columns = fixtureColumns()
   if (withCountColumn) {
     el.tables.push({ schema: 'public', name: 'stats' })
     el.columns.push({ schema: 'public', table: 'stats', name: 'count', dataType: 'integer', nullable: false, primaryKey: false, foreignKey: false })
@@ -113,8 +151,8 @@ test('FROM/JOIN alias resolves to the aliased table', async () => {
 })
 
 test('unbound unique prefix expands to table.column', async () => {
-  expect(await completionsAt('SELECT * FROM postings WHERE p.i')).toEqual(['postings.id', 'postings.item_count'])
-  expect(await acceptAt('SELECT * FROM postings WHERE p.it', 'postings.item_count')).toBe(
+  expect(await completionsAt('SELECT * FROM postings WHERE post.i')).toEqual(['postings.id', 'postings.item_count'])
+  expect(await acceptAt('SELECT * FROM postings WHERE post.it', 'postings.item_count')).toBe(
     'SELECT * FROM postings WHERE postings.item_count',
   )
 })
@@ -122,10 +160,12 @@ test('unbound unique prefix expands to table.column', async () => {
 test('ambiguous or unknown prefix completes nothing', async () => {
   // matches neither a table, an alias, a schema, nor a unique prefix
   expect(await completionsAt('SELECT * FROM postings WHERE x.i')).toEqual([])
+  // payments, permission_groups and postings all start with p
+  expect(await completionsAt('SELECT * FROM postings WHERE p.i')).toEqual([])
 })
 
 test('schema. lists its tables', async () => {
-  expect(await completionsAt('SELECT * FROM public.')).toEqual(['postings', 'users'])
+  expect([...await completionsAt('SELECT * FROM public.')].sort()).toEqual(Object.keys(SCHEMA).sort())
 })
 
 test('schema.table. completes columns', async () => {
@@ -151,22 +191,23 @@ test('explicit completion still lists multi-word keywords', async () => {
   expect(await completionsAt('SELECT * FROM users ')).toContain('GROUP BY')
 })
 
+// Undemoted multi-word keywords outrank a table name; demoted ones fall below
+// it. A table is the stable yardstick: the popup renders 100 options at most,
+// which an unfiltered list of every keyword and column now exceeds.
+const ranksAbove = (labels: (string | null)[], label: string, other = 'users') => {
+  expect(labels).toContain(label)
+  expect(labels.indexOf(label)).toBeLessThan(labels.indexOf(other))
+}
+
 test('FROM-less SELECT keeps normal multi-word keyword boosts', async () => {
   const labels = await completionsAt('SELECT id, name ')
-  expect(labels).toContain('LEFT JOIN')
-  expect(labels).toContain('ORDER BY')
-  expect(labels).toContain('GROUP BY')
-  expect(labels.indexOf('LEFT JOIN')).toBeLessThan(labels.indexOf('TRUE'))
-  expect(labels.indexOf('ORDER BY')).toBeLessThan(labels.indexOf('TRUE'))
-  expect(labels.indexOf('GROUP BY')).toBeLessThan(labels.indexOf('TRUE'))
+  for (const keyword of ['LEFT JOIN', 'ORDER BY', 'GROUP BY']) ranksAbove(labels, keyword)
 })
 
 test('a FROM without metadata keeps normal multi-word keyword boosts', async () => {
   // Column metadata gates the demotion, not the binding alone: mystery_tbl binds but has none.
   const doc = 'SELECT id,  FROM mystery_tbl'
-  const labels = await completionsAt(doc, doc.indexOf(',') + 2)
-  expect(labels).toContain('ORDER BY')
-  expect(labels.indexOf('ORDER BY')).toBeLessThan(labels.indexOf('TRUE'))
+  ranksAbove(await completionsAt(doc, doc.indexOf(',') + 2), 'ORDER BY')
 })
 
 test('transaction keywords complete', async () => {
@@ -195,6 +236,26 @@ test('a table completed after FROM or JOIN inserts a fresh alias', async () => {
   expect(await acceptAt('SELECT * FROM us', 'users')).toBe('SELECT * FROM users u')
   // u is taken by the first join, so the second falls back to a longer prefix
   expect(await acceptAt('SELECT * FROM users u JOIN us', 'users')).toBe('SELECT * FROM users u JOIN users us')
+})
+
+test('a multi-word table aliases to its initials', async () => {
+  expect(await acceptAt('SELECT * FROM orders o JOIN order_i', 'order_items')).toBe(
+    'SELECT * FROM orders o JOIN order_items oi',
+  )
+  expect(await acceptAt('SELECT * FROM admins a JOIN permission_g', 'permission_groups')).toBe(
+    'SELECT * FROM admins a JOIN permission_groups pg',
+  )
+})
+
+test('ON suggests the FK of the joined pair, not of every bound table', async () => {
+  // payments keys to orders; users and merchants are bound but unrelated to it
+  const doc = 'SELECT * FROM users u JOIN orders o ON o.user_id = u.id JOIN merchants m ON o.merchant_id = m.id JOIN payments p ON '
+  expect((await completionsAt(doc)).filter((label) => label?.includes(' = '))).toEqual(['p.order_id = o.id'])
+  // a table with two foreign keys offers the one reaching the table it joins
+  const admins = 'SELECT * FROM merchants m JOIN permission_groups pg ON pg.id = 1 JOIN admins a ON '
+  expect((await completionsAt(admins)).filter((label) => label?.includes(' = '))).toEqual([
+    'a.merchant_id = m.id', 'a.permission_group_id = pg.id',
+  ])
 })
 
 test('a table completed in a subquery does not shadow an outer alias', async () => {
@@ -415,6 +476,64 @@ test('ambiguous joined columns complete with their aliases', async () => {
   expect(aliasLabels).not.toContain('u.id')
 })
 
+// Four bindings, so a name can be shared by two of them, by all of them, or by
+// none — the cases a two-table join cannot tell apart.
+const CHAIN = 'FROM users u'
+  + ' JOIN orders o ON o.user_id = u.id'
+  + ' JOIN order_items oi ON oi.order_id = o.id'
+  + ' JOIN payments p ON p.order_id = o.id'
+
+test('a long join lists every alias, then qualifies only the clashing columns', async () => {
+  const doc = `SELECT  ${CHAIN}`
+  const labels = await completionsAt(doc, 'SELECT '.length)
+  expect(labels.slice(0, 4)).toEqual(['u', 'o', 'oi', 'p'])
+  // tran_date is orders' and payments', created_at only orders'
+  expect(labels).toContain('o.tran_date')
+  expect(labels).toContain('p.tran_date')
+  expect(labels).not.toContain('tran_date')
+  expect(labels).toContain('created_at')
+  expect(labels).toContain('user_name')
+  expect(labels).toContain('quantity')
+  // sessions and campaigns are unbound, however many tables the statement joins
+  expect(labels).not.toContain('token')
+  expect(labels).not.toContain('date_to_activate')
+})
+
+test('a column every bound table owns qualifies for each of them', async () => {
+  const doc = `SELECT i ${CHAIN}`
+  const labels = await completionsAt(doc, 'SELECT i'.length)
+  expect(labels.slice(0, 4)).toEqual(['u.id', 'o.id', 'oi.id', 'p.id'])
+  expect(labels).not.toContain('id')
+})
+
+test('mixed join kinds and a schema-qualified join bind like a plain JOIN', async () => {
+  const doc = 'SELECT tok FROM users u'
+    + ' LEFT JOIN public.sessions s ON s.user_id = u.id'
+    + ' INNER JOIN orders o ON o.user_id = u.id'
+  expect(await completionsAt(doc, 'SELECT tok'.length)).toEqual(['token'])
+})
+
+test('the clauses after a long join scope to exactly its tables', async () => {
+  const where = await completionsAt(`SELECT * ${CHAIN} WHERE tran`)
+  expect(where.slice(0, 2)).toEqual(['o.tran_date', 'p.tran_date'])
+  expect(where).not.toContain('tran_date')
+  // status_id and start_date belong to tables this statement never joins
+  const order = await completionsAt(`SELECT * ${CHAIN} ORDER BY sta`)
+  expect(order).not.toContain('status_id')
+  expect(order).not.toContain('start_date')
+  // and an alias mid-chain still resolves to its own table
+  expect(await completionsAt(`SELECT * ${CHAIN} WHERE oi.`)).toEqual([
+    'id', 'order_id', 'posting_id', 'quantity', 'unit_price',
+  ])
+})
+
+test('a third join takes an alias none of the bindings own', async () => {
+  // o and oi are bound; or is reserved; order_items claims ord in this same popup
+  expect(await acceptAt('SELECT * FROM orders o JOIN order_items oi ON oi.order_id = o.id JOIN ord', 'orders')).toBe(
+    'SELECT * FROM orders o JOIN order_items oi ON oi.order_id = o.id JOIN orders orde',
+  )
+})
+
 test('the aliases stay reachable in a popup opened before the word', async () => {
   const doc = 'SELECT  FROM postings p JOIN users u ON u.id = p.author'
   const at = 'SELECT '.length
@@ -471,6 +590,45 @@ test('a parenthesized FROM list binds its comma items, a call argument does not'
   expect(callLabels).not.toContain('postings.id')
   expect(callLabels).not.toContain('users.id')
   expect(callLabels).not.toContain('user_name')
+})
+
+test('WHERE completion scopes bare names to the statement bindings', async () => {
+  // admins owns none of the fixture's date columns, in or out of a call paren
+  const dates = ['date_to_activate', 'start_date', 'end_date', 'tran_date']
+  const call = 'SELECT * FROM "public"."admins"\n  WHERE admins.created_at = DATE(dat)  LIMIT 200'
+  const inCall = await completionsAt(call, call.indexOf('DATE(dat') + 'DATE(dat'.length)
+  const bare = await completionsAt('SELECT * FROM "public"."admins" WHERE dat')
+  for (const column of dates) {
+    expect(inCall, column).not.toContain(column)
+    expect(bare, column).not.toContain(column)
+  }
+  // the date the caret could mean is still there, and so are the admin's own columns
+  expect(inCall).toContain('CURRENT_DATE')
+  expect(await completionsAt('SELECT * FROM admins WHERE id = 1 AND ema')).toContain('email')
+})
+
+test('every column-expression clause scopes its bare names', async () => {
+  for (const doc of [
+    'SELECT * FROM users ORDER BY cre',
+    'SELECT * FROM users GROUP BY cre',
+    'SELECT id FROM users GROUP BY id HAVING cre',
+    'DELETE FROM users WHERE cre',
+    'UPDATE users SET cre',
+  ]) {
+    expect(await completionsAt(doc), doc).not.toContain('created_at')
+  }
+  // a subquery scopes to its own FROM, where created_at does belong
+  const subquery = 'SELECT * FROM users WHERE id IN (SELECT author FROM postings WHERE cre'
+  expect(await completionsAt(subquery)).toContain('created_at')
+})
+
+test('a metadata-less statement still offers every bare column', async () => {
+  expect(await completionsAt('SELECT * FROM mystery_tbl WHERE cre')).toContain('created_at')
+  expect(await completionsAt('SET search_path = cre')).toContain('created_at')
+})
+
+test('an UPDATE alias resolves to the table being written', async () => {
+  expect(await completionsAt('UPDATE users u SET u.')).toEqual(['id', 'user_name'])
 })
 
 test('FROM/JOIN suggestions omit bare column names', async () => {

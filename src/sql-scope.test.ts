@@ -82,6 +82,19 @@ test('explicit joins and old-style FROM lists both bind', () => {
   expect(bindings('SELECT | FROM "My Table" mt')).toEqual(['"My Table" mt'])
 })
 
+test('a statement-leading keyword binds, having no clause before it', () => {
+  expect(bindings('DELETE FROM users WHERE |')).toEqual(['users'])
+  expect(bindings('UPDATE users u SET name = | ')).toEqual(['users u'])
+  expect(bindings('UPDATE public.users u SET name = 1 WHERE |')).toEqual(['users u'])
+  // the write target joins the FROM items of the same statement
+  expect(bindings('UPDATE users u SET n = 1 FROM postings p WHERE |')).toEqual(['postings p', 'users u'])
+  expect(aliasTarget('UPDATE users u SET name = | ', 'u')).toBe('users')
+  // an INSERT's SELECT is its own query, so the target stays out of it
+  expect(bindings('INSERT INTO users SELECT | FROM postings p')).toEqual(['postings p'])
+  // the UPDATE of an upsert names no table
+  expect(bindings('INSERT INTO users VALUES (1) ON CONFLICT (id) DO UPDATE SET name = |')).toEqual(['users'])
+})
+
 test('a parenthesized join group binds into the query around it', () => {
   expect(bindings('SELECT | FROM (postings p JOIN users u ON u.id = p.author)')).toEqual(['postings p', 'users u'])
   expect(bindings('SELECT | FROM (postings p, users u)')).toEqual(['postings p', 'users u'])

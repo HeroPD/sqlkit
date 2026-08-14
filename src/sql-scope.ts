@@ -172,6 +172,14 @@ const TABLE_BINDINGS = new RegExp(
   'gi',
 )
 
+// The table an UPDATE or INSERT writes to. It binds like a FROM item: the SET
+// list and the WHERE of the same statement resolve columns against it. The
+// first lookahead keeps `ON CONFLICT DO UPDATE SET` from naming a table.
+const TARGET_BINDINGS = new RegExp(
+  `\\b(?:update|into)\\b\\s+(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
+  'gi',
+)
+
 // A comma-separated FROM item, with or without an alias. The clause, scope and
 // call-paren checks keep SELECT-list and argument commas out of the bindings.
 const COMMA_BINDINGS = new RegExp(
@@ -182,6 +190,14 @@ const COMMA_BINDINGS = new RegExp(
 // A match landing in masked text (a string, comment or quoted identifier) is not
 // SQL structure: masking leaves whitespace where its content was.
 const isMasked = (structure: SqlStructure, index: number) => !/\S/.test(structure.masked[index] ?? '')
+
+// The query a binding match belongs to, read from the clause before it. A
+// keyword that opens the statement (`DELETE FROM …`, `UPDATE …`) has no token
+// before it, so the clause it opens itself answers.
+function bindingClause(structure: SqlStructure, match: RegExpMatchArray): ClauseContext | undefined {
+  const at = match.index ?? 0
+  return clauseAt(structure, at) ?? clauseAt(structure, at + match[0].length)
+}
 
 // The tables `query` itself binds. Cached per structure, since one completion
 // resolves every binding match against the same scan.
@@ -204,7 +220,7 @@ export function tableBindings(structure: SqlStructure, query: ClauseContext): Ta
     if (isMasked(structure, match.index ?? 0)) continue
     // The owning query decides scope, not the paren depth: a join group binds
     // into the query around it from one level deeper.
-    if (clauseAt(structure, match.index ?? 0)?.queryStart !== query.queryStart) continue
+    if (bindingClause(structure, match)?.queryStart !== query.queryStart) continue
     bindings.push({ seg, qualified, alias, table })
   }
   // TABLE_BINDINGS covers explicit JOINs; add old-style FROM-list items.
@@ -212,11 +228,19 @@ export function tableBindings(structure: SqlStructure, query: ClauseContext): Ta
     const [, seg, qualified, alias] = match
     if (seg === undefined) continue
     if (isMasked(structure, match.index ?? 0)) continue
-    if (clauseAt(structure, match.index ?? 0)?.queryStart !== query.queryStart) continue
+    if (bindingClause(structure, match)?.queryStart !== query.queryStart) continue
     if (!inFromList(structure, match.index ?? 0)) continue
     // A FROM item may sit inside a join group, never inside a call's argument
     // list — `unnest(a, b)` names no tables.
     if (callDepthAt(structure, match.index ?? 0) > query.queryDepth) continue
+    bindings.push({ seg, qualified, alias, table: qualified ?? seg })
+  }
+  // The table an UPDATE or INSERT writes to binds for its SET list and WHERE.
+  for (const match of structure.sql.matchAll(TARGET_BINDINGS)) {
+    const [, seg, qualified, alias] = match
+    if (seg === undefined) continue
+    if (isMasked(structure, match.index ?? 0)) continue
+    if (bindingClause(structure, match)?.queryStart !== query.queryStart) continue
     bindings.push({ seg, qualified, alias, table: qualified ?? seg })
   }
   perQuery.set(cacheKey, bindings)
@@ -253,7 +277,7 @@ export function findAliasTarget(structure: SqlStructure, alias: string, query: C
       if (isMasked(structure, match.index ?? 0)) continue
       // Scope is the owning query, not the paren depth: a join group sits deeper
       // than the query it binds into.
-      if (clauseAt(structure, match.index ?? 0)?.queryStart !== queryStart) continue
+      if (bindingClause(structure, match)?.queryStart !== queryStart) continue
       const candidate = normIdent(aliasSeg)
       if (candidate !== alias || ALIAS_STOPWORDS.has(candidate)) continue
       // A select-list comma must not bind "select a, b c" as alias c → table b.
@@ -281,7 +305,7 @@ export function boundAliases(structure: SqlStructure, queryScopes: ClauseContext
     const [, comma, first, , aliasSeg] = match
     if (first === undefined || aliasSeg === undefined) continue
     if (isMasked(structure, match.index ?? 0)) continue
-    const query = clauseAt(structure, match.index ?? 0)
+    const query = bindingClause(structure, match)
     if (!query || !visible.has(`${query.queryDepth}:${query.queryStart}`)) continue
     const candidate = normIdent(aliasSeg)
     if (ALIAS_STOPWORDS.has(candidate)) continue
