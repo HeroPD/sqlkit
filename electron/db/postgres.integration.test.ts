@@ -531,6 +531,7 @@ describeDb('postgres driver (integration)', () => {
       expect(foreignKeys?.rows[0]?.definition).toMatch(/REFERENCES sqlkit_it\.authors/i)
       const indexes = inspection.sections.find((section) => section.title === 'Indexes')
       expect(indexes?.rows.some((row) => row.name === 'books_author_idx')).toBe(true)
+      expect(indexes?.rows.find((row) => row.name === 'books_author_idx')?.sizeBytes).toEqual(expect.any(Number))
       const constraints = inspection.sections.find((section) => section.title === 'Constraints')
       expect(constraints?.rows.some((row) => /^PRIMARY KEY \(id\)/i.test(row.definition))).toBe(true)
     } finally {
@@ -565,6 +566,15 @@ describeDb('postgres driver (integration)', () => {
       expect(await driver.runDdl!([
         buildAddPartition({ schema: 'sqlkit_it', name: 'ddl_partitioned', kind: 'table' }, { name: 'ddl_partition_10', bounds: 'FROM (0) TO (10)' }, 'postgresql'),
       ])).toEqual({ success: true })
+      await driver.query('create index ddl_partitioned_idx on sqlkit_it.ddl_partitioned (id)')
+      await driver.query('insert into sqlkit_it.ddl_partitioned select generate_series(0, 9)')
+      const partitionInspection = await driver.inspectTable({ schema: 'sqlkit_it', name: 'ddl_partitioned', kind: 'table' })
+      expect(partitionInspection.sections.find((section) => section.title === 'Partitions')?.rows[0]?.sizeBytes).toEqual(expect.any(Number))
+      // The partitioned index is empty itself, so its size has to come from the leaves.
+      const partitionedIndex = partitionInspection.sections.find((section) => section.title === 'Indexes')
+        ?.rows.find((row) => row.name === 'ddl_partitioned_idx')
+      expect(partitionedIndex?.sizeBytes).toEqual(expect.any(Number))
+      expect(partitionedIndex?.sizeBytes).toBeGreaterThan(0)
     } finally {
       await driver.query('drop table if exists sqlkit_it.ddl_partitioned cascade').catch(() => {})
       await driver.query('drop table if exists sqlkit_it.ddl_source cascade').catch(() => {})

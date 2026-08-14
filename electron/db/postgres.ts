@@ -11,7 +11,7 @@ import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
-import { byteCount } from './table-stats'
+import { byteCount, sizedRow } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -1126,7 +1126,8 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       const schema = table.schema ?? 'public'
       const args = [schema, table.name]
       type Row = { name: string; definition: string }
-      const rows = async (sql: string): Promise<Row[]> => (await pool.query<Row>(sql, args)).rows
+      type Sized = Row & { size_bytes: string | null }
+      const rows = async <T extends Row = Row>(sql: string): Promise<T[]> => (await pool.query<T>(sql, args)).rows
 
       const [columns, constraints, indexes, partitions, triggers, rules, policies, storage] = await Promise.all([
         pool.query(
@@ -1161,15 +1162,33 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
            order by con.contype, con.conname`,
           args,
         ),
-        rows(`select indexname as name, indexdef as definition
-              from pg_catalog.pg_indexes where schemaname = $1 and tablename = $2 order by indexname`),
-        rows(`select child.relname as name,
-                     coalesce(pg_catalog.pg_get_expr(child.relpartbound, child.oid, true), '') as definition
-              from pg_catalog.pg_inherits
-              join pg_catalog.pg_class child on child.oid = inhrelid
-              join pg_catalog.pg_class parent on parent.oid = inhparent
-              join pg_catalog.pg_namespace n on n.oid = parent.relnamespace
-              where n.nspname = $1 and parent.relname = $2 order by child.relname`),
+        // A partitioned index (relkind 'I') is empty itself, so its size is the
+        // sum over its leaves. pg_total_relation_size is what listTableStats
+        // reports for tables, so an index here reads on the same scale.
+        rows<Sized>(`select idx.relname as name, pg_catalog.pg_get_indexdef(idx.oid) as definition,
+                       case when idx.relkind = 'I' then
+                         (select coalesce(sum(pg_catalog.pg_total_relation_size(tree.relid)), 0)
+                          from pg_catalog.pg_partition_tree(idx.oid) tree)
+                       else pg_catalog.pg_total_relation_size(idx.oid)
+                       end::text as size_bytes
+                     from pg_catalog.pg_index i
+                     join pg_catalog.pg_class parent on parent.oid = i.indrelid
+                     join pg_catalog.pg_class idx on idx.oid = i.indexrelid
+                     join pg_catalog.pg_namespace n on n.oid = parent.relnamespace
+                     where n.nspname = $1 and parent.relname = $2
+                     order by idx.relname`),
+        rows<Sized>(`select child.relname as name,
+                       coalesce(pg_catalog.pg_get_expr(child.relpartbound, child.oid, true), '') as definition,
+                       case when child.relkind = 'p' then
+                         (select coalesce(sum(pg_catalog.pg_total_relation_size(tree.relid)), 0)
+                          from pg_catalog.pg_partition_tree(child.oid) tree)
+                       else pg_catalog.pg_total_relation_size(child.oid)
+                       end::text as size_bytes
+                     from pg_catalog.pg_inherits
+                     join pg_catalog.pg_class child on child.oid = inhrelid
+                     join pg_catalog.pg_class parent on parent.oid = inhparent
+                     join pg_catalog.pg_namespace n on n.oid = parent.relnamespace
+                     where n.nspname = $1 and parent.relname = $2 order by child.relname`),
         rows(`select t.tgname as name, pg_catalog.pg_get_triggerdef(t.oid, true) as definition
               from pg_catalog.pg_trigger t
               join pg_catalog.pg_class c on c.oid = t.tgrelid
@@ -1198,8 +1217,9 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         // Skip NOT NULL (contype 'n', PG 17+); the PRIMARY KEY ('p') stays, shown
         // read-only in the UI (it's also the columns table's key marker), like FKs.
         { title: 'Constraints', rows: constraintRows.filter((row) => row.type !== 'f' && row.type !== 'n') },
-        { title: 'Indexes', rows: indexes },
-        { title: 'Partitions', rows: partitions },
+        // Sizes are allocated bytes, not estimates, so they aren't marked approximate.
+        { title: 'Indexes', rows: indexes.map(({ size_bytes, ...row }) => sizedRow(row, size_bytes)) },
+        { title: 'Partitions', rows: partitions.map(({ size_bytes, ...row }) => sizedRow(row, size_bytes)) },
         { title: 'Triggers', rows: triggers },
         { title: 'Rules', rows: rules },
         { title: 'Policies', rows: policies },

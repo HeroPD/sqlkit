@@ -327,7 +327,17 @@ export type InspectColumn = {
 
 /** One named-rows block of a table inspection (Indexes, Triggers, …).
  * Engines supply whichever sections they have; empty ones are omitted. */
-export type InspectSection = { title: string; rows: Array<{ name: string; definition: string }> }
+export type InspectSection = {
+  title: string
+  rows: Array<{
+    name: string
+    definition: string
+    /** Allocated bytes for this index or partition, when the engine exposes it. */
+    sizeBytes?: number
+    /** Catalog value is an estimate rather than measured allocation. */
+    approximateSize?: boolean
+  }>
+}
 
 export type TableInspection = { columns: InspectColumn[]; sections: InspectSection[] }
 

@@ -73,6 +73,32 @@ const stubInspect = () => {
 const inspection = (title: string): TableInspection => ({ columns: [], sections: [{ title, rows: [] }] })
 const chooseOption = (button: HTMLButtonElement) => button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
 
+describe('TableInspect object sizes', () => {
+  it('shows size metadata without changing the definition', async () => {
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: {
+        columns: [],
+        sections: [{ title: 'Indexes', rows: [{ name: 'users_email_idx', definition: 'CREATE INDEX users_email_idx', sizeBytes: 2_048 }] }],
+      },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    await view.updateComplete
+
+    expect(view.shadowRoot!.querySelector('.object-size')?.textContent).toBe('2 KB')
+    expect(view.shadowRoot!.querySelector<HTMLElement>('[data-field="definition"]')?.title).toBe('CREATE INDEX users_email_idx\nSize: 2 KB')
+    expect(internals(view)._state.inspection?.sections[0]?.rows[0]?.definition).toBe('CREATE INDEX users_email_idx')
+    view.remove()
+  })
+})
+
 describe('TableInspect stale-load guard', () => {
   it('ignores a result for a child the user already switched away from', async () => {
     const table: TableRef = { schema: 'public', name: 't', kind: 'table' }

@@ -12,3 +12,21 @@ export function byteCount(value: string | number | null | undefined): number | n
   const bytes = Number(value)
   return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null
 }
+
+/**
+ * An inspection row carrying the size its engine reported for that object.
+ *
+ * `approximate` marks catalogs that sample rather than measure — MySQL's
+ * InnoDB stats are recalculated on ANALYZE, where Postgres and SQL Server both
+ * answer with allocated pages. An unusable size drops both fields, so the UI
+ * shows no badge at all rather than a wrong or zero one.
+ */
+export function sizedRow<T extends { name: string; definition: string }>(
+  row: T,
+  value: string | number | null | undefined,
+  approximate = false,
+): T & { sizeBytes?: number; approximateSize?: boolean } {
+  const sizeBytes = byteCount(value)
+  if (sizeBytes === null) return row
+  return { ...row, sizeBytes, ...(approximate ? { approximateSize: true } : {}) }
+}

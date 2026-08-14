@@ -681,10 +681,26 @@ DELIMITER ;`)
       expect(inspection.sections.find((section) => section.title === 'Foreign Keys')?.rows.some((row) => row.name === 'ddl_source_fk')).toBe(true)
       expect(inspection.sections.find((section) => section.title === 'Triggers')?.rows.some((row) => row.name === 'ddl_source_trigger')).toBe(true)
 
-      await driver.query('create table ddl_partitioned (id int) partition by range (id) (partition p0 values less than (10))')
+      await driver.query(
+        `create table ddl_partitioned (id int, note varchar(20), key ddl_partitioned_idx (note))
+         partition by range (id) (partition p0 values less than (10))`,
+      )
       expect(await driver.runDdl!([
         buildAddPartition({ schema: null, name: 'ddl_partitioned', kind: 'table' }, { name: 'p1', bounds: 'VALUES LESS THAN (20)' }, 'mysql'),
       ])).toEqual({ success: true })
+      await driver.query("insert into ddl_partitioned values (1, 'a'), (15, 'b')")
+      await driver.query('analyze table ddl_partitioned')
+      const partitionInspection = await driver.inspectTable({ schema: null, name: 'ddl_partitioned', kind: 'table' })
+      const partitionRows = partitionInspection.sections.find((section) => section.title === 'Partitions')?.rows
+      expect(partitionRows?.map((row) => row.name)).toEqual(['p0', 'p1'])
+      expect(partitionRows?.every((row) => typeof row.sizeBytes === 'number')).toBe(true)
+      // innodb_index_stats names a partition's rows `table#p#partition`, so index
+      // sizes only survive the split when it ignores the separator's case.
+      const partitionedIndexes = partitionInspection.sections.find((section) => section.title === 'Indexes')?.rows
+      expect(partitionedIndexes?.map((row) => row.name)).toEqual(['ddl_partitioned_idx'])
+      expect(partitionedIndexes?.[0]?.sizeBytes).toEqual(expect.any(Number))
+      const sourceIndexes = (await driver.inspectTable(source)).sections.find((section) => section.title === 'Indexes')?.rows
+      expect(sourceIndexes?.find((row) => row.name === 'ddl_source_idx')?.sizeBytes).toEqual(expect.any(Number))
     } finally {
       await driver.query('drop table if exists ddl_source, ddl_target, ddl_partitioned').catch(() => {})
       await driver.disconnect()

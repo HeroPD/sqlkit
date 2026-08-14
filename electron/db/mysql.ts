@@ -3,7 +3,7 @@ import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResul
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
-import { byteCount } from './table-stats'
+import { byteCount, sizedRow } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -989,7 +989,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       type Row = { name: string; definition: string }
       const args = [table.name]
 
-      const [columns, primaryKey, foreignKeys, checks, indexes, partitions, triggers] = await Promise.all([
+      const [columns, primaryKey, foreignKeys, checks, indexes, indexSizes, partitions, triggers] = await Promise.all([
         metaRows<{ name: string; data_type: string; nullable: number; default_expr: string | null; pk: number; fk: number; comment: string | null; extra: string }>(
           `select c.column_name as name, c.column_type as data_type, c.is_nullable = 'YES' as nullable,
                   c.column_default as default_expr, c.column_key = 'PRI' as pk,
@@ -1047,10 +1047,31 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           args,
           childDb,
         ),
-        metaRows<Row>(
+        // InnoDB exposes per-index page counts outside information_schema.
+        // Some managed servers deny this catalog; inspection still works there,
+        // simply without index sizes.
+        //
+        // A partitioned table is stored one row per partition, named
+        // `table#p#partition` — lowercase on MySQL 8, uppercase on 5.7 and
+        // MariaDB. table_name is utf8mb3_bin, so the split has to be
+        // case-insensitive or partitioned tables silently report no sizes;
+        // the table name itself stays a binary compare, which is what
+        // lower_case_table_names=0 servers need.
+        metaRows<{ name: string; size_bytes: string | number | null }>(
+          `select index_name as name, sum(stat_value) * @@innodb_page_size as size_bytes
+           from mysql.innodb_index_stats
+           where database_name = database()
+             and substring_index(replace(table_name, '#P#', '#p#'), '#p#', 1) = ?
+             and stat_name = 'size'
+           group by index_name`,
+          args,
+          childDb,
+        ).catch(() => []),
+        metaRows<Row & { size_bytes: string | number | null }>(
           `select partition_name as name,
                   concat(partition_method, coalesce(concat(' (', partition_expression, ')'), ''),
-                         coalesce(concat(' — ', partition_description), '')) as definition
+                         coalesce(concat(' — ', partition_description), '')) as definition,
+                  coalesce(data_length, 0) + coalesce(index_length, 0) as size_bytes
            from information_schema.partitions
            where table_schema = database() and table_name = ? and partition_name is not null
            order by partition_ordinal_position`,
@@ -1070,8 +1091,11 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         { title: 'Foreign Keys', rows: foreignKeys },
         // PK is shown read-only in the UI (also the columns table's key marker), like FKs.
         { title: 'Constraints', rows: [...primaryKey, ...checks] },
-        { title: 'Indexes', rows: indexes.filter((row) => row.name !== 'PRIMARY') },
-        { title: 'Partitions', rows: partitions },
+        // Both size sources are InnoDB estimates, so every row is marked approximate.
+        { title: 'Indexes', rows: indexes
+          .filter((row) => row.name !== 'PRIMARY')
+          .map((row) => sizedRow(row, indexSizes.find((size) => size.name === row.name)?.size_bytes, true)) },
+        { title: 'Partitions', rows: partitions.map(({ size_bytes, ...row }) => sizedRow(row, size_bytes, true)) },
         { title: 'Triggers', rows: triggers },
       ]
       return {

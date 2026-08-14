@@ -20,7 +20,7 @@ import {
   type InspectDropTarget,
   type InspectOperation,
 } from '../inspect-operations'
-import { t } from '../i18n'
+import { formatBytes, t } from '../i18n'
 
 // A column property the user can edit inline (click). Nullable is edited via a
 // yes/no menu; primary key stays read-only. Capabilities come from the dialect.
@@ -85,7 +85,7 @@ const NEW_COLUMN_NAME = 'new_column'
 const ENGINE_SECTIONS: Record<Engine, string[]> = {
   postgresql: ['Foreign Keys', 'Constraints', 'Indexes', 'Partitions', 'Triggers', 'Rules', 'Policies', 'Storage'],
   mysql: ['Foreign Keys', 'Constraints', 'Indexes', 'Partitions', 'Triggers'],
-  sqlserver: ['Foreign Keys', 'Constraints', 'Indexes', 'Triggers'],
+  sqlserver: ['Foreign Keys', 'Constraints', 'Indexes', 'Partitions', 'Triggers'],
   sqlite: ['Foreign Keys', 'Constraints', 'Indexes', 'Triggers'],
 }
 
@@ -1706,6 +1706,7 @@ export class TableInspect extends LitElement {
                   const stagedIndex = this._stagedOperationIndex(section.title, row.name)
                   const objectEditing = this._sectionEditing
                   const rowName = row.name
+                  const size = row.sizeBytes === undefined ? null : formatBytes(row.sizeBytes)
                   const readonly = this._isReadonlyRow(section.title, row.definition, stagedIndex >= 0)
                   const editingName = objectEditing?.section === section.title
                     && objectEditing.operationIndex === (stagedIndex >= 0 ? stagedIndex : undefined)
@@ -1760,8 +1761,15 @@ export class TableInspect extends LitElement {
                           ><i class="icon icon-x" aria-hidden="true"></i></button>`
                         : ''}
                     </td>
-                    <td data-field="definition" class="mono def${this._isSelected(grid, index, 1) ? ' selected' : ''}" title=${row.definition}
-                      >${highlightDefinition(row.definition)}</td>
+                    <td
+                      data-field="definition"
+                      class="mono def${this._isSelected(grid, index, 1) ? ' selected' : ''}"
+                      title=${size === null
+                        ? row.definition
+                        : `${row.definition}\n${t(row.approximateSize ? 'inspect.approximateObjectSize' : 'inspect.objectSize', { size })}`}
+                    >${highlightDefinition(row.definition)}${size === null
+                        ? ''
+                        : html`<span class="object-size">${row.approximateSize ? '~' : ''}${size}</span>`}</td>
                   </tr>
                 `},
               )}
@@ -2423,6 +2431,21 @@ export class TableInspect extends LitElement {
         /* The editor's keyword violet (sql-editor.ts softHighlightStyle), so
            definitions read as the same language as the editor. */
         color: #a163b5;
+      }
+
+      /* Drawn from currentColor so the badge follows the cell through selection
+         and every staged colour, the way the explorer's size text does. */
+      .object-size {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 1px 5px;
+        border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+        border-radius: 999px;
+        color: color-mix(in srgb, currentColor 72%, transparent);
+        font-family: var(--ui-font);
+        font-size: var(--font-size-sm);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
       }
 
       .staged-add td {

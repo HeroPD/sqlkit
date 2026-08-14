@@ -457,6 +457,8 @@ const enUS = {
   'inspect.chooseDefault': 'Choose default',
   'inspect.chooseNullability': 'Choose nullability',
   'inspect.lockedSqlite': 'SQLite requires a table rebuild to change this',
+  'inspect.objectSize': 'Size: {size}',
+  'inspect.approximateObjectSize': 'Size: approximately {size}',
   'inspect.lockedMysql': 'MySQL requires a full MODIFY COLUMN to change this',
   'inspect.lockedSqlServerDefault': 'SQL Server defaults are named constraints — edit them there',
   'inspect.noIndexesAdd': 'No indexes yet — add one with + to speed up lookups and enforce uniqueness.',

@@ -7,7 +7,7 @@ import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResul
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
-import { byteCount } from './table-stats'
+import { byteCount, sizedRow } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
 import type { Endpoint } from './transport'
@@ -1070,7 +1070,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         ? `${dialect.quoteIdent(table.schema)}.${dialect.quoteIdent(table.name)}`
         : dialect.quoteIdent(table.name)
 
-      const [columns, primaryKey, foreignKeys, checks, indexes, triggers] = await Promise.all([
+      const [columns, primaryKey, foreignKeys, checks, indexes, partitions, triggers] = await Promise.all([
         metaRows<{
           name: string
           data_type: string
@@ -1139,17 +1139,63 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           [qualified],
           childDb,
         ),
-        metaRows<Row>(
+        metaRows<Row & { size_bytes: string | number | null }>(
           `select i.name as name,
                   concat(iif(i.is_unique = 1, 'UNIQUE ', ''), '(',
                          stuff((select ', ' + col_name(ic.object_id, ic.column_id)
                                 from sys.index_columns ic
                                 where ic.object_id = i.object_id and ic.index_id = i.index_id and ic.is_included_column = 0
                                 order by ic.key_ordinal for xml path('')), 1, 2, ''),
-                         ') ', i.type_desc) as definition
+                         ') ', i.type_desc) as definition,
+                  (select sum(cast(a.total_pages as bigint)) * 8192
+                   from sys.partitions p
+                   join sys.allocation_units a
+                     on a.container_id = case when a.type in (1, 3) then p.hobt_id else p.partition_id end
+                   where p.object_id = i.object_id and p.index_id = i.index_id) as size_bytes
            from sys.indexes i
            where i.object_id = object_id(@p1) and i.is_primary_key = 0 and i.type > 0
            order by i.name`,
+          [qualified],
+          childDb,
+        ),
+        // Partition N spans boundary N-1 to boundary N; which end includes its
+        // boundary is what RANGE LEFT/RIGHT decides, so the interval brackets
+        // carry it. A table not on a partition scheme joins to no function and
+        // drops out here, which is how the section stays hidden for it.
+        metaRows<Row & { size_bytes: string | number | null }>(
+          `with part_scheme as (
+             select ps.function_id, pf.type_desc, pf.boundary_value_on_right,
+                    col_name(ic.object_id, ic.column_id) as column_name
+             from sys.indexes i
+             join sys.index_columns ic
+               on ic.object_id = i.object_id and ic.index_id = i.index_id and ic.partition_ordinal > 0
+             join sys.partition_schemes ps on ps.data_space_id = i.data_space_id
+             join sys.partition_functions pf on pf.function_id = ps.function_id
+             where i.object_id = object_id(@p1) and i.index_id in (0, 1)
+           ),
+           part_size as (
+             select p.partition_number, sum(cast(a.total_pages as bigint)) * 8192 as size_bytes
+             from sys.partitions p
+             join sys.allocation_units a
+               on a.container_id = case when a.type in (1, 3) then p.hobt_id else p.partition_id end
+             where p.object_id = object_id(@p1)
+             group by p.partition_number
+           )
+           select concat('Partition ', s.partition_number) as name,
+                  concat(f.type_desc, iif(f.boundary_value_on_right = 1, ' RIGHT', ' LEFT'),
+                         ' (', f.column_name, ') — ',
+                         iif(f.boundary_value_on_right = 1, '[', '('),
+                         isnull(convert(nvarchar(64), lo.value, 121), 'MIN'), ', ',
+                         isnull(convert(nvarchar(64), hi.value, 121), 'MAX'),
+                         iif(f.boundary_value_on_right = 1, ')', ']')) as definition,
+                  s.size_bytes
+           from part_size s
+           cross join part_scheme f
+           left join sys.partition_range_values lo
+             on lo.function_id = f.function_id and lo.boundary_id = s.partition_number - 1
+           left join sys.partition_range_values hi
+             on hi.function_id = f.function_id and hi.boundary_id = s.partition_number
+           order by s.partition_number`,
           [qualified],
           childDb,
         ),
@@ -1165,7 +1211,9 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         { title: 'Foreign Keys', rows: foreignKeys },
         // PK is shown read-only in the UI (also the columns table's key marker), like FKs.
         { title: 'Constraints', rows: [...primaryKey, ...checks] },
-        { title: 'Indexes', rows: indexes },
+        // Sizes are allocated pages, not estimates, so they aren't marked approximate.
+        { title: 'Indexes', rows: indexes.map(({ size_bytes, ...row }) => sizedRow(row, size_bytes)) },
+        { title: 'Partitions', rows: partitions.map(({ size_bytes, ...row }) => sizedRow(row, size_bytes)) },
         { title: 'Triggers', rows: triggers },
       ]
       return {

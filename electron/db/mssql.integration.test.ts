@@ -751,11 +751,39 @@ describeDb('mssql driver (integration)', () => {
       expect(foreignKeys?.rows[0]?.definition).toMatch(/REFERENCES dbo\.authors/i)
       const indexes = inspection.sections.find((section) => section.title === 'Indexes')
       expect(indexes?.rows.some((row) => row.name === 'books_author_idx')).toBe(true)
+      expect(indexes?.rows.find((row) => row.name === 'books_author_idx')?.sizeBytes).toEqual(expect.any(Number))
       expect(indexes?.rows.every((row) => !/^PK_/.test(row.name))).toBe(true)
       const constraints = inspection.sections.find((section) => section.title === 'Constraints')
       expect(constraints?.rows.some((row) => /^PRIMARY KEY \(id\)/i.test(row.definition))).toBe(true)
+      // A table on no partition scheme has nothing to show.
+      expect(inspection.sections.some((section) => section.title === 'Partitions')).toBe(false)
     } finally {
       await driver.disconnect()
+    }
+  })
+
+  it('describes partitions by their boundary interval and size', async () => {
+    await fixtures.request().batch(`
+      create partition function pf_books (int) as range left for values (10, 20);
+      create partition scheme ps_books as partition pf_books all to ([PRIMARY]);
+      create table dbo.partitioned_books (id int not null, note nvarchar(50)) on ps_books(id);
+      insert into dbo.partitioned_books values (1, 'a'), (15, 'b'), (25, 'c');`)
+    const driver = await connectDriver()
+    try {
+      const inspection = await driver.inspectTable({ schema: 'dbo', name: 'partitioned_books', kind: 'table' })
+      const partitions = inspection.sections.find((section) => section.title === 'Partitions')
+      expect(partitions?.rows.map((row) => row.definition)).toEqual([
+        'RANGE LEFT (id) — (MIN, 10]',
+        'RANGE LEFT (id) — (10, 20]',
+        'RANGE LEFT (id) — (20, MAX]',
+      ])
+      expect(partitions?.rows.every((row) => typeof row.sizeBytes === 'number')).toBe(true)
+    } finally {
+      await driver.disconnect()
+      await fixtures.request().batch(`
+        drop table if exists dbo.partitioned_books;
+        drop partition scheme ps_books;
+        drop partition function pf_books;`)
     }
   })
 
