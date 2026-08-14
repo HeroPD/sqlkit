@@ -3577,17 +3577,26 @@ export class ResultsPanel extends LitElement {
         color: var(--accent);
       }
 
+      /* Top-aligned, not centred: a multi-line expression grows downwards, and
+         the funnel and actions belong beside its first line. Each is a 24px box
+         — one line of the editor — so they centre against that line. */
       .filter-bar {
         min-height: 34px;
         flex-shrink: 0;
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 6px;
         padding: 4px 8px 4px 12px;
         box-sizing: border-box;
         background: var(--header-bg);
         border-bottom: 1px solid var(--border-subtle);
         color: var(--text-3);
+      }
+
+      .filter-bar .icon-filter {
+        display: inline-flex;
+        align-items: center;
+        height: 24px;
       }
 
       /* Accent the leading funnel while a filter is actually applied. */
