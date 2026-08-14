@@ -120,6 +120,22 @@ export const SQL_FUNCTIONS = new Set([
   'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'COALESCE', 'NULLIF', 'NOW', 'GETDATE',
 ])
 
+/**
+ * Whether a completion candidate is worth offering for what has been typed.
+ *
+ * The rule both SQL editors match on, because the two defaults are each wrong
+ * in their own direction: a bare prefix test never reaches CURRENT_TIMESTAMP
+ * from `time`, while CodeMirror's own matcher takes any subsequence and reaches
+ * it from `test` (curren·t·_tim·es·t·amp). A candidate qualifies when the typed
+ * text starts the label or starts one of its underscore-separated words.
+ */
+export function matchesCompletionTerm(label: string, typed: string): boolean {
+  if (!typed) return true
+  const needle = typed.toLowerCase()
+  const haystack = label.toLowerCase()
+  return haystack.startsWith(needle) || haystack.split('_').some((word) => word.startsWith(needle))
+}
+
 export const SQL_DIALECTS: Record<SqlDialectName, SqlDialectConfig> = {
   postgres: {
     dialect: SQLDialect.define({

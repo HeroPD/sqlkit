@@ -52,7 +52,7 @@ import {
 } from '../codemirror/selection-commands'
 import type { ColumnRef } from '../electron'
 import { quoteStyleFor } from '../dialect'
-import { KEYWORD_BOOSTS, SQL_FUNCTIONS, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
+import { KEYWORD_BOOSTS, SQL_FUNCTIONS, matchesCompletionTerm, resolveDialect, type SqlDialectName } from '../codemirror/dialects'
 import {
   IDENT_SEG,
   boundAliases,
@@ -1068,11 +1068,11 @@ export class SqlEditor extends LitElement {
               const member = lower.slice(lower.lastIndexOf('.') + 1)
               // Keyed by kind: a column named `count` must not swallow COUNT().
               const key = `${option.type ?? ''}:${lower}`
-              if ((!lower.startsWith(typed) && !member.startsWith(typed)) || seen.has(key)) return
+              if ((!matchesCompletionTerm(lower, typed) && !matchesCompletionTerm(member, typed)) || seen.has(key)) return
               seen.add(key)
               // CM matches the label alone, so a word reaching for the ref
               // (`p` → `p.id`) only survives if the qualified form is the label.
-              const qualified = typed && !member.startsWith(typed) ? option.displayLabel : undefined
+              const qualified = typed && !matchesCompletionTerm(member, typed) ? option.displayLabel : undefined
               options.push(qualified === undefined
                 ? { ...option, boost }
                 : { ...option, label: qualified, displayLabel: undefined, boost })
@@ -1093,7 +1093,7 @@ export class SqlEditor extends LitElement {
             }
           } else {
             for (const [lower, option] of entries) {
-              if (!lower.startsWith(typed)) continue
+              if (!matchesCompletionTerm(lower, typed)) continue
               // In FROM/JOIN position, bare column names are noise.
               if (taken && option.type === 'property') continue
               options.push(taken && option.type === 'type' ? aliasedOption(option, taken) : option)
@@ -1101,7 +1101,7 @@ export class SqlEditor extends LitElement {
             // A table position binds new aliases; everywhere else offers the bound ones.
             if (!taken) {
               for (const option of aliasOptions(query)) {
-                if (option.label.toLowerCase().startsWith(typed)) options.push(option)
+                if (matchesCompletionTerm(option.label, typed)) options.push(option)
               }
             }
           }

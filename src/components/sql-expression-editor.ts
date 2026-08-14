@@ -8,7 +8,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { sql } from '@codemirror/lang-sql'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 import type { Engine } from '../electron'
-import { dialectForEngine, KEYWORD_BOOSTS, SQL_FUNCTIONS, resolveDialect } from '../codemirror/dialects'
+import { dialectForEngine, KEYWORD_BOOSTS, SQL_FUNCTIONS, matchesCompletionTerm, resolveDialect } from '../codemirror/dialects'
 import { softHighlightStyle } from '../codemirror/highlight'
 
 const configCompartment = new Compartment()
@@ -178,7 +178,9 @@ export class SqlExpressionEditor extends LitElement {
         override: [(context: CompletionContext) => {
           const word = context.matchBefore(/[\w$]*/)
           if (!context.explicit && (!word || word.from === word.to)) return null
-          return { from: word?.from ?? context.pos, options: expressionCompletionOptions(this.engine, this.columns) }
+          const options = expressionCompletionOptions(this.engine, this.columns)
+            .filter((option) => matchesCompletionTerm(option.label, word?.text ?? ''))
+          return { from: word?.from ?? context.pos, options }
         }],
       }),
     ]
