@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import catalogueSource from '../components/workbench-screen.ts?raw'
 import dispatchSource from './command-palette.ts?raw'
 import type { ReactiveControllerHost } from 'lit'
@@ -113,9 +113,6 @@ function setup(opts: Opts = {}) {
 
 const pick = (mode: PaletteMode, id: string) => new CustomEvent('palette-pick', { detail: { mode, id } })
 
-// The recently-used order persists, so each case starts with none.
-beforeEach(() => localStorage.clear())
-
 // The catalogue lives in workbench-screen and the dispatch here, so only a scan
 // pairs them: a command listed without a case renders as a row that does
 // nothing. Prefixed ids (view:, theme:) are routed ahead of the switch and
@@ -150,32 +147,21 @@ describe('CommandPaletteController entries', () => {
   it('names each command by its category and sorts the flat list', () => {
     const { ctrl } = setup()
     ctrl.open('commands')
-    // no headers with nothing recently used, and no leftover section order
+    // sorted by the composed name, not by the order the catalogue lists them
     expect(ctrl.entries().map((e) => e.label)).toEqual([
       'File: New Query', 'Theme: Light', 'View: Show Explorer', 'View: Toggle Sidebar',
     ])
-    expect(ctrl.entries().some((entry) => entry.header)).toBe(false)
     expect(ctrl.entries().every((entry) => entry.icon === undefined)).toBe(true)
   })
 
-  it('floats the last-run commands above the rest, once anything has run', () => {
+  it('never groups the commands: a command holds its place across runs', () => {
     const { ctrl } = setup()
-    ctrl.onPick(pick('commands', 'toggle-sidebar'))
-    ctrl.onPick(pick('commands', 'view:explorer'))
     ctrl.open('commands')
-    expect(ctrl.entries().map((e) => e.id)).toEqual([
-      'group:recent', 'view:explorer', 'toggle-sidebar',
-      'group:other', 'new-query', 'theme:light',
-    ])
-    // most recent first, and neither repeats below its own header
-    expect(ctrl.entries().filter((entry) => entry.header).map((entry) => entry.label))
-      .toEqual(['recently used', 'other commands'])
-  })
-
-  it('drops a recently used command that is no longer available', () => {
-    const { ctrl } = setup({ queryRunning: true })
-    ctrl.onPick(pick('commands', 'cancel-query'))
-    expect(setup().ctrl.entries().map((entry) => entry.id)).not.toContain('group:recent')
+    const before = ctrl.entries().map((entry) => entry.id)
+    ctrl.onPick(pick('commands', 'toggle-sidebar'))
+    ctrl.open('commands')
+    expect(ctrl.entries().map((entry) => entry.id)).toEqual(before)
+    expect(ctrl.entries().some((entry) => entry.header)).toBe(false)
   })
 
   it('offers cancel only while the active tab is running', () => {

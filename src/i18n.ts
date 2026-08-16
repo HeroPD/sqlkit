@@ -82,9 +82,6 @@ const enUS = {
   'palette.category.transaction': 'Transaction',
   'palette.category.view': 'View',
   'palette.category.theme': 'Theme',
-  // The only two labels ⌘⇧P shows, and only while nothing is typed.
-  'palette.recentlyUsed': 'recently used',
-  'palette.otherCommands': 'other commands',
   'view.explorer': 'Explorer',
   'view.search': 'Search',
   'view.databases': 'Databases',

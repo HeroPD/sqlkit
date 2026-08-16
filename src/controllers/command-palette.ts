@@ -28,10 +28,6 @@ const CATEGORY_LABELS: Record<PaletteCategory, string> = {
   theme: t('palette.category.theme'),
 }
 
-// How many of the last-run commands ⌘⇧P floats to the top before the rest.
-const RECENT_LIMIT = 5
-const RECENT_KEY = 'sqlkit-recent-commands'
-
 // Commands that act on the SQL under the caret, so they are offered only with a
 // SQL tab open. The `selection:` ones are checked by prefix alongside these.
 const EDITOR_COMMANDS = new Set([
@@ -153,20 +149,9 @@ export class CommandPaletteController implements ReactiveController {
         return [{ id, label: name, keybind, ...(detail ? { detail } : {}) }]
       })
       // Alphabetical by the composed name, so a category's commands sit
-      // together without a header having to say so.
-      available.sort((a, b) => a.label.localeCompare(b.label))
-      const recent = this.recent
-        .flatMap((id) => available.filter((entry) => entry.id === id))
-        .slice(0, RECENT_LIMIT)
-      if (!recent.length) return available
-      // The only two labels ⌘⇧P shows; the component drops them the moment
-      // something is typed, which is where a flat ranked list belongs.
-      const rest = available.filter((entry) => !recent.includes(entry))
-      return [
-        { id: 'group:recent', label: t('palette.recentlyUsed'), header: true },
-        ...recent,
-        ...(rest.length ? [{ id: 'group:other', label: t('palette.otherCommands'), header: true }, ...rest] : []),
-      ]
+      // together without a header having to say so — and so a command holds
+      // the same place every time, which is what makes the list quick.
+      return available.sort((a, b) => a.label.localeCompare(b.label))
     }
 
     if (this.mode === 'quick') {
@@ -348,35 +333,12 @@ export class CommandPaletteController implements ReactiveController {
     return ''
   }
 
-  // Last-run command ids, most recent first. Persisted like the theme is: a
-  // palette that forgets what you just did is the one you stop reaching for.
-  private get recent(): string[] {
-    try {
-      const stored: unknown = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]')
-      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []
-    } catch {
-      return []
-    }
-  }
-
-  private remember(id: string) {
-    const next = [id, ...this.recent.filter((seen) => seen !== id)].slice(0, RECENT_LIMIT)
-    try {
-      localStorage.setItem(RECENT_KEY, JSON.stringify(next))
-    } catch {
-      // A full or blocked store only costs the ordering, never the command.
-    }
-  }
-
   private withActiveProfile(run: (profileId: string) => void) {
     const active = this.deps.activeProfile()
     if (active) run(active.id)
   }
 
   private runCommand(id: string) {
-    // Remembered before it runs: quick-open re-enters the palette, and closing
-    // a workspace tears this controller down.
-    this.remember(id)
     if (id.startsWith('selection:')) {
       this.deps.runSelectionCommand(id.slice('selection:'.length) as SelectionCommandId)
       return
