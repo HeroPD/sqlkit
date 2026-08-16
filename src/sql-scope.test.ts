@@ -86,13 +86,41 @@ test('a statement-leading keyword binds, having no clause before it', () => {
   expect(bindings('DELETE FROM users WHERE |')).toEqual(['users'])
   expect(bindings('UPDATE users u SET name = | ')).toEqual(['users u'])
   expect(bindings('UPDATE public.users u SET name = 1 WHERE |')).toEqual(['users u'])
-  // the write target joins the FROM items of the same statement
-  expect(bindings('UPDATE users u SET n = 1 FROM postings p WHERE |')).toEqual(['postings p', 'users u'])
+  // the write target leads the FROM items of the same statement
+  expect(bindings('UPDATE users u SET n = 1 FROM postings p WHERE |')).toEqual(['users u', 'postings p'])
   expect(aliasTarget('UPDATE users u SET name = | ', 'u')).toBe('users')
   // an INSERT's SELECT is its own query, so the target stays out of it
   expect(bindings('INSERT INTO users SELECT | FROM postings p')).toEqual(['postings p'])
   // the UPDATE of an upsert names no table
   expect(bindings('INSERT INTO users VALUES (1) ON CONFLICT (id) DO UPDATE SET name = |')).toEqual(['users'])
+})
+
+test('only an update/into that opens its query names a write target', () => {
+  // each of these reuses the keyword inside a clause already running
+  expect(bindings('SELECT * FROM users u WHERE u.id > 0 FOR UPDATE OF users |')).toEqual(['users u'])
+  expect(bindings('SELECT * FROM users u WHERE u.id > 0 FOR UPDATE SKIP LOCKED |')).toEqual(['users u'])
+  expect(bindings('INSERT INTO orders VALUES (1) ON DUPLICATE KEY UPDATE users = 1 |', 'mysql')).toEqual(['orders'])
+  expect(bindings('SELECT id INTO myvar FROM users WHERE |')).toEqual(['users'])
+  // a CTE's own DML opens its query one paren deep, and the UPDATE after it does too
+  expect(bindings('WITH added AS (INSERT INTO users VALUES (1) RETURNING |) SELECT 1')).toEqual(['users'])
+  expect(bindings('WITH recent AS (SELECT 1) UPDATE orders SET n = |')).toEqual(['orders'])
+})
+
+test('USING binds a table, except where it lists join columns', () => {
+  expect(bindings('DELETE FROM orders o USING payments p WHERE |')).toEqual(['orders o', 'payments p'])
+  expect(bindings('MERGE INTO orders o USING payments p ON |')).toEqual(['orders o', 'payments p'])
+  expect(aliasTarget('DELETE FROM orders o USING payments p WHERE p.|', 'p')).toBe('payments')
+  // `JOIN … USING (id)` names a column, not a table
+  expect(bindings('SELECT | FROM orders o JOIN payments p USING (id)')).toEqual(['orders o', 'payments p'])
+  expect(bindings('SELECT | FROM orders o JOIN payments p USING(id)')).toEqual(['orders o', 'payments p'])
+})
+
+test('RETURNING belongs to the statement, not to the query that ran last', () => {
+  // the SELECT sits between INTO and RETURNING, and must not claim it
+  expect(bindings('INSERT INTO users SELECT * FROM postings p RETURNING |')).toEqual(['users'])
+  expect(bindings('INSERT INTO users VALUES (1) RETURNING |')).toEqual(['users'])
+  expect(bindings('UPDATE users SET n = 1 FROM postings p RETURNING |')).toEqual(['users', 'postings p'])
+  expect(bindings('DELETE FROM users WHERE id = 1 RETURNING |')).toEqual(['users'])
 })
 
 test('a parenthesized join group binds into the query around it', () => {

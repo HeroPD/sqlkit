@@ -631,6 +631,75 @@ test('an UPDATE alias resolves to the table being written', async () => {
   expect(await completionsAt('UPDATE users u SET u.')).toEqual(['id', 'user_name'])
 })
 
+test('an assignment target scopes to the written table and takes no ref', async () => {
+  // Postgres and SQLite reject `SET o.col = …`, and payments is never assignable
+  const doc = 'UPDATE orders o SET tra = 1 FROM payments p WHERE p.order_id = o.id'
+  const target = await completionsAt(doc, doc.indexOf('tra = 1') + 'tra'.length)
+  expect(target).toContain('tran_date')
+  expect(target).not.toContain('o.tran_date')
+  expect(target).not.toContain('p.tran_date')
+  // an empty target position leads with the written table's columns, not the aliases
+  const empty = await completionsAt('UPDATE orders o SET ')
+  expect(empty.slice(0, 3)).toEqual(['id', 'merchant_id', 'user_id'])
+  expect(empty).not.toContain('o')
+  expect(empty).not.toContain('p')
+  // and so does the target after a comma
+  const second = 'UPDATE orders o SET total_amount = 1, tra = 2 FROM payments p'
+  expect(await completionsAt(second, second.indexOf('tra = 2') + 'tra'.length)).not.toContain('p.tran_date')
+})
+
+test('a SET value is an ordinary column expression over the whole statement', async () => {
+  const value = 'UPDATE orders o SET tran_date = tra FROM payments p WHERE p.order_id = o.id'
+  const labels = await completionsAt(value, value.indexOf('= tra') + '= tra'.length)
+  expect(labels.slice(0, 2)).toEqual(['o.tran_date', 'p.tran_date'])
+  // a call argument sits past the `=` however many commas it holds
+  const call = 'UPDATE orders o SET tran_date = coalesce(paid_at, amo) FROM payments p'
+  expect(await completionsAt(call, call.indexOf('amo)') + 'amo'.length)).toContain('amount')
+})
+
+test('USING binds its table for the clauses that follow', async () => {
+  const deleted = await completionsAt('DELETE FROM orders o USING payments p WHERE amo')
+  expect(deleted).toContain('amount')
+  expect(deleted).toContain('total_amount')
+  expect(await completionsAt('MERGE INTO orders o USING payments p ON amo')).toContain('amount')
+  // `JOIN … USING (id)` names a column, so no unbound table rides in on it
+  const joined = await completionsAt('SELECT * FROM orders o JOIN payments p USING (id) WHERE tok')
+  expect(joined).not.toContain('token')
+})
+
+test('RETURNING completes the columns of the table written, not of the query between', async () => {
+  const inserted = await completionsAt('INSERT INTO users SELECT * FROM postings p RETURNING user_')
+  expect(inserted).toContain('user_name')
+  expect(inserted).not.toContain('user_id')
+  expect(await completionsAt('UPDATE orders SET total_amount = 1 RETURNING tran')).toEqual(
+    ['tran_date', 'START TRANSACTION'],
+  )
+  expect(await completionsAt('DELETE FROM users WHERE id = 1 RETURNING user_')).toEqual(['user_name'])
+})
+
+test('a keyword that only reuses UPDATE or INTO binds no table', async () => {
+  const locked = await completionsAt('SELECT * FROM users u WHERE u.id > 0 FOR UPDATE OF users AND us')
+  expect(locked.filter((label) => label === 'users')).toHaveLength(1)
+  expect(locked).toContain('user_name')
+  // `SELECT … INTO` names a variable; the columns still come from the FROM
+  expect(await completionsAt('SELECT id INTO myvar FROM users WHERE user_')).toEqual(['user_name'])
+})
+
+test('the written table leads the tables an UPDATE reads from', async () => {
+  const doc = 'UPDATE orders o SET total_amount = 1 FROM payments p WHERE o.id = p.order_id AND i'
+  const labels = await completionsAt(doc)
+  expect(labels.slice(0, 2)).toEqual(['o.id', 'p.id'])
+})
+
+test('multi-word keywords rank below the scoped names in every expression clause', async () => {
+  const where = await completionsAt('SELECT * FROM orders o WHERE ')
+  expect(where.indexOf('AVG')).toBeGreaterThan(-1)
+  expect(where.indexOf('AVG')).toBeLessThan(where.indexOf('LEFT JOIN'))
+  // a statement the metadata does not cover keeps the dialect keyword ranking
+  const unknown = await completionsAt('SELECT * FROM mystery_tbl WHERE ')
+  expect(unknown.indexOf('LEFT JOIN')).toBeLessThan(unknown.indexOf('AVG'))
+})
+
 test('FROM/JOIN suggestions omit bare column names', async () => {
   const labels = await completionsAt('SELECT * FROM us')
   expect(labels).toContain('users')

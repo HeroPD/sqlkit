@@ -56,6 +56,7 @@ import { KEYWORD_BOOSTS, SQL_FUNCTIONS, matchesCompletionTerm, resolveDialect, t
 import {
   IDENT_SEG,
   boundAliases,
+  callDepthAt,
   clauseAt,
   depthAt,
   findAliasTarget,
@@ -331,10 +332,14 @@ const JOIN_ON_TARGET = new RegExp(
   'i',
 )
 
-// Clauses whose words are column expressions over the statement's own tables.
-// A bare name there resolves against those tables alone, so every other table's
+// Clauses whose words are column expressions over the statement's own tables. A
+// bare name there resolves against those tables alone, so every other table's
 // columns are noise — `WHERE DATE(` must not offer some unrelated table's date.
 const EXPRESSION_CLAUSES = new Set(['select', 'where', 'on', 'set', 'group', 'order', 'having', 'returning', 'window'])
+
+// In a SET list the caret names an assignment target until an `=` is passed;
+// past it the right-hand side is an ordinary column expression.
+const SET_TARGET = /(?:\bset\b|,)[^,=]*$/i
 
 @customElement('sql-editor')
 export class SqlEditor extends LitElement {
@@ -966,6 +971,15 @@ export class SqlEditor extends LitElement {
           return options
         }
 
+        // The write target's own columns, bare and unranked by ambiguity: an
+        // assignment target names a column of that table and takes no ref.
+        const targetColumnOptions = (query: ClauseContext): Completion[] =>
+          tableBindings(structure, query).flatMap(({ seg, qualified, table, target }) => {
+            if (!target) return []
+            const tableKey = qualified === undefined ? normIdent(table) : `${normIdent(seg)}.${normIdent(table)}`
+            return columnsByTable.get(tableKey) ?? columnsByTable.get(normIdent(table)) ?? []
+          })
+
         // FK equalities linking the table of the `JOIN … ON ` before `pos` to
         // the other tables bound in the statement, in both key directions.
         const onConditions = (pos: number): string[] => {
@@ -1061,12 +1075,16 @@ export class SqlEditor extends LitElement {
         const options: Completion[] = []
         if (!unprompted) {
           const taken = inTableClause(from) ? takenAliases(from) : null
-          const activeContext = statementContext(from)
-          const expression = !taken && EXPRESSION_CLAUSES.has(activeContext?.clause ?? '')
-          const query = activeContext ?? queryContextAt(from)
+          const query = queryContextAt(from)
+          // An assignment target scopes to the written table alone: Postgres and
+          // SQLite reject `SET alias.col = …`, and no other table may appear.
+          const assigning = !taken && query.clause === 'set'
+            && callDepthAt(structure, from - statementStart) === 0
+            && SET_TARGET.test(context.state.sliceDoc(statementStart, from))
+          const expression = !taken && !assigning && EXPRESSION_CLAUSES.has(query.clause)
           const aliases = expression ? aliasOptions(query) : []
-          const boundColumns = expression ? boundColumnOptions(query) : []
-          if (expression && boundColumns.length) {
+          const boundColumns = assigning ? targetColumnOptions(query) : expression ? boundColumnOptions(query) : []
+          if (boundColumns.length) {
             const seen = new Set<string>()
             const add = (option: Completion, boost: number) => {
               const lower = (option.displayLabel ?? option.label).toLowerCase()
@@ -1173,11 +1191,11 @@ export class SqlEditor extends LitElement {
           structure,
           (wordAtCursor?.from ?? context.pos) - statementStart,
         )
-        // Match the main source's scoped SELECT-list mode: metadata-less and
+        // Match the main source's scoped expression mode: metadata-less and
         // FROM-less queries keep the dialect keyword boosts.
-        const scopedSelectList = query?.clause === 'select' && visibleBindings(structure, query)
-          .some(({ table }) => columnTables.has(normIdent(table)))
-        const ranked = (option: Completion): Completion => scopedSelectList ? { ...option, boost: -1 } : option
+        const scoped = query !== undefined && EXPRESSION_CLAUSES.has(query.clause)
+          && visibleBindings(structure, query).some(({ table }) => columnTables.has(normIdent(table)))
+        const ranked = (option: Completion): Completion => scoped ? { ...option, boost: -1 } : option
         const tokens = [...before.matchAll(/[A-Za-z_][\w$]*/g)]
         // Longest phrase first: "is not n" must beat "not n" (NOT IN).
         for (const back of [3, 2, 1]) {

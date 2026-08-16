@@ -60,8 +60,9 @@ export type ClauseState = {
 export type SqlStructure = { sql: string; masked: string; states: ClauseState[] }
 
 /** A FROM/JOIN/comma item: `seg` as written, `qualified` its second segment
- * when schema-qualified, `table` whichever names the table. */
-export type TableBinding = { seg: string; qualified?: string; alias?: string; table: string }
+ * when schema-qualified, `table` whichever names the table. `target` marks the
+ * table an UPDATE, INSERT or MERGE writes to. */
+export type TableBinding = { seg: string; qualified?: string; alias?: string; table: string; target?: boolean }
 
 // Clause and parenthesis depth at each structural token, so a caret or a match
 // index resolves by lookup instead of a rescan. Child expression parens inherit
@@ -77,6 +78,9 @@ export function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
   // query around it. Kept for the paren's life, so both branches of a
   // `IN (SELECT … UNION SELECT …)` reach the same outer query.
   const enclosing: Array<ClauseContext | undefined> = []
+  // The query each depth opened with. RETURNING belongs to the statement, not to
+  // whatever query ran last: `INSERT INTO t SELECT …` puts the SELECT in between.
+  const roots: Array<ClauseContext | undefined> = []
   // Depths of the open parens that hold arguments rather than FROM items, so a
   // comma inside `unnest(a, b)` is told apart from one inside `(a x, b y)`.
   const calls: number[] = []
@@ -88,18 +92,23 @@ export function scanSql(sql: string, dialect: SqlDialectName): SqlStructure {
       const inherited = contexts.get(depth)
       depth += 1
       if (inherited) contexts.set(depth, inherited)
+      roots[depth] = inherited
       enclosing[depth] = inherited?.clause === 'from' || inherited?.clause === 'join' ? undefined : inherited
       if (!GROUPING_PAREN.test(masked.slice(Math.max(0, at - 64), at))) calls.push(depth)
     } else if (token === ')') {
       contexts.delete(depth)
       enclosing[depth] = undefined
+      roots[depth] = undefined
       if (calls[calls.length - 1] === depth) calls.pop()
       depth = Math.max(0, depth - 1)
     } else {
       const previous = contexts.get(depth)
-      contexts.set(depth, token === 'select' || !previous
+      const root = token === 'returning' ? roots[depth] : undefined
+      const next = token === 'select' || !previous
         ? { clause: token, queryDepth: depth, queryStart: at, parent: enclosing[depth] }
-        : { ...previous, clause: token })
+        : { ...(root ?? previous), clause: token }
+      if (!previous) roots[depth] = next
+      contexts.set(depth, next)
     }
     // An inherited context repeats per depth; consumers key it, so leave it.
     const queryScopes = [...contexts.values()]
@@ -159,22 +168,25 @@ export function inFromList(structure: SqlStructure, index: number): boolean {
 // subquery instead is left alone: its keyword is no table name.
 const GROUP_OPEN = `\\s*(?:\\(\\s*)*(?!(?:select|with|values)\\b)`
 
-// A FROM/JOIN/UPDATE/INTO clause (or FROM-list comma) binding a table to an alias.
+// USING names a table in `DELETE … USING` and `MERGE … USING`, but a column list
+// in `JOIN … USING (…)`, so a paren after it rules the binding out.
+const USING_OPEN = `\\busing\\b\\s+(?!\\()`
+
+// A FROM/JOIN/USING/UPDATE/INTO clause (or FROM-list comma) binding a table to an alias.
 const ALIAS_BINDINGS = new RegExp(
-  `(?:\\b(?:from|join|update|into)\\b|(,))${GROUP_OPEN}(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?\\s+(?:as\\s+)?(${IDENT_SEG})`,
+  `(?:\\b(?:from|join|update|into)\\b${GROUP_OPEN}|${USING_OPEN}|(,)${GROUP_OPEN})(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?\\s+(?:as\\s+)?(${IDENT_SEG})`,
   'gi',
 )
 
-// Every FROM/JOIN table binding with its optional alias; the lookahead keeps a
-// following keyword (`FROM users JOIN …`) from being read as users's alias.
+// Every FROM/JOIN/USING table binding with its optional alias; the lookahead keeps
+// a following keyword (`FROM users JOIN …`) from being read as users's alias.
 const TABLE_BINDINGS = new RegExp(
-  `\\b(?:from|join)\\b${GROUP_OPEN}(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
+  `(?:\\b(?:from|join)\\b${GROUP_OPEN}|${USING_OPEN})(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
   'gi',
 )
 
-// The table an UPDATE or INSERT writes to. It binds like a FROM item: the SET
-// list and the WHERE of the same statement resolve columns against it. The
-// first lookahead keeps `ON CONFLICT DO UPDATE SET` from naming a table.
+// The table an UPDATE, INSERT or MERGE writes to. It binds like a FROM item: the
+// SET list, the WHERE and the RETURNING of the same statement resolve against it.
 const TARGET_BINDINGS = new RegExp(
   `\\b(?:update|into)\\b\\s+(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG})(?:\\.(${IDENT_SEG}))?(?:\\s+(?:as\\s+)?(?!(?:${[...ALIAS_STOPWORDS].join('|')})\\b)(${IDENT_SEG}))?`,
   'gi',
@@ -213,6 +225,20 @@ export function tableBindings(structure: SqlStructure, query: ClauseContext): Ta
   const cached = perQuery.get(cacheKey)
   if (cached) return cached
   const bindings: TableBinding[] = []
+  // The write target leads: in `UPDATE t … FROM s` its columns are the ones the
+  // statement is about, and only they may name an assignment target.
+  for (const match of structure.sql.matchAll(TARGET_BINDINGS)) {
+    const [, seg, qualified, alias] = match
+    const at = match.index ?? 0
+    if (seg === undefined) continue
+    if (isMasked(structure, at)) continue
+    // A write target opens its query. `FOR UPDATE OF`, `ON DUPLICATE KEY UPDATE`
+    // and `SELECT … INTO` only reuse the word inside a clause already running.
+    const before = clauseAt(structure, at)
+    if (before && before.clause !== 'with') continue
+    if ((before ?? clauseAt(structure, at + match[0].length))?.queryStart !== query.queryStart) continue
+    bindings.push({ seg, qualified, alias, table: qualified ?? seg, target: true })
+  }
   for (const match of structure.sql.matchAll(TABLE_BINDINGS)) {
     const [, seg, qualified, alias] = match
     const table = qualified ?? seg
@@ -233,14 +259,6 @@ export function tableBindings(structure: SqlStructure, query: ClauseContext): Ta
     // A FROM item may sit inside a join group, never inside a call's argument
     // list — `unnest(a, b)` names no tables.
     if (callDepthAt(structure, match.index ?? 0) > query.queryDepth) continue
-    bindings.push({ seg, qualified, alias, table: qualified ?? seg })
-  }
-  // The table an UPDATE or INSERT writes to binds for its SET list and WHERE.
-  for (const match of structure.sql.matchAll(TARGET_BINDINGS)) {
-    const [, seg, qualified, alias] = match
-    if (seg === undefined) continue
-    if (isMasked(structure, match.index ?? 0)) continue
-    if (bindingClause(structure, match)?.queryStart !== query.queryStart) continue
     bindings.push({ seg, qualified, alias, table: qualified ?? seg })
   }
   perQuery.set(cacheKey, bindings)
