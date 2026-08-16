@@ -9,7 +9,7 @@ import { ConnectionsController } from '../controllers/connections'
 import { FilesController } from '../controllers/files'
 import { QueriesController } from '../controllers/queries'
 import { LayoutController } from '../controllers/layout'
-import { CommandPaletteController } from '../controllers/command-palette'
+import { CommandPaletteController, type PaletteCommand } from '../controllers/command-palette'
 import { DialogsController } from '../controllers/dialogs'
 import { ResultEditingController } from '../controllers/result-editing'
 import { SchemaOpsController } from '../controllers/schema-ops'
@@ -152,22 +152,90 @@ const NO_FOREIGN_KEYS: ReadonlyMap<number, ColumnReference> = new Map()
 const NO_JSON_COLUMNS: ReadonlySet<number> = new Set()
 const NO_KEY_COLUMNS: readonly number[] = []
 
-const COMMANDS: ReadonlyArray<{ id: string; label: string; keybind?: string }> = [
-  { id: 'new-query', label: t('action.newQuery'), keybind: mod('N') },
-  { id: 'new-window', label: t('action.newWindow'), keybind: `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}N` },
-  { id: 'run-query', label: t('action.runQuery'), keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
-  { id: 'save-file', label: t('action.saveFile'), keybind: mod('S') },
-  { id: 'format-sql', label: t('action.formatSql'), keybind: isMac ? '⇧⌥F' : 'Shift+Alt+F' },
-  { id: 'quick-open', label: t('action.quickOpen'), keybind: mod('P') },
-  { id: 'switch-database', label: t('action.switchDatabase'), keybind: mod('K') },
-  { id: 'add-database', label: t('action.addDatabase') },
-  { id: 'connect-database', label: t('action.connectDatabase') },
-  { id: 'disconnect-database', label: t('action.disconnectDatabase') },
-  { id: 'disconnect-all', label: t('action.disconnectAll') },
-  { id: 'refresh-files', label: t('action.refreshFiles') },
-  { id: 'toggle-sidebar', label: t('action.toggleSidebar'), keybind: mod('B') },
-  { id: 'toggle-results-panel', label: t('action.toggleResults'), keybind: mod('J') },
-  { id: 'close-workspace', label: t('action.closeWorkspace') },
+const shiftMod = (key: string) => `${isMac ? '⇧⌘' : 'Shift+Ctrl+'}${key}`
+const altShift = (key: string) => (isMac ? `⇧⌥${key}` : `Shift+Alt+${key}`)
+
+// The editor's multi-cursor and line commands, which the Selection menu already
+// routes; the palette offers the same set so none of them needs the menu.
+const SELECTION_COMMANDS: ReadonlyArray<{ id: SelectionCommandId; label: string; keybind: string }> = [
+  { id: 'expand', label: t('menu.expandSelection'), keybind: mod('I') },
+  { id: 'copy-line-up', label: t('menu.copyLineUp'), keybind: altShift('↑') },
+  { id: 'copy-line-down', label: t('menu.copyLineDown'), keybind: altShift('↓') },
+  { id: 'move-line-up', label: t('menu.moveLineUp'), keybind: isMac ? '⌥↑' : 'Alt+↑' },
+  { id: 'move-line-down', label: t('menu.moveLineDown'), keybind: isMac ? '⌥↓' : 'Alt+↓' },
+  { id: 'add-cursor-above', label: t('menu.addCursorAbove'), keybind: isMac ? '⌥⌘↑' : 'Ctrl+Alt+↑' },
+  { id: 'add-cursor-below', label: t('menu.addCursorBelow'), keybind: isMac ? '⌥⌘↓' : 'Ctrl+Alt+↓' },
+  { id: 'add-cursors-to-line-ends', label: t('menu.addCursorsToLineEnds'), keybind: altShift('I') },
+  { id: 'add-next-occurrence', label: t('menu.addNextOccurrence'), keybind: mod('D') },
+  { id: 'select-all-occurrences', label: t('menu.selectAllOccurrences'), keybind: shiftMod('L') },
+]
+
+// ⌘⇧P's catalogue. `category` prefixes the name — `File: Save File` — so one
+// string both reads and filters; the list itself stays flat.
+const COMMANDS: readonly PaletteCommand[] = [
+  { id: 'new-query', category: 'file', label: t('action.newQuery'), keybind: mod('N') },
+  { id: 'quick-open', category: 'file', label: t('action.quickOpen'), keybind: mod('P') },
+  { id: 'save-file', category: 'file', label: t('action.saveFile'), keybind: mod('S') },
+  { id: 'save-file-as', category: 'file', label: t('action.saveFileAs'), keybind: shiftMod('S') },
+  { id: 'refresh-files', category: 'file', label: t('action.refreshFiles') },
+  { id: 'reveal-workspace', category: 'file', label: isMac ? t('action.revealInFinder') : t('action.revealInExplorer') },
+  { id: 'switch-workspace', category: 'file', label: t('action.switchWorkspace') },
+  { id: 'close-workspace', category: 'file', label: t('action.closeWorkspace') },
+  { id: 'new-window', category: 'file', label: t('action.newWindow'), keybind: shiftMod('N') },
+
+  { id: 'format-sql', category: 'editor', label: t('action.formatSql'), keybind: altShift('F') },
+  { id: 'find', category: 'editor', label: t('action.find'), keybind: mod('F') },
+  ...SELECTION_COMMANDS.map(({ id, label, keybind }) => ({
+    id: `selection:${id}`,
+    category: 'editor' as const,
+    label,
+    keybind,
+  })),
+
+  { id: 'run-query', category: 'run', label: t('action.runQuery'), keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
+  { id: 'cancel-query', category: 'run', label: t('action.cancelQuery') },
+
+  { id: 'refresh-results', category: 'results', label: t('action.refreshResults'), keybind: mod('R') },
+  { id: 'previous-result', category: 'results', label: t('action.previousResult') },
+  { id: 'next-result', category: 'results', label: t('action.nextResult') },
+  { id: 'toggle-results-panel', category: 'results', label: t('action.toggleResults'), keybind: mod('J') },
+  { id: 'save-result-changes', category: 'results', label: t('results.saveChanges'), keybind: mod('↵') },
+  { id: 'discard-result-changes', category: 'results', label: t('results.discardChanges') },
+  { id: 'add-result-row', category: 'results', label: t('results.addRow') },
+  { id: 'export-results', category: 'results', label: t('results.export') },
+
+  { id: 'undo-change', category: 'edit', label: t('action.undoChange'), keybind: mod('Z') },
+  { id: 'redo-change', category: 'edit', label: t('action.redoChange'), keybind: shiftMod('Z') },
+
+  { id: 'close-tab', category: 'tabs', label: t('action.closeTab'), keybind: mod('W') },
+  { id: 'next-tab', category: 'tabs', label: t('action.nextTab') },
+  { id: 'previous-tab', category: 'tabs', label: t('action.previousTab') },
+
+  { id: 'switch-database', category: 'connection', label: t('action.switchDatabase'), keybind: mod('K') },
+  { id: 'add-database', category: 'connection', label: t('action.addDatabase') },
+  { id: 'connect-database', category: 'connection', label: t('action.connectDatabase') },
+  { id: 'disconnect-database', category: 'connection', label: t('action.disconnectDatabase') },
+  { id: 'disconnect-all', category: 'connection', label: t('action.disconnectAll') },
+  { id: 'edit-connection', category: 'connection', label: t('database.edit') },
+  { id: 'refresh-schema', category: 'connection', label: t('action.refreshSchema') },
+  { id: 'create-database', category: 'connection', label: t('database.create') },
+
+  { id: 'commit-transaction', category: 'transaction', label: t('transaction.commit') },
+  { id: 'rollback-transaction', category: 'transaction', label: t('transaction.rollback') },
+  { id: 'transaction-manager', category: 'transaction', label: t('action.transactionManager') },
+
+  ...VIEWS.map((view) => ({
+    id: `view:${view.id}`,
+    category: 'view' as const,
+    label: t('action.showView', { view: view.title }),
+    keybind: shiftMod(view.shortcutKey),
+  })),
+  { id: 'toggle-sidebar', category: 'view', label: t('action.toggleSidebar'), keybind: mod('B') },
+
+  { id: 'theme:dark', category: 'theme', label: t('menu.theme.dark') },
+  { id: 'theme:light', category: 'theme', label: t('menu.theme.light') },
+  { id: 'theme:midnight-blue', category: 'theme', label: t('menu.theme.midnightBlue') },
+  { id: 'theme:warm-dark', category: 'theme', label: t('menu.theme.warmDark') },
 ]
 
 // Workbench shell and orchestrator: owns the tab model, the in-use database
@@ -291,13 +359,51 @@ export class WorkbenchScreen extends LitElement {
       void this._runSql(tab.content.trim(), undefined, undefined, undefined, 1 + (leading.match(/\n/g)?.length ?? 0))
     },
     saveActiveTab: () => void this._fileOps.saveActive(),
+    saveActiveTabAs: () => void this._fileOps.saveActiveAs(),
+    closeActiveTab: () => {
+      if (this._ctx.activeTabId) this._requestCloseTab(this._ctx.activeTabId)
+    },
     formatActiveTab: () => this.renderRoot.querySelector('sql-editor')?.formatSql(),
+    runSelectionCommand: (id) => this.renderRoot.querySelector('sql-editor')?.runSelectionCommand(id),
+    openFind: () => this.renderRoot.querySelector('sql-editor')?.openFind(),
+    stepTab: (delta) => this._stepTab(delta),
+    endTransaction: (mode) => {
+      const profileId = this._openTransactionProfile()?.id
+      if (profileId) void this._endTransaction(profileId, mode)
+    },
+    showTransactionManager: () => {
+      this._transactionManagerOpen = true
+    },
+    hasSqlTab: () => this._ctx.activeSqlTab() !== null,
+    openTransaction: () => this._openTransactionProfile()?.name ?? null,
+    queryRunning: () => this._queries.runFor(this._ctx.activeTabId).phase === 'running',
+    hasPendingEdits: () => this._hasPendingEdits(),
+    hasResult: () => this._queries.runFor(this._ctx.activeTabId).phase === 'done',
+    refreshResults: () => void this._refreshResults(),
+    saveResultChanges: () => this._resultEditing.saveChanges(),
+    discardResultChanges: () => this._onDiscardChanges(),
+    addResultRow: () => this._onAddRow(new CustomEvent('add-row', { detail: {} })),
+    exportResults: () => this.renderRoot.querySelector('results-panel')?.openExport(),
+    stepEdit: (direction) => this._stepEdit(direction),
+    editConnection: (profileId) => {
+      const connection = this._config.byId(profileId)
+      if (connection) this._ctx.openConfigTab(connection)
+    },
+    refreshSchema: (profileId) => this._live.refresh(profileId),
+    createDatabase: (profileId) => void this._schemaOps.createDatabase(profileId),
+    cancelQuery: () => this._onCancelQuery(),
+    navigateResult: (direction) => this._navigateResult(direction),
     addDatabase: () => this._onAddDatabase(),
     connectProfile: (profileId) => void this._connectProfile(profileId),
     disconnectProfile: (profileId) => void this._live.disconnect(profileId),
+    showView: (view) => {
+      this._activeView = view as ViewId
+    },
     refreshFiles: () => void this._workspaceFiles.reload(),
     toggleSidebar: () => this._toggleSidebar(),
     toggleResultsPanel: () => this._layout.togglePanelCollapse(),
+    // Same intent the status bar raises; <app-root> owns the folder picker.
+    switchWorkspace: () => this.dispatchEvent(new CustomEvent('open-folder', { bubbles: true, composed: true })),
     closeWorkspace: () => this._onCloseWorkspace(),
   })
 
@@ -687,16 +793,7 @@ export class WorkbenchScreen extends LitElement {
     // workbench — unless focus is in a text field, which keeps its native undo.
     if (key === 'z' && !event.altKey) {
       if (this._inTextField(event)) return
-      const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
-      if (activeTab?.kind === 'inspect' || activeTab?.kind === 'inspect-object') {
-        const inspect = this.renderRoot.querySelector('table-inspect')
-        if (event.shiftKey ? inspect?.redo() : inspect?.undo()) event.preventDefault()
-        return
-      }
-      if (this._ctx.activeSqlTab() && !this._layout.panelCollapsed && !this._stagingFrozen()) {
-        const tabId = this._ctx.activeTabId
-        if (event.shiftKey ? this._queries.redoStaged(tabId) : this._queries.undoStaged(tabId)) event.preventDefault()
-      }
+      if (this._stepEdit(event.shiftKey ? 'redo' : 'undo')) event.preventDefault()
       return
     }
 
@@ -2464,9 +2561,55 @@ export class WorkbenchScreen extends LitElement {
     }
   }
 
-  /** Steps the active tab's result trail. */
+  // Steps the active tab's unsaved work: a DDL draft on an inspect tab, staged
+  // grid edits on a SQL one. Shared by ⌘Z/⌘⇧Z and the palette, so both agree on
+  // which of the two the caret is over.
+  private _stepEdit(direction: 'undo' | 'redo'): boolean {
+    const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
+    if (activeTab?.kind === 'inspect' || activeTab?.kind === 'inspect-object') {
+      const inspect = this.renderRoot.querySelector('table-inspect')
+      return (direction === 'redo' ? inspect?.redo() : inspect?.undo()) ?? false
+    }
+    if (!this._ctx.activeSqlTab() || this._layout.panelCollapsed || this._stagingFrozen()) return false
+    const tabId = this._ctx.activeTabId
+    return direction === 'redo' ? this._queries.redoStaged(tabId) : this._queries.undoStaged(tabId)
+  }
+
+  // Whether _stepEdit or a save has anything to act on, for the palette's gate.
+  private _hasPendingEdits(): boolean {
+    const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
+    if (activeTab?.kind === 'inspect' || activeTab?.kind === 'inspect-object') {
+      return this._inspectDirtyTabIds.has(activeTab.id)
+    }
+    return this._resultEditing.hasPendingChanges()
+  }
+
+  /** Wraps around the context's tabs; the palette walks them without ⌘1..9. */
+  private _stepTab(delta: 1 | -1) {
+    const tabs = this._ctx.tabs
+    if (tabs.length < 2) return
+    const current = tabs.findIndex((tab) => tab.id === this._ctx.activeTabId)
+    const next = tabs[(((current < 0 ? 0 : current) + delta) % tabs.length + tabs.length) % tabs.length]
+    if (next) this._ctx.activeTabId = next.id
+  }
+
+  // The connection a transaction command would end. The in-use context answers
+  // first; failing that a single open transaction is unambiguous, and two are
+  // not — committing the wrong connection is not a mistake to guess into.
+  private _openTransactionProfile(): ConnectionProfile | null {
+    const active = this._config.activeProfile()
+    if (active && this._transactionSessions.has(active.id)) return active
+    const open = [...this._transactionSessions.keys()]
+    const only = open.length === 1 ? open[0] : undefined
+    return only ? this._config.byId(only) : null
+  }
+
   private _onResultNavigate(event: Event) {
-    const { direction } = (event as CustomEvent<ResultNavigateDetail>).detail
+    this._navigateResult((event as CustomEvent<ResultNavigateDetail>).detail.direction)
+  }
+
+  /** Steps the active tab's result trail; the grid and the palette both ask. */
+  private _navigateResult(direction: 'back' | 'forward') {
     const tabId = this._ctx.activeTabId
     if (!tabId) return
     // Refuse before prompting: confirming a discard for a step that will not

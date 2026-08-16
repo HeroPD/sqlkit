@@ -1063,6 +1063,13 @@ export class ResultsPanel extends LitElement {
   /** No result is coming for the view-keep this panel armed: the review was
    * cancelled, or the save committed but its refresh never started. Either way
    * the next result to arrive must not inherit the stale restore. */
+  /** Opens the export dialog, for a caller that is not the toolbar button. */
+  openExport(): boolean {
+    if (this.run.phase !== 'done') return false
+    this._exportOpen = true
+    return true
+  }
+
   refreshNotComing() {
     this._keepAfterSave = null
   }

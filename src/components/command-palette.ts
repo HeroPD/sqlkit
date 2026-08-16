@@ -70,7 +70,12 @@ function matches(query: string, entry: PaletteEntry): boolean {
 
 // Filters while preserving group structure: a header stays while any of its
 // children match, and a header that matches by itself reveals all of them.
+// A typed query drops plain section labels instead: once the list is ranked by
+// what was typed, a label above it describes nothing.
 function filterEntries(query: string, entries: PaletteEntry[]): PaletteEntry[] {
+  if (query.trim() && entries.some((entry) => entry.header && !entry.connection)) {
+    return entries.filter((entry) => !entry.header && matches(query, entry))
+  }
   const visible: PaletteEntry[] = []
   let index = 0
   while (index < entries.length) {
@@ -207,8 +212,10 @@ export class CommandPalette extends LitElement {
 
   private _renderEntry(entry: PaletteEntry, index: number, active: number) {
     if (entry.header) {
+      // A connection header keeps the ⌘K identity/status tracks; a commands
+      // section label is a plain caps row with no tracks to line up against.
       return html`
-        <div class="row group" role="presentation">
+        <div class="row group ${entry.connection ? 'connection' : 'section'}" role="presentation">
           ${this._renderEntryContent(entry)}
         </div>
       `
@@ -456,12 +463,24 @@ export class CommandPalette extends LitElement {
 
       /* Identity left, status right: the name track takes the free width so
          "Connected" and "In use" line up down the right edge of every row. */
-      .row.connection,
-      .row.group {
+      .row.connection {
         display: grid;
         min-height: 30px;
         grid-template-columns: 3px 19px minmax(0, 1fr) minmax(12px, 32px) 104px 72px 26px;
         column-gap: 7px;
+      }
+
+      /* ⌘⇧P section label: quiet, tight, and set off from the rows above it. */
+      .row.section {
+        min-height: 20px;
+        margin-top: 8px;
+        font-size: var(--font-size-sm);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .row.section:first-child {
+        margin-top: 0;
       }
 
       /* Tracked row: a notch above the menus' 9% hover so Enter's target reads. */
@@ -489,14 +508,11 @@ export class CommandPalette extends LitElement {
       }
 
       .row.connection > .icon,
-      .row.group > .icon,
-      .row.connection > engine-badge,
-      .row.group > engine-badge {
+      .row.connection > engine-badge {
         grid-column: 2;
       }
 
-      .row.connection > engine-badge,
-      .row.group > engine-badge {
+      .row.connection > engine-badge {
         --engine-badge-size: 19px;
       }
 
@@ -561,8 +577,7 @@ export class CommandPalette extends LitElement {
         font-size: var(--font-size-sm);
       }
 
-      .row.connection .detail,
-      .row.group .detail {
+      .row.connection .detail {
         flex: none;
         text-transform: capitalize;
       }

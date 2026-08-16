@@ -261,6 +261,10 @@ function registerIpc() {
     if (typeof text !== 'string') throw new Error('Clipboard text must be a string')
     clipboard.writeText(text)
   })
+  ipcMain.handle('app:set-theme', (_event, theme: unknown) => {
+    if (!isThemeId(theme)) throw new Error('Unknown theme')
+    selectTheme(theme)
+  })
   registerWorkspaceIpc({
     workspaceFor,
     setWorkspace: (contentsId, path) => workspacePaths.set(contentsId, path),
@@ -292,6 +296,25 @@ function installQuitHandler() {
   })
 }
 
+// The Record makes tsc flag a theme added to ThemeId but not listed here.
+const THEMES: Record<ThemeId, true> = { dark: true, light: true, 'midnight-blue': true, 'warm-dark': true }
+const isThemeId = (value: unknown): value is ThemeId => typeof value === 'string' && value in THEMES
+
+// Persist the theme, repaint the Windows title bar, and tell every renderer.
+// Reached from the View menu and from the command palette, so the radio item is
+// checked here rather than left to the click Electron would have handled.
+function selectTheme(theme: ThemeId) {
+  writeTheme(theme)
+  const item = Menu.getApplicationMenu()?.getMenuItemById(`theme:${theme}`)
+  if (item) item.checked = true
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (process.platform !== 'darwin') window.setTitleBarOverlay(titleBarOverlay(theme))
+    window.webContents.send('app:menu', `theme:${theme}`)
+  }
+  // Rebuilding the native menu inside a click callback can release the pointer
+  // into the renderer and leave the window covered by a native text selection.
+}
+
 function buildAppMenu() {
   const isMac = process.platform === 'darwin'
   const selectedTheme = readTheme()
@@ -307,16 +330,6 @@ function buildAppMenu() {
     registerAccelerator: false,
     click: menuAction(action),
   })
-  const selectTheme = (theme: ThemeId) => {
-    writeTheme(theme)
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (process.platform !== 'darwin') window.setTitleBarOverlay(titleBarOverlay(theme))
-      window.webContents.send('app:menu', `theme:${theme}`)
-    }
-    // Electron updates sibling radio items itself. Rebuilding the native menu
-    // inside its click callback can release the pointer into the renderer and
-    // leave the window covered by a native text selection.
-  }
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' } as MenuItemConstructorOptions] : []),
     {
@@ -362,10 +375,10 @@ function buildAppMenu() {
         {
           label: t('menu.theme'),
           submenu: [
-            { label: t('menu.theme.dark'), type: 'radio', checked: selectedTheme === 'dark', click: () => selectTheme('dark') },
-            { label: t('menu.theme.light'), type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
-            { label: t('menu.theme.midnightBlue'), type: 'radio', checked: selectedTheme === 'midnight-blue', click: () => selectTheme('midnight-blue') },
-            { label: t('menu.theme.warmDark'), type: 'radio', checked: selectedTheme === 'warm-dark', click: () => selectTheme('warm-dark') },
+            { id: 'theme:dark', label: t('menu.theme.dark'), type: 'radio', checked: selectedTheme === 'dark', click: () => selectTheme('dark') },
+            { id: 'theme:light', label: t('menu.theme.light'), type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
+            { id: 'theme:midnight-blue', label: t('menu.theme.midnightBlue'), type: 'radio', checked: selectedTheme === 'midnight-blue', click: () => selectTheme('midnight-blue') },
+            { id: 'theme:warm-dark', label: t('menu.theme.warmDark'), type: 'radio', checked: selectedTheme === 'warm-dark', click: () => selectTheme('warm-dark') },
           ],
         },
         { type: 'separator' },

@@ -39,7 +39,7 @@ import {
   type Completion,
   type CompletionContext,
 } from '@codemirror/autocomplete'
-import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search'
+import { highlightSelectionMatches, openSearchPanel, search, searchKeymap } from '@codemirror/search'
 import { sql } from '@codemirror/lang-sql'
 import { explicitQueryToRun, hasExplicitQueryTarget, queryToRun, runQuery } from '../codemirror/run-query'
 import { altShiftKeys } from '../codemirror/alt-shift-keys'
@@ -577,6 +577,14 @@ export class SqlEditor extends LitElement {
 
   focusEditor() {
     this._view?.focus()
+  }
+
+  /** Opens the find panel, for a caller with no focus in the editor to press ⌘F. */
+  openFind(): boolean {
+    const view = this._view
+    if (!view) return false
+    view.focus()
+    return openSearchPanel(view)
   }
 
   /** Formats the selection, or the whole document when the selection is empty. */

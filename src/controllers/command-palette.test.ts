@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import catalogueSource from '../components/workbench-screen.ts?raw'
+import dispatchSource from './command-palette.ts?raw'
 import type { ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile, FileInfo, TableRef } from '../electron'
 import type { ConnectionsController } from './connections'
 import type { PaletteMode } from '../components/command-palette'
-import { CommandPaletteController } from './command-palette'
+import { CommandPaletteController, type PaletteCommand } from './command-palette'
 
 const host = (): ReactiveControllerHost =>
   ({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
@@ -25,7 +27,25 @@ type Opts = {
   phase?: string
   activeDbId?: string | null
   activeChildDb?: string | null
+  queryRunning?: boolean
+  hasSqlTab?: boolean
+  hasPendingEdits?: boolean
+  hasResult?: boolean
+  openTransaction?: string | null
+  commands?: PaletteCommand[]
 }
+
+// Several categories, deliberately not in alphabetical order, so a test can
+// tell the controller's sort from the order it was handed.
+const TEST_COMMANDS: PaletteCommand[] = [
+  { id: 'toggle-sidebar', category: 'view', label: 'Toggle Sidebar' },
+  { id: 'new-query', category: 'file', label: 'New Query' },
+  { id: 'cancel-query', category: 'run', label: 'Cancel Running Query' },
+  { id: 'connect-database', category: 'connection', label: 'Connect Database' },
+  { id: 'disconnect-database', category: 'connection', label: 'Disconnect Database' },
+  { id: 'view:explorer', category: 'view', label: 'Show Explorer' },
+  { id: 'theme:light', category: 'theme', label: 'Light' },
+]
 
 function setup(opts: Opts = {}) {
   const actions = {
@@ -35,13 +55,33 @@ function setup(opts: Opts = {}) {
     newQuery: vi.fn(),
     runActiveTab: vi.fn(),
     saveActiveTab: vi.fn(),
+    saveActiveTabAs: vi.fn(),
+    closeActiveTab: vi.fn(),
     formatActiveTab: vi.fn(),
+    runSelectionCommand: vi.fn(),
+    openFind: vi.fn(),
+    stepTab: vi.fn(),
+    endTransaction: vi.fn(),
+    showTransactionManager: vi.fn(),
+    refreshResults: vi.fn(),
+    saveResultChanges: vi.fn(),
+    discardResultChanges: vi.fn(),
+    addResultRow: vi.fn(),
+    exportResults: vi.fn(),
+    stepEdit: vi.fn(),
+    editConnection: vi.fn(),
+    refreshSchema: vi.fn(),
+    createDatabase: vi.fn(),
+    cancelQuery: vi.fn(),
+    navigateResult: vi.fn(),
     addDatabase: vi.fn(),
     connectProfile: vi.fn(),
     disconnectProfile: vi.fn(),
+    showView: vi.fn(),
     refreshFiles: vi.fn(),
     toggleSidebar: vi.fn(),
     toggleResultsPanel: vi.fn(),
+    switchWorkspace: vi.fn(),
     closeWorkspace: vi.fn(),
   }
   const live = {
@@ -55,23 +95,41 @@ function setup(opts: Opts = {}) {
   }
   const ctrl = new CommandPaletteController(host(), {
     live: live as unknown as ConnectionsController,
-    commands: [
-      { id: 'new-query', label: 'New Query' },
-      { id: 'toggle-sidebar', label: 'Toggle Sidebar' },
-      { id: 'connect-database', label: 'Connect Database' },
-      { id: 'disconnect-database', label: 'Disconnect Database' },
-    ],
+    commands: opts.commands ?? TEST_COMMANDS,
     files: () => opts.files ?? [],
     connections: () => opts.connections ?? [],
     activeProfile: () => opts.activeProfile ?? null,
     activeDbId: () => opts.activeDbId ?? null,
     activeChildDb: () => opts.activeChildDb ?? null,
+    queryRunning: () => opts.queryRunning ?? false,
+    hasSqlTab: () => opts.hasSqlTab ?? true,
+    hasPendingEdits: () => opts.hasPendingEdits ?? false,
+    hasResult: () => opts.hasResult ?? false,
+    openTransaction: () => opts.openTransaction ?? null,
     ...actions,
   })
   return { ctrl, actions, live }
 }
 
 const pick = (mode: PaletteMode, id: string) => new CustomEvent('palette-pick', { detail: { mode, id } })
+
+// The recently-used order persists, so each case starts with none.
+beforeEach(() => localStorage.clear())
+
+// The catalogue lives in workbench-screen and the dispatch here, so only a scan
+// pairs them: a command listed without a case renders as a row that does
+// nothing. Prefixed ids (view:, theme:) are routed ahead of the switch and
+// carry a colon, so this deliberately does not capture them.
+describe('CommandPaletteController catalogue', () => {
+  const listed = [...catalogueSource.matchAll(/\{ id: '([a-z-]+)', category:/g)].map((match) => match[1] ?? '')
+
+  it('handles every plain command the workbench lists, exactly once', () => {
+    const handled = new Set([...dispatchSource.matchAll(/case '([a-z-]+)':/g)].map((match) => match[1]))
+    expect(listed.length).toBeGreaterThan(20)
+    expect(listed.filter((id) => !handled.has(id))).toEqual([])
+    expect(listed.filter((id, index) => listed.indexOf(id) !== index)).toEqual([])
+  })
+})
 
 describe('CommandPaletteController open/close', () => {
   it('toggles the same mode shut and opens others', () => {
@@ -89,11 +147,103 @@ describe('CommandPaletteController open/close', () => {
 })
 
 describe('CommandPaletteController entries', () => {
-  it('lists the commands in commands mode', () => {
+  it('names each command by its category and sorts the flat list', () => {
     const { ctrl } = setup()
     ctrl.open('commands')
-    expect(ctrl.entries().map((e) => e.id)).toEqual(['new-query', 'toggle-sidebar'])
+    // no headers with nothing recently used, and no leftover section order
+    expect(ctrl.entries().map((e) => e.label)).toEqual([
+      'File: New Query', 'Theme: Light', 'View: Show Explorer', 'View: Toggle Sidebar',
+    ])
+    expect(ctrl.entries().some((entry) => entry.header)).toBe(false)
     expect(ctrl.entries().every((entry) => entry.icon === undefined)).toBe(true)
+  })
+
+  it('floats the last-run commands above the rest, once anything has run', () => {
+    const { ctrl } = setup()
+    ctrl.onPick(pick('commands', 'toggle-sidebar'))
+    ctrl.onPick(pick('commands', 'view:explorer'))
+    ctrl.open('commands')
+    expect(ctrl.entries().map((e) => e.id)).toEqual([
+      'group:recent', 'view:explorer', 'toggle-sidebar',
+      'group:other', 'new-query', 'theme:light',
+    ])
+    // most recent first, and neither repeats below its own header
+    expect(ctrl.entries().filter((entry) => entry.header).map((entry) => entry.label))
+      .toEqual(['recently used', 'other commands'])
+  })
+
+  it('drops a recently used command that is no longer available', () => {
+    const { ctrl } = setup({ queryRunning: true })
+    ctrl.onPick(pick('commands', 'cancel-query'))
+    expect(setup().ctrl.entries().map((entry) => entry.id)).not.toContain('group:recent')
+  })
+
+  it('offers cancel only while the active tab is running', () => {
+    expect(setup().ctrl.entries().some((entry) => entry.id === 'cancel-query')).toBe(false)
+    const { ctrl } = setup({ queryRunning: true })
+    ctrl.open('commands')
+    expect(ctrl.entries()).toContainEqual({ id: 'cancel-query', label: 'Run: Cancel Running Query', keybind: undefined })
+  })
+
+  it('offers the editor commands only with a SQL tab open', () => {
+    const commands: PaletteCommand[] = [
+      { id: 'format-sql', category: 'editor', label: 'Format SQL' },
+      { id: 'selection:expand', category: 'editor', label: 'Expand Selection' },
+      { id: 'toggle-sidebar', category: 'view', label: 'Toggle Sidebar' },
+    ]
+    const withTab = setup({ commands, hasSqlTab: true })
+    withTab.ctrl.open('commands')
+    expect(withTab.ctrl.entries()).toHaveLength(3)
+
+    const without = setup({ commands, hasSqlTab: false })
+    without.ctrl.open('commands')
+    expect(without.ctrl.entries().map((entry) => entry.id)).toEqual(['toggle-sidebar'])
+  })
+
+  it('offers the result-edit commands only once something is staged', () => {
+    const commands: PaletteCommand[] = [
+      { id: 'save-result-changes', category: 'results', label: 'Save changes' },
+      { id: 'discard-result-changes', category: 'results', label: 'Discard changes' },
+      { id: 'undo-change', category: 'edit', label: 'Undo Change' },
+      { id: 'add-result-row', category: 'results', label: 'Add new row' },
+    ]
+    const clean = setup({ commands, hasResult: true })
+    clean.ctrl.open('commands')
+    // a landed result can take a row; nothing is staged, so nothing to save
+    expect(clean.ctrl.entries().map((entry) => entry.id)).toEqual(['add-result-row'])
+
+    const staged = setup({ commands, hasResult: true, hasPendingEdits: true })
+    staged.ctrl.open('commands')
+    expect(staged.ctrl.entries()).toHaveLength(4)
+  })
+
+  it('offers the server-bound connection commands only while connected', () => {
+    const commands: PaletteCommand[] = [
+      { id: 'refresh-schema', category: 'connection', label: 'Refresh Schema' },
+      { id: 'create-database', category: 'connection', label: 'Create Database…' },
+      { id: 'edit-connection', category: 'connection', label: 'Edit Connection' },
+    ]
+    const profile = { id: 'p1', name: 'Local' } as ConnectionProfile
+    const offline = setup({ commands, activeProfile: profile, phase: 'disconnected' })
+    offline.ctrl.open('commands')
+    // the profile can still be edited offline; the other two reach the server
+    expect(offline.ctrl.entries().map((entry) => entry.id)).toEqual(['edit-connection'])
+
+    const online = setup({ commands, activeProfile: profile, phase: 'connected' })
+    online.ctrl.open('commands')
+    expect(online.ctrl.entries().every((entry) => entry.detail === 'Local')).toBe(true)
+    expect(online.ctrl.entries()).toHaveLength(3)
+  })
+
+  it('offers the transaction commands only while one is open, and names it', () => {
+    const commands: PaletteCommand[] = [{ id: 'commit-transaction', category: 'transaction', label: 'Commit' }]
+    expect(setup({ commands }).ctrl.entries()).toEqual([])
+
+    const { ctrl } = setup({ commands, openTransaction: 'Production' })
+    ctrl.open('commands')
+    expect(ctrl.entries()).toEqual([
+      { id: 'commit-transaction', label: 'Transaction: Commit', keybind: undefined, detail: 'Production' },
+    ])
   })
 
   it('offers disconnect for the active connected profile', () => {
@@ -101,7 +251,9 @@ describe('CommandPaletteController entries', () => {
     const { ctrl } = setup({ activeProfile: profile, connections: [profile], phase: 'connected' })
     ctrl.open('commands')
 
-    expect(ctrl.entries()).toContainEqual({ id: 'disconnect-database', label: 'Disconnect Database', detail: 'Production' })
+    expect(ctrl.entries()).toContainEqual({
+      id: 'disconnect-database', label: 'Connection: Disconnect Database', keybind: undefined, detail: 'Production',
+    })
     expect(ctrl.entries().some((entry) => entry.id === 'connect-database')).toBe(false)
   })
 
@@ -110,7 +262,9 @@ describe('CommandPaletteController entries', () => {
     const { ctrl } = setup({ activeProfile: profile, connections: [profile], phase: 'disconnected' })
     ctrl.open('commands')
 
-    expect(ctrl.entries()).toContainEqual({ id: 'connect-database', label: 'Connect Database', detail: 'Local' })
+    expect(ctrl.entries()).toContainEqual({
+      id: 'connect-database', label: 'Connection: Connect Database', keybind: undefined, detail: 'Local',
+    })
     expect(ctrl.entries().some((entry) => entry.id === 'disconnect-database')).toBe(false)
   })
 
@@ -211,6 +365,77 @@ describe('CommandPaletteController pick dispatch', () => {
     const { ctrl } = setup()
     ctrl.onPick(pick('commands', 'quick-open'))
     expect(ctrl.mode).toBe('quick')
+  })
+
+  it('routes the prefixed view, theme and selection commands by their suffix', () => {
+    const setTheme = vi.fn(() => Promise.resolve())
+    vi.stubGlobal('sqlkit', { ...window.sqlkit, setTheme })
+    const { ctrl, actions } = setup()
+    ctrl.onPick(pick('commands', 'view:tasks'))
+    expect(actions.showView).toHaveBeenCalledWith('tasks')
+    ctrl.onPick(pick('commands', 'theme:midnight-blue'))
+    expect(setTheme).toHaveBeenCalledWith('midnight-blue')
+    ctrl.onPick(pick('commands', 'selection:add-next-occurrence'))
+    expect(actions.runSelectionCommand).toHaveBeenCalledWith('add-next-occurrence')
+    vi.unstubAllGlobals()
+  })
+
+  it('dispatches the editor and result commands to their deps', () => {
+    const { ctrl, actions } = setup()
+    ctrl.onPick(pick('commands', 'save-file-as'))
+    ctrl.onPick(pick('commands', 'close-tab'))
+    ctrl.onPick(pick('commands', 'refresh-results'))
+    ctrl.onPick(pick('commands', 'cancel-query'))
+    ctrl.onPick(pick('commands', 'previous-result'))
+    ctrl.onPick(pick('commands', 'next-result'))
+    ctrl.onPick(pick('commands', 'switch-workspace'))
+    ctrl.onPick(pick('commands', 'find'))
+    ctrl.onPick(pick('commands', 'next-tab'))
+    ctrl.onPick(pick('commands', 'previous-tab'))
+    ctrl.onPick(pick('commands', 'commit-transaction'))
+    ctrl.onPick(pick('commands', 'rollback-transaction'))
+    expect(actions.saveActiveTabAs).toHaveBeenCalledOnce()
+    expect(actions.closeActiveTab).toHaveBeenCalledOnce()
+    expect(actions.refreshResults).toHaveBeenCalledOnce()
+    expect(actions.cancelQuery).toHaveBeenCalledOnce()
+    expect(actions.navigateResult).toHaveBeenNthCalledWith(1, 'back')
+    expect(actions.navigateResult).toHaveBeenNthCalledWith(2, 'forward')
+    expect(actions.switchWorkspace).toHaveBeenCalledOnce()
+    expect(actions.openFind).toHaveBeenCalledOnce()
+    expect(actions.stepTab).toHaveBeenNthCalledWith(1, 1)
+    expect(actions.stepTab).toHaveBeenNthCalledWith(2, -1)
+    expect(actions.endTransaction).toHaveBeenNthCalledWith(1, 'commit')
+    expect(actions.endTransaction).toHaveBeenNthCalledWith(2, 'rollback')
+  })
+
+  it('dispatches the result-edit and connection commands to their deps', () => {
+    const profile = { id: 'p1', name: 'Local' } as ConnectionProfile
+    const { ctrl, actions } = setup({ activeProfile: profile })
+    for (const id of [
+      'save-result-changes', 'discard-result-changes', 'add-result-row', 'export-results',
+      'undo-change', 'redo-change', 'transaction-manager',
+      'edit-connection', 'refresh-schema', 'create-database',
+    ]) ctrl.onPick(pick('commands', id))
+
+    expect(actions.saveResultChanges).toHaveBeenCalledOnce()
+    expect(actions.discardResultChanges).toHaveBeenCalledOnce()
+    expect(actions.addResultRow).toHaveBeenCalledOnce()
+    expect(actions.exportResults).toHaveBeenCalledOnce()
+    expect(actions.stepEdit).toHaveBeenNthCalledWith(1, 'undo')
+    expect(actions.stepEdit).toHaveBeenNthCalledWith(2, 'redo')
+    expect(actions.showTransactionManager).toHaveBeenCalledOnce()
+    // the three profile-scoped ones all target the in-use connection
+    expect(actions.editConnection).toHaveBeenCalledWith('p1')
+    expect(actions.refreshSchema).toHaveBeenCalledWith('p1')
+    expect(actions.createDatabase).toHaveBeenCalledWith('p1')
+  })
+
+  it('runs no profile-scoped command without an active connection', () => {
+    const { ctrl, actions } = setup({ activeProfile: null })
+    ctrl.onPick(pick('commands', 'refresh-schema'))
+    ctrl.onPick(pick('commands', 'create-database'))
+    expect(actions.refreshSchema).not.toHaveBeenCalled()
+    expect(actions.createDatabase).not.toHaveBeenCalled()
   })
 
   it('connects or disconnects the active profile directly', () => {

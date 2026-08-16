@@ -446,6 +446,8 @@ export type SqlkitApi = {
   notifyRendered: () => Promise<void>
   getRecentWorkspaces: () => Promise<RecentWorkspace[]>
   getTheme: () => Promise<ThemeId>
+  /** Persists the theme and broadcasts it, as the View menu's own items do. */
+  setTheme: (theme: ThemeId) => Promise<void>
   getWorkspaceConfig: () => Promise<WorkspaceConfigResult>
   saveWorkspaceConfig: (config: WorkspaceConfig) => Promise<SaveResult>
   /** The workspace's persisted query history, newest first. */

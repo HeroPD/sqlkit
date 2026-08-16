@@ -1,32 +1,100 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import type { ConnectionProfile, FileInfo } from '../electron'
+import type { ConnectionProfile, FileInfo, ThemeId } from '../electron'
+import type { SelectionCommandId } from '../codemirror/selection-commands'
 import type { ConnectionsController } from './connections'
 import type { PaletteEntry, PaletteMode } from '../components/command-palette'
 import { tableKey } from '../components/explorer-view'
 import { t } from '../i18n'
 import { connectionLabelColorValue } from '../connection-label-colors'
 
+/** What a command's name is prefixed with, so `File: Save` reads and filters as
+ * one string. Categories are not sections: the list stays flat. */
+export type PaletteCategory =
+  | 'file' | 'editor' | 'edit' | 'run' | 'results' | 'tabs' | 'connection' | 'transaction' | 'view' | 'theme'
+
+/** A ⌘⇧P command as configured; the controller composes its displayed name. */
+export type PaletteCommand = { id: string; category: PaletteCategory; label: string; keybind?: string }
+
+const CATEGORY_LABELS: Record<PaletteCategory, string> = {
+  file: t('palette.category.file'),
+  editor: t('palette.category.editor'),
+  edit: t('palette.category.edit'),
+  run: t('palette.category.run'),
+  results: t('palette.category.results'),
+  tabs: t('palette.category.tabs'),
+  connection: t('palette.category.connection'),
+  transaction: t('palette.category.transaction'),
+  view: t('palette.category.view'),
+  theme: t('palette.category.theme'),
+}
+
+// How many of the last-run commands ⌘⇧P floats to the top before the rest.
+const RECENT_LIMIT = 5
+const RECENT_KEY = 'sqlkit-recent-commands'
+
+// Commands that act on the SQL under the caret, so they are offered only with a
+// SQL tab open. The `selection:` ones are checked by prefix alongside these.
+const EDITOR_COMMANDS = new Set([
+  'run-query', 'format-sql', 'find', 'save-file', 'save-file-as', 'close-tab',
+])
+
+// Commands that only mean something once the grid or a DDL draft holds an edit.
+const PENDING_EDIT_COMMANDS = new Set([
+  'save-result-changes', 'discard-result-changes', 'undo-change', 'redo-change',
+])
+
+// Commands that reach the server, so they wait for the context to be live.
+const CONNECTED_COMMANDS = new Set(['refresh-schema', 'create-database'])
+
 type Deps = {
   live: ConnectionsController
-  commands: readonly PaletteEntry[]
+  commands: readonly PaletteCommand[]
   files: () => FileInfo[]
   connections: () => ConnectionProfile[]
   activeProfile: () => ConnectionProfile | null
   activeDbId: () => string | null
   activeChildDb: () => string | null
+  queryRunning: () => boolean
+  hasSqlTab: () => boolean
+  /** Whether the grid or a DDL draft is holding an unsaved edit. */
+  hasPendingEdits: () => boolean
+  /** Whether a result has landed for the active tab. */
+  hasResult: () => boolean
+  /** The name of the connection holding an open transaction, or null. */
+  openTransaction: () => string | null
   openFile: (file: FileInfo) => void
   openTable: (key: string) => void
   setActiveDb: (profileId: string, childDb?: string | null) => void
   newQuery: () => void
   runActiveTab: () => void
   saveActiveTab: () => void
+  saveActiveTabAs: () => void
+  closeActiveTab: () => void
   formatActiveTab: () => void
+  runSelectionCommand: (id: SelectionCommandId) => void
+  openFind: () => void
+  stepTab: (delta: 1 | -1) => void
+  endTransaction: (mode: 'commit' | 'rollback') => void
+  showTransactionManager: () => void
+  refreshResults: () => void
+  saveResultChanges: () => void
+  discardResultChanges: () => void
+  addResultRow: () => void
+  exportResults: () => void
+  stepEdit: (direction: 'undo' | 'redo') => void
+  editConnection: (profileId: string) => void
+  refreshSchema: (profileId: string) => void
+  createDatabase: (profileId: string) => void
+  cancelQuery: () => void
+  navigateResult: (direction: 'back' | 'forward') => void
   addDatabase: () => void
   connectProfile: (profileId: string) => void
   disconnectProfile: (profileId: string) => void
+  showView: (view: string) => void
   refreshFiles: () => void
   toggleSidebar: () => void
   toggleResultsPanel: () => void
+  switchWorkspace: () => void
   closeWorkspace: () => void
 }
 
@@ -78,17 +146,27 @@ export class CommandPaletteController implements ReactiveController {
 
   entries(): PaletteEntry[] {
     if (this.mode === 'commands') {
-      const active = this.deps.activeProfile()
-      const phase = active ? this.deps.live.phase(active.id) : null
-      return this.deps.commands.flatMap((command): PaletteEntry[] => {
-        if (command.id === 'connect-database') {
-          return active && phase !== 'connected' && phase !== 'connecting' ? [{ ...command, detail: active.name }] : []
-        }
-        if (command.id === 'disconnect-database') {
-          return active && phase === 'connected' ? [{ ...command, detail: active.name }] : []
-        }
-        return [command]
+      const available = this.deps.commands.flatMap(({ id, category, label, keybind }): PaletteEntry[] => {
+        const detail = this.commandDetail(id)
+        if (detail === null) return []
+        const name = t('palette.command', { category: CATEGORY_LABELS[category], label })
+        return [{ id, label: name, keybind, ...(detail ? { detail } : {}) }]
       })
+      // Alphabetical by the composed name, so a category's commands sit
+      // together without a header having to say so.
+      available.sort((a, b) => a.label.localeCompare(b.label))
+      const recent = this.recent
+        .flatMap((id) => available.filter((entry) => entry.id === id))
+        .slice(0, RECENT_LIMIT)
+      if (!recent.length) return available
+      // The only two labels ⌘⇧P shows; the component drops them the moment
+      // something is typed, which is where a flat ranked list belongs.
+      const rest = available.filter((entry) => !recent.includes(entry))
+      return [
+        { id: 'group:recent', label: t('palette.recentlyUsed'), header: true },
+        ...recent,
+        ...(rest.length ? [{ id: 'group:other', label: t('palette.otherCommands'), header: true }, ...rest] : []),
+      ]
     }
 
     if (this.mode === 'quick') {
@@ -243,7 +321,74 @@ export class CommandPaletteController implements ReactiveController {
     if (profileId && this.deps.live.phase(profileId) === 'connected') void this.deps.live.disconnect(profileId)
   }
 
+  // Whether a command belongs in the list right now, and what it says on the
+  // right: null hides it, '' shows it plain, anything else is its detail. Only
+  // commands that would be a no-op or a wrong offer are hidden.
+  private commandDetail(id: string): string | null {
+    const active = this.deps.activeProfile()
+    const phase = active ? this.deps.live.phase(active.id) : null
+    if (id === 'connect-database') {
+      return active && phase !== 'connected' && phase !== 'connecting' ? active.name : null
+    }
+    if (id === 'disconnect-database') return active && phase === 'connected' ? active.name : null
+    if (id === 'cancel-query') return this.deps.queryRunning() ? '' : null
+    if (id.startsWith('selection:')) return this.deps.hasSqlTab() ? '' : null
+    // Nothing to write, discard or step back through until an edit is staged.
+    if (PENDING_EDIT_COMMANDS.has(id)) return this.deps.hasPendingEdits() ? '' : null
+    // Add Row and Export both need a landed result to act on.
+    if (id === 'add-result-row' || id === 'export-results') return this.deps.hasResult() ? '' : null
+    if (CONNECTED_COMMANDS.has(id)) return active && phase === 'connected' ? active.name : null
+    if (id === 'edit-connection') return active ? active.name : null
+    if (id === 'transaction-manager') return this.deps.openTransaction()
+    // A transaction is only commitable while one is open, and naming it keeps
+    // the row honest about which connection it would end.
+    if (id === 'commit-transaction' || id === 'rollback-transaction') return this.deps.openTransaction()
+    // Everything that edits or runs SQL needs a SQL tab under the caret.
+    if (EDITOR_COMMANDS.has(id)) return this.deps.hasSqlTab() ? '' : null
+    return ''
+  }
+
+  // Last-run command ids, most recent first. Persisted like the theme is: a
+  // palette that forgets what you just did is the one you stop reaching for.
+  private get recent(): string[] {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]')
+      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []
+    } catch {
+      return []
+    }
+  }
+
+  private remember(id: string) {
+    const next = [id, ...this.recent.filter((seen) => seen !== id)].slice(0, RECENT_LIMIT)
+    try {
+      localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+    } catch {
+      // A full or blocked store only costs the ordering, never the command.
+    }
+  }
+
+  private withActiveProfile(run: (profileId: string) => void) {
+    const active = this.deps.activeProfile()
+    if (active) run(active.id)
+  }
+
   private runCommand(id: string) {
+    // Remembered before it runs: quick-open re-enters the palette, and closing
+    // a workspace tears this controller down.
+    this.remember(id)
+    if (id.startsWith('selection:')) {
+      this.deps.runSelectionCommand(id.slice('selection:'.length) as SelectionCommandId)
+      return
+    }
+    if (id.startsWith('view:')) {
+      this.deps.showView(id.slice('view:'.length))
+      return
+    }
+    if (id.startsWith('theme:')) {
+      void window.sqlkit.setTheme(id.slice('theme:'.length) as ThemeId)
+      return
+    }
     switch (id) {
       case 'new-query':
         this.deps.newQuery()
@@ -257,8 +402,26 @@ export class CommandPaletteController implements ReactiveController {
       case 'save-file':
         this.deps.saveActiveTab()
         break
+      case 'save-file-as':
+        this.deps.saveActiveTabAs()
+        break
+      case 'close-tab':
+        this.deps.closeActiveTab()
+        break
       case 'format-sql':
         this.deps.formatActiveTab()
+        break
+      case 'refresh-results':
+        this.deps.refreshResults()
+        break
+      case 'cancel-query':
+        this.deps.cancelQuery()
+        break
+      case 'previous-result':
+        this.deps.navigateResult('back')
+        break
+      case 'next-result':
+        this.deps.navigateResult('forward')
         break
       case 'quick-open':
         this.open('quick')
@@ -292,6 +455,57 @@ export class CommandPaletteController implements ReactiveController {
         break
       case 'toggle-results-panel':
         this.deps.toggleResultsPanel()
+        break
+      case 'find':
+        this.deps.openFind()
+        break
+      case 'next-tab':
+        this.deps.stepTab(1)
+        break
+      case 'previous-tab':
+        this.deps.stepTab(-1)
+        break
+      case 'commit-transaction':
+        this.deps.endTransaction('commit')
+        break
+      case 'rollback-transaction':
+        this.deps.endTransaction('rollback')
+        break
+      case 'transaction-manager':
+        this.deps.showTransactionManager()
+        break
+      case 'save-result-changes':
+        this.deps.saveResultChanges()
+        break
+      case 'discard-result-changes':
+        this.deps.discardResultChanges()
+        break
+      case 'add-result-row':
+        this.deps.addResultRow()
+        break
+      case 'export-results':
+        this.deps.exportResults()
+        break
+      case 'undo-change':
+        this.deps.stepEdit('undo')
+        break
+      case 'redo-change':
+        this.deps.stepEdit('redo')
+        break
+      case 'edit-connection':
+        this.withActiveProfile((profileId) => this.deps.editConnection(profileId))
+        break
+      case 'refresh-schema':
+        this.withActiveProfile((profileId) => this.deps.refreshSchema(profileId))
+        break
+      case 'create-database':
+        this.withActiveProfile((profileId) => this.deps.createDatabase(profileId))
+        break
+      case 'reveal-workspace':
+        void window.sqlkit.revealWorkspace()
+        break
+      case 'switch-workspace':
+        this.deps.switchWorkspace()
         break
       case 'close-workspace':
         this.deps.closeWorkspace()
