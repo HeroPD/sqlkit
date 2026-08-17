@@ -5,6 +5,8 @@ export type RecentWorkspace = {
   name: string
   path: string
   lastOpened: string
+  /** Added when recents are read; omitted from the persisted global list. */
+  profileCount?: number
 }
 
 export type WorkspaceResult =

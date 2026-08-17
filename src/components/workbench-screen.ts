@@ -3755,8 +3755,8 @@ export class WorkbenchScreen extends LitElement {
       /* Activity-bar icons are inline SVG (not the icon font) so stroke-width
          is a live knob — nudge this value to lighten/darken them. */
       .activity-bar svg {
-        width: 24px;
-        height: 24px;
+        width: 22px;
+        height: 22px;
         stroke-width: 1.5;
       }
 

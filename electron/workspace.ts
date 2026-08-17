@@ -258,6 +258,12 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
   }
 }
 
+/** Counts valid saved profiles without decrypting or exposing their contents. */
+export function workspaceProfileCount(workspacePath: string): number {
+  const outcome = loadWorkspaceConfig(workspacePath)
+  return outcome.status === 'ok' ? outcome.config.connections.length : 0
+}
+
 export function readWorkspaceConfig(workspacePath: string | null): WorkspaceConfigResult {
   if (!workspacePath) return { config: defaultWorkspaceConfig() }
   const outcome = loadWorkspaceConfig(workspacePath)

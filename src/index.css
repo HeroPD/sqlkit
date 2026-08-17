@@ -32,7 +32,7 @@
   --titlebar-h: 38px;
   /* Gutter the macOS traffic lights need; app-root sets the real value. */
   --titlebar-inset: 0px;
-  --activity-bar-w: 48px;
+  --activity-bar-w: 44px;
   --sidebar-w: 280px;
   --tab-h: 35px;
   --panel-header-h: 35px;

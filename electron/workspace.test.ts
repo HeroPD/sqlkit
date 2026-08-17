@@ -11,6 +11,7 @@ import {
   readWorkspaceHistory,
   readTheme,
   isWeakStorageBackend,
+  workspaceProfileCount,
   writeWorkspaceConfig,
   writeWorkspaceHistory,
   writeTheme,
@@ -272,6 +273,25 @@ describe('workspace config: credential round-trip', () => {
     const reloaded = readWorkspaceConfig(workspaceDir).config.connections
     writeWorkspaceConfig(workspaceDir, { version: 1, connections: reloaded })
     expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.password).toBe('still-here')
+  })
+})
+
+describe('workspace profile count', () => {
+  it('counts valid profiles without decrypting credentials', () => {
+    writeWorkspaceConfig(workspaceDir, {
+      version: 1,
+      connections: [profile(), profile({ id: 'p2', name: 'Reporting' })],
+    })
+    state.decryptCalls = 0
+
+    expect(workspaceProfileCount(workspaceDir)).toBe(2)
+    expect(state.decryptCalls).toBe(0)
+  })
+
+  it('treats missing and invalid configurations as having no connections', () => {
+    expect(workspaceProfileCount(workspaceDir)).toBe(0)
+    writeRawConfig('{not json')
+    expect(workspaceProfileCount(workspaceDir)).toBe(0)
   })
 })
 

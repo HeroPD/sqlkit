@@ -25,6 +25,7 @@ import {
   readTheme,
   readWorkspaceConfigForRenderer,
   readWorkspaceHistory,
+  workspaceProfileCount,
   writeWorkspaceConfig,
   writeWorkspaceHistory,
 } from './workspace'
@@ -224,7 +225,9 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
   })
 
   ipcMain.handle('workspace:get-recent', () =>
-    readGlobalConfig().recentWorkspaces.filter((workspace) => isDirectory(workspace.path)))
+    readGlobalConfig().recentWorkspaces
+      .filter((workspace) => isDirectory(workspace.path))
+      .map((workspace) => ({ ...workspace, profileCount: workspaceProfileCount(workspace.path) })))
   ipcMain.handle('app:get-theme', () => readTheme())
   ipcMain.handle('workspace:get-config', (event) => readWorkspaceConfigForRenderer(context.workspaceFor(event.sender)))
   ipcMain.handle('workspace:save-config', (event, config: WorkspaceConfig) => {
