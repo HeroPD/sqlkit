@@ -121,6 +121,9 @@ test('dollar quoting is masked for Postgres, and placeholders are not', () => {
   expectMask('SELECT ⟦$fn$ x $fn$⟧ FROM t', 'postgresql')
   // $1/$2 open no tag, so a parameterised statement is left intact
   expectMask('SELECT * FROM t WHERE a = $1 AND b = $2', 'postgresql')
+  // a tag cannot start with a digit; read as one, $1$ would blank every
+  // statement after it — and the destructive preflight would see none of them
+  expectMask('SELECT $1$ AS a; DELETE FROM audit_log', 'postgresql')
   // an unterminated tag stops at the end of the input
   expectMask('SELECT ⟦$$abc⟧', 'postgresql')
   // MySQL has no dollar quoting, so the apostrophe inside opens a string instead

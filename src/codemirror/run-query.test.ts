@@ -156,6 +156,17 @@ describe('queryToRun', () => {
       expect(queryAtCaret(doc)).toBe('SELECT 2;')
     })
 
+    it('keeps a BEGIN ATOMIC routine body whole', () => {
+      // The SQL-standard body holds `;`-terminated statements but is one
+      // CREATE. The parser splits on `;` alone, so the caret inside the body
+      // used to run a truncated function the server could only reject.
+      const doc =
+        'CREATE FUNCTION f() RETURNS int LANGUAGE SQL\nBEGIN ATOMIC\n  DELETE FROM t;\n  SELECT 1;\nEND;\nSELECT 2;'
+      const fn = doc.slice(0, doc.indexOf('\nSELECT 2;'))
+      expect(queryAtCaret(doc.replace('  DELETE', '  DELETE|'), SQL_DIALECTS.postgres.dialect, 'postgres')).toBe(fn)
+      expect(queryAtCaret(doc.replace('SELECT 2', 'SELECT |2'), SQL_DIALECTS.postgres.dialect, 'postgres')).toBe('SELECT 2;')
+    })
+
     it('does not split inside an unterminated dollar-quote being typed', () => {
       const doc = 'DO $$\nBEGIN\n  PERFORM 1;|\nEND'
       expect(queryAtCaret(doc)).toBe('DO $$\nBEGIN\n  PERFORM 1;\nEND')
@@ -277,6 +288,96 @@ describe('queryToRun', () => {
 
       const body = 'CREATE FUNCTION f() RETURNS void AS $$\nBEGIN\nUPDATE t SET x = 1;|\nEND\n$$ LANGUAGE plpgsql;'
       expect(queryAtCaret(body)).toBe(body.replace('|', ''))
+    })
+  })
+
+  describe('consecutive queries without semicolons', () => {
+    // Reported: the formatter puts every keyword flush left, so a query typed
+    // under a finished one has nothing separating them - no `;`, no blank
+    // line, and SELECT opens no statement on its own. Both used to run as one
+    // and the server answered `syntax error at or near "SELECT"`.
+    const pg = SQL_DIALECTS.postgres.dialect
+    const scratch = [
+      'BEGIN',
+      'SELECT',
+      '  *',
+      'FROM',
+      '  "public"."pos_transactions"',
+      'LIMIT',
+      '  200',
+      'SELECT',
+      '  *',
+      'FROM',
+      '  pos_transactions pt',
+      'WHERE',
+      '  pt.id = 1',
+    ].join('\n')
+
+    it('runs only the query the cursor is in', () => {
+      expect(queryAtCaret(scratch.replace('LIMIT', 'LIMIT|'), pg, 'postgres')).toBe(
+        'SELECT\n  *\nFROM\n  "public"."pos_transactions"\nLIMIT\n  200',
+      )
+      expect(queryAtCaret(scratch.replace('WHERE', 'WHERE|'), pg, 'postgres')).toBe(
+        'SELECT\n  *\nFROM\n  pos_transactions pt\nWHERE\n  pt.id = 1',
+      )
+    })
+
+    it('reports the second query starting where it does, for error lines', () => {
+      const state = stateAt(scratch, scratch.indexOf('WHERE'), { dialect: pg })
+      expect(queryToRun(state, 'postgres')?.from).toBe(scratch.indexOf('SELECT', 10))
+    })
+
+    it('keeps the halves of a set operation together', () => {
+      const doc = 'SELECT 1\nUNION ALL\nSELECT |2'
+      expect(queryAtCaret(doc)).toBe(doc.replace('|', ''))
+      expect(queryAtCaret('SELECT 1\nEXCEPT\nSELECT |2')).toBe('SELECT 1\nEXCEPT\nSELECT 2')
+      expect(queryAtCaret('SELECT 1\nUNION ALL -- both\nSELECT |2')).toBe(
+        'SELECT 1\nUNION ALL -- both\nSELECT 2',
+      )
+    })
+
+    it('keeps an INSERT and the SELECT it inserts together', () => {
+      const doc = 'INSERT INTO archive\n  (id, name)\nSELECT\n  id, name\nFROM |t'
+      expect(queryAtCaret(doc)).toBe(doc.replace('|', ''))
+    })
+
+    it('starts a new query at a SELECT under a finished INSERT', () => {
+      expect(queryAtCaret('INSERT INTO t VALUES (1)\nSELECT |2')).toBe('SELECT 2')
+    })
+
+    it('keeps a SELECT that is another statement body attached', () => {
+      const view = 'CREATE VIEW v AS\nSELECT *\nFROM |t'
+      expect(queryAtCaret(view)).toBe(view.replace('|', ''))
+      const explain = 'EXPLAIN\nSELECT *\nFROM |t'
+      expect(queryAtCaret(explain)).toBe(explain.replace('|', ''))
+    })
+
+    it('splits the query typed under a CTE from the CTE itself', () => {
+      const doc = 'WITH r AS (\n  SELECT 1\n)\nSELECT * FROM r\nSELECT 2'
+      expect(queryAtCaret(doc.replace('SELECT * FROM r', 'SELECT * |FROM r'))).toBe(
+        'WITH r AS (\n  SELECT 1\n)\nSELECT * FROM r',
+      )
+      expect(queryAtCaret(doc.replace('SELECT 2', 'SELECT |2'))).toBe('SELECT 2')
+    })
+
+    it('ends a query at a flush-left WITH', () => {
+      const doc = 'SELECT 1\nWITH r AS (\n  SELECT 2\n)\nSELECT * FROM r'
+      expect(queryAtCaret(doc.replace('SELECT 1', 'SELECT |1'))).toBe('SELECT 1')
+      expect(queryAtCaret(doc.replace('FROM r', 'FROM |r'))).toBe(
+        'WITH r AS (\n  SELECT 2\n)\nSELECT * FROM r',
+      )
+    })
+
+    it('runs a query merged into the statement above it alone', () => {
+      expect(queryAtCaret('ALTER TABLE t ADD COLUMN x int\nSELECT |1\nFROM t')).toBe(
+        'SELECT 1\nFROM t',
+      )
+    })
+
+    it('keeps a query attached to the comment above it', () => {
+      expect(queryAtCaret('SELECT 1\n\n-- recent orders\nSELECT |2\nFROM t')).toBe(
+        '-- recent orders\nSELECT 2\nFROM t',
+      )
     })
   })
 

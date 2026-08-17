@@ -3,8 +3,41 @@ import { keymap, type EditorView } from '@codemirror/view'
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
 import { sql } from '@codemirror/lang-sql'
 import type { SyntaxNode, Tree } from '@lezer/common'
-import { dollarSpans, spanAt, type DollarSpan } from './dollar-spans'
-import type { SqlDialectName } from './dialects'
+import { maskSqlRegions } from '../sql-mask'
+import { atomicBodySpans, type SqlSpan } from '../sql-statements'
+import { engineForDialect, SQL_DIALECTS, type SqlDialectName } from './dialects'
+
+/**
+ * The regions the syntax tree cannot be trusted inside. The editor's postgres
+ * dialect parses dollar-quoted bodies as plain SQL, and the parser splits on
+ * `;` alone, so a `BEGIN ATOMIC` routine body shatters into fragments too.
+ * Both come from the same dialect-aware scan the executor's splitter uses, so
+ * the statement offered to run and the statement that actually runs cannot
+ * disagree about where either one ends.
+ */
+const unparsedSpans = (text: string, dialect: SqlDialectName | undefined): SqlSpan[] => {
+  const engine = dialect ? engineForDialect[dialect] : undefined
+  // Both constructs are Postgres-only and the mask is the one full-text pass
+  // per run, so skip it outright when neither can be in the document. Either
+  // spelling would have to appear literally, inside a string or not.
+  if (engine && engine !== 'postgresql') return []
+  if (!text.includes('$') && !/atomic/i.test(text)) return []
+
+  const { masked, regions } = maskSqlRegions(text, engine)
+  const spans: SqlSpan[] = []
+  for (const region of regions) if (region.kind === 'dollar') spans.push([region.from, region.to])
+  if (!engine || engine === 'postgresql') spans.push(...atomicBodySpans(masked))
+  return spans.sort((a, b) => a[0] - b[0])
+}
+
+/** The span strictly containing `pos`; span edges count as outside. */
+const spanAt = (spans: SqlSpan[], pos: number): SqlSpan | null => {
+  for (const span of spans) {
+    if (pos <= span[0]) break
+    if (pos < span[1]) return span
+  }
+  return null
+}
 
 /** The SQL to run and its start offset in the document (post-trim). */
 export type QueryBlock = { sql: string; from: number }
@@ -19,9 +52,11 @@ export type RunQueryHandler = (query: QueryBlock, view: EditorView) => void
  *    with blank lines instead; blank lines inside parens, strings or
  *    dollar-quoted bodies do not count as separators).
  *
- * Lookup stays cheap on large documents: the doc is never stringified as a
- * whole, the tree is probed around the cursor (O(log n)) instead of walking
- * every statement, and only the block that will run is ever sliced.
+ * Lookup stays cheap on large documents: the tree is probed around the cursor
+ * (O(log n)) instead of walking every statement, and only the block that will
+ * run is ever sliced. The one full-text pass is the mask behind
+ * `unparsedSpans`, paid per run rather than per keystroke — the editor's
+ * per-update check (`hasExplicitQueryTarget`) stays on the tree alone.
  */
 
 const PARSE_TIMEOUT_MS = 100
@@ -50,7 +85,7 @@ const isBlank = (text: string) => !/\S/.test(text)
  * line is part of the query; dollar-quoted bodies parse as plain SQL and need
  * the span check instead.
  */
-const isSeparatorLine = (tree: Tree, spans: DollarSpan[], line: Line) => {
+const isSeparatorLine = (tree: Tree, spans: SqlSpan[], line: Line) => {
   if (!isBlank(line.text)) return false
   if (spanAt(spans, line.from)) return false
   const context = tree.resolveInner(line.from, 0)
@@ -64,9 +99,10 @@ const isSeparatorLine = (tree: Tree, spans: DollarSpan[], line: Line) => {
  * one statement and runs as one, which the server rejects. A flush-left
  * statement keyword ends the query above it.
  *
- * Absent on purpose: keywords that legally continue a statement — SELECT
- * (INSERT … SELECT, UNION SELECT), WITH, SET (UPDATE … SET), VALUES, and DROP
- * (ALTER TABLE t / DROP COLUMN c, which people do write across two lines).
+ * Absent on purpose: keywords that legally continue a statement — SET
+ * (UPDATE … SET), VALUES, and DROP (ALTER TABLE t / DROP COLUMN c, which
+ * people do write across two lines). SELECT and WITH continue one only
+ * sometimes, so they answer per block in `statementStarts` instead.
  * ALTER counts only when what follows can head a statement — ALTER COLUMN and
  * ALTER CONSTRAINT/CHECK continue an ALTER TABLE the same way DROP does — and
  * BEGIN only with an explicit transaction tail: bare BEGIN opens a T-SQL
@@ -110,14 +146,14 @@ const continuesPreviousLine = (dialect: SqlDialectName | undefined, doc: Text, l
  * different context; dollar-quoted bodies parse as plain SQL, so — as with
  * blank lines — they need the span check instead.
  */
-const topLevelKeywordLine = (tree: Tree, spans: DollarSpan[], line: Line) => {
+const topLevelKeywordLine = (tree: Tree, spans: SqlSpan[], line: Line) => {
   if (spanAt(spans, line.from)) return false
   const keyword = tree.resolveInner(line.from, 1)
   return keyword.name === 'Keyword' && keyword.parent?.name === 'Statement' && keyword.parent.parent?.name === 'Script'
 }
 
 /** A lone transaction-opening BEGIN at the top level: one complete statement on its own line. */
-const transactionBeginLine = (dialect: SqlDialectName | undefined, tree: Tree, spans: DollarSpan[], doc: Text, line: Line) =>
+const transactionBeginLine = (dialect: SqlDialectName | undefined, tree: Tree, spans: SqlSpan[], doc: Text, line: Line) =>
   bareTransactionBegin(dialect, doc, line) && topLevelKeywordLine(tree, spans, line)
 
 /**
@@ -126,10 +162,83 @@ const transactionBeginLine = (dialect: SqlDialectName | undefined, tree: Tree, s
  * MATCHED THEN / UPDATE SET), must not be the body the previous line expects,
  * and must sit at the top level of the script.
  */
-const startsStatement = (dialect: SqlDialectName | undefined, tree: Tree, spans: DollarSpan[], doc: Text, line: Line) => {
+const startsStatement = (dialect: SqlDialectName | undefined, tree: Tree, spans: SqlSpan[], doc: Text, line: Line) => {
   if (!STATEMENT_START.test(line.text) && !bareTransactionBegin(dialect, doc, line)) return false
   if (continuesPreviousLine(dialect, doc, line)) return false
   return topLevelKeywordLine(tree, spans, line)
+}
+
+/**
+ * A flush-left SELECT or WITH is as often the body of the statement above it —
+ * an INSERT's source, a CTE's query, `CREATE VIEW … AS`, the right side of a
+ * UNION — as it is a new statement. Which one it is depends on what opened the
+ * statement above rather than on the line itself, so these are settled against
+ * that head in `statementStarts` instead of in `startsStatement`.
+ */
+const SELECT_OPENER = /^(?:select|with)\b/i
+
+/**
+ * Whether a statement opening with `head` takes the flush-left SELECT under it
+ * as its body. An INSERT does only while it is still missing its source: one
+ * that already names its rows is finished, and the SELECT below it is the next
+ * query. Only the head line is read, so `VALUES` parked on a line of its own
+ * still reads as unfinished.
+ */
+const takesSelectBody = (head: string) =>
+  /^\s*(?:with|create|explain|analyze|prepare|declare)\b/i.test(head) ||
+  (/^\s*(?:insert|replace)\b/i.test(head) && !/\bvalues\b/i.test(head))
+
+const isCommentLine = (text: string) => /^\s*--/.test(text)
+
+// A trailing line comment is no part of the statement's tail. A `--` with a
+// quote after it sits inside a string literal and starts no comment.
+const codeTail = (text: string) => text.replace(/--[^'"]*$/, '')
+
+const SET_OPERATOR = /\b(?:union|intersect|except|minus)(?:\s+(?:all|distinct))?\s*$/i
+
+/** Whether the code above `line` hands off to a SELECT: `… UNION [ALL]`. */
+const afterSetOperator = (doc: Text, line: Line) => {
+  for (let n = line.number - 1; n >= 1; n -= 1) {
+    const { text } = doc.line(n)
+    if (isBlank(text) || isCommentLine(text)) continue
+    return SET_OPERATOR.test(codeTail(text))
+  }
+  return false
+}
+
+/**
+ * The lines in [first, last] that open a statement of their own. Only the
+ * SELECT/WITH question is answered here — every other keyword already answered
+ * for itself in `startsStatement` — and it is answered against the head of the
+ * statement the line would otherwise join, which is why this walks down from
+ * the block's first line carrying that head. A SELECT taken as some other
+ * statement's body becomes the head itself, so the next one still splits. A
+ * comment heads nothing, so the query written under one stays with it.
+ */
+const statementStarts = (
+  dialect: SqlDialectName | undefined,
+  tree: Tree,
+  spans: SqlSpan[],
+  doc: Text,
+  first: Line,
+  last: Line,
+) => {
+  const starts = [first]
+  let head = ''
+  for (let n = first.number; n <= last.number; n += 1) {
+    const line = doc.line(n)
+    if (isBlank(line.text) || isCommentLine(line.text)) continue
+    if (!head) {
+      head = line.text
+      continue
+    }
+    if (!SELECT_OPENER.test(line.text) || !topLevelKeywordLine(tree, spans, line)) continue
+    if (!takesSelectBody(head) && !continuesPreviousLine(dialect, doc, line) && !afterSetOperator(doc, line)) {
+      starts.push(line)
+    }
+    head = line.text
+  }
+  return starts
 }
 
 /** An empty statement (a bare `;`) is never worth running. */
@@ -178,7 +287,7 @@ const statementsAround = (tree: Tree, doc: Text, cursor: number) => {
  * The blank-line-delimited block at/nearest the cursor, found by walking
  * lines outward and clipped to [lo, hi] when given.
  */
-const paragraphBlock = (dialect: SqlDialectName | undefined, tree: Tree, spans: DollarSpan[], doc: Text, cursor: number, lo = 0, hi = doc.length) => {
+const paragraphBlock = (dialect: SqlDialectName | undefined, tree: Tree, spans: SqlSpan[], doc: Text, cursor: number, lo = 0, hi = doc.length) => {
   let line = doc.lineAt(cursor)
 
   if (isBlank(line.text)) {
@@ -227,6 +336,17 @@ const paragraphBlock = (dialect: SqlDialectName | undefined, tree: Tree, spans: 
     }
   }
 
+  // A flush-left SELECT reads as a statement start only in the light of the
+  // block above it, so the block is narrowed to the one covering the anchor
+  // once both ends are known.
+  for (const start of statementStarts(dialect, tree, spans, doc, first, last)) {
+    if (start.number > line.number) {
+      last = doc.line(start.number - 1)
+      break
+    }
+    first = start
+  }
+
   const from = Math.max(first.from, lo)
   const to = Math.min(last.to, hi)
   if (from >= to) return null
@@ -242,7 +362,7 @@ const topLevelCovering = (tree: Tree, pos: number, side: -1 | 1) => {
   return node.parent ? node : null
 }
 
-const intersectsSpan = (spans: DollarSpan[], from: number, to: number) =>
+const intersectsSpan = (spans: SqlSpan[], from: number, to: number) =>
   spans.some(([spanFrom, spanTo]) => from < spanTo && to > spanFrom)
 
 /**
@@ -253,7 +373,7 @@ const intersectsSpan = (spans: DollarSpan[], from: number, to: number) =>
  * back over neighbors still touching a span, and forward while the statement
  * hasn't ended in a real `;` outside every span.
  */
-const expandOverSpans = (tree: Tree, spans: DollarSpan[], doc: Text, node: SyntaxNode): [number, number] => {
+const expandOverSpans = (tree: Tree, spans: SqlSpan[], doc: Text, node: SyntaxNode): [number, number] => {
   let from = node.from
   let to = node.to
   if (!spans.length) return [from, to]
@@ -288,8 +408,8 @@ const expandOverSpans = (tree: Tree, spans: DollarSpan[], doc: Text, node: Synta
 const closestQueryBlock = (state: EditorState, cursor: number, allowNeighbor = true, dialect?: SqlDialectName) => {
   const doc = state.doc
   const tree = treeForQuery(state, cursor)
-  // One full-text scan per run; the tree can't provide these (see dollar-spans.ts).
-  const spans = dollarSpans(doc.toString())
+  // One full-text scan per run; the tree can't provide these (see unparsedSpans).
+  const spans = unparsedSpans(doc.toString(), dialect)
   const { covering, prev, next } = statementsAround(tree, doc, cursor)
 
   if (!covering && !allowNeighbor) return null
@@ -370,8 +490,11 @@ export const hasExplicitQueryTarget = (state: EditorState): boolean => {
 
 // First runnable statement of a plain SQL string (same `;`/blank-line splitting as run-at-caret),
 // for callers without a live editor — e.g. re-running a stored tab minus its trailing half-written query.
+// The throwaway state parses under the caller's dialect: the generic one tokenizes `[b]`/`` `b` ``
+// as plain SQL and splits inside quoted identifiers that happen to hold a `;`.
 export const firstStatement = (text: string, dialect?: SqlDialectName): string => {
-  const state = EditorState.create({ doc: text, extensions: [sql()] })
+  const language = dialect ? sql({ dialect: SQL_DIALECTS[dialect].dialect }) : sql()
+  const state = EditorState.create({ doc: text, extensions: [language] })
   return closestQueryBlock(state, 0, true, dialect)?.sql ?? ''
 }
 

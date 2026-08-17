@@ -12,6 +12,14 @@ export const dialectForEngine: Record<Engine, SqlDialectName> = {
   sqlserver: 'mssql',
 }
 
+/** The inverse, for editor code that has to reach the engine-keyed SQL helpers (masking, splitting). */
+export const engineForDialect: Record<SqlDialectName, Engine> = {
+  postgres: 'postgresql',
+  sqlite: 'sqlite',
+  mysql: 'mysql',
+  mssql: 'sqlserver',
+}
+
 export type SqlDialectConfig = {
   dialect: SQLDialect
   /** Keywords offered by autocomplete. Extend per dialect as needed. */

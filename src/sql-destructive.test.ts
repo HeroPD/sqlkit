@@ -27,6 +27,10 @@ describe('analyzeDestructive', () => {
 
   it('flags writes that scope nothing', () => {
     expect(analyzeDestructive('delete from users')).toEqual(['deleteAll'])
+
+    // `$1$` is not a dollar-quote opener; masked as one it blanked the rest of
+    // the script, and this unguarded DELETE went unwarned.
+    expect(analyzeDestructive('select $1$ as a; delete from audit_log', 'postgresql')).toContain('deleteAll')
     expect(analyzeDestructive('update users set active = false')).toEqual(['updateAll'])
     // MySQL's multi-table form names the target before FROM.
     expect(analyzeDestructive('delete t1 from t1 join t2 on t1.id = t2.id', 'mysql')).toEqual(['deleteAll'])

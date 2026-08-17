@@ -10,6 +10,12 @@ export type SqlModeFlags = {
   ansiQuotes?: boolean
 }
 
+/** What a masked region held. `dollar` is called out because the editor's postgres dialect parses those bodies as plain SQL. */
+export type MaskKind = 'comment' | 'quoted' | 'dollar'
+
+/** One masked region, delimiters included: [from, to). */
+export type MaskRegion = { from: number; to: number; kind: MaskKind }
+
 // Masks quoted text and comments while preserving offsets/newlines, so batch
 // handling and edit-context inference never treat their contents as SQL syntax.
 // Dialect-aware: each engine's comment/quote/escape rules differ enough that a
@@ -17,9 +23,24 @@ export type SqlModeFlags = {
 // nested comments and E'' strings, SQL Server [brackets]). Shared by the
 // renderer and the main-process drivers, like src/dialect.ts.
 export function maskSql(sql: string, engine?: Engine, mode?: SqlModeFlags): string {
+  return scan(sql, engine, mode, null)
+}
+
+/**
+ * The mask plus the regions it blanked, in ascending order. Only callers that
+ * must reason about the regions themselves pay for collecting them — a syntax
+ * tree that cannot see dollar-quoted bodies has to recover them from here.
+ */
+export function maskSqlRegions(sql: string, engine?: Engine, mode?: SqlModeFlags): { masked: string; regions: MaskRegion[] } {
+  const regions: MaskRegion[] = []
+  return { masked: scan(sql, engine, mode, regions), regions }
+}
+
+function scan(sql: string, engine: Engine | undefined, mode: SqlModeFlags | undefined, regions: MaskRegion[] | null): string {
   const chars = sql.split('')
   let i = 0
-  const blank = (from: number, to: number) => {
+  const blank = (from: number, to: number, kind: MaskKind) => {
+    regions?.push({ from, to, kind })
     for (let p = from; p < to; p += 1) if (chars[p] !== '\n' && chars[p] !== '\r') chars[p] = ' '
   }
   while (i < sql.length) {
@@ -29,14 +50,14 @@ export function maskSql(sql: string, engine?: Engine, mode?: SqlModeFlags): stri
     if (ch === '-' && sql[i + 1] === '-' && dashComment) {
       const end = sql.indexOf('\n', i + 2)
       const to = end < 0 ? sql.length : end
-      blank(i, to)
+      blank(i, to, 'comment')
       i = to
       continue
     }
     if (engine === 'mysql' && ch === '#') {
       const end = sql.indexOf('\n', i + 1)
       const to = end < 0 ? sql.length : end
-      blank(i, to)
+      blank(i, to, 'comment')
       i = to
       continue
     }
@@ -47,7 +68,7 @@ export function maskSql(sql: string, engine?: Engine, mode?: SqlModeFlags): stri
         let content = i + 3
         while (/\d/.test(sql[content] ?? '')) content += 1
         while (/\s/.test(sql[content] ?? '')) content += 1
-        blank(i, content)
+        blank(i, content, 'comment')
         i = content
         continue
       }
@@ -65,16 +86,20 @@ export function maskSql(sql: string, engine?: Engine, mode?: SqlModeFlags): stri
           p += 1
         }
       }
-      blank(i, p)
+      blank(i, p, 'comment')
       i = p
       continue
     }
     if ((engine === undefined || engine === 'postgresql') && ch === '$') {
-      const tag = /^\$[A-Za-z0-9_]*\$/.exec(sql.slice(i))?.[0]
+      // A tag follows unquoted-identifier rules, so a digit cannot lead it:
+      // `$1$` is the placeholder $1 followed by a dollar, not an opener. Read
+      // as one, an unterminated tag blanks the rest of the script — and every
+      // statement in it stops being seen at all.
+      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i))?.[0]
       if (tag) {
         const end = sql.indexOf(tag, i + tag.length)
         const to = end < 0 ? sql.length : end + tag.length
-        blank(i, to)
+        blank(i, to, 'dollar')
         i = to
         continue
       }
@@ -108,7 +133,7 @@ export function maskSql(sql: string, engine?: Engine, mode?: SqlModeFlags): stri
         }
         p += 1
       }
-      blank(i, p)
+      blank(i, p, 'quoted')
       i = p
       continue
     }
@@ -125,13 +150,13 @@ export function maskSql(sql: string, engine?: Engine, mode?: SqlModeFlags): stri
         }
         p += 1
       }
-      blank(i, p)
+      blank(i, p, 'quoted')
       i = p
       continue
     }
     // A dangling MySQL version-comment terminator from the branch above.
     if (engine === 'mysql' && ch === '*' && sql[i + 1] === '/') {
-      blank(i, i + 2)
+      blank(i, i + 2, 'comment')
       i += 2
       continue
     }

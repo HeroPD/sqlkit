@@ -6,6 +6,49 @@ export type ScriptStatement = { raw: string; masked: string }
 
 export type SplitScript = { statements: ScriptStatement[]; masked: string }
 
+/** A half-open region of a script: [from, to). */
+export type SqlSpan = [from: number, to: number]
+
+/**
+ * PostgreSQL's SQL-standard routine body is part of one CREATE statement even
+ * though it contains semicolon-terminated statements. CASE has its own END
+ * inside that body, so a tiny construct stack keeps the first END from closing
+ * BEGIN ATOMIC. Takes masked text so a `begin atomic` inside a literal or
+ * comment cannot open a body.
+ *
+ * Shared so that everything deciding where a statement ends — the executor's
+ * splitter below and the editor's run-at-caret target, whose syntax tree splits
+ * on `;` alone — agrees on which semicolons are inside a routine body.
+ */
+export function atomicBodySpans(masked: string): SqlSpan[] {
+  const spans: SqlSpan[] = []
+  const blocks: Array<'atomic' | 'case'> = []
+  let start = 0
+  let previousWord = ''
+  for (let i = 0; i < masked.length; i += 1) {
+    if (!/[A-Za-z_]/.test(masked[i]!) || /[A-Za-z0-9_$]/.test(masked[i - 1] ?? '')) continue
+    let end = i + 1
+    while (/[A-Za-z0-9_$]/.test(masked[end] ?? '')) end += 1
+    const word = masked.slice(i, end).toLowerCase()
+    if (word === 'begin' && /^\s+atomic\b/i.test(masked.slice(end))) {
+      if (!blocks.length) start = i
+      blocks.push('atomic')
+    } else if (blocks.length && word === 'case' && previousWord !== 'end') {
+      blocks.push('case')
+    } else if (blocks.length && word === 'end') {
+      blocks.pop()
+      if (!blocks.length) spans.push([start, end])
+    }
+    previousWord = word
+    i = end - 1
+  }
+  // Still being typed: the body runs to the end of the script.
+  if (blocks.length) spans.push([start, masked.length])
+  return spans
+}
+
+const inSpan = (spans: SqlSpan[], pos: number) => spans.some(([from, to]) => pos >= from && pos < to)
+
 // Splits a script into top-level statements. Shared by the renderer and the
 // main-process drivers, like src/sql-mask.ts: the destructive-statement
 // preflight must see exactly the statements the executor will run, or it warns
@@ -15,34 +58,16 @@ export function splitScript(sql: string, engine?: Engine, mode?: SqlModeFlags): 
   const masked = maskSql(sql, engine, mode)
   const statements: ScriptStatement[] = []
   let depth = 0
-  // PostgreSQL's SQL-standard routine body is part of one CREATE statement
-  // even though it contains semicolon-terminated statements. CASE has its own
-  // END inside that body, so retain a tiny construct stack rather than treating
-  // the first END as the end of BEGIN ATOMIC.
-  const postgresBlocks: Array<'atomic' | 'case'> = []
-  let previousWord = ''
+  const bodies = engine === 'postgresql' ? atomicBodySpans(masked) : []
   let start = 0
   const push = (from: number, to: number) => {
     if (masked.slice(from, to).trim()) statements.push({ raw: sql.slice(from, to).trim(), masked: masked.slice(from, to).trim() })
   }
   for (let i = 0; i < masked.length; i += 1) {
     const char = masked[i]!
-    if (engine === 'postgresql' && /[A-Za-z_]/.test(char) && !/[A-Za-z0-9_$]/.test(masked[i - 1] ?? '')) {
-      let end = i + 1
-      while (/[A-Za-z0-9_$]/.test(masked[end] ?? '')) end += 1
-      const word = masked.slice(i, end).toLowerCase()
-      if (word === 'begin' && /^\s+atomic\b/i.test(masked.slice(end))) {
-        postgresBlocks.push('atomic')
-      } else if (postgresBlocks.length && word === 'case' && previousWord !== 'end') {
-        postgresBlocks.push('case')
-      } else if (postgresBlocks.length && word === 'end') {
-        postgresBlocks.pop()
-      }
-      previousWord = word
-      i = end - 1
-    } else if (char === '(') depth += 1
+    if (char === '(') depth += 1
     else if (char === ')') depth = Math.max(0, depth - 1)
-    else if (char === ';' && depth === 0 && postgresBlocks.length === 0) {
+    else if (char === ';' && depth === 0 && !inSpan(bodies, i)) {
       push(start, i)
       start = i + 1
     }
