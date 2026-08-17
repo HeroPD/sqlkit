@@ -93,24 +93,60 @@ const isSeparatorLine = (tree: Tree, spans: SqlSpan[], line: Line) => {
 }
 
 /**
- * Keywords that can only open a statement, never continue one. The parser
- * splits on `;` alone, so an unterminated query swallows everything up to the
- * next semicolon — `SELECT … LIMIT 200` followed by `ALTER TABLE …;` parses as
- * one statement and runs as one, which the server rejects. A flush-left
- * statement keyword ends the query above it.
+ * Words that can head a statement. The parser splits on `;` alone, so an
+ * unterminated query swallows everything up to the next semicolon — `SELECT …
+ * LIMIT 200` followed by `DROP INDEX …;` parses as one statement and runs as
+ * one, which the server rejects. A flush-left one of these ends the query
+ * above it.
  *
- * Absent on purpose: keywords that legally continue a statement — SET
- * (UPDATE … SET), VALUES, and DROP (ALTER TABLE t / DROP COLUMN c, which
- * people do write across two lines). SELECT and WITH continue one only
- * sometimes, so they answer per block in `statementStarts` instead.
- * ALTER counts only when what follows can head a statement — ALTER COLUMN and
- * ALTER CONSTRAINT/CHECK continue an ALTER TABLE the same way DROP does — and
- * BEGIN only with an explicit transaction tail: bare BEGIN opens a T-SQL
- * block. Outside SQL Server a lone BEGIN can still open a transaction — see
- * `bareTransactionBegin`.
+ * Heading a statement is not the same as doing so here. DROP heads `DROP INDEX
+ * …` and continues `ALTER TABLE t`; SELECT heads a query and continues `INSERT
+ * INTO t`; SET heads `SET search_path` and continues `UPDATE t`. The word
+ * alone can never tell them apart — only the head of the statement the line
+ * would otherwise join can, which is what `continuation` is for. Anything not
+ * listed here never ends the query above it.
+ *
+ * Left out on purpose, because each is far more often a clause than a
+ * statement: FETCH (`… OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY`), DESC (`ORDER
+ * BY a DESC` — DESCRIBE is here for the spelling that is always a statement),
+ * and GO, which is a batch separator the executor strips rather than runs.
  */
-const STATEMENT_START =
-  /^(?:(?:create|insert|update|delete|merge|truncate|copy|grant|revoke|vacuum|reindex|refresh|explain|commit|rollback|savepoint|call|do|show|use|describe|pragma)\b|alter\s+(?!column\b|constraint\b|check\b)|begin(?:\s*;|\s+(?:transaction|tran|work|isolation|deferred|immediate|exclusive|read)\b))/i
+const OPENER =
+  /^(?:select|with|insert|replace|update|delete|merge|drop|create|alter|truncate|comment|copy|grant|revoke|deny|vacuum|reindex|refresh|cluster|analyze|optimize|repair|flush|explain|prepare|deallocate|declare|open|close|call|do|set|values|table|show|use|describe|pragma|attach|detach|begin|start|commit|rollback|savepoint|release|listen|notify|lock|reset|discard|checkpoint|load|execute|exec|rename|kill|handler|print|raiserror|throw|backup|restore|waitfor|if|while)\b/i
+
+/**
+ * The clauses a statement takes on a line of its own, keyed by the word that
+ * opened it: `ALTER TABLE t` / `DROP COLUMN c`, `INSERT INTO t` / `SELECT …`,
+ * `UPDATE t` / `SET x = 1`. An INSERT takes a query only while it is still
+ * short of its rows; one that already names them is finished.
+ *
+ * `restarts` marks a clause that is a whole statement in its own right: an
+ * INSERT's source is a query, so a second query under it starts again, while a
+ * second DROP under an ALTER is just one more of that ALTER's actions.
+ *
+ * A head that matches nothing here absorbs nothing, so the line below it opens
+ * a statement. That is the safe default — a query that swallows the next one
+ * is the failure this layer exists to prevent.
+ */
+const CONTINUATIONS: Array<{ head: RegExp; clause: RegExp; restarts?: true }> = [
+  { head: /^alter\b/i, clause: /^(?:drop|add|alter|set|reset|rename|owner|validate|enable|disable|cluster|inherit|attach|detach|replica|no|not|of|options|if|table)\b/i },
+  // The object a DDL verb names, and the guard in front of it, can each be
+  // parked on their own line: `DROP INDEX` / `IF EXISTS i`.
+  { head: /^drop\b/i, clause: /^(?:if|table|index|view|column|constraint|sequence|schema|type|domain|function|procedure|trigger|database|materialized|cascade|restrict|concurrently)\b/i },
+  { head: /^truncate\b/i, clause: /^(?:table|only|restart|continue|cascade|restrict)\b/i },
+  { head: /^(?:insert|replace)\b(?!.*\bvalues\b)/i, clause: /^(?:select|with|values|default|overriding)\b/i, restarts: true },
+  { head: /^with\b/i, clause: /^(?:select|insert|update|delete|merge|values)\b/i, restarts: true },
+  { head: /^create\b/i, clause: /^(?:select|with|insert|update|delete|values|as|begin|declare|return|if|table)\b/i, restarts: true },
+  { head: /^(?:explain|analyze)\b/i, clause: /^(?:select|insert|update|delete|merge|with|values|create|drop|alter|truncate)\b/i, restarts: true },
+  { head: /^(?:prepare|declare)\b/i, clause: /^(?:select|insert|update|delete|with|values)\b/i, restarts: true },
+  { head: /^merge\b/i, clause: /^(?:update|insert|delete|values)\b/i },
+  { head: /^update\b/i, clause: /^(?:set|from|where)\b/i },
+  { head: /^(?:grant|revoke)\b/i, clause: /^(?:to|from|on|with)\b/i },
+]
+
+/** The rule by which the statement opened by `head` takes `line` as a clause, if it does. */
+const continuation = (head: string, line: string) =>
+  CONTINUATIONS.find((rule) => rule.head.test(head) && rule.clause.test(line))
 
 /**
  * A lone flush-left BEGIN outside SQL Server: there it opens a T-SQL block,
@@ -156,38 +192,6 @@ const topLevelKeywordLine = (tree: Tree, spans: SqlSpan[], line: Line) => {
 const transactionBeginLine = (dialect: SqlDialectName | undefined, tree: Tree, spans: SqlSpan[], doc: Text, line: Line) =>
   bareTransactionBegin(dialect, doc, line) && topLevelKeywordLine(tree, spans, line)
 
-/**
- * Whether `line` opens a new statement: the keyword must be flush left (a
- * continuation clause of a well-formed statement is indented — MERGE's WHEN
- * MATCHED THEN / UPDATE SET), must not be the body the previous line expects,
- * and must sit at the top level of the script.
- */
-const startsStatement = (dialect: SqlDialectName | undefined, tree: Tree, spans: SqlSpan[], doc: Text, line: Line) => {
-  if (!STATEMENT_START.test(line.text) && !bareTransactionBegin(dialect, doc, line)) return false
-  if (continuesPreviousLine(dialect, doc, line)) return false
-  return topLevelKeywordLine(tree, spans, line)
-}
-
-/**
- * A flush-left SELECT or WITH is as often the body of the statement above it —
- * an INSERT's source, a CTE's query, `CREATE VIEW … AS`, the right side of a
- * UNION — as it is a new statement. Which one it is depends on what opened the
- * statement above rather than on the line itself, so these are settled against
- * that head in `statementStarts` instead of in `startsStatement`.
- */
-const SELECT_OPENER = /^(?:select|with)\b/i
-
-/**
- * Whether a statement opening with `head` takes the flush-left SELECT under it
- * as its body. An INSERT does only while it is still missing its source: one
- * that already names its rows is finished, and the SELECT below it is the next
- * query. Only the head line is read, so `VALUES` parked on a line of its own
- * still reads as unfinished.
- */
-const takesSelectBody = (head: string) =>
-  /^\s*(?:with|create|explain|analyze|prepare|declare)\b/i.test(head) ||
-  (/^\s*(?:insert|replace)\b/i.test(head) && !/\bvalues\b/i.test(head))
-
 const isCommentLine = (text: string) => /^\s*--/.test(text)
 
 // A trailing line comment is no part of the statement's tail. A `--` with a
@@ -207,13 +211,11 @@ const afterSetOperator = (doc: Text, line: Line) => {
 }
 
 /**
- * The lines in [first, last] that open a statement of their own. Only the
- * SELECT/WITH question is answered here — every other keyword already answered
- * for itself in `startsStatement` — and it is answered against the head of the
- * statement the line would otherwise join, which is why this walks down from
- * the block's first line carrying that head. A SELECT taken as some other
- * statement's body becomes the head itself, so the next one still splits. A
- * comment heads nothing, so the query written under one stays with it.
+ * The lines in [first, last] that open a statement of their own — the one
+ * place that decides it, for every keyword. Each candidate is judged against
+ * the head of the statement it would otherwise join, which is why this walks
+ * down from the block's first line carrying that head along. A comment heads
+ * nothing, so the query written under one stays with it.
  */
 const statementStarts = (
   dialect: SqlDialectName | undefined,
@@ -232,10 +234,15 @@ const statementStarts = (
       head = line.text
       continue
     }
-    if (!SELECT_OPENER.test(line.text) || !topLevelKeywordLine(tree, spans, line)) continue
-    if (!takesSelectBody(head) && !continuesPreviousLine(dialect, doc, line) && !afterSetOperator(doc, line)) {
-      starts.push(line)
+    if (!OPENER.test(line.text) || !topLevelKeywordLine(tree, spans, line)) continue
+    const rule = continuation(head, line.text)
+    if (rule || continuesPreviousLine(dialect, doc, line) || afterSetOperator(doc, line)) {
+      // A clause that is a statement in its own right becomes the head, so a
+      // second one under it starts again instead of joining the same statement.
+      if (!rule || rule.restarts) head = line.text
+      continue
     }
+    starts.push(line)
     head = line.text
   }
   return starts
@@ -314,16 +321,16 @@ const paragraphBlock = (dialect: SqlDialectName | undefined, tree: Tree, spans: 
     line = !below || (above && cursor - above.to <= below.from - cursor) ? above! : below
   }
 
-  // A statement keyword bounds the block from whichever side it is met: the
-  // line that opens a statement is the block's first line, and the next one to
-  // open a statement is where the block stops. A transaction-opening BEGIN is
-  // complete on its own: as the anchor it is the whole block, and met above
-  // the anchor it is a finished statement rather than this block's opener.
+  // Grow to the blank lines around the anchor first, and let statementStarts
+  // find the boundaries inside: whether a keyword line opens a statement or
+  // continues the one above cannot be known until there is a block to read it
+  // against. A transaction-opening BEGIN is complete on its own — as the
+  // anchor it is the whole block, and met above the anchor it is a finished
+  // statement rather than this block's opener.
   let first = line
   let last = line
   if (!transactionBeginLine(dialect, tree, spans, doc, line)) {
     while (first.number > 1 && first.from > lo) {
-      if (startsStatement(dialect, tree, spans, doc, first)) break
       const candidate = doc.line(first.number - 1)
       if (isSeparatorLine(tree, spans, candidate) || transactionBeginLine(dialect, tree, spans, doc, candidate)) break
       first = candidate
@@ -331,14 +338,12 @@ const paragraphBlock = (dialect: SqlDialectName | undefined, tree: Tree, spans: 
 
     while (last.number < doc.lines && last.to < hi) {
       const candidate = doc.line(last.number + 1)
-      if (isSeparatorLine(tree, spans, candidate) || startsStatement(dialect, tree, spans, doc, candidate)) break
+      if (isSeparatorLine(tree, spans, candidate)) break
       last = candidate
     }
   }
 
-  // A flush-left SELECT reads as a statement start only in the light of the
-  // block above it, so the block is narrowed to the one covering the anchor
-  // once both ends are known.
+  // Narrow to the statement covering the anchor, now that both ends are known.
   for (const start of statementStarts(dialect, tree, spans, doc, first, last)) {
     if (start.number > line.number) {
       last = doc.line(start.number - 1)

@@ -53,6 +53,27 @@ describeDb('postgres driver (integration)', () => {
     return driver
   }
 
+  /** Polls until `check` holds, so a test waits on the condition it means rather than on the clock. */
+  const until = async (what: string, check: () => boolean | Promise<boolean>, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      if (await check()) return
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  /**
+   * Resolves once the statement tagged `marker` is genuinely executing on a
+   * backend, observed from a second connection. A cancel issued before the
+   * query has captured its PID is answered client-side and never reaches the
+   * server (see `cancel` in postgres.ts), so a test asserting a server-side
+   * effect has to wait for the backend rather than for a fixed delay.
+   */
+  const awaitBackend = (observer: Driver, marker: string) =>
+    until(`a backend running ${marker}`, async () =>
+      (await observer.query("select 1 from pg_stat_activity where state = 'active' and query like $1", [`%${marker}%`])).rows.length > 0)
+
   it('swaps two column names in one runDdl without a transient collision', async () => {
     const driver = await connectDriver()
     try {
@@ -748,17 +769,24 @@ describeDb('postgres driver (integration)', () => {
 
     it('cancelling a statement inside the transaction leaves it failed but recoverable', async () => {
       const driver = await connectDriver()
+      const observer = await connectDriver()
       try {
         await driver.query('BEGIN')
-        const slow = driver.query('select pg_sleep(20)', [], null, null, null, 'txn-slow')
+        const slow = driver.query('select pg_sleep(20) /* txn-slow */', [], null, null, null, 'txn-slow')
         const rejection = expect(slow).rejects.toThrow('Query cancelled.')
-        await new Promise((resolve) => setTimeout(resolve, 400))
+        // Only a cancel that reaches the backend leaves the transaction failed;
+        // waiting a fixed 400ms here raced the pool checkout under load.
+        await awaitBackend(observer, 'txn-slow')
         await driver.cancel!('txn-slow')
         await rejection
+        // The rejection settles on the server's ErrorResponse, but the wire
+        // transaction status only flips on the ReadyForQuery that follows it.
+        await until('the transaction to report itself failed', () => driver.openTransaction!()?.failed === true)
         expect(driver.openTransaction!()).toMatchObject({ failed: true })
         await driver.endTransaction!('rollback')
         expect((await driver.query('select 1')).rows).toEqual([[1]])
       } finally {
+        await observer.disconnect()
         await driver.disconnect()
       }
     }, 30_000)
