@@ -538,6 +538,12 @@ export class WorkbenchScreen extends LitElement {
       case 'close-tab':
         if (this._ctx.activeTabId) this._requestCloseTab(this._ctx.activeTabId)
         break
+      case 'reveal-workspace':
+        void window.sqlkit.revealWorkspace()
+        break
+      case 'close-workspace':
+        this._onCloseWorkspace()
+        break
       case 'refresh-results':
         void this._refreshResults()
         break

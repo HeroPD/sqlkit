@@ -538,6 +538,8 @@ const enUS = {
   'menu.window': 'Window',
   'menu.newWindow': 'New Window',
   'menu.newQuery': 'New Query',
+  'menu.openWorkspace': 'Open Workspace…',
+  'menu.closeWorkspace': 'Close Workspace',
   'menu.save': 'Save',
   'menu.saveAs': 'Save As…',
   'menu.closeTab': 'Close Tab',

@@ -32,16 +32,6 @@ export class WelcomeScreen extends LitElement {
   @property({ attribute: false })
   recents: RecentWorkspace[] = []
 
-  connectedCallback() {
-    super.connectedCallback()
-    document.addEventListener('keydown', this._onKeydown)
-  }
-
-  disconnectedCallback() {
-    super.disconnectedCallback()
-    document.removeEventListener('keydown', this._onKeydown)
-  }
-
   render() {
     return html`
       <div class="workspace">
@@ -117,13 +107,6 @@ export class WelcomeScreen extends LitElement {
         </aside>
       </div>
     `
-  }
-
-  private _onKeydown = (event: KeyboardEvent) => {
-    if (!this.classList.contains('active')) return
-    if (event.key.toLowerCase() !== 'o' || event.shiftKey || event.altKey || !(event.metaKey || event.ctrlKey)) return
-    event.preventDefault()
-    this._onOpenFolder()
   }
 
   private _onOpenFolder() {

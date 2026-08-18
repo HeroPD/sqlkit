@@ -41,20 +41,4 @@ describe('WelcomeScreen', () => {
     expect(opened).toEqual(['/work/analytics'])
   })
 
-  it('opens the folder picker from the displayed shortcut only while active', async () => {
-    const screen = new WelcomeScreen()
-    const openFolder = vi.fn()
-    screen.addEventListener('open-folder', openFolder)
-    document.body.append(screen)
-    await screen.updateComplete
-
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'o', metaKey: true, bubbles: true, cancelable: true }))
-    expect(openFolder).not.toHaveBeenCalled()
-
-    screen.classList.add('active')
-    const shortcut = new KeyboardEvent('keydown', { key: 'o', metaKey: true, bubbles: true, cancelable: true })
-    document.dispatchEvent(shortcut)
-    expect(shortcut.defaultPrevented).toBe(true)
-    expect(openFolder).toHaveBeenCalledOnce()
-  })
 })

@@ -335,9 +335,12 @@ function buildAppMenu() {
     {
       label: t('menu.file'),
       submenu: [
+        { label: t('menu.newQuery'), accelerator: 'CmdOrCtrl+N', click: menuAction('new-query') },
         { label: t('menu.newWindow'), accelerator: 'Shift+CmdOrCtrl+N', click: () => createWindow() },
         { type: 'separator' },
-        { label: t('menu.newQuery'), accelerator: 'CmdOrCtrl+N', click: menuAction('new-query') },
+        { label: t('menu.openWorkspace'), accelerator: 'CmdOrCtrl+O', click: menuAction('open-workspace') },
+        { label: isMac ? t('action.revealInFinder') : t('action.revealInExplorer'), click: menuAction('reveal-workspace') },
+        { label: t('menu.closeWorkspace'), click: menuAction('close-workspace') },
         { type: 'separator' },
         { label: t('menu.save'), accelerator: 'CmdOrCtrl+S', click: menuAction('save') },
         { label: t('menu.saveAs'), accelerator: 'Shift+CmdOrCtrl+S', click: menuAction('save-as') },

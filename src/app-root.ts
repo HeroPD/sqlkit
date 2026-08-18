@@ -56,6 +56,7 @@ export class AppRoot extends LitElement {
   }
 
   private _onMenuAction(action: MenuAction) {
+    if (action === 'open-workspace') void this._onOpenFolder()
     if (action.startsWith('theme:')) this._applyTheme(action.slice('theme:'.length) as ThemeId)
   }
 

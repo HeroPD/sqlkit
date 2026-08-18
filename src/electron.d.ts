@@ -571,6 +571,9 @@ export type SqlkitApi = {
 
 /** Action ids the app menu sends over `app:menu`. */
 export type MenuAction =
+  | 'open-workspace'
+  | 'reveal-workspace'
+  | 'close-workspace'
   | 'new-query'
   | 'save'
   | 'save-as'

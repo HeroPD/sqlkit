@@ -600,6 +600,21 @@ describe('WorkbenchScreen child alignment', () => {
 })
 
 describe('WorkbenchScreen staged result changes', () => {
+  it('routes app-menu Close Workspace through the staged-change guard', () => {
+    const screen = new WorkbenchScreen()
+    screen.workspace = { name: 'Workspace', path: '/workspace' }
+    const closeWorkspace = vi.fn()
+    const workbench = screen as never as {
+      _onCloseWorkspace: ReturnType<typeof vi.fn>
+      _onMenuAction(action: 'close-workspace'): void
+    }
+    workbench._onCloseWorkspace = closeWorkspace
+
+    workbench._onMenuAction('close-workspace')
+
+    expect(closeWorkspace).toHaveBeenCalledOnce()
+  })
+
   it('routes app-menu Save to staged result changes before file save', () => {
     const screen = new WorkbenchScreen()
     screen.workspace = { name: 'Workspace', path: '/workspace' }
