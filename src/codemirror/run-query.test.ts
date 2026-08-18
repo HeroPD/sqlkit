@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { EditorState } from '@codemirror/state'
 import { MSSQL, MySQL, PostgreSQL, SQLite, sql, type SQLDialect } from '@codemirror/lang-sql'
-import { queryToRun } from './run-query'
+import { CONTINUATIONS, OPENER, queryToRun } from './run-query'
 import { SQL_DIALECTS, type SqlDialectName } from './dialects'
 
 // The app's postgres dialect: dollar-quoted bodies parse as plain SQL, so the
@@ -381,6 +381,28 @@ describe('queryToRun', () => {
     })
   })
 
+  // The scratch buffer as reported, formatter output and all: keywords flush
+  // left, no semicolons until the last line, four statements running together.
+  it('segments the reported scratch buffer the same way from every line', () => {
+    const statements = [
+      'BEGIN',
+      'SELECT\n  *\nFROM\n  "public"."pos_transactions"\nLIMIT\n  200',
+      'SELECT\n  *\nFROM\n  pos_transactions pt\n  JOIN customers cu ON cu.id = pt.customer_id\nWHERE\n  pt.id = 1\nORDER BY\n  test\nLIMIT\n  1',
+      'DROP INDEX IF EXISTS products_merchant_barcode_idx;',
+    ]
+    const doc = statements.join('\n')
+    const pg = SQL_DIALECTS.postgres.dialect
+
+    let offset = 0
+    for (const statement of statements) {
+      for (const line of statement.split('\n')) {
+        const caret = offset + Math.min(1, line.length)
+        expect(queryToRun(stateAt(doc, caret, { dialect: pg }), 'postgres')?.sql).toBe(statement)
+        offset += line.length + 1
+      }
+    }
+  })
+
   describe('openers judged against the statement above', () => {
     const pg = SQL_DIALECTS.postgres.dialect
 
@@ -493,16 +515,47 @@ describe('queryToRun', () => {
       ['mssql', "BACKUP DATABASE d TO DISK = 'x';"],
       ['mssql', "WAITFOR DELAY '00:01';"],
       ['mssql', 'TRUNCATE TABLE t;'],
+      ['mssql', 'DENY SELECT ON t TO r;'],
+      ['mssql', "RESTORE DATABASE d FROM DISK = 'x';"],
+      ['mssql', 'OPEN cur;'],
+      ['mssql', 'CLOSE cur;'],
+      ['mysql', 'DESCRIBE t;'],
+      ['postgres', 'START TRANSACTION;'],
+      ['postgres', 'DO $$ BEGIN END $$;'],
+      ['mssql', 'WHILE @x < 2 SELECT 1;'],
       ['sqlite', 'PRAGMA table_info(t);'],
       ['sqlite', "ATTACH DATABASE 'f' AS d;"],
       ['sqlite', 'DETACH d;'],
       ['sqlite', 'VACUUM;'],
     ]
 
+    /**
+     * Words OPENER claims that no case above can cover, with the reason. The
+     * parser has to agree the word is a keyword — that requirement is what
+     * keeps a column named `comment` or `open` from reading as a statement —
+     * so a word missing from a dialect's keyword table is beyond reach here.
+     */
+    const unreachable: Record<string, string> = {
+      throw: 'lang-sql omits THROW from its T-SQL keyword table, so it parses as an identifier',
+    }
+
+    // The vocabulary and its tests grow together: a word added to OPENER
+    // without a case here fails this, rather than going quietly untested.
+    it('covers every word the opener list claims', () => {
+      const words = /\(\?:([^)]*)\)/.exec(OPENER.source)![1]!.split('|')
+      const covered = new Set(followers.map(([, statement]) => statement.trim().split(/[\s(;]/)[0]!.toLowerCase()))
+      expect(words.filter((word) => !covered.has(word) && !(word in unreachable))).toEqual([])
+      // and nothing lingers in the exemption list once it becomes reachable
+      expect(Object.keys(unreachable).filter((word) => covered.has(word))).toEqual([])
+    })
+
     it.each(followers)('%s runs the query above %s alone', (name, follower) => {
-      const doc = `${unterminated}\n${follower}`
-      expect(queryAtCaret(doc.replace('FROM t', 'FROM |t'), DIALECTS[name], name)).toBe(unterminated)
-      expect(queryAtCaret(doc.replace(follower, `${follower.slice(0, 2)}|${follower.slice(2)}`), DIALECTS[name], name)).toBe(follower)
+      // Built by concatenation, not String.replace: a `$$` body in the
+      // replacement would be read as an escape and come back as a single `$`.
+      const above = `${unterminated.replace('FROM t', 'FROM |t')}\n${follower}`
+      const below = `${unterminated}\n${follower.slice(0, 2)}|${follower.slice(2)}`
+      expect(queryAtCaret(above, DIALECTS[name], name)).toBe(unterminated)
+      expect(queryAtCaret(below, DIALECTS[name], name)).toBe(follower)
     })
 
     // THROW is absent on purpose: @codemirror/lang-sql does not carry it in the
@@ -557,11 +610,50 @@ describe('queryToRun', () => {
       ['postgres', 'SELECT a\nFROM t\nORDER BY a\nDESC'],
       ['postgres', 'SELECT a\nFROM t\nOFFSET 10 ROWS\nFETCH NEXT 5 ROWS ONLY'],
       ['postgres', 'MERGE INTO t USING s ON s.id = t.id\nWHEN MATCHED THEN\nUPDATE SET x = 1\nWHEN NOT MATCHED THEN\nINSERT VALUES (1);'],
+      ['postgres', 'ALTER TABLE t\nVALIDATE CONSTRAINT c;'],
+      ['postgres', 'ALTER TABLE t\nDISABLE TRIGGER g;'],
+      ['postgres', 'ALTER TABLE t\nCLUSTER ON i;'],
+      ['postgres', 'ALTER TABLE t\nINHERIT p;'],
+      ['postgres', 'ALTER TABLE t\nNO INHERIT p;'],
+      ['postgres', 'ALTER TABLE t\nDETACH PARTITION p;'],
+      ['postgres', 'ALTER TABLE t\nRESET (fillfactor);'],
+      ['postgres', 'ALTER TABLE t\nREPLICA IDENTITY FULL;'],
+      ['postgres', 'ALTER TABLE t\nOF shape;'],
+      ['postgres', 'DROP TABLE t\nCASCADE;'],
+      ['postgres', 'DROP INDEX\nCONCURRENTLY i;'],
+      ['postgres', 'TRUNCATE t\nRESTART IDENTITY\nCASCADE;'],
+      ['postgres', 'CREATE MATERIALIZED VIEW v AS\nSELECT 1;'],
+      ['postgres', 'CREATE VIEW v\nAS\nSELECT 1;'],
+      ['postgres', 'CREATE TABLE t\nAS\nSELECT 1;'],
+      ['postgres', 'INSERT INTO t\nOVERRIDING SYSTEM VALUE\nVALUES (1);'],
+      ['postgres', 'WITH a AS (SELECT 1)\nUPDATE t SET x = 1;'],
+      ['postgres', 'WITH a AS (SELECT 1)\nINSERT INTO t SELECT * FROM a;'],
+      ['postgres', 'WITH a AS (SELECT 1)\nMERGE INTO t USING a ON a.id = t.id WHEN MATCHED THEN DELETE;'],
+      ['postgres', 'EXPLAIN\nUPDATE t SET x = 1;'],
+      ['postgres', 'EXPLAIN\nDELETE FROM t;'],
+      ['postgres', 'EXPLAIN\nCREATE TABLE t AS SELECT 1;'],
+      ['postgres', 'DECLARE c CURSOR FOR\nSELECT 1;'],
+      ['postgres', 'SELECT 1\nUNION\nSELECT 2'],
+      ['postgres', 'UPDATE t\nSET x = 1\nFROM u\nWHERE u.id = t.id;'],
+      ['postgres', 'REVOKE SELECT\nON t\nFROM r;'],
+      ['postgres', 'MERGE INTO t USING s ON s.id = t.id\nWHEN NOT MATCHED THEN\nINSERT VALUES (1);'],
       ['mssql', "IF @x = 1\nPRINT 'a';"],
       ['mssql', 'BEGIN\nSELECT 1\nEND'],
       ['mssql', 'IF @x = 1\nBEGIN\nUPDATE t SET y = 2\nEND'],
       ['mssql', 'WHILE @x < 2\nBEGIN\nSET @x = @x + 1\nEND'],
     ]
+
+    // Rules and their tests grow together, the same way the opener list does.
+    it('exercises every continuation rule', () => {
+      const unexercised = CONTINUATIONS.filter(
+        (rule) =>
+          !whole.some(([, doc]) => {
+            const [head, ...rest] = doc.split('\n')
+            return rule.head.test(head!) && rest.some((line) => rule.clause.test(line))
+          }),
+      )
+      expect(unexercised.map((rule) => rule.head.source)).toEqual([])
+    })
 
     it.each(whole)('%s keeps %j whole from every line in it', (name, doc) => {
       const dialect = name === 'mssql' ? MSSQL : name === 'mysql' ? MySQL : name === 'sqlite' ? SQLite : SQL_DIALECTS.postgres.dialect

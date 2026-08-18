@@ -111,7 +111,7 @@ const isSeparatorLine = (tree: Tree, spans: SqlSpan[], line: Line) => {
  * BY a DESC` — DESCRIBE is here for the spelling that is always a statement),
  * and GO, which is a batch separator the executor strips rather than runs.
  */
-const OPENER =
+export const OPENER =
   /^(?:select|with|insert|replace|update|delete|merge|drop|create|alter|truncate|comment|copy|grant|revoke|deny|vacuum|reindex|refresh|cluster|analyze|optimize|repair|flush|explain|prepare|deallocate|declare|open|close|call|do|set|values|table|show|use|describe|pragma|attach|detach|begin|start|commit|rollback|savepoint|release|listen|notify|lock|reset|discard|checkpoint|load|execute|exec|rename|kill|handler|print|raiserror|throw|backup|restore|waitfor|if|while)\b/i
 
 /**
@@ -128,7 +128,7 @@ const OPENER =
  * a statement. That is the safe default — a query that swallows the next one
  * is the failure this layer exists to prevent.
  */
-const CONTINUATIONS: Array<{ head: RegExp; clause: RegExp; restarts?: true }> = [
+export const CONTINUATIONS: Array<{ head: RegExp; clause: RegExp; restarts?: true }> = [
   { head: /^alter\b/i, clause: /^(?:drop|add|alter|set|reset|rename|owner|validate|enable|disable|cluster|inherit|attach|detach|replica|no|not|of|options|if|table)\b/i },
   // The object a DDL verb names, and the guard in front of it, can each be
   // parked on their own line: `DROP INDEX` / `IF EXISTS i`.
