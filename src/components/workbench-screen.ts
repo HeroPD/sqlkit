@@ -15,8 +15,9 @@ import { ResultEditingController } from '../controllers/result-editing'
 import { SchemaOpsController } from '../controllers/schema-ops'
 import { ConfigController } from '../controllers/config'
 import { FileOpsController } from '../controllers/file-ops'
-import { ContextsController, type EditorTabState } from '../controllers/contexts'
-import type { ConnectionPhase, ConnectionProfile, Engine, FileInfo, MenuAction, QueryResponse, SessionEndMode, TableRef } from '../electron'
+import { ContextsController, needsSessionBackup, type EditorTabState, type RestoredContext } from '../controllers/contexts'
+import { SessionController, type RestoredBuffer } from '../controllers/session'
+import type { ConnectionPhase, ConnectionProfile, Engine, FileInfo, MenuAction, QueryResponse, SessionContext, SessionEndMode, SessionTab, TableRef } from '../electron'
 import { buildInsertBatches, type CellInput } from '../sql-write'
 import './activity-button'
 import './command-palette'
@@ -42,7 +43,7 @@ import './status-bar'
 import type { StatusConnection } from './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
-import { clearInspectDraftCache, dropInspectDraft, sweepInspectDrafts, type ColumnAlterEventDetail } from './table-inspect'
+import { clearInspectDraftCache, dropInspectDraft, exportInspectDraft, importInspectDraft, sweepInspectDrafts, type ColumnAlterEventDetail } from './table-inspect'
 import { connectionLabelColorValue } from '../connection-label-colors'
 import { clearEditorStateCache, type EditorCommandDetail, type RunQueryDetail } from './sql-editor'
 import type { SelectionCommandId } from '../codemirror/selection-commands'
@@ -102,6 +103,26 @@ const NO_CONTEXT = '__none__'
 
 const contextKey = (profileId: string | null, childDb: string | null) =>
   profileId === null ? NO_CONTEXT : `${profileId}:${childDb ?? ''}`
+
+// A config tab restores from the saved profile with its unsaved edits laid over
+// it. Secrets never reach the session file, so the saved values — already
+// redacted to their "a password exists" markers — stay the truth about
+// credentials. A draft with no profile behind it is a connection that was never
+// saved; the draft is all there is, and all that is needed.
+const restoreConfigDraft = (saved: ConnectionProfile | null, draft?: ConnectionProfile): ConnectionProfile | null => {
+  if (!saved) return draft ?? null
+  const merged: ConnectionProfile = { ...saved, ...(draft ?? {}), password: saved.password, passwordSaved: saved.passwordSaved }
+  if (saved.ssh) {
+    merged.ssh = {
+      ...(draft?.ssh ?? saved.ssh),
+      password: saved.ssh.password,
+      passphrase: saved.ssh.passphrase,
+      passwordSaved: saved.ssh.passwordSaved,
+      passphraseSaved: saved.ssh.passphraseSaved,
+    }
+  }
+  return merged
+}
 
 const tableContextKey = (profileId: string, childDb: string | null, table: TableRef) =>
   `${profileId}:${childDb ?? ''}:${table.schema ?? ''}:${table.name}`
@@ -434,8 +455,21 @@ export class WorkbenchScreen extends LitElement {
       this._tabScroll.delete(tabId)
       dropInspectDraft(tabId)
       this._forgetInspectDirty(tabId)
+      this._session.dropBuffer(tabId)
     },
   })
+
+  // Hot exit: mirrors the open tabs and their unsaved buffers into the workspace
+  // so neither a quit nor a crash costs work in progress.
+  private _session = new SessionController(this, {
+    snapshot: () => this._sessionSnapshot(),
+    buffers: () => this._ctx.sessionBuffers(),
+    enabled: () => !!this.workspace,
+    onBackupFailed: (tabId) => this._warnBackupFailed(tabId),
+  })
+
+  /** Warn about lost crash protection at most once per workspace open. */
+  private _warnedBackupFailed = false
 
   // Saved connection profiles and the workspace config file (.sqlkit/config.json).
   private _config = new ConfigController(this, {
@@ -452,6 +486,7 @@ export class WorkbenchScreen extends LitElement {
     dialogs: this._dialogs,
     sweepOrphanTabState: () => this._sweepOrphanTabState(),
     contextFolder: () => this._contextFolder(),
+    onTabSaved: (tabId) => this._session.dropBuffer(tabId),
   })
 
   private _resultEditing = new ResultEditingController({
@@ -602,6 +637,12 @@ export class WorkbenchScreen extends LitElement {
 
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('workspace')) {
+      // Closing writes the tabs out from here: app-root drops the workspace
+      // without waiting on the IPC, so main's own flush would arrive after this
+      // state is gone. A switch is the other way round — main flushes before it
+      // repoints the window, and writing here would land in the new workspace.
+      if (!this.workspace) this._session.flushOutgoing()
+      this._session.reset()
       this._tabScroll.clear()
       this._ctx.reset()
       this._config.reset()
@@ -616,6 +657,7 @@ export class WorkbenchScreen extends LitElement {
       this._inspectDirtyTabIds = new Set()
       this._activeActionSurface = null
       this._resultHasUnstagedJson = false
+      this._warnedBackupFailed = false
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
       void this._live.disconnectAll()
@@ -632,6 +674,10 @@ export class WorkbenchScreen extends LitElement {
   }
 
   protected updated() {
+    // Every tab mutation ends in a re-render, so this is the one hook that can't
+    // be missed. The write itself is debounced and skipped when the snapshot is
+    // unchanged, which is what makes over-calling it cheap.
+    this._session.scheduleLayoutWrite()
     const tabId = this._restoreScrollTabId
     this._restoreScrollTabId = null
     if (tabId) void this._restoreTabScroll(tabId)
@@ -654,9 +700,109 @@ export class WorkbenchScreen extends LitElement {
     // Restore the in-use context; the config controller defaults to the first
     // profile so the Explorer has a files folder to show right away.
     const { profileId, child } = await this._config.load()
+    // Tabs come back before the context switch: switchInstance restores the
+    // instance for the context it lands on, which has to be there already.
+    await this._restoreSession()
     this._ctx.switchInstance(profileId, child)
     this._workspaceFiles.setFolder(this._contextFolder())
     void this._queries.loadHistory()
+  }
+
+  // The session as it stands: tab identity from the contexts controller, plus
+  // the staged schema edits, which live in the inspect component's own cache.
+  private _sessionSnapshot(): SessionContext[] {
+    return this._ctx.toSession().map((context) => ({
+      ...context,
+      tabs: context.tabs.map((tab) => {
+        if (tab.kind !== 'inspect' && tab.kind !== 'inspect-object') return tab
+        const draft = exportInspectDraft(tab.id)
+        return draft ? { ...tab, draft } : tab
+      }),
+    }))
+  }
+
+  // Brings back the tabs the last session left open, silently and without
+  // comment — a restore the user has to acknowledge is a restore that interrupts
+  // them. Results, staged row edits and live connections are not restored: they
+  // belong to a session that no longer exists.
+  private async _restoreSession() {
+    const restored = await this._session.hydrate()
+    if (!restored) return
+    const inspectDirty = new Set<string>()
+    const contexts: RestoredContext[] = []
+    for (const context of restored.contexts) {
+      const tabs = context.tabs
+        .map((tab) => this._restoreTab(tab, restored.buffers, inspectDirty))
+        .filter((tab): tab is EditorTabState => tab !== null)
+      if (!tabs.length) continue
+      contexts.push({
+        profileId: context.profileId,
+        childDb: context.childDb,
+        // A tab that couldn't be restored must not leave the context pointing
+        // at it; the last remaining tab takes over.
+        activeTabId: tabs.some((tab) => tab.id === context.activeTabId) ? context.activeTabId : (tabs.at(-1)?.id ?? null),
+        selectedTable: context.selectedTable,
+        tabs,
+      })
+    }
+    if (!contexts.length) return
+    this._ctx.hydrate(contexts)
+    if (inspectDirty.size) this._inspectDirtyTabIds = inspectDirty
+  }
+
+  // Crash protection silently stopping for a tab is the one session failure the
+  // user can act on — saving the file keeps the work either way. Said once per
+  // workspace, like the unencrypted-secrets warning.
+  private _warnBackupFailed(tabId: string) {
+    if (this._warnedBackupFailed) return
+    const name = this._ctx.tabName(tabId)
+    if (!name) return
+    this._warnedBackupFailed = true
+    this._dialogs.notice(t('session.backupFailedTitle'), t('session.backupFailedDetail', { name }))
+  }
+
+  private _restoreTab(tab: SessionTab, buffers: Map<string, RestoredBuffer>, inspectDirty: Set<string>): EditorTabState | null {
+    if (tab.kind === 'sql') {
+      // No buffer means the file this tab pointed at is gone and nothing was
+      // left unsaved in it — there is nothing to reopen.
+      const buffer = buffers.get(tab.id)
+      if (!buffer) return null
+      return {
+        // The id survives even when the file behind it did not, though it still
+        // reads `file:<path>`: the backup holding this text is keyed by it, and
+        // a tab that changes id loses its claim on that file — the next session
+        // write would prune the only copy of the work just recovered. Should the
+        // file come back, FileOpsController matches on the path, so this tab
+        // cannot stand in for it.
+        id: tab.id,
+        kind: 'sql',
+        name: tab.name,
+        path: buffer.path,
+        content: buffer.content,
+        savedContent: buffer.savedContent,
+        ...(tab.preview ? { preview: true } : {}),
+        ...(tab.history ? { history: true } : {}),
+        ...(tab.table ? { table: tab.table } : {}),
+      }
+    }
+    if (tab.kind === 'config') {
+      const profile = restoreConfigDraft(this._config.byId(tab.profileId), tab.draft)
+      return profile ? { id: tab.id, kind: 'config', profile } : null
+    }
+    // Inspect tabs re-fetch their structure when opened, so only the staged
+    // edits need carrying — and only while their connection still exists.
+    if (!this._config.byId(tab.profileId)) return null
+    if (tab.draft && importInspectDraft(tab.id, tab.draft)) inspectDirty.add(tab.id)
+    if (tab.kind === 'inspect') {
+      return {
+        id: tab.id,
+        kind: 'inspect',
+        profileId: tab.profileId,
+        table: tab.table,
+        ...(tab.createTable ? { createTable: true } : {}),
+      }
+    }
+    return { id: tab.id, kind: 'inspect-object', profileId: tab.profileId, object: tab.object, objectKind: tab.objectKind }
   }
 
   // Files nest per context: connection-folder/child-folder for all-databases
@@ -2520,6 +2666,8 @@ export class WorkbenchScreen extends LitElement {
   private _onEditorChange(event: Event) {
     const { value } = (event as CustomEvent<{ value: string }>).detail
     this._ctx.setActiveContent(value)
+    const tab = this._ctx.activeSqlTab()
+    if (tab) this._session.noteBufferChange(tab.id, value, needsSessionBackup(tab))
   }
 
   private _onRunQuery(event: Event) {

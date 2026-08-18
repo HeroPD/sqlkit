@@ -25,6 +25,12 @@ describe('IPC contract: main ⇄ preload', () => {
     expect(invoked).toEqual(handled)
   })
 
+  it('matches every preload sendSync channel to a main listener', () => {
+    const listened = channels(main, /ipcMain\.on\(\s*'([^']+)'/g)
+    const sent = channels(preload, /ipcRenderer\.sendSync\(\s*'([^']+)'/g)
+    expect(sent).toEqual(listened)
+  })
+
   it('matches every main broadcast channel to a preload listener', () => {
     const sent = channels(main, /\.send\(\s*'([^']+)'/g)
     const listened = channels(preload, /ipcRenderer\.on\(\s*'([^']+)'/g)

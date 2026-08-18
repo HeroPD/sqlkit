@@ -13,10 +13,17 @@ type Deps = {
   contextFolder: () => string | null
   // Deleting a file closes its tabs in bulk, which skips the per-tab close path.
   sweepOrphanTabState: () => void
+  // A tab whose work is now on disk no longer needs its session backup, and any
+  // write still queued for it has to be cancelled before it recreates one.
+  onTabSaved?: (tabId: string) => void
 }
 
-// Tabs for workspace files are keyed by absolute path, so same-named files in
-// different database folders stay distinct.
+// Tabs for workspace files take an id derived from the absolute path, so
+// same-named files in different database folders stay distinct — and so a tab
+// keeps the same session backup across a reload. It is a starting point, not an
+// index: whether a file is already open is answered by the tabs' paths, since a
+// tab can outlive the path its id spells (Save As, or a restore after the file
+// went missing).
 const fileTabId = (path: string) => `file:${path}`
 
 // Browse/history tab names already end in .sql; don't double it.
@@ -38,10 +45,20 @@ export class FileOpsController {
     return { profileId: this.deps.ctx.activeDbId, childDb: this.deps.ctx.activeChildDb }
   }
 
+  // A path-derived id that nothing else holds. The id normally reads
+  // `file:<path>`, but a tab restored after its file went missing keeps that id
+  // while showing unsaved work of its own — so a tab for the file that came back
+  // takes a fresh id instead of merging into it, and the two keep their own
+  // session backups.
+  private freeTabId(path: string) {
+    const id = fileTabId(path)
+    return this.deps.ctx.tabExists(id) ? crypto.randomUUID() : id
+  }
+
   async openFile(file: FileInfo, context = this.currentContext()) {
-    const id = fileTabId(file.path)
-    if (this.deps.ctx.tabExistsInContext(context.profileId, context.childDb, id)) {
-      this.deps.ctx.activateTabInContext(context.profileId, context.childDb, id)
+    const open = this.deps.ctx.fileTabInContext(context.profileId, context.childDb, file.path)
+    if (open) {
+      this.deps.ctx.activateTabInContext(context.profileId, context.childDb, open)
       return
     }
     const result = await window.sqlkit.readFile(file.path)
@@ -50,7 +67,7 @@ export class FileOpsController {
       return
     }
     this.deps.ctx.addTabToContext(context.profileId, context.childDb, {
-      id,
+      id: this.freeTabId(file.path),
       kind: 'sql',
       name: file.name,
       path: file.path,
@@ -88,6 +105,7 @@ export class FileOpsController {
       : await window.sqlkit.saveFileAs(this.deps.contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
     if (!this.reportSaveError(result)) return
     this.deps.ctx.applySaveResult(tab, result)
+    this.deps.onTabSaved?.(tab.id)
   }
 
   // File > Save As…: always the dialog, even for files that have a path.
@@ -97,6 +115,7 @@ export class FileOpsController {
     const result = await window.sqlkit.saveFileAs(this.deps.contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
     if (!this.reportSaveError(result)) return
     this.deps.ctx.applySaveResult(tab, result)
+    this.deps.onTabSaved?.(tab.id)
   }
 
   // A failed save must never look like it succeeded — the tab keeps its dirty
@@ -133,10 +152,16 @@ export class FileOpsController {
       this.deps.dialogs.notice(t('file.renameFailed'), result.error ?? t('common.unknownError'))
       return
     }
-    const oldId = fileTabId(file.path)
-    const newId = fileTabId(result.path)
-    this.deps.ctx.retargetFileTab(oldId, newId, result.name, result.path)
-    this.deps.queries.renameTab(oldId, newId)
+    // Retarget whatever is actually showing this file. An id spelled from the old
+    // path may belong to no tab (one opened alongside a detached tab, or saved
+    // through Save As), or worse to a detached tab that only looks like it —
+    // pointing that one at the renamed file would let a later save overwrite it
+    // with recovered text.
+    for (const oldId of this.deps.ctx.fileTabIds(file.path)) {
+      const newId = this.freeTabId(result.path)
+      this.deps.ctx.retargetFileTab(oldId, newId, result.name, result.path)
+      this.deps.queries.renameTab(oldId, newId)
+    }
     void this.deps.files.reload()
   }
 

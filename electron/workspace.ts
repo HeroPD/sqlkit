@@ -15,8 +15,11 @@ import { workspaceConfig as validateWorkspaceConfig } from './ipc-validation'
 import { t } from '../src/i18n'
 
 // temp+rename so a crash mid-write can't leave a half-written (and for the
-// workspace config, connection-wiping) file behind.
-const writeFileAtomic = (file: string, data: string) => {
+// workspace config, connection-wiping) file behind. One fixed temp name is safe
+// here only because both calls are synchronous: nothing can interleave between
+// the write and the rename. Anything async needs a unique name per write, as the
+// .sql saves in files.ts do.
+export const writeFileAtomic = (file: string, data: string) => {
   const tmp = `${file}.tmp`
   fs.writeFileSync(tmp, data, { mode: 0o600 })
   fs.renameSync(tmp, file)
@@ -124,11 +127,20 @@ const hasWeaklyProtectedSecrets = (connections: ConnectionProfile[]) => {
 
 // Keeps config.json — and the temp file the atomic write leaves on a crash —
 // out of version control; both hold credentials, plaintext on a keyless system.
-// History holds query text, which can embed secrets, so it stays out too.
+// History and the session's unsaved buffers hold query text, which can embed
+// secrets, so they stay out too.
 // Appends any missing rule to a hand-edited .gitignore rather than skipping, so
 // a pre-existing file can't defeat the guard. Best-effort and idempotent.
-const GITIGNORE_RULES = ['config.json', 'config.json.tmp', 'history.json', 'history.json.tmp']
-const ensureInternalGitignore = (workspacePath: string) => {
+const GITIGNORE_RULES = [
+  'config.json',
+  'config.json.tmp',
+  'history.json',
+  'history.json.tmp',
+  'session.json',
+  'session.json.tmp',
+  'backups/',
+]
+export const ensureInternalGitignore = (workspacePath: string) => {
   try {
     const dir = path.join(workspacePath, '.sqlkit')
     fs.mkdirSync(dir, { recursive: true })

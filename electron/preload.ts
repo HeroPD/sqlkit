@@ -17,6 +17,21 @@ const api: SqlkitApi = {
   saveWorkspaceConfig: (config) => ipcRenderer.invoke('workspace:save-config', config),
   readHistory: () => ipcRenderer.invoke('workspace:history-read'),
   writeHistory: (items) => ipcRenderer.invoke('workspace:history-write', items),
+  readSession: () => ipcRenderer.invoke('session:read'),
+  writeSession: (session) => ipcRenderer.invoke('session:write', session),
+  readSessionBackup: (tabId) => ipcRenderer.invoke('session:read-backup', tabId),
+  writeSessionBackup: (tabId, content) => ipcRenderer.invoke('session:write-backup', tabId, content),
+  dropSessionBackup: (tabId) => ipcRenderer.invoke('session:drop-backup', tabId),
+  // Blocking on purpose: the caller is a `pagehide` handler, and an async write
+  // started there never lands.
+  flushSession: (payload) => {
+    ipcRenderer.sendSync('session:flush', payload)
+  },
+  onFlushSession: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on('app:flush-session', handler)
+    return () => ipcRenderer.off('app:flush-session', handler)
+  },
   testConnection: (profile) => ipcRenderer.invoke('db:test', profile),
   testSshTunnel: (profile) => ipcRenderer.invoke('db:test-ssh', profile),
   connectDatabase: (profile) => ipcRenderer.invoke('db:connect', profile),

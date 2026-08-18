@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import type { InspectColumn, InspectResult, TableInspection, TableRef } from '../electron'
-import { clearInspectDraftCache, dropInspectDraft, sweepInspectDrafts, TableInspect, type ColumnAlterEventDetail } from './table-inspect'
+import { clearInspectDraftCache, dropInspectDraft, exportInspectDraft, importInspectDraft, sweepInspectDrafts, TableInspect, type ColumnAlterEventDetail } from './table-inspect'
 import type { AddObjectDetail } from './inspect-add-dialog'
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
@@ -21,6 +21,7 @@ const internals = (view: TableInspect) =>
     _setNullable(col: InspectColumn, value: boolean): void
     _fieldNullable(col: InspectColumn): boolean
     _edits: Map<string, Record<string, unknown>>
+    _operations: Record<string, unknown>[]
     _editing: { col: string; field: string } | null
     _typeItems(col: InspectColumn, filter?: string): Array<{ id: string; label: string; checked?: boolean }>
     _defaultItems(col: InspectColumn, filter?: string): Array<{ id: string; label: string; checked?: boolean }>
@@ -1856,5 +1857,93 @@ describe('TableInspect create-table mode', () => {
       { kind: 'constraint', spec: { name: 'pk_projects', type: 'PRIMARY KEY', columns: ['id'] } },
     ])
     view.remove()
+  })
+})
+
+// Hot exit carries staged schema edits across a restart, so they have to
+// survive the round trip through the session file.
+describe('TableInspect session drafts', () => {
+  const stageDraft = async (tabId: string) => {
+    const column = inspectCol({ name: 'age' })
+    const inspectTable = vi.fn(() => Promise.resolve<InspectResult>({
+      success: true,
+      inspection: { columns: [column], sections: [] },
+    }))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+
+    const view = new TableInspect()
+    view.tabId = tabId
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    internals(view)._commitText(column, 'name', 'age_years')
+    view.remove()
+    return { column, inspectTable }
+  }
+
+  const mount = async (tabId: string, inspectTable: unknown) => {
+    ;(window as never as { sqlkit: unknown }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.tabId = tabId
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    document.body.append(view)
+    await internals(view)._load()
+    return view
+  }
+
+  it('exports a staged edit as plain data and brings it back', async () => {
+    clearInspectDraftCache()
+    const { inspectTable } = await stageDraft('inspect:users')
+
+    const exported = exportInspectDraft('inspect:users')
+    expect(exported?.edits).toEqual([['age', { name: 'age_years' }]])
+    // Plain JSON, or it would never survive the trip through the session file.
+    expect(JSON.parse(JSON.stringify(exported))).toEqual(exported)
+
+    clearInspectDraftCache()
+    expect(importInspectDraft('inspect:users', exported!)).toBe(true)
+
+    const restored = await mount('inspect:users', inspectTable)
+    expect(internals(restored)._edits.get('age')).toEqual({ name: 'age_years' })
+    restored.remove()
+    clearInspectDraftCache()
+  })
+
+  it('has nothing to export for a tab with no staged edits', () => {
+    clearInspectDraftCache()
+    expect(exportInspectDraft('inspect:untouched')).toBeUndefined()
+  })
+
+  it('refuses an empty draft rather than marking the tab dirty for nothing', () => {
+    clearInspectDraftCache()
+    expect(importInspectDraft('inspect:users', { edits: [], operations: [], tableName: null, addSeq: 0 })).toBe(false)
+  })
+
+  it('drops operations a hand-edited session file mangled', async () => {
+    clearInspectDraftCache()
+    const { inspectTable } = await stageDraft('inspect:users')
+    const exported = exportInspectDraft('inspect:users')!
+    clearInspectDraftCache()
+
+    importInspectDraft('inspect:users', {
+      ...exported,
+      operations: [
+        { kind: 'nonsense' },
+        // A real kind, but missing the columns the section renderer reads.
+        { kind: 'index', spec: { name: 'users_half_idx' } },
+        { kind: 'index', spec: { name: 'users_email_idx', columns: ['email'], unique: true } },
+      ],
+    })
+
+    const restored = await mount('inspect:users', inspectTable)
+    expect(internals(restored)._operations).toEqual([
+      { kind: 'index', spec: { name: 'users_email_idx', columns: ['email'], unique: true } },
+    ])
+    restored.remove()
+    clearInspectDraftCache()
   })
 })

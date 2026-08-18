@@ -29,6 +29,37 @@ export type InspectOperation =
   | { kind: 'drop'; target: InspectDropTarget; name: string }
   | { kind: 'rename'; target: InspectDropTarget; from: string; to: string }
 
+const DROP_TARGETS = new Set(['index', 'trigger', 'foreignKey', 'constraint'])
+const isStringList = (value: unknown) => Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+
+// Restored session drafts come off disk, where a hand edit or an older version
+// could have left anything. Every field the inspect view renders is checked
+// here — a spec missing its columns list reaches the render as a crash, not as
+// a validation error, so a name alone is not enough to let one through.
+export const isInspectOperation = (value: unknown): value is InspectOperation => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const operation = value as Record<string, unknown>
+  if (operation.kind === 'drop') return typeof operation.name === 'string' && DROP_TARGETS.has(operation.target as string)
+  if (operation.kind === 'rename') {
+    return typeof operation.from === 'string' && typeof operation.to === 'string' && DROP_TARGETS.has(operation.target as string)
+  }
+  const spec = operation.spec as Record<string, unknown> | undefined
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec) || typeof spec.name !== 'string') return false
+  if (operation.kind === 'index') return isStringList(spec.columns) && typeof spec.unique === 'boolean'
+  if (operation.kind === 'trigger') {
+    return typeof spec.timing === 'string' && isStringList(spec.events) && (spec.level === 'ROW' || spec.level === 'STATEMENT')
+  }
+  if (operation.kind === 'partition') return typeof spec.bounds === 'string'
+  if (operation.kind === 'foreignKey') {
+    return isStringList(spec.columns) && typeof spec.refTable === 'string' && isStringList(spec.refColumns)
+  }
+  if (operation.kind === 'constraint') {
+    if (spec.type !== 'CHECK' && spec.type !== 'UNIQUE' && spec.type !== 'PRIMARY KEY') return false
+    return spec.type === 'CHECK' ? typeof spec.expression === 'string' : isStringList(spec.columns)
+  }
+  return false
+}
+
 const targetSection = (target: InspectDropTarget): string => {
   if (target === 'index') return 'Indexes'
   if (target === 'trigger') return 'Triggers'

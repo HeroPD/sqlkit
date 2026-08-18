@@ -19,6 +19,7 @@ import { stopWorkspaceWatcher } from './files'
 import { registerDbIpc } from './ipc-db'
 import { inspectionSwitch } from './hardening'
 import { registerWorkspaceIpc } from './ipc-workspace'
+import { markSessionClean } from './session'
 import { readGlobalConfig, readTheme, writeTheme } from './workspace'
 import { titleBarOverlay, WINDOW_CHROME } from './window-chrome'
 
@@ -205,6 +206,11 @@ function createWindow() {
   const contentsId = window.webContents.id
   window.on('closed', () => {
     pendingShows.delete(contentsId)
+    notifySessionFlushed(contentsId)
+    // Closing a window is an orderly exit from its workspace, and on macOS the
+    // app outlives it — so the crash marker comes off here, not only at quit.
+    // Before cleanupWindow, which is what forgets the workspace this window had.
+    markSessionClean(workspacePaths.get(contentsId) ?? null)
     cleanupWindow(contentsId)
   })
 
@@ -273,6 +279,8 @@ function registerIpc() {
     focusExistingWorkspace,
     isAuthorizedRecentWorkspace,
     createWindow,
+    notifySessionFlushed,
+    flushSession: flushRendererSession,
   })
   registerDbIpc({
     workspaceFor,
@@ -281,18 +289,65 @@ function registerIpc() {
   })
 }
 
+// How long a renderer gets to write out whatever its debounce still holds. The
+// buffers are already on disk within a second of the last keystroke, so this
+// only catches the tail — a hung renderer must never hold the app open for it.
+const SESSION_FLUSH_MS = 1_000
+
+const pendingSessionFlushes = new Map<number, () => void>()
+// Captured when the quit starts: closing each window clears its entry from
+// workspacePaths, and the crash marker has to be cleared after that.
+let quittingWorkspaces: string[] = []
+
+function notifySessionFlushed(contentsId: number) {
+  const resolve = pendingSessionFlushes.get(contentsId)
+  if (!resolve) return
+  pendingSessionFlushes.delete(contentsId)
+  resolve()
+}
+
+// Asks one renderer to write out whatever its debounce still holds, and waits
+// for the reply. Also used before a workspace switch: the tabs being flushed
+// belong to the workspace that is on its way out, so they have to reach disk
+// before this window's path is repointed at the new one.
+function flushRendererSession(contents: WebContents): Promise<void> {
+  if (contents.isDestroyed() || !workspacePaths.has(contents.id)) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    pendingSessionFlushes.set(contents.id, resolve)
+    contents.send('app:flush-session')
+    setTimeout(() => {
+      pendingSessionFlushes.delete(contents.id)
+      resolve()
+    }, SESSION_FLUSH_MS)
+  })
+}
+
+function flushRendererSessions(): Promise<unknown> {
+  return Promise.all(BrowserWindow.getAllWindows().map((window) => flushRendererSession(window.webContents)))
+}
+
 function installQuitHandler() {
   app.on('before-quit', (event) => {
     if (quitting) return
     quitting = true
     event.preventDefault()
     stopWorkspaceWatcher()
+    quittingWorkspaces = [...new Set(workspacePaths.values())]
     const closed = Promise.all([
+      flushRendererSessions(),
       ...[...dbManagers.values()].map((active) => active.disconnectAll().catch(() => {})),
       ...pendingDisconnects,
     ])
     const deadline = new Promise<void>((resolve) => setTimeout(resolve, 3000))
     void Promise.race([closed, deadline]).finally(() => app.quit())
+  })
+
+  // After every window is gone, so the flush each one fires as it tears down
+  // can't re-mark the session it just cleared. The marker is what tells the
+  // next launch whether this exit was orderly.
+  app.on('will-quit', () => {
+    for (const workspacePath of quittingWorkspaces) markSessionClean(workspacePath)
+    quittingWorkspaces = []
   })
 }
 

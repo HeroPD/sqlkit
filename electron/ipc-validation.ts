@@ -1,4 +1,4 @@
-import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, ObjectDdlRef, QuerySort, TableRef, WorkspaceConfig } from '../src/electron'
+import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, ObjectDdlRef, QuerySort, SessionContext, SessionInspectDraft, SessionTab, TableRef, WorkspaceConfig, WorkspaceSession } from '../src/electron'
 import type { ExportFormat } from '../src/result-export'
 import { isConnectionLabelColor } from '../src/connection-label-colors'
 
@@ -162,6 +162,131 @@ export function workspaceConfig(value: unknown): WorkspaceConfig {
     version,
     connections: config.connections.map(connectionProfile),
     ...(activeDbId === undefined ? {} : { activeDbId }),
+  }
+}
+
+const MAX_SESSION_CONTEXTS = 200
+const MAX_SESSION_TABS = 500
+const MAX_DRAFT_ITEMS = 1_000
+
+// Staged schema edits ride through verbatim: their shape belongs to the inspect
+// component, and re-declaring it here would mean editing two files for every
+// field it grows. Bound the size, confirm it is plain data, leave the meaning
+// to the renderer — which re-checks it anyway, the file being user-editable.
+function sessionInspectDraft(value: unknown): SessionInspectDraft | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Inspect draft is invalid')
+  const draft = value as Record<string, unknown>
+  if (!Array.isArray(draft.edits) || draft.edits.length > MAX_DRAFT_ITEMS) throw new IpcValidationError('Inspect draft edits are invalid')
+  if (!Array.isArray(draft.operations) || draft.operations.length > MAX_DRAFT_ITEMS) {
+    throw new IpcValidationError('Inspect draft operations are invalid')
+  }
+  const edits = draft.edits.map((entry): [string, Record<string, unknown>] => {
+    if (!Array.isArray(entry) || entry.length !== 2) throw new IpcValidationError('Inspect draft edit is invalid')
+    const [key, diff] = entry as [unknown, unknown]
+    if (!diff || typeof diff !== 'object' || Array.isArray(diff)) throw new IpcValidationError('Inspect draft edit is invalid')
+    return [stringValue(key, 'Inspect draft column', MAX_ID), diff as Record<string, unknown>]
+  })
+  const operations = draft.operations.map((entry): Record<string, unknown> => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new IpcValidationError('Inspect draft operation is invalid')
+    return entry as Record<string, unknown>
+  })
+  return {
+    edits,
+    operations,
+    tableName: nullableStringValue(draft.tableName, 'Inspect draft table', 2_000),
+    addSeq: nonNegativeInteger(draft.addSeq, 'Inspect draft counter', 100_000),
+  }
+}
+
+// A config tab's unsaved form edits can hold a password the user just typed and
+// has not saved. Blanking here — on the way to disk *and* on the way back —
+// makes it impossible for any caller to put one in session.json by mistake.
+const withoutSecrets = (profile: ConnectionProfile): ConnectionProfile => ({
+  ...profile,
+  password: '',
+  ...(profile.ssh ? { ssh: { ...profile.ssh, password: '', passphrase: '' } } : {}),
+})
+
+// An unknown tab kind is dropped, not rejected: a session written by a later
+// version must still restore the tabs this one understands.
+function sessionTab(value: unknown): SessionTab | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Session tab is invalid')
+  const tab = value as Record<string, unknown>
+  const id = stringValue(tab.id, 'Session tab id', MAX_ID)
+  if (tab.kind === 'sql') {
+    return {
+      kind: 'sql',
+      id,
+      name: stringValue(tab.name, 'Session tab name', 2_000),
+      path: nullableStringValue(tab.path, 'Session tab path', 20_000),
+      ...(tab.preview === undefined ? {} : { preview: booleanValue(tab.preview, 'Session tab preview') }),
+      ...(tab.history === undefined ? {} : { history: booleanValue(tab.history, 'Session tab history') }),
+      ...(tab.table === undefined ? {} : { table: tableReference(tab.table) }),
+      ...(tab.dirty === undefined ? {} : { dirty: booleanValue(tab.dirty, 'Session tab dirty') }),
+    }
+  }
+  if (tab.kind === 'config') {
+    const draft = tab.draft === undefined ? undefined : withoutSecrets(connectionProfile(tab.draft))
+    return {
+      kind: 'config',
+      id,
+      profileId: stringValue(tab.profileId, 'Session tab profile', MAX_ID),
+      ...(draft === undefined ? {} : { draft }),
+    }
+  }
+  if (tab.kind === 'inspect') {
+    const draft = sessionInspectDraft(tab.draft)
+    return {
+      kind: 'inspect',
+      id,
+      profileId: stringValue(tab.profileId, 'Session tab profile', MAX_ID),
+      table: tableReference(tab.table),
+      ...(tab.createTable === undefined ? {} : { createTable: booleanValue(tab.createTable, 'Session tab createTable') }),
+      ...(draft === undefined ? {} : { draft }),
+    }
+  }
+  if (tab.kind === 'inspect-object') {
+    const draft = sessionInspectDraft(tab.draft)
+    return {
+      kind: 'inspect-object',
+      id,
+      profileId: stringValue(tab.profileId, 'Session tab profile', MAX_ID),
+      object: databaseObject(tab.object),
+      objectKind: databaseObjectKind(tab.objectKind),
+      ...(draft === undefined ? {} : { draft }),
+    }
+  }
+  return null
+}
+
+function sessionContext(value: unknown): SessionContext {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Session context is invalid')
+  const context = value as Record<string, unknown>
+  if (!Array.isArray(context.tabs) || context.tabs.length > MAX_SESSION_TABS) throw new IpcValidationError('Session tabs are invalid')
+  const tabs = context.tabs.map(sessionTab).filter((tab): tab is SessionTab => tab !== null)
+  const activeTabId = nullableStringValue(context.activeTabId, 'Session active tab', MAX_ID)
+  return {
+    profileId: nullableStringValue(context.profileId, 'Session context profile', MAX_ID),
+    childDb: nullableStringValue(context.childDb, 'Session context database', 2_000),
+    tabs,
+    // A tab dropped as unknown must not leave the context pointing at it.
+    activeTabId: tabs.some((tab) => tab.id === activeTabId) ? activeTabId : null,
+    selectedTable: nullableStringValue(context.selectedTable, 'Session selected table', 2_000),
+  }
+}
+
+export function workspaceSession(value: unknown): WorkspaceSession {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Session is invalid')
+  const session = value as Record<string, unknown>
+  if (session.version !== 1) throw new IpcValidationError('Session version is invalid')
+  if (!Array.isArray(session.contexts) || session.contexts.length > MAX_SESSION_CONTEXTS) {
+    throw new IpcValidationError('Session contexts are invalid')
+  }
+  return {
+    version: 1,
+    contexts: session.contexts.map(sessionContext),
+    ...(session.unclean === undefined ? {} : { unclean: booleanValue(session.unclean, 'Session unclean flag') }),
   }
 }
 

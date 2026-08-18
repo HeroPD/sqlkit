@@ -1686,3 +1686,48 @@ describe('WorkbenchScreen connect lands in the remembered database', () => {
     expect(workbench._live.tables.p1).toHaveLength(12)
   })
 })
+
+// Closing a workspace and switching to another one wipe the same state, but the
+// window is pointed at a different folder in each case — so they cannot write
+// the outgoing tabs from the same place.
+describe('WorkbenchScreen session flush on leaving a workspace', () => {
+  const mount = () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      workspace: { name: string; path: string } | null
+      _session: { flushOutgoing: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> }
+      _live: { disconnectAll(): Promise<void> }
+      willUpdate(changed: Map<string, unknown>): void
+    }
+    workbench._session.flushOutgoing = vi.fn()
+    workbench._session.reset = vi.fn()
+    workbench._live.disconnectAll = () => Promise.resolve()
+    // Arriving at a workspace kicks off its load; stub only what that touches.
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      getWorkspaceConfig: () => Promise.resolve({ config: { version: 1, connections: [] } }),
+      readSession: () => Promise.resolve(null),
+      readHistory: () => Promise.resolve([]),
+      listFiles: () => Promise.resolve({ success: true, files: [] }),
+    }
+    return { screen, workbench }
+  }
+
+  it('writes the tabs out when the workspace is closed', () => {
+    const { workbench } = mount()
+    // app-root drops the workspace without waiting on the IPC, so main's own
+    // flush request arrives after this state is gone.
+    workbench.workspace = null
+    workbench.willUpdate(new Map([['workspace', { name: 'ws', path: '/ws' }]]))
+    expect(workbench._session.flushOutgoing).toHaveBeenCalledTimes(1)
+    expect(workbench._session.reset).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves a switch to main, which flushes before it repoints the window', () => {
+    const { workbench } = mount()
+    workbench.workspace = { name: 'next', path: '/next' }
+    workbench.willUpdate(new Map([['workspace', { name: 'ws', path: '/ws' }]]))
+    // Writing here would file the outgoing tabs under the incoming workspace.
+    expect(workbench._session.flushOutgoing).not.toHaveBeenCalled()
+    expect(workbench._session.reset).toHaveBeenCalledTimes(1)
+  })
+})

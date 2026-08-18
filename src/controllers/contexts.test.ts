@@ -333,3 +333,166 @@ describe('ContextsController history picks keep to their own tab', () => {
     })
   })
 })
+
+describe('ContextsController session round trip', () => {
+  it('carries every context, the active tab, and the dirty marker', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', null)
+    ctrl.newQuery()
+    ctrl.setActiveContent('select 1')
+    ctrl.switchInstance('p1', 'billing')
+    ctrl.addTab({ id: 'file:/ws/a.sql', kind: 'sql', name: 'a.sql', path: '/ws/a.sql', content: 'x', savedContent: 'x' })
+    ctrl.selectedTable = 'public.users'
+
+    const session = ctrl.toSession()
+    // The database context each bucket belongs to, stored as its parts.
+    expect(session.map((context) => `${context.profileId}/${context.childDb ?? ''}`).sort())
+      .toEqual(['p1/', 'p1/billing'])
+
+    const edited = session.find((context) => context.childDb === null)
+    expect(edited?.tabs[0]).toMatchObject({ kind: 'sql', path: null, dirty: true })
+    expect(edited?.activeTabId).toBe(edited?.tabs[0]?.id)
+
+    const saved = session.find((context) => context.childDb === 'billing')
+    expect(saved?.tabs[0]).toMatchObject({ kind: 'sql', path: '/ws/a.sql' })
+    expect(saved?.tabs[0]).not.toHaveProperty('dirty')
+    expect(saved?.selectedTable).toBe('public.users')
+  })
+
+  it('leaves out contexts with nothing open', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', null)
+    ctrl.switchInstance('p2', null)
+    expect(ctrl.toSession()).toEqual([])
+  })
+
+  it('never carries a password out of a config tab', () => {
+    const { ctrl } = make()
+    ctrl.openConfigTab({
+      id: 'p1',
+      name: 'prod',
+      engine: 'postgresql',
+      host: 'db',
+      port: '5432',
+      username: 'app',
+      password: 'hunter2',
+      database: 'app',
+      file: '',
+      folder: 'prod',
+      ssh: { enabled: true, host: 'bastion', port: '22', username: 'ops', authType: 'password', password: 's3cret', keyPath: '', passphrase: 'k3y' },
+    })
+
+    const [tab] = ctrl.toSession()[0]!.tabs
+    expect(tab).toMatchObject({ kind: 'config', profileId: 'p1' })
+    expect(JSON.stringify(tab)).not.toContain('hunter2')
+    expect(JSON.stringify(tab)).not.toContain('s3cret')
+    expect(JSON.stringify(tab)).not.toContain('k3y')
+  })
+
+  it('restores the current context live, not just into the stash', () => {
+    const { ctrl } = make()
+    // The startup case: nothing switched yet, so the live key and the target
+    // key are both the no-context key and switchInstance would return early.
+    ctrl.hydrate([
+      { profileId: null, childDb: null, tabs: [{ id: 't1', kind: 'sql', name: 'Untitled-1', path: null, content: 'select 1', savedContent: '' }], activeTabId: 't1', selectedTable: null },
+      { profileId: 'p1', childDb: null, tabs: [{ id: 't2', kind: 'sql', name: 'a.sql', path: '/ws/a.sql', content: 'x', savedContent: 'x' }], activeTabId: 't2', selectedTable: null },
+    ])
+
+    expect(ctrl.tabs).toHaveLength(1)
+    expect(ctrl.activeTabId).toBe('t1')
+
+    ctrl.switchInstance('p1', null)
+    expect(ctrl.activeSqlTab()).toMatchObject({ id: 't2', path: '/ws/a.sql' })
+
+    ctrl.switchInstance(null, null)
+    expect(ctrl.activeSqlTab()).toMatchObject({ id: 't1', content: 'select 1' })
+  })
+
+  it('replaces whatever was open when a session is hydrated', () => {
+    const { ctrl } = make()
+    ctrl.newQuery()
+    ctrl.hydrate([])
+    expect(ctrl.tabs).toEqual([])
+    expect(ctrl.activeTabId).toBeNull()
+  })
+})
+
+describe('ContextsController.sessionBuffers', () => {
+  const browse = (sql: string) => ({
+    id: 'browse:events',
+    kind: 'sql' as const,
+    name: 'events.sql',
+    path: null,
+    content: sql,
+    savedContent: sql,
+    table: { schema: null, name: 'events', kind: 'table' as const },
+  })
+
+  it('offers the SQL of tabs the user never typed in', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', null)
+    // A browse tab and a History pick: content set programmatically, so no
+    // editor event ever reports them.
+    ctrl.addTab(browse('SELECT * FROM "events" LIMIT 200'))
+    ctrl.openPermanent('select 99')
+
+    const buffers = ctrl.sessionBuffers()
+    expect(buffers.get('browse:events')).toBe('SELECT * FROM "events" LIMIT 200')
+    expect([...buffers.values()]).toContain('select 99')
+  })
+
+  it('leaves out an empty untitled tab and a clean saved file', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', null)
+    ctrl.newQuery()
+    ctrl.addTab({ id: 'file:/ws/a.sql', kind: 'sql', name: 'a.sql', path: '/ws/a.sql', content: 'x', savedContent: 'x' })
+    expect(ctrl.sessionBuffers().size).toBe(0)
+  })
+
+  it('offers a saved file once its buffer moves away from disk', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', null)
+    ctrl.addTab({ id: 'file:/ws/a.sql', kind: 'sql', name: 'a.sql', path: '/ws/a.sql', content: 'x', savedContent: 'x' })
+    ctrl.setActiveContent('x edited')
+    expect(ctrl.sessionBuffers().get('file:/ws/a.sql')).toBe('x edited')
+  })
+
+  it('covers stashed contexts as well as the live one', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', null)
+    ctrl.addTab(browse('SELECT * FROM "events"'))
+    ctrl.switchInstance('p1', 'billing')
+    ctrl.openPermanent('select 7')
+
+    expect(ctrl.sessionBuffers().get('browse:events')).toBe('SELECT * FROM "events"')
+    expect([...ctrl.sessionBuffers().values()]).toContain('select 7')
+  })
+
+  it('prefers the live strip over the stale stash entry for its own context', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', null)
+    ctrl.newQuery()
+    ctrl.setActiveContent('first')
+    // Switching away stashes p1 and leaves that entry in place on the way back,
+    // so the stash still holds the old text.
+    ctrl.switchInstance('p2', null)
+    ctrl.switchInstance('p1', null)
+    ctrl.setActiveContent('second')
+
+    expect([...ctrl.sessionBuffers().values()]).toEqual(['second'])
+  })
+})
+
+describe('ContextsController.tabName', () => {
+  it('finds a tab in the live strip and in a stashed context', () => {
+    const { ctrl } = make()
+    ctrl.switchInstance('p1', null)
+    ctrl.addTab({ id: 'file:/ws/a.sql', kind: 'sql', name: 'a.sql', path: '/ws/a.sql', content: '', savedContent: '' })
+    ctrl.switchInstance('p1', 'billing')
+    ctrl.newQuery()
+
+    expect(ctrl.tabName('file:/ws/a.sql')).toBe('a.sql')
+    expect(ctrl.tabName(ctrl.activeTabId!)).toBe('Untitled-1')
+    expect(ctrl.tabName('nothing')).toBeNull()
+  })
+})

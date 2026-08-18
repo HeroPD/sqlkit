@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import { promises as fsp } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import type { FileInfo, FileReadResult, FileSaveResult, FilesResult } from '../src/electron'
 import { t } from '../src/i18n'
@@ -190,6 +191,15 @@ export async function readWorkspaceFileAsync(workspacePath: string | null, fileP
   }
 }
 
+// Saves go through a sibling temp file and a rename, so a crash mid-write can't
+// truncate work the user already had. The name leads with a dot — dotfiles are
+// filtered from the Explorer, so it never flickers into the tree — and carries a
+// random suffix: two saves racing on one path (⌘S held down, or ⌘S while a
+// save-as is in flight) would otherwise share a temp, and the first rename would
+// leave the second failing on a file that is no longer there.
+const tempSavePath = (target: string) =>
+  path.join(path.dirname(target), `.${path.basename(target)}.${randomBytes(6).toString('hex')}.tmp`)
+
 // Writes a .sql file under the workspace root, with the same hardening as
 // readWorkspaceFile. Used by both save (existing path) and save-as (path
 // picked in a native dialog — still validated, dialogs can navigate anywhere).
@@ -204,11 +214,20 @@ export function saveWorkspaceFile(workspacePath: string | null, filePath: string
   if (!isSqlFile(resolved)) return { success: false, error: t('file.saveSqlOnly') }
   if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToSave') }
 
+  const temp = tempSavePath(resolved)
   try {
     fs.mkdirSync(path.dirname(resolved), { recursive: true })
-    fs.writeFileSync(resolved, content, 'utf8')
+    fs.writeFileSync(temp, content, 'utf8')
+    fs.renameSync(temp, resolved)
     return { success: true, path: resolved, name: path.basename(resolved) }
   } catch (error) {
+    // A name of its own means a failed save leaves an orphan of its own, hidden
+    // from the tree but real on disk (and in the user's git).
+    try {
+      fs.unlinkSync(temp)
+    } catch {
+      // Never created, or already renamed into place.
+    }
     return { success: false, error: (error as Error).message }
   }
 }
@@ -220,11 +239,14 @@ export async function saveWorkspaceFileAsync(workspacePath: string | null, fileP
   if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: t('file.internalFolder') }
   if (!isSqlFile(resolved)) return { success: false, error: t('file.saveSqlOnly') }
   if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToSave') }
+  const temp = tempSavePath(resolved)
   try {
     await fsp.mkdir(path.dirname(resolved), { recursive: true })
-    await fsp.writeFile(resolved, content, 'utf8')
+    await fsp.writeFile(temp, content, 'utf8')
+    await fsp.rename(temp, resolved)
     return { success: true, path: resolved, name: path.basename(resolved) }
   } catch (error) {
+    await fsp.unlink(temp).catch(() => {})
     return { success: false, error: (error as Error).message }
   }
 }

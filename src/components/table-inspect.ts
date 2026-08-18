@@ -1,7 +1,7 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { icons, scrollbars, typography } from '../shared-styles'
-import type { ColumnRef, DbObject, DbObjectKind, Engine, InspectColumn, ObjectDdlRef, TableInspection, TableRef } from '../electron'
+import type { ColumnRef, DbObject, DbObjectKind, Engine, InspectColumn, ObjectDdlRef, SessionInspectDraft, TableInspection, TableRef } from '../electron'
 import { dialectFor, defaultValueSuggestions } from '../dialect'
 import { cellsToTsv } from '../result-export'
 import { autoIncrementLabel, buildCreateTable, canAddConstraint, type ColumnAdd, type ColumnAlter } from '../sql-write'
@@ -14,6 +14,7 @@ import {
   buildInspectOperation,
   canDropInspectObject,
   canRenameInspectObject,
+  isInspectOperation,
   operationName,
   operationSection,
   operationSourceName,
@@ -40,6 +41,32 @@ export const dropInspectDraft = (tabId: string) => draftCache.delete(tabId)
 // database) never see a close, so they need sweeping like query state does.
 export const sweepInspectDrafts = (exists: (tabId: string) => boolean) => {
   for (const tabId of [...draftCache.keys()]) if (!exists(tabId)) draftCache.delete(tabId)
+}
+
+/** A tab's staged schema edits, flattened for the session file. */
+export const exportInspectDraft = (tabId: string): SessionInspectDraft | undefined => {
+  const cached = draftCache.get(tabId)
+  if (!cached) return undefined
+  return {
+    edits: [...cached.snapshot.edits].map(([column, diff]) => [column, { ...diff }] as [string, Record<string, unknown>]),
+    operations: cached.snapshot.operations.map((operation) => ({ ...operation })),
+    tableName: cached.snapshot.tableName,
+    addSeq: cached.addSeq,
+  }
+}
+
+// Restoring a session brings the draft back but not the undo stack behind it:
+// the snapshot becomes the single history entry, so a restored tab can be saved
+// or discarded but not stepped back through last session's edits.
+export const importInspectDraft = (tabId: string, draft: SessionInspectDraft) => {
+  const snapshot: DraftSnapshot = {
+    edits: new Map(draft.edits.map(([column, diff]) => [column, diff as ColumnDiff])),
+    operations: draft.operations.filter(isInspectOperation),
+    tableName: draft.tableName,
+  }
+  if (!snapshot.edits.size && !snapshot.operations.length) return false
+  draftCache.set(tabId, { snapshot, history: [snapshot], historyIndex: 0, addSeq: draft.addSeq })
+  return true
 }
 
 // Right-click menu state. `col`/`field` are set for the columns table (they

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Engine, TableRef } from './electron'
-import { buildInspectOperation, canDropInspectObject, type InspectDropTarget } from './inspect-operations'
+import { buildInspectOperation, canDropInspectObject, isInspectOperation, type InspectDropTarget } from './inspect-operations'
 
 const users: TableRef = { schema: 'app', name: 'users', kind: 'table' }
 const drop = (engine: Engine, target: InspectDropTarget, name: string) =>
@@ -74,5 +74,31 @@ describe('inspect object renames', () => {
   it('rejects SQLite object renames', () => {
     expect(() => buildInspectOperation(users, { kind: 'rename', target: 'index', from: 'old', to: 'new' }, 'sqlite'))
       .toThrow(/cannot rename/i)
+  })
+})
+
+// Staged operations restored from a session file are only as trustworthy as the
+// file: a spec short of what the inspect view renders crashes it outright.
+describe('isInspectOperation', () => {
+  it('accepts the operations the inspect view builds', () => {
+    expect(isInspectOperation({ kind: 'index', spec: { name: 'i', columns: ['a'], unique: false } })).toBe(true)
+    expect(isInspectOperation({ kind: 'trigger', spec: { name: 't', timing: 'BEFORE', events: ['INSERT'], level: 'ROW' } })).toBe(true)
+    expect(isInspectOperation({ kind: 'partition', spec: { name: 'p', bounds: 'FROM (1) TO (2)' } })).toBe(true)
+    expect(isInspectOperation({ kind: 'foreignKey', spec: { name: 'fk', columns: ['a'], refTable: 'b', refColumns: ['id'] } })).toBe(true)
+    expect(isInspectOperation({ kind: 'constraint', spec: { name: 'c', type: 'CHECK', expression: 'a > 0' } })).toBe(true)
+    expect(isInspectOperation({ kind: 'constraint', spec: { name: 'c', type: 'UNIQUE', columns: ['a'] } })).toBe(true)
+    expect(isInspectOperation({ kind: 'drop', target: 'index', name: 'i' })).toBe(true)
+    expect(isInspectOperation({ kind: 'rename', target: 'index', from: 'i', to: 'j' })).toBe(true)
+  })
+
+  it('rejects anything the view would then fail to render', () => {
+    expect(isInspectOperation({ kind: 'index', spec: { name: 'i' } })).toBe(false)
+    expect(isInspectOperation({ kind: 'index', spec: { name: 'i', columns: [1], unique: false } })).toBe(false)
+    expect(isInspectOperation({ kind: 'constraint', spec: { name: 'c', type: 'UNIQUE' } })).toBe(false)
+    expect(isInspectOperation({ kind: 'constraint', spec: { name: 'c', type: 'EXCLUDE', columns: ['a'] } })).toBe(false)
+    expect(isInspectOperation({ kind: 'drop', target: 'table', name: 'users' })).toBe(false)
+    expect(isInspectOperation({ kind: 'notebook' })).toBe(false)
+    expect(isInspectOperation(null)).toBe(false)
+    expect(isInspectOperation([])).toBe(false)
   })
 })

@@ -1,5 +1,5 @@
 import type { ReactiveControllerHost } from 'lit'
-import type { ConnectionProfile, DbObject, DbObjectKind, FileSaveResult, TableRef } from '../electron'
+import type { ConnectionProfile, DbObject, DbObjectKind, FileSaveResult, SessionContext, SessionTab, TableRef } from '../electron'
 
 // An editor tab: a connection-config form (the tab owns the unsaved draft, so
 // edits survive switching tabs) or a SQL editor over a workspace file —
@@ -30,9 +30,13 @@ export type EditorTabState =
   | { id: string; kind: 'inspect-object'; profileId: string; object: DbObject; objectKind: DbObjectKind }
   | SqlTabState
 
-// A context's working instance: open tabs, the active tab, and the Explorer's
-// table selection.
+// A context's working instance: which database context it belongs to, its open
+// tabs, the active tab, and the Explorer's table selection. The profile and
+// child are carried alongside the map key so the session file never has to take
+// that key apart again.
 type ContextInstance = {
+  profileId: string | null
+  childDb: string | null
   tabs: EditorTabState[]
   activeTabId: string | null
   selectedTable: string | null
@@ -41,6 +45,53 @@ type ContextInstance = {
 type Deps = {
   contextKey: (profileId: string | null, childDb: string | null) => string
   dropQuery: (tabId: string) => void
+}
+
+/** One context's tabs, already rebuilt into live editor state. */
+export type RestoredContext = ContextInstance
+
+/** Whether a tab's text needs a session backup. An untitled tab has no file to
+ * fall back on, so anything it holds does — including the SQL of a browse or
+ * History tab the user never touched. A saved file needs one only once its
+ * buffer has moved away from what is on disk. */
+export const needsSessionBackup = (tab: SqlTabState) =>
+  tab.path === null ? tab.content !== '' : tab.content !== tab.savedContent
+
+// A config tab's draft can hold a password the user typed but has not saved.
+// The session file never gets one — the main process blanks these again on the
+// way through, so neither side has to be trusted alone.
+const withoutSecrets = (profile: ConnectionProfile): ConnectionProfile => ({
+  ...profile,
+  password: '',
+  ...(profile.ssh ? { ssh: { ...profile.ssh, password: '', passphrase: '' } } : {}),
+})
+
+// Tab identity, without the buffers — those are backed up per tab, and the
+// inspect drafts are attached by the caller, which owns that cache.
+const sessionTabFrom = (tab: EditorTabState): SessionTab => {
+  if (tab.kind === 'sql') {
+    return {
+      kind: 'sql',
+      id: tab.id,
+      name: tab.name,
+      path: tab.path,
+      ...(tab.preview ? { preview: true } : {}),
+      ...(tab.history ? { history: true } : {}),
+      ...(tab.table ? { table: tab.table } : {}),
+      ...(tab.content === tab.savedContent ? {} : { dirty: true }),
+    }
+  }
+  if (tab.kind === 'config') return { kind: 'config', id: tab.id, profileId: tab.profile.id, draft: withoutSecrets(tab.profile) }
+  if (tab.kind === 'inspect') {
+    return {
+      kind: 'inspect',
+      id: tab.id,
+      profileId: tab.profileId,
+      table: tab.table,
+      ...(tab.createTable ? { createTable: true } : {}),
+    }
+  }
+  return { kind: 'inspect-object', id: tab.id, profileId: tab.profileId, object: tab.object, objectKind: tab.objectKind }
 }
 
 // Owns the workbench's per-context working state: the open tabs, the active
@@ -129,6 +180,8 @@ export class ContextsController {
     // context visited, forever.
     if (this._tabs.length || this._activeTabId || this._selectedTable) {
       this._instances.set(fromKey, {
+        profileId: this._activeDbId,
+        childDb: this._activeChildDb,
         tabs: this._tabs,
         activeTabId: this._activeTabId,
         selectedTable: this._selectedTable,
@@ -143,6 +196,67 @@ export class ContextsController {
     this._tabs = incoming?.tabs ?? []
     this._activeTabId = incoming?.activeTabId ?? null
     this._selectedTable = incoming?.selectedTable ?? null
+    this.host.requestUpdate()
+  }
+
+  // Every context's tabs, live one included, for the session file. Contexts with
+  // nothing open are left out — they restore identically to a missing one.
+  toSession(): SessionContext[] {
+    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
+    const instances = [...this._instances].filter(([key]) => key !== liveKey).map(([, instance]) => instance)
+    instances.push({
+      profileId: this._activeDbId,
+      childDb: this._activeChildDb,
+      tabs: this._tabs,
+      activeTabId: this._activeTabId,
+      selectedTable: this._selectedTable,
+    })
+    return instances
+      .filter((instance) => instance.tabs.length)
+      .map((instance) => ({
+        profileId: instance.profileId,
+        childDb: instance.childDb,
+        tabs: instance.tabs.map(sessionTabFrom),
+        activeTabId: instance.activeTabId,
+        selectedTable: instance.selectedTable,
+      }))
+  }
+
+  // The text of every tab across every context that a session backup has to
+  // hold. Editor events only ever report the tab being typed in, so this is the
+  // only thing that offers up a programmatically opened tab's SQL.
+  sessionBuffers(): Map<string, string> {
+    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
+    const buffers = new Map<string, string>()
+    const collect = (tabs: EditorTabState[]) => {
+      for (const tab of tabs) if (tab.kind === 'sql' && needsSessionBackup(tab)) buffers.set(tab.id, tab.content)
+    }
+    // Switching away leaves the stash's entry for the live key in place, so it
+    // holds a stale copy of these very tabs; the live strip wins.
+    for (const [key, instance] of this._instances) if (key !== liveKey) collect(instance.tabs)
+    collect(this._tabs)
+    return buffers
+  }
+
+  /** A tab's display name, wherever it is open. Null when nothing matches. */
+  tabName(id: string): string | null {
+    for (const tabs of [this._tabs, ...[...this._instances.values()].map((instance) => instance.tabs)]) {
+      const tab = tabs.find((entry) => entry.id === id)
+      if (tab) return tab.kind === 'sql' ? tab.name : tab.kind === 'config' ? tab.profile.name : null
+    }
+    return null
+  }
+
+  // Restores a saved session. The instance matching the current key is loaded
+  // live as well: switchInstance returns early when the key doesn't change, and
+  // at startup both are the no-context key, which would leave those tabs stashed
+  // and invisible.
+  hydrate(contexts: RestoredContext[]) {
+    this._instances = new Map(contexts.map((instance) => [this.deps.contextKey(instance.profileId, instance.childDb), instance]))
+    const live = this._instances.get(this.deps.contextKey(this._activeDbId, this._activeChildDb))
+    this._tabs = live?.tabs ?? []
+    this._activeTabId = live?.activeTabId ?? null
+    this._selectedTable = live?.selectedTable ?? null
     this.host.requestUpdate()
   }
 
@@ -173,6 +287,31 @@ export class ContextsController {
     return this._instances.get(key)?.tabs.some((tab) => tab.id === id) ?? false
   }
 
+  /** The tab showing this file in a context, if one is open. Matched on the path
+   * rather than on the id derived from it: a tab restored after its file went
+   * missing keeps that id while pointing nowhere, and must not stand in for the
+   * file should it come back. */
+  fileTabInContext(profileId: string | null, childDb: string | null, path: string): string | null {
+    const key = this.deps.contextKey(profileId, childDb)
+    const tabs = key === this.deps.contextKey(this._activeDbId, this._activeChildDb)
+      ? this._tabs
+      : (this._instances.get(key)?.tabs ?? [])
+    return tabs.find((tab) => tab.kind === 'sql' && tab.path === path)?.id ?? null
+  }
+
+  /** Every tab showing this file, anywhere. Ids, because that is what the caller
+   * has to retarget — and it must be the id the tab really has, not one spelled
+   * from the path, which may belong to another tab or to none. */
+  fileTabIds(path: string): string[] {
+    const ids = new Set<string>()
+    const collect = (tabs: EditorTabState[]) => {
+      for (const tab of tabs) if (tab.kind === 'sql' && tab.path === path) ids.add(tab.id)
+    }
+    collect(this._tabs)
+    for (const instance of this._instances.values()) collect(instance.tabs)
+    return [...ids]
+  }
+
   activateTabInContext(profileId: string | null, childDb: string | null, id: string) {
     const key = this.deps.contextKey(profileId, childDb)
     if (key === this.deps.contextKey(this._activeDbId, this._activeChildDb)) {
@@ -190,7 +329,7 @@ export class ContextsController {
       this.addTab(tab)
       return
     }
-    const instance = this._instances.get(key) ?? { tabs: [], activeTabId: null, selectedTable: null }
+    const instance = this._instances.get(key) ?? { profileId, childDb, tabs: [], activeTabId: null, selectedTable: null }
     const tabs = instance.tabs.some((entry) => entry.id === tab.id) ? instance.tabs : [...instance.tabs, tab]
     this._instances.set(key, { ...instance, tabs, activeTabId: tab.id })
   }
@@ -214,7 +353,7 @@ export class ContextsController {
     }
     const key = this.deps.contextKey(profileId, childDb)
     if (key === this.deps.contextKey(this._activeDbId, this._activeChildDb)) {
-      const next = replace({ tabs: this._tabs, activeTabId: this._activeTabId, selectedTable: this._selectedTable })
+      const next = replace({ profileId, childDb, tabs: this._tabs, activeTabId: this._activeTabId, selectedTable: this._selectedTable })
       this.tabs = next.tabs
       this.activeTabId = next.activeTabId
       return

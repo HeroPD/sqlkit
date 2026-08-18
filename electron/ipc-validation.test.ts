@@ -12,6 +12,7 @@ import {
   querySort,
   tableReference,
   workspaceConfig,
+  workspaceSession,
 } from './ipc-validation'
 
 const profile = () => ({
@@ -124,5 +125,71 @@ describe('historyItems', () => {
   it('caps the number of stored entries', () => {
     const flood = Array.from({ length: 6_000 }, (_, index) => entry({ id: `h${index}` }))
     expect(historyItems(flood)).toHaveLength(5_000)
+  })
+})
+
+describe('workspaceSession', () => {
+  const context = (tabs: unknown[], over: Record<string, unknown> = {}) =>
+    ({ profileId: 'p1', childDb: null, tabs, activeTabId: null, selectedTable: null, ...over })
+  const session = (contexts: unknown[]) => ({ version: 1, contexts })
+
+  it('accepts the tab kinds the workbench opens', () => {
+    const parsed = workspaceSession(session([context([
+      { kind: 'sql', id: 't1', name: 'a.sql', path: '/ws/a.sql', dirty: true },
+      { kind: 'config', id: 'p1', profileId: 'p1', draft: profile() },
+      { kind: 'inspect', id: 'i1', profileId: 'p1', table: { schema: 'public', name: 'users', kind: 'table' } },
+      { kind: 'inspect-object', id: 'o1', profileId: 'p1', object: { schema: 'public', name: 'f', detail: '' }, objectKind: 'function' },
+    ], { activeTabId: 't1' })]))
+    expect(parsed.contexts[0]?.tabs).toHaveLength(4)
+    expect(parsed.contexts[0]?.activeTabId).toBe('t1')
+  })
+
+  it('drops an unknown tab kind instead of rejecting the whole session', () => {
+    const parsed = workspaceSession(session([context([
+      { kind: 'notebook', id: 'n1' },
+      { kind: 'sql', id: 't1', name: 'a.sql', path: null },
+    ])]))
+    expect(parsed.contexts[0]?.tabs).toHaveLength(1)
+  })
+
+  it('clears an active pointer left aiming at a dropped tab', () => {
+    const parsed = workspaceSession(session([context([{ kind: 'notebook', id: 'n1' }], { activeTabId: 'n1' })]))
+    expect(parsed.contexts[0]?.activeTabId).toBeNull()
+  })
+
+  it('blanks secrets in a config draft, whichever direction it is going', () => {
+    const draft = { ...profile(), password: 'hunter2', ssh: { enabled: true, host: 'b', port: '22', username: 'o', authType: 'password', password: 's3cret', keyPath: '', passphrase: 'k3y' } }
+    const parsed = workspaceSession(session([context([{ kind: 'config', id: 'p1', profileId: 'p1', draft }])]))
+    const tab = parsed.contexts[0]?.tabs[0]
+    expect(tab?.kind === 'config' && tab.draft?.password).toBe('')
+    expect(tab?.kind === 'config' && tab.draft?.ssh).toMatchObject({ password: '', passphrase: '' })
+  })
+
+  it('carries a staged schema draft through without inspecting its meaning', () => {
+    const draft = {
+      edits: [['id', { name: 'ident', nullable: false }]],
+      operations: [{ kind: 'index', spec: { name: 'users_email_idx' } }],
+      tableName: null,
+      addSeq: 3,
+    }
+    const parsed = workspaceSession(session([context([
+      { kind: 'inspect', id: 'i1', profileId: 'p1', table: { schema: null, name: 'users', kind: 'table' }, draft },
+    ])]))
+    const tab = parsed.contexts[0]?.tabs[0]
+    expect(tab?.kind === 'inspect' && tab.draft).toEqual(draft)
+  })
+
+  it('rejects malformed shapes', () => {
+    expect(() => workspaceSession('nope')).toThrow()
+    expect(() => workspaceSession({ version: 2, contexts: [] })).toThrow()
+    expect(() => workspaceSession(session([context([{ kind: 'sql', id: 't1', name: 'a.sql', path: 3 }])]))).toThrow()
+    expect(() => workspaceSession(session([context([{ kind: 'sql', id: 't1', name: 'a.sql', path: null, dirty: 'yes' }])]))).toThrow()
+    expect(() => workspaceSession(session([context([{ kind: 'inspect', id: 'i1', profileId: 'p1' }])]))).toThrow()
+    expect(() => workspaceSession(session(['nope']))).toThrow()
+  })
+
+  it('caps how much one session can carry', () => {
+    const tabs = Array.from({ length: 501 }, (_, index) => ({ kind: 'sql', id: `t${index}`, name: 'a.sql', path: null }))
+    expect(() => workspaceSession(session([context(tabs)]))).toThrow()
   })
 })

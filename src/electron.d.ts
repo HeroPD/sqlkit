@@ -122,6 +122,65 @@ export type WorkspaceConfigResult = {
   weakCredentialStorage?: boolean
 }
 
+// --- Workspace session (hot exit) ---------------------------------------
+
+/** Staged schema edits of an inspect tab. The renderer owns the shape; the main
+ * process only bounds its size, so a future field needs no validator change. */
+export type SessionInspectDraft = {
+  edits: [string, Record<string, unknown>][]
+  operations: Record<string, unknown>[]
+  tableName: string | null
+  /** Next suffix for generated add-column keys, so restored drafts don't collide. */
+  addSeq: number
+}
+
+/** One restored tab. Buffers live in separate backup files, never inline. */
+export type SessionTab =
+  | {
+      kind: 'sql'
+      id: string
+      name: string
+      path: string | null
+      preview?: boolean
+      history?: boolean
+      table?: TableRef
+      /** The buffer differs from the file on disk. Untitled tabs are backed up
+       *  whether or not this is set — they have no file to fall back to. */
+      dirty?: boolean
+    }
+  | {
+      kind: 'config'
+      id: string
+      profileId: string
+      /** Unsaved form edits, always secret-free — the main process blanks
+       *  passwords on the way in and out regardless of what the renderer sends. */
+      draft?: ConnectionProfile
+    }
+  | { kind: 'inspect'; id: string; profileId: string; table: TableRef; createTable?: boolean; draft?: SessionInspectDraft }
+  | { kind: 'inspect-object'; id: string; profileId: string; object: DbObject; objectKind: DbObjectKind; draft?: SessionInspectDraft }
+
+/** One database context's tabs. The profile and its child database are stored
+ * apart rather than as the composite key the workbench uses at runtime: that key
+ * is a renderer implementation detail, and a file that embedded it would stop
+ * matching any reachable context the day its shape changed. */
+export type SessionContext = {
+  /** null is the no-context bucket — tabs opened before any database was in use. */
+  profileId: string | null
+  /** The child database of an all-databases connection; null otherwise. */
+  childDb: string | null
+  tabs: SessionTab[]
+  activeTabId: string | null
+  selectedTable: string | null
+}
+
+export type WorkspaceSession = {
+  version: 1
+  contexts: SessionContext[]
+  /** Written true on every session save and cleared only on a clean quit, so a
+   * session loaded with it still set is one the app never got to shut down. */
+  unclean?: boolean
+}
+
 // --- Live connections ---------------------------------------------------
 
 export type ConnectionPhase = 'connecting' | 'connected' | 'error'
@@ -456,6 +515,21 @@ export type SqlkitApi = {
   readHistory: () => Promise<HistoryItem[]>
   /** Replaces the workspace's persisted query history (write-through per run). */
   writeHistory: (items: HistoryItem[]) => Promise<SaveResult>
+  /** The workspace's open tabs from the last session; null when there is none. */
+  readSession: () => Promise<WorkspaceSession | null>
+  /** Replaces the persisted session and prunes backups no tab claims. */
+  writeSession: (session: WorkspaceSession) => Promise<SaveResult>
+  /** A tab's unsaved buffer from the last session; null when it has none. */
+  readSessionBackup: (tabId: string) => Promise<string | null>
+  /** Mirrors a tab's unsaved buffer to disk (debounced by the caller). */
+  writeSessionBackup: (tabId: string, content: string) => Promise<SaveResult>
+  /** Drops a tab's backup — it was saved, reverted, or closed. */
+  dropSessionBackup: (tabId: string) => Promise<void>
+  /** Last-gasp synchronous flush from the renderer's `pagehide`; `send`-based
+   *  writes are dropped during teardown, so this one blocks. */
+  flushSession: (payload: { session?: WorkspaceSession; backups: { tabId: string; content: string }[] }) => void
+  /** Subscribes to main's pre-quit flush request; returns unsubscribe. */
+  onFlushSession: (listener: () => void) => () => void
   testConnection: (profile: ConnectionProfile) => Promise<TestConnectionResult>
   testSshTunnel: (profile: ConnectionProfile) => Promise<TestSshResult>
   connectDatabase: (profile: ConnectionProfile) => Promise<ConnectResult>

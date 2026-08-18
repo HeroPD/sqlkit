@@ -242,3 +242,145 @@ describe('FileOpsController delete', () => {
     expect(files.reload).toHaveBeenCalled()
   })
 })
+
+// A tab restored after its file went missing comes back untitled but keeps the
+// id derived from that path. It must not stand in for the file if it returns.
+describe('FileOpsController opening a file a detached tab was restored from', () => {
+  const detached = (path: string) => ({
+    id: `file:${path}`,
+    kind: 'sql' as const,
+    name: path.split('/').pop() ?? path,
+    path: null,
+    content: 'recovered work',
+    savedContent: '',
+  })
+
+  it('opens the recreated file in its own tab instead of activating the recovered one', async () => {
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'the file on disk' })) })
+    const { ctrl, ctx } = make()
+    ctx.addTab(detached('/ws/ctx/q.sql'))
+
+    await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+
+    expect(ctx.tabs).toHaveLength(2)
+    // Both survive with ids of their own, so neither loses its session backup.
+    expect(new Set(ctx.tabs.map((tab) => tab.id)).size).toBe(2)
+    expect(ctx.activeSqlTab()).toMatchObject({ path: '/ws/ctx/q.sql', content: 'the file on disk' })
+    expect(ctx.tabs[0]).toMatchObject({ path: null, content: 'recovered work' })
+  })
+
+  it('still activates the existing tab when one really is showing that file', async () => {
+    stubSqlkit()
+    const { ctrl, ctx } = make()
+    await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+    const first = ctx.activeTabId
+    ctx.newQuery()
+
+    await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+
+    expect(ctx.tabs.filter((tab) => tab.kind === 'sql' && tab.path === '/ws/ctx/q.sql')).toHaveLength(1)
+    expect(ctx.activeTabId).toBe(first)
+  })
+
+  it('finds that tab again after Save As gave it a path its id does not spell', async () => {
+    stubSqlkit({ saveFileAs: vi.fn(() => Promise.resolve({ success: true, path: '/ws/ctx/saved.sql', name: 'saved.sql' })) })
+    const { ctrl, ctx } = make()
+    ctx.newQuery()
+    ctx.setActiveContent('select 1')
+    await ctrl.saveActiveAs()
+    const saved = ctx.activeTabId
+
+    await ctrl.openFile(fileInfo('/ws/ctx/saved.sql'))
+
+    expect(ctx.tabs).toHaveLength(1)
+    expect(ctx.activeTabId).toBe(saved)
+  })
+
+  it('renames the tab that actually shows the file, not the one whose id spells it', async () => {
+    stubSqlkit({
+      readFile: vi.fn(() => Promise.resolve({ success: true, content: 'the file on disk' })),
+      renameFile: vi.fn(() => Promise.resolve({ success: true, path: '/ws/ctx/renamed.sql', name: 'renamed.sql' })),
+    })
+    const { ctrl, ctx } = make()
+    ctx.addTab(detached('/ws/ctx/q.sql'))
+    await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+
+    await ctrl.rename(fileInfo('/ws/ctx/q.sql'), 'renamed.sql')
+
+    const recovered = ctx.tabs.find((tab) => tab.kind === 'sql' && tab.content === 'recovered work')
+    const onDisk = ctx.tabs.find((tab) => tab.kind === 'sql' && tab.content === 'the file on disk')
+    // The renamed file's tab follows the rename...
+    expect(onDisk).toMatchObject({ path: '/ws/ctx/renamed.sql', name: 'renamed.sql' })
+    // ...and the detached tab is left alone: pointing it at the renamed file
+    // would let a later save overwrite that file with recovered text.
+    expect(recovered).toMatchObject({ path: null })
+  })
+
+  it('moves query state under the id the tab really had', async () => {
+    stubSqlkit({
+      readFile: vi.fn(() => Promise.resolve({ success: true, content: 'the file on disk' })),
+      renameFile: vi.fn(() => Promise.resolve({ success: true, path: '/ws/ctx/renamed.sql', name: 'renamed.sql' })),
+    })
+    const { ctrl, ctx, queries } = make()
+    ctx.addTab(detached('/ws/ctx/q.sql'))
+    await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+    const realId = ctx.activeTabId
+
+    await ctrl.rename(fileInfo('/ws/ctx/q.sql'), 'renamed.sql')
+
+    expect(queries.renameTab).toHaveBeenCalledWith(realId, expect.any(String))
+  })
+
+  it('gives a renamed file a free id when a detached tab holds the derived one', async () => {
+    stubSqlkit({ renameFile: vi.fn(() => Promise.resolve({ success: true, path: '/ws/ctx/q.sql', name: 'q.sql' })) })
+    const { ctrl, ctx } = make()
+    ctx.addTab(detached('/ws/ctx/q.sql'))
+    await ctrl.openFile(fileInfo('/ws/ctx/other.sql'))
+
+    await ctrl.rename(fileInfo('/ws/ctx/other.sql'), 'q.sql')
+
+    // Sharing an id would let one tab's close, results, and backup take the other's.
+    expect(new Set(ctx.tabs.map((tab) => tab.id)).size).toBe(ctx.tabs.length)
+  })
+})
+
+describe('FileOpsController.rename tab targeting', () => {
+  it('follows a tab whose id no longer spells its path (Save As)', async () => {
+    stubSqlkit({
+      saveFileAs: vi.fn(() => Promise.resolve({ success: true, path: '/ws/ctx/saved.sql', name: 'saved.sql' })),
+      renameFile: vi.fn(() => Promise.resolve({ success: true, path: '/ws/ctx/final.sql', name: 'final.sql' })),
+    })
+    const { ctrl, ctx } = make()
+    ctx.newQuery()
+    ctx.setActiveContent('select 1')
+    await ctrl.saveActiveAs()
+
+    await ctrl.rename(fileInfo('/ws/ctx/saved.sql'), 'final.sql')
+
+    // Left behind, the tab would keep saving to a path that no longer exists.
+    expect(ctx.activeSqlTab()).toMatchObject({ path: '/ws/ctx/final.sql', name: 'final.sql' })
+  })
+
+  it('retargets a tab stashed in another context too', async () => {
+    stubSqlkit({ renameFile: vi.fn(() => Promise.resolve({ success: true, path: '/ws/ctx/final.sql', name: 'final.sql' })) })
+    const { ctrl, ctx } = make()
+    await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+    ctx.switchInstance('p2', null)
+
+    await ctrl.rename(fileInfo('/ws/ctx/q.sql'), 'final.sql')
+
+    ctx.switchInstance(null, null)
+    expect(ctx.tabs[0]).toMatchObject({ path: '/ws/ctx/final.sql', name: 'final.sql' })
+  })
+
+  it('does nothing when no tab is showing the renamed file', async () => {
+    stubSqlkit({ renameFile: vi.fn(() => Promise.resolve({ success: true, path: '/ws/ctx/final.sql', name: 'final.sql' })) })
+    const { ctrl, ctx, queries } = make()
+    ctx.newQuery()
+
+    await ctrl.rename(fileInfo('/ws/ctx/q.sql'), 'final.sql')
+
+    expect(queries.renameTab).not.toHaveBeenCalled()
+    expect(ctx.tabs[0]).toMatchObject({ path: null })
+  })
+})

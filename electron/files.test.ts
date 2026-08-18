@@ -9,6 +9,7 @@ import {
   readWorkspaceFile,
   resolveWorkspaceItem,
   saveWorkspaceFile,
+  saveWorkspaceFileAsync,
 } from './files'
 
 // Each test gets a fresh workspace plus a sibling "outside" dir that a symlink
@@ -160,5 +161,32 @@ describe('open-external safety', () => {
   it('rejects a path that does not exist', () => {
     const { ws } = setup()
     expect(externalOpenAction(path.join(ws, 'gone.csv'))).toBe('reject')
+  })
+})
+
+// Saves land through a temp file and a rename. Two of them racing on the same
+// path (⌘S held down, or ⌘S then the menu item) must not collide on it.
+describe('concurrent saves of one file', () => {
+  it('lets both finish, with the file holding one of the two versions', async () => {
+    const { ws } = setup()
+    const target = path.join(ws, 'q.sql')
+    fs.writeFileSync(target, 'original')
+
+    const results = await Promise.all([
+      saveWorkspaceFileAsync(ws, target, 'select 1'),
+      saveWorkspaceFileAsync(ws, target, 'select 2'),
+    ])
+
+    expect(results.map((result) => result.success)).toEqual([true, true])
+    expect(['select 1', 'select 2']).toContain(fs.readFileSync(target, 'utf8'))
+  })
+
+  it('leaves no temp file behind, however many saves raced', async () => {
+    const { ws } = setup()
+    const target = path.join(ws, 'q.sql')
+    await Promise.all(Array.from({ length: 8 }, (_, index) => saveWorkspaceFileAsync(ws, target, `select ${index}`)))
+
+    const leftovers = fs.readdirSync(ws).filter((name) => name.endsWith('.tmp'))
+    expect(leftovers).toEqual([])
   })
 })

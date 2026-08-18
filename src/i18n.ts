@@ -367,6 +367,8 @@ const enUS = {
   'workbench.unsavedChanges': 'Unsaved changes will be lost.',
   'workbench.unsavedSchema': 'Unsaved schema changes will be lost.',
   'workbench.unsavedResults': 'Staged result edits/new rows will be lost.',
+  'session.backupFailedTitle': 'Crash backup unavailable',
+  'session.backupFailedDetail': 'SqlKit Studio could not keep a crash backup of "{name}". Save the file to be sure of keeping your changes.',
   'workbench.closeTabPrompt': 'Close "{title}" without saving?',
   'workbench.closeWithoutSaving': 'Close Without Saving',
   'workbench.discardAndClose': 'Discard and Close',

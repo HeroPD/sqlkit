@@ -17,7 +17,17 @@ import {
   startWorkspaceWatcher,
   stopWorkspaceWatcher,
 } from './files'
-import { historyItems, stringValue, workspaceConfig } from './ipc-validation'
+import { historyItems, stringValue, workspaceConfig, workspaceSession } from './ipc-validation'
+import { recoverableContexts } from '../src/session-recovery'
+import {
+  dropBackup,
+  markSessionClean,
+  readBackup,
+  readSession,
+  writeBackup,
+  writeSession,
+  writeShutdownBackup,
+} from './session'
 import {
   isDirectory,
   openWorkspace,
@@ -50,11 +60,21 @@ export type WorkspaceIpcContext = {
   focusExistingWorkspace(path: string, requesterId: number): boolean
   isAuthorizedRecentWorkspace(path: string): boolean
   createWindow(): void
+  /** A renderer finished its pre-quit session flush; releases main's wait. */
+  notifySessionFlushed(contentsId: number): void
+  /** Waits for a renderer to persist its open tabs, bounded by main. */
+  flushSession(contents: WebContents): Promise<void>
 }
 
 export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
   const watchOpened = async (contents: WebContents, opened: ReturnType<typeof openWorkspace>) => {
     if (!opened.success) return
+    // Before this window points at the new workspace: the tabs it still holds
+    // belong to the old one, and a write that lands after the swap would file
+    // them under the wrong folder. Leaving a workspace deliberately is an
+    // orderly exit from it, so its crash marker comes off too.
+    await context.flushSession(contents)
+    markSessionClean(context.workspaceFor(contents))
     await context.managerFor(contents.id)?.disconnectAll()
     context.setWorkspace(contents.id, opened.path)
     startWorkspaceWatcher(contents.id, opened.path, () => {
@@ -97,6 +117,8 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
   })
 
   ipcMain.handle('workspace:close', async (event) => {
+    await context.flushSession(event.sender)
+    markSessionClean(context.workspaceFor(event.sender))
     context.clearWorkspace(event.sender.id)
     stopWorkspaceWatcher(event.sender.id)
     await context.managerFor(event.sender.id)?.disconnectAll()
@@ -237,6 +259,72 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
       return { success: false as const, error: (error as Error).message }
     }
   })
+  ipcMain.handle('session:read', (event) => readSession(context.workspaceFor(event.sender)))
+  ipcMain.handle('session:write', (event, session: unknown) => {
+    try {
+      return writeSession(context.workspaceFor(event.sender), workspaceSession(session))
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message }
+    }
+  })
+  ipcMain.handle('session:read-backup', (event, tabId: unknown) => {
+    try {
+      return readBackup(context.workspaceFor(event.sender), stringValue(tabId, 'Tab id', IPC_PATH_LIMIT))
+    } catch {
+      return null
+    }
+  })
+  ipcMain.handle('session:write-backup', (event, tabId: unknown, content: unknown) => {
+    try {
+      return writeBackup(
+        context.workspaceFor(event.sender),
+        stringValue(tabId, 'Tab id', IPC_PATH_LIMIT),
+        stringValue(content, 'Buffer', IPC_SQL_FILE_LIMIT),
+      )
+    } catch (error) {
+      return { success: false as const, error: (error as Error).message }
+    }
+  })
+  ipcMain.handle('session:drop-backup', (event, tabId: unknown) => {
+    try {
+      dropBackup(context.workspaceFor(event.sender), stringValue(tabId, 'Tab id', IPC_PATH_LIMIT))
+    } catch {
+      // A malformed id has no backup to drop.
+    }
+  })
+
+  // Synchronous by necessity: this runs from the renderer's `pagehide`, where an
+  // async invoke would be torn down before it lands. Everything it writes is
+  // already covered by the debounced path — it only catches the last keystrokes.
+  ipcMain.on('session:flush', (event, payload: unknown) => {
+    event.returnValue = true
+    try {
+      const workspacePath = context.workspaceFor(event.sender)
+      const flush = payload as { session?: unknown; backups?: unknown }
+      const unbacked = new Set<string>()
+      if (Array.isArray(flush?.backups)) {
+        for (const entry of flush.backups.slice(0, 500)) {
+          const backup = entry as { tabId?: unknown; content?: unknown }
+          const tabId = stringValue(backup.tabId, 'Tab id', IPC_PATH_LIMIT)
+          const written = writeShutdownBackup(workspacePath, tabId, stringValue(backup.content, 'Buffer', IPC_SQL_FILE_LIMIT))
+          if (written.unbacked) unbacked.add(tabId)
+        }
+      }
+      if (flush?.session !== undefined) {
+        // Only this side knows which of those writes landed, so the claims of
+        // the ones that didn't are dropped here — otherwise a shutdown would
+        // replace a session the renderer had already filtered with one
+        // promising text that no backup holds.
+        const session = workspaceSession(flush.session)
+        writeSession(workspacePath, { ...session, contexts: recoverableContexts(session.contexts, unbacked) })
+      }
+    } catch {
+      // A shutdown is the worst moment to throw; the debounced writes stand.
+    } finally {
+      context.notifySessionFlushed(event.sender.id)
+    }
+  })
+
   ipcMain.handle('workspace:history-read', (event) => readWorkspaceHistory(context.workspaceFor(event.sender)))
   ipcMain.handle('workspace:history-write', (event, items: unknown) => {
     try {
