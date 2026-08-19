@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { SshConfig } from '../../src/electron'
 import { t } from '../../src/i18n'
+import { errorMessage } from './error-message'
 import type { Tunnel } from './transport'
 import { hasPinnedHostKey, hostKeyFingerprint, knownHostsPath, makeHostVerifier, trustHostKey, unknownHostKeyMessage } from './knownHosts'
 
@@ -133,7 +134,7 @@ export async function openSshTunnel(
         // sockets before reporting, so nothing keeps listening on a dead tunnel.
         if (!closing) {
           void close()
-          onError(`SSH tunnel: ${finalError.message}`)
+          onError(`SSH tunnel: ${errorMessage(finalError)}`)
         }
         return
       }

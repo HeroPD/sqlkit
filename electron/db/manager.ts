@@ -35,6 +35,7 @@ import { isReadOnlyQuery } from '../../src/sql-order'
 import { isReadOnlyScript } from '../../src/sql-readonly'
 import { t } from '../../src/i18n'
 import { createDriver, type Driver } from './driver'
+import { errorMessage } from './error-message'
 import { queryErrorLine } from './error-line'
 import { ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
@@ -237,7 +238,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       })
       return { success: true, serverVersion }
     } catch (error) {
-      const message = (error as Error).message
+      const message = errorMessage(error)
       if (isCurrent()) register({ phase: 'error', profileId: profile.id, error: message, ...resources })
       // A failed connect must not leak the pool or the tunnel under it.
       await teardown()
@@ -294,7 +295,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       if (connectedDriver(profileId) === driver) syncTransaction(profileId)
       // Typed here — same process as the drivers' throw — so the renderer never
       // has to pattern-match the human-readable message.
-      const message = (error as Error).message
+      const message = errorMessage(error)
       const cancelled = message === t('query.cancelled')
       // Position mapping only holds when the submitted text was the raw sql;
       // a grid sort/filter rewrite shifts every offset.
@@ -324,7 +325,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return await driver.runBatch(statements, childDb)
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -339,7 +340,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return await driver.runDdl(statements, childDb)
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -374,7 +375,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       return { success: true, rowCount }
     } catch (error) {
       await unlink(filePath).catch(() => {})
-      const message = (error as Error).message
+      const message = errorMessage(error)
       return { success: false, error: message, ...(message === t('query.cancelled') ? { cancelled: true } : {}) }
     }
   }
@@ -399,7 +400,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       }
       return { success: false, error: t('connection.noRunningQuery') }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -433,7 +434,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       const transaction = driver.openTransaction?.() ?? null
       return { success: true, ...(transaction ? { transaction } : {}) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     } finally {
       syncTransaction(profileId)
     }
@@ -452,7 +453,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       broadcast(statuses())
       return { success: true }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -466,7 +467,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, meta: await driver.databaseCreateMeta() }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -479,7 +480,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, tables: await driver.listTables(childDb) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -493,7 +494,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, stats: await driver.listTableStats(childDb) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -504,7 +505,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       // Engines without schema objects (sqlite) just have empty lists.
       return { success: true, objects: (await driver.listObjects?.(childDb)) ?? { functions: [], types: [] } }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -520,7 +521,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, inspection: await driver.inspectObject(object, objectKind, childDb) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -531,7 +532,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, sql: await driver.objectDdl(ref, childDb) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -542,7 +543,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, sections: await driver.inspectServer(childDb) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -553,7 +554,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, activity: await driver.serverActivity(childDb) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -567,7 +568,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       await driver.endSession(sessionId, mode)
       return { success: true }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -577,7 +578,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, inspection: await driver.inspectTable(table, childDb) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -587,7 +588,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     try {
       return { success: true, columns: await driver.listColumns(childDb) }
     } catch (error) {
-      return { success: false, error: (error as Error).message }
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -638,7 +639,7 @@ export async function testConnection(profile: ConnectionProfile): Promise<TestCo
     const serverVersion = await driver.connect()
     return { success: true, serverVersion, tookMs: tookMs() }
   } catch (error) {
-    return { success: false, error: (error as Error).message, tookMs: tookMs() }
+    return { success: false, error: errorMessage(error), tookMs: tookMs() }
   } finally {
     await driver?.disconnect().catch(() => {})
     await endpoint?.tunnel?.close().catch(() => {})

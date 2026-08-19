@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef, TableStat } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
+import { errorMessage } from './error-message'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
 import { byteCount, sizedRow } from './table-stats'
@@ -706,7 +707,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
-          error: isCancelled(error) || (error as Error).message === t('query.cancelled') ? t('query.saveCancelled') : (error as Error).message,
+          error: isCancelled(error) || (error as Error).message === t('query.cancelled') ? t('query.saveCancelled') : errorMessage(error),
         }
       } finally {
         running.delete(entry)
@@ -741,7 +742,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
-          error: isCancelled(error) || (error as Error).message === t('query.cancelled') ? t('query.saveCancelled') : (error as Error).message,
+          error: isCancelled(error) || (error as Error).message === t('query.cancelled') ? t('query.saveCancelled') : errorMessage(error),
         }
       } finally {
         running.delete(entry)

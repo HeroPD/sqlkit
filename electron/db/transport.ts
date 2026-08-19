@@ -1,5 +1,6 @@
 import type { ConnectionProfile, TestSshResult } from '../../src/electron'
 import { dialog } from 'electron'
+import { errorMessage } from './error-message'
 import { openSshTunnel } from './sshTunnel'
 import { t } from '../../src/i18n'
 
@@ -57,7 +58,7 @@ export async function resolveEndpoint(
     try {
       tunnel = await openSshTunnel(profile.ssh!, host, port, onTunnelError, approveFirstUse)
     } catch (error) {
-      throw new Error(t('ssh.tunnelFailed', { error: (error as Error).message }), { cause: error })
+      throw new Error(t('ssh.tunnelFailed', { error: errorMessage(error) }), { cause: error })
     }
     return { host: '127.0.0.1', port: tunnel.localPort, tunnel }
   }
@@ -78,7 +79,7 @@ export async function testSshTunnel(profile: ConnectionProfile): Promise<TestSsh
     tunnel = await openSshTunnel(profile.ssh!, host, port, () => {}, approveFirstUse)
     return { success: true, tookMs: tookMs() }
   } catch (error) {
-    return { success: false, error: (error as Error).message, tookMs: tookMs() }
+    return { success: false, error: errorMessage(error), tookMs: tookMs() }
   } finally {
     await tunnel?.close().catch(() => {})
   }

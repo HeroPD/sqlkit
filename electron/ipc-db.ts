@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebC
 import { join } from 'node:path'
 import type { ConnectionProfile } from '../src/electron'
 import { t } from '../src/i18n'
+import { errorMessage } from './db/error-message'
 import { testConnection, type ConnectionManager } from './db/manager'
 import { MAX_FETCH_ROWS } from './db/result-sessions'
 import { testSshTunnel } from './db/transport'
@@ -41,21 +42,21 @@ export function registerDbIpc(context: DbIpcContext) {
     try {
       return testConnection(hydratedProfile(event, connectionProfile(profile)))
     } catch (error) {
-      return { success: false as const, error: (error as Error).message, tookMs: 0 }
+      return { success: false as const, error: errorMessage(error), tookMs: 0 }
     }
   })
   ipcMain.handle('db:test-ssh', (event, profile: unknown) => {
     try {
       return testSshTunnel(hydratedProfile(event, connectionProfile(profile)))
     } catch (error) {
-      return { success: false as const, error: (error as Error).message, tookMs: 0 }
+      return { success: false as const, error: errorMessage(error), tookMs: 0 }
     }
   })
   ipcMain.handle('db:connect', (event, profile: unknown) => {
     try {
       return manager(event).connect(hydratedProfile(event, connectionProfile(profile)))
     } catch (error) {
-      return { success: false as const, error: (error as Error).message }
+      return { success: false as const, error: errorMessage(error) }
     }
   })
   ipcMain.handle('db:disconnect', (event, profileId: unknown) =>
@@ -70,7 +71,7 @@ export function registerDbIpc(context: DbIpcContext) {
         stringValue(database, 'Database name', 2_000),
       )
     } catch (error) {
-      return { success: false as const, error: (error as Error).message }
+      return { success: false as const, error: errorMessage(error) }
     }
   })
   ipcMain.handle('db:statuses', (event) => existingManager(event)?.statuses() ?? [])
@@ -78,7 +79,7 @@ export function registerDbIpc(context: DbIpcContext) {
     try {
       return manager(event).endTransaction(stringValue(profileId, 'Profile id', 200), transactionEndMode(mode))
     } catch (error) {
-      return { success: false as const, error: (error as Error).message }
+      return { success: false as const, error: errorMessage(error) }
     }
   })
   ipcMain.handle(
@@ -96,7 +97,7 @@ export function registerDbIpc(context: DbIpcContext) {
           payload.executionId,
         )
       } catch (error) {
-        return { success: false as const, error: (error as Error).message }
+        return { success: false as const, error: errorMessage(error) }
       }
     },
   )
@@ -108,7 +109,7 @@ export function registerDbIpc(context: DbIpcContext) {
         batchStatements(statements),
       )
     } catch (error) {
-      return { success: false as const, error: (error as Error).message }
+      return { success: false as const, error: errorMessage(error) }
     }
   })
   ipcMain.handle('db:run-ddl', (event, profileId: unknown, childDb: unknown, statements: unknown) => {
@@ -119,7 +120,7 @@ export function registerDbIpc(context: DbIpcContext) {
         ddlStatements(statements),
       )
     } catch (error) {
-      return { success: false as const, error: (error as Error).message }
+      return { success: false as const, error: errorMessage(error) }
     }
   })
   ipcMain.handle('db:fetch-rows', (event, sessionId: unknown, offset: unknown, limit: unknown) =>
@@ -144,7 +145,7 @@ export function registerDbIpc(context: DbIpcContext) {
         sqlTable: optionalTableReference(sqlTable),
       }
     } catch (error) {
-      return { success: false as const, error: (error as Error).message }
+      return { success: false as const, error: errorMessage(error) }
     }
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return { success: false as const, error: t('workspace.windowNotReady') }

@@ -1,6 +1,7 @@
 import mysql from 'mysql2/promise'
 import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResult, QueryResultSet, TableRef, TableStat } from '../../src/electron'
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
+import { errorMessage } from './error-message'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
 import { byteCount, sizedRow } from './table-stats'
@@ -564,7 +565,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         return {
           success: false,
           failedIndex: index >= 0 ? index : undefined,
-          error: isInterrupted(error) ? t('query.saveCancelled') : (error as Error).message,
+          error: isInterrupted(error) ? t('query.saveCancelled') : errorMessage(error),
         }
       } finally {
         running.delete(entry)
@@ -597,7 +598,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           failedIndex: index >= 0 ? index : undefined,
           partial: index > 0,
           appliedCount: Math.max(0, index),
-          error: isInterrupted(error) ? t('query.saveCancelled') : (error as Error).message,
+          error: isInterrupted(error) ? t('query.saveCancelled') : errorMessage(error),
         }
       } finally {
         running.delete(entry)

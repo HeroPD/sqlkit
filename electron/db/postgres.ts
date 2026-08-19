@@ -9,6 +9,7 @@ import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResul
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
+import { errorMessage } from './error-message'
 import { columnReference } from './column-reference'
 import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
 import { byteCount, sizedRow } from './table-stats'
@@ -563,7 +564,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
         // transaction state is discarded — closing the connection aborts the txn.
         client.release(error as Error)
         const cancelled = (error as { code?: string }).code === '57014'
-        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? t('query.saveCancelled') : (error as Error).message }
+        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? t('query.saveCancelled') : errorMessage(error) }
       } finally {
         running.delete(entry)
       }
@@ -595,7 +596,7 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
       } catch (error) {
         client.release(error as Error)
         const cancelled = (error as { code?: string }).code === '57014'
-        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? t('query.saveCancelled') : (error as Error).message }
+        return { success: false, failedIndex: index >= 0 ? index : undefined, error: cancelled ? t('query.saveCancelled') : errorMessage(error) }
       } finally {
         running.delete(entry)
       }
