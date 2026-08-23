@@ -2,12 +2,12 @@ import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import './components/welcome-screen'
 import './components/workbench-screen'
-import type { MenuAction, RecentWorkspace, ThemeId, WorkspaceResult } from './electron'
+import type { MenuAction, RecentWorkspace, WorkspaceResult } from './electron'
 import { t } from './i18n'
 import { isMac } from './platform'
 import { titlebar } from './shared-styles'
 
-type Screen = 'welcome' | 'workbench'
+type Screen = 'welcome' | 'workbench' | 'settings'
 type Workspace = { name: string; path: string }
 
 // Width the macOS traffic lights occupy over a `hiddenInset` title bar, plus
@@ -28,6 +28,7 @@ export class AppRoot extends LitElement {
 
   @state()
   private _workspace: Workspace | null = null
+  private _settingsReturn: Exclude<Screen, 'settings'> = 'welcome'
 
   @state()
   private _recents: RecentWorkspace[] = []
@@ -37,7 +38,6 @@ export class AppRoot extends LitElement {
     this._unsubscribeMenu = window.sqlkit.onMenuAction((action) => this._onMenuAction(action))
     this._applyTitlebarInset(false)
     this._unsubscribeFullScreen = window.sqlkit.onFullScreenChange((full) => this._applyTitlebarInset(full))
-    void window.sqlkit.getTheme().then((theme) => this._applyTheme(theme))
     void this._loadRecents()
   }
 
@@ -57,12 +57,7 @@ export class AppRoot extends LitElement {
 
   private _onMenuAction(action: MenuAction) {
     if (action === 'open-workspace') void this._onOpenFolder()
-    if (action.startsWith('theme:')) this._applyTheme(action.slice('theme:'.length) as ThemeId)
-  }
-
-  private _applyTheme(theme: ThemeId) {
-    document.documentElement.dataset.theme = theme
-    localStorage.setItem('sqlkit-theme', theme)
+    if (action === 'settings') this._onOpenSettings()
   }
 
   // Document-level so both title bars (welcome and workbench) inherit it.
@@ -73,12 +68,15 @@ export class AppRoot extends LitElement {
 
   render() {
     const welcome = this._screen === 'welcome'
+    const workbench = this._screen !== 'welcome'
     return html`
       <div
         id="app"
         @open-folder=${this._onOpenFolder}
         @open-recent=${this._onOpenRecent}
         @close-workspace=${this._onCloseWorkspace}
+        @open-settings=${this._onOpenSettings}
+        @settings-close=${this._onSettingsClose}
       >
         ${welcome
           ? html`
@@ -88,7 +86,11 @@ export class AppRoot extends LitElement {
             `
           : ''}
         <welcome-screen class="screen ${welcome ? 'active' : ''}" .recents=${this._recents}></welcome-screen>
-        <workbench-screen class="screen ${welcome ? '' : 'active'}" .workspace=${this._workspace}></workbench-screen>
+        <workbench-screen
+          class="screen ${workbench ? 'active' : ''}"
+          .workspace=${this._workspace}
+          .settingsOpen=${this._screen === 'settings'}
+        ></workbench-screen>
       </div>
     `
   }
@@ -122,6 +124,17 @@ export class AppRoot extends LitElement {
     this._workspace = null
     this._screen = 'welcome'
     void this._loadRecents()
+  }
+
+  private _onSettingsClose() {
+    if (this._screen === 'settings') this._screen = this._settingsReturn
+  }
+
+  // Both entry points (⌘, and the activity-bar toggle) land here, so the screen
+  // to return to is remembered once and re-entering settings never loses it.
+  private _onOpenSettings() {
+    if (this._screen !== 'settings') this._settingsReturn = this._screen
+    this._screen = 'settings'
   }
 
   static styles = [

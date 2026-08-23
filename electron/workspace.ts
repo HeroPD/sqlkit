@@ -11,6 +11,15 @@ import type {
   WorkspaceResult,
 } from '../src/electron'
 import type { ThemeId } from '../src/electron'
+import {
+  APP_SETTINGS_VERSION,
+  DEFAULT_WORKSPACE_PREFERENCES,
+  migrateAppSettings,
+  normalizeAppSettings,
+  normalizeWorkspacePreferences,
+  type AppSettings,
+} from '../src/settings'
+import { DEFAULT_THEME, themeOrDefault } from '../src/themes'
 import { workspaceConfig as validateWorkspaceConfig } from './ipc-validation'
 import { t } from '../src/i18n'
 
@@ -29,13 +38,14 @@ type GlobalConfig = {
   recentWorkspaces: RecentWorkspace[]
   lastWorkspace: string | null
   theme: ThemeId
+  settings: AppSettings
+  /** How many settings migrations the stored blob has been through. */
+  settingsVersion: number
 }
 
-const DEFAULT_THEME: ThemeId = 'dark'
-const themeValue = (value: unknown): ThemeId =>
-  value === 'light' || value === 'midnight-blue' || value === 'warm-dark' ? value : DEFAULT_THEME
+const themeValue = themeOrDefault
 
-const defaultWorkspaceConfig = (): WorkspaceConfig => ({ version: 1, connections: [] })
+const defaultWorkspaceConfig = (): WorkspaceConfig => ({ version: 1, connections: [], preferences: DEFAULT_WORKSPACE_PREFERENCES })
 
 const workspaceConfigPathFor = (wsPath: string) => path.join(wsPath, '.sqlkit', 'config.json')
 
@@ -262,6 +272,7 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
       status: 'ok',
       config: {
         ...parsed,
+        preferences: normalizeWorkspacePreferences(parsed.preferences),
         connections: normalizeConnections(parsed.connections),
       },
     }
@@ -376,22 +387,47 @@ const globalConfigPath = () => path.join(app.getPath('userData'), 'config.json')
 export function readGlobalConfig(): GlobalConfig {
   try {
     const file = globalConfigPath()
-    if (fs.statSync(file).size > MAX_CONFIG_BYTES) return { recentWorkspaces: [], lastWorkspace: null, theme: DEFAULT_THEME }
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { recentWorkspaces?: unknown; lastWorkspace?: unknown; theme?: unknown }
+    if (fs.statSync(file).size > MAX_CONFIG_BYTES) return defaultGlobalConfig()
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+      recentWorkspaces?: unknown
+      lastWorkspace?: unknown
+      theme?: unknown
+      settings?: unknown
+      settingsVersion?: unknown
+    }
     // Valid JSON with a missing/wrong-typed shape (a hand-edit, an old version)
     // must not crash callers that map over recentWorkspaces — normalize to the
     // known shape, dropping entries without a usable path.
     const entries: unknown[] = Array.isArray(parsed.recentWorkspaces) ? parsed.recentWorkspaces : []
+    const theme = themeValue(parsed.theme)
     return {
       recentWorkspaces: entries.filter((entry): entry is RecentWorkspace =>
         !!entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).path === 'string'),
       lastWorkspace: typeof parsed.lastWorkspace === 'string' ? parsed.lastWorkspace : null,
-      theme: themeValue(parsed.theme),
+      theme,
+      // Migrations run before coercion: a renamed key still holds its value,
+      // and anything they leave malformed still falls back to its default.
+      settings: normalizeAppSettings({
+        ...record(migrateAppSettings(parsed.settings, typeof parsed.settingsVersion === 'number' ? parsed.settingsVersion : 0)),
+        theme,
+      }),
+      settingsVersion: APP_SETTINGS_VERSION,
     }
   } catch {
-    return { recentWorkspaces: [], lastWorkspace: null, theme: DEFAULT_THEME }
+    return defaultGlobalConfig()
   }
 }
+
+const record = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+
+const defaultGlobalConfig = (): GlobalConfig => ({
+  recentWorkspaces: [],
+  lastWorkspace: null,
+  theme: DEFAULT_THEME,
+  settings: normalizeAppSettings(null),
+  settingsVersion: APP_SETTINGS_VERSION,
+})
 
 function writeGlobalConfig(config: GlobalConfig) {
   writeFileAtomic(globalConfigPath(), JSON.stringify(config, null, 2))
@@ -399,8 +435,21 @@ function writeGlobalConfig(config: GlobalConfig) {
 
 export const readTheme = (): ThemeId => readGlobalConfig().theme
 
+export const readAppSettings = (): AppSettings => readGlobalConfig().settings
+
+export function writeAppSettings(settings: AppSettings) {
+  const normalized = normalizeAppSettings(settings)
+  writeGlobalConfig({
+    ...readGlobalConfig(),
+    theme: normalized.theme,
+    settings: normalized,
+    settingsVersion: APP_SETTINGS_VERSION,
+  })
+}
+
 export function writeTheme(theme: ThemeId) {
-  writeGlobalConfig({ ...readGlobalConfig(), theme })
+  const config = readGlobalConfig()
+  writeGlobalConfig({ ...config, theme, settings: { ...config.settings, theme } })
 }
 
 export function isDirectory(checkPath: string) {

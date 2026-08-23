@@ -1,5 +1,5 @@
-import { EditorState, Prec, type Extension, type Line, type Text } from '@codemirror/state'
-import { keymap, type EditorView } from '@codemirror/view'
+import { EditorState, type Line, type Text } from '@codemirror/state'
+import type { Command, EditorView } from '@codemirror/view'
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
 import { sql } from '@codemirror/lang-sql'
 import type { SyntaxNode, Tree } from '@lezer/common'
@@ -503,17 +503,11 @@ export const firstStatement = (text: string, dialect?: SqlDialectName): string =
   return closestQueryBlock(state, 0, true, dialect)?.sql ?? ''
 }
 
-/** Binds Mod-Enter to run the selection, or the query block at/nearest the cursor. */
-export const runQuery = (onRun: RunQueryHandler, dialect?: () => SqlDialectName): Extension =>
-  Prec.highest(
-    keymap.of([
-      {
-        key: 'Mod-Enter',
-        run: (view) => {
-          const query = queryToRun(view.state, dialect?.())
-          if (query) onRun(query, view)
-          return true
-        },
-      },
-    ]),
-  )
+/** Runs the selection, or the query block at/nearest the cursor. The editor owns
+ * the key it is bound to, so every configurable shortcut is matched one way. */
+export const runQueryCommand = (onRun: RunQueryHandler, dialect?: () => SqlDialectName): Command =>
+  (view) => {
+    const query = queryToRun(view.state, dialect?.())
+    if (query) onRun(query, view)
+    return true
+  }

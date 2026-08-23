@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  appSettings,
   batchStatements,
   connectionProfile,
   databaseObject,
@@ -14,6 +15,7 @@ import {
   workspaceConfig,
   workspaceSession,
 } from './ipc-validation'
+import { DEFAULT_APP_SETTINGS } from '../src/settings'
 
 const profile = () => ({
   id: 'p1', name: 'db', engine: 'postgresql', host: 'localhost', port: '5432', username: 'u', password: '',
@@ -26,6 +28,16 @@ describe('IPC validation', () => {
       id: 'p1', engine: 'postgresql', labelColor: 'accent-01', readOnly: true,
     })
     expect(workspaceConfig({ version: 1, connections: [profile()] }).connections).toHaveLength(1)
+  })
+
+  it('validates app and workspace settings at the IPC boundary', () => {
+    expect(appSettings(DEFAULT_APP_SETTINGS)).toEqual(DEFAULT_APP_SETTINGS)
+    expect(() => appSettings({ ...DEFAULT_APP_SETTINGS, editorFontSize: 100 })).toThrow(/font size/i)
+    expect(() => workspaceConfig({
+      version: 1,
+      connections: [],
+      preferences: { saveHistory: true, historyRetentionDays: 12, maxHistoryPerContext: 200 },
+    })).toThrow(/retention/i)
   })
 
   it('rejects invalid engines, malformed configs, and oversized collections', () => {

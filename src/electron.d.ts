@@ -1,5 +1,6 @@
 import type { ExportFormat } from './result-export'
 import type { SelectionCommandId } from './codemirror/selection-commands'
+import type { AppSettings, WorkspacePreferences } from './settings'
 
 export type RecentWorkspace = {
   name: string
@@ -108,6 +109,7 @@ export type WorkspaceConfig = {
   connections: ConnectionProfile[]
   /** The in-use database context (⌘K); restored on workspace open. */
   activeDbId?: string | null
+  preferences?: WorkspacePreferences
 }
 
 export type SaveResult = { success: true } | { success: false; error: string }
@@ -509,6 +511,9 @@ export type SqlkitApi = {
   getTheme: () => Promise<ThemeId>
   /** Persists the theme and broadcasts it, as the View menu's own items do. */
   setTheme: (theme: ThemeId) => Promise<void>
+  getSettings: () => Promise<AppSettings>
+  setSettings: (settings: AppSettings) => Promise<void>
+  onSettingsChange: (listener: (settings: AppSettings) => void) => () => void
   getWorkspaceConfig: () => Promise<WorkspaceConfigResult>
   saveWorkspaceConfig: (config: WorkspaceConfig) => Promise<SaveResult>
   /** The workspace's persisted query history, newest first. */
@@ -653,6 +658,7 @@ export type MenuAction =
   | 'save-as'
   | 'close-tab'
   | 'refresh-results'
+  | 'settings'
   | `theme:${ThemeId}`
   | `selection:${SelectionCommandId}`
 

@@ -3,6 +3,7 @@ import type { ConnectionProfile } from '../electron'
 import type { ConnectionsController } from './connections'
 import type { DialogsController } from './dialogs'
 import { t } from '../i18n'
+import { DEFAULT_WORKSPACE_PREFERENCES, normalizeWorkspacePreferences, type WorkspacePreferences } from '../settings'
 
 type Deps = {
   // Live connection statuses, read to resolve which child a profile targets.
@@ -17,6 +18,8 @@ type Deps = {
 // which owns the *live* connections. Setting `connections` re-renders the host.
 export class ConfigController {
   private _connections: ConnectionProfile[] = []
+  private _preferences: WorkspacePreferences = DEFAULT_WORKSPACE_PREFERENCES
+  private preferenceListeners = new Set<(preferences: WorkspacePreferences) => void>()
   private host: ReactiveControllerHost
   private deps: Deps
   /** Warn about unencrypted-at-rest secrets at most once per workspace open. */
@@ -35,9 +38,33 @@ export class ConfigController {
     this.host.requestUpdate()
   }
 
+  get preferences() { return this._preferences }
+
+  setPreferences(value: WorkspacePreferences) {
+    this._preferences = normalizeWorkspacePreferences(value)
+    this.announcePreferences()
+    this.host.requestUpdate()
+    this.persist()
+  }
+
+  /** Registers a consumer of the workspace preferences and hands it the current
+   * ones. Consumers subscribe once instead of every writer remembering to call
+   * them, so a new preference cannot be half-wired. Returns an unsubscribe. */
+  onPreferences(listener: (preferences: WorkspacePreferences) => void) {
+    this.preferenceListeners.add(listener)
+    listener(this._preferences)
+    return () => this.preferenceListeners.delete(listener)
+  }
+
+  private announcePreferences() {
+    for (const listener of this.preferenceListeners) listener(this._preferences)
+  }
+
   // Workspace close: forget the loaded profiles.
   reset() {
     this.connections = []
+    this._preferences = DEFAULT_WORKSPACE_PREFERENCES
+    this.announcePreferences()
     this._warnedUnencrypted = false
   }
 
@@ -99,6 +126,8 @@ export class ConfigController {
       this.deps.dialogs.notice(t('config.weakStorageTitle'), t('config.weakStorageDetail'))
     }
     this.connections = config.connections
+    this._preferences = normalizeWorkspacePreferences(config.preferences)
+    this.announcePreferences()
     const restored =
       config.activeDbId && config.connections.some((connection) => connection.id === config.activeDbId)
         ? config.activeDbId
@@ -112,6 +141,7 @@ export class ConfigController {
       version: 1,
       connections: this._connections,
       activeDbId: this.deps.activeDbId(),
+      preferences: this._preferences,
     }).then((result) => {
       if (!result.success) this.deps.dialogs.notice(t('config.saveFailed'), result.error)
     }).catch((error: unknown) => this.deps.dialogs.notice(t('config.saveFailed'), (error as Error).message))
@@ -125,7 +155,7 @@ export class ConfigController {
       existing >= 0
         ? this._connections.map((connection) => (connection.id === profile.id ? profile : connection))
         : [...this._connections, profile]
-    const result = await window.sqlkit.saveWorkspaceConfig({ version: 1, connections, activeDbId: this.deps.activeDbId() })
+    const result = await window.sqlkit.saveWorkspaceConfig({ version: 1, connections, activeDbId: this.deps.activeDbId(), preferences: this._preferences })
     if (!result.success) {
       console.error('Failed to save workspace config:', result.error)
       return false

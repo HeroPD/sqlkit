@@ -44,7 +44,7 @@ const CONNECTED_COMMANDS = new Set(['refresh-schema', 'create-database'])
 
 type Deps = {
   live: ConnectionsController
-  commands: readonly PaletteCommand[]
+  commands: () => readonly PaletteCommand[]
   files: () => FileInfo[]
   connections: () => ConnectionProfile[]
   activeProfile: () => ConnectionProfile | null
@@ -142,7 +142,7 @@ export class CommandPaletteController implements ReactiveController {
 
   entries(): PaletteEntry[] {
     if (this.mode === 'commands') {
-      const available = this.deps.commands.flatMap(({ id, category, label, keybind }): PaletteEntry[] => {
+      const available = this.deps.commands().flatMap(({ id, category, label, keybind }): PaletteEntry[] => {
         const detail = this.commandDetail(id)
         if (detail === null) return []
         const name = t('palette.command', { category: CATEGORY_LABELS[category], label })

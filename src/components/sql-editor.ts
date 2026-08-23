@@ -4,11 +4,12 @@ import { icons, scrollbars } from '../shared-styles'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 
-import { Compartment, EditorState } from '@codemirror/state'
+import { Compartment, EditorState, Prec, type Extension } from '@codemirror/state'
 import {
   EditorView,
   keymap,
   lineNumbers,
+  type Command,
   highlightActiveLine,
   highlightActiveLineGutter,
   drawSelection,
@@ -24,6 +25,7 @@ import {
 import {
   bracketMatching,
   indentOnInput,
+  indentUnit,
   syntaxHighlighting,
 } from '@codemirror/language'
 import {
@@ -41,7 +43,7 @@ import {
 } from '@codemirror/autocomplete'
 import { highlightSelectionMatches, openSearchPanel, search, searchKeymap } from '@codemirror/search'
 import { sql } from '@codemirror/lang-sql'
-import { explicitQueryToRun, hasExplicitQueryTarget, queryToRun, runQuery } from '../codemirror/run-query'
+import { explicitQueryToRun, hasExplicitQueryTarget, queryToRun, runQueryCommand } from '../codemirror/run-query'
 import { altShiftKeys } from '../codemirror/alt-shift-keys'
 import { createFindPanel, findWidgetStyles } from '../codemirror/find-panel'
 import {
@@ -70,8 +72,10 @@ import {
 } from '../sql-scope'
 import { oneDarkTheme } from '@codemirror/theme-one-dark'
 import { softHighlightStyle } from '../codemirror/highlight'
-import { isMac, mod } from '../platform'
+import { mod } from '../platform'
 import { t } from '../i18n'
+import { displayKeybinding, eventMatchesBinding } from '../keybindings'
+import { KEYMAP_DEFAULTS } from '../settings'
 
 const FORMAT_LANGUAGE = {
   postgres: 'postgresql',
@@ -94,9 +98,9 @@ const appTheme = EditorView.theme(
 
     '.cm-scroller': {
       fontFamily: 'var(--mono-font)',
-      fontSize: 'var(--font-size)',
+      fontSize: 'var(--editor-font-size, var(--font-size))',
       fontFeatureSettings: "'liga' 0, 'calt' 0",
-      lineHeight: '1.5',
+      lineHeight: 'var(--editor-line-height, 1.5)',
       overscrollBehavior: 'none',
     },
 
@@ -231,6 +235,7 @@ export function clearEditorStateCache() {
 // across component instances can still be reconfigured.
 const languageCompartment = new Compartment()
 const autocompleteCompartment = new Compartment()
+const appearanceCompartment = new Compartment()
 // run-query + change events close over the component instance; a cached
 // state restored into a NEW element must be rebound to it, or those events
 // fire on the old detached element and vanish.
@@ -239,9 +244,6 @@ const handlersCompartment = new Compartment()
 // Everything per-state that doesn't capture component state, built once.
 const baseExtensions = [
   lineNumbers(),
-  highlightActiveLineGutter(),
-  highlightActiveLine(),
-
   history(),
   indentOnInput(),
   bracketMatching(),
@@ -311,7 +313,7 @@ const baseKeymap = keymap.of([
 // Theme precedence in CodeMirror is earlier-wins: appTheme must come BEFORE
 // oneDarkTheme or every app override (editor bg, tooltip, panel placement)
 // silently loses to One Dark's rules.
-const themeExtensions = [appTheme, oneDarkTheme, syntaxHighlighting(softHighlightStyle), EditorView.lineWrapping]
+const themeExtensions = [appTheme, oneDarkTheme, syntaxHighlighting(softHighlightStyle)]
 
 // The segment still being typed: its closing quote may be missing.
 const IDENT_TAIL = '"[^"]*"?|`[^`]*`?|\\[[^\\]]*\\]?|[A-Za-z0-9_$]*'
@@ -357,6 +359,14 @@ export class SqlEditor extends LitElement {
   /** Column metadata of the context, for member and bare-name completion. */
   @property({ attribute: false })
   columns: ColumnRef[] | null = null
+
+  @property({ type: Boolean }) wordWrap = true
+  @property({ type: Boolean }) autocompleteEnabled = true
+  @property({ type: Boolean }) highlightActiveLine = true
+  @property({ type: Number }) tabSize = 4
+  @property() runQueryKey = KEYMAP_DEFAULTS.runQuery
+  @property() formatSqlKey = KEYMAP_DEFAULTS.formatSql
+  @property() commandPaletteKey = KEYMAP_DEFAULTS.commandPalette
 
   @property()
   dialect: SqlDialectName = 'postgres'
@@ -451,6 +461,7 @@ export class SqlEditor extends LitElement {
       handlersCompartment.of(this._handlerExtensions()),
       baseExtensions,
       autocompleteCompartment.of(this._autocompleteExtension()),
+      appearanceCompartment.of(this._appearanceExtensions()),
       baseKeymap,
       languageCompartment.of(this._sqlExtension()),
       themeExtensions,
@@ -460,8 +471,7 @@ export class SqlEditor extends LitElement {
   // Everything that captures `this` — rebound whenever a state lands in a view.
   private _handlerExtensions() {
     return [
-      runQuery((query, view) => this._emitRun(query.sql, view.state.doc.lineAt(query.from).number), () => this.dialect),
-      altShiftKeys({ KeyF: () => this.formatSql() }),
+      this._configurableKeys(),
       this._changeListener,
     ]
   }
@@ -474,6 +484,7 @@ export class SqlEditor extends LitElement {
         handlersCompartment.reconfigure(this._handlerExtensions()),
         languageCompartment.reconfigure(this._sqlExtension()),
         autocompleteCompartment.reconfigure(this._autocompleteExtension()),
+        appearanceCompartment.reconfigure(this._appearanceExtensions()),
       ],
     })
   }
@@ -545,6 +556,18 @@ export class SqlEditor extends LitElement {
       }
 
       this._lastEmittedValue = this.value
+    }
+
+    if (changed.has('runQueryKey') || changed.has('formatSqlKey') || changed.has('commandPaletteKey')) {
+      view.dispatch({ effects: handlersCompartment.reconfigure(this._handlerExtensions()) })
+    }
+
+    if (changed.has('wordWrap') || changed.has('highlightActiveLine') || changed.has('tabSize')) {
+      view.dispatch({ effects: appearanceCompartment.reconfigure(this._appearanceExtensions()) })
+    }
+
+    if (changed.has('autocompleteEnabled')) {
+      view.dispatch({ effects: autocompleteCompartment.reconfigure(this._autocompleteExtension()) })
     }
 
     if (changed.has('tables') || changed.has('dialect') || changed.has('columns')) {
@@ -685,15 +708,15 @@ export class SqlEditor extends LitElement {
   private _menuItems(): MenuItem[] {
     const noSelection = !this._view?.state.selection.ranges.some((range) => !range.empty)
     return [
-      { id: 'run', label: t('action.runQuery'), shortcut: isMac ? '⌘↵' : 'Ctrl+↵' },
-      { id: 'format', label: t('action.formatSql'), shortcut: isMac ? '⇧⌥F' : 'Shift+Alt+F' },
+      { id: 'run', label: t('action.runQuery'), shortcut: displayKeybinding(this.runQueryKey) },
+      { id: 'format', label: t('action.formatSql'), shortcut: displayKeybinding(this.formatSqlKey) },
       { id: 'cut', label: t('action.cut'), shortcut: mod('X'), disabled: noSelection, separatorBefore: true },
       { id: 'copy', label: t('action.copy'), shortcut: mod('C'), disabled: noSelection },
       { id: 'paste', label: t('action.paste'), shortcut: mod('V') },
       {
         id: 'command-palette',
         label: t('action.commandPalette'),
-        shortcut: isMac ? '⇧⌘P' : 'Shift+Ctrl+P',
+        shortcut: displayKeybinding(this.commandPaletteKey),
         separatorBefore: true,
       },
     ]
@@ -718,13 +741,7 @@ export class SqlEditor extends LitElement {
         void this._paste()
         break
       case 'command-palette':
-        this.dispatchEvent(
-          new CustomEvent<EditorCommandDetail>('editor-command', {
-            detail: { command: 'command-palette' },
-            bubbles: true,
-            composed: true,
-          }),
-        )
+        this._emitCommand('command-palette')
         break
     }
   }
@@ -774,11 +791,58 @@ export class SqlEditor extends LitElement {
 
   private _autocompleteExtension() {
     return autocompletion({
-      activateOnTyping: true,
+      activateOnTyping: this.autocompleteEnabled,
       defaultKeymap: false,
       interactionDelay: 75,
       override: [this._completionSource(), this._phraseSource()],
     })
+  }
+
+  // The three configurable commands, matched by physical key like altShiftKeys
+  // (a keymap entry cannot carry an Alt chord on macOS) and at the highest
+  // precedence, so a rebound chord wins over CodeMirror's own bindings instead
+  // of being swallowed by them — ⌘⇧K would otherwise delete a line.
+  private _configurableKeys(): Extension {
+    const bound: Array<[string, Command]> = [
+      [this.runQueryKey, runQueryCommand(
+        (query, view) => this._emitRun(query.sql, view.state.doc.lineAt(query.from).number),
+        () => this.dialect,
+      )],
+      [this.formatSqlKey, () => this.formatSql()],
+      [this.commandPaletteKey, () => this._emitCommand('command-palette')],
+    ]
+    return Prec.highest(
+      EditorView.domEventHandlers({
+        keydown: (event, view) => {
+          for (const [binding, command] of bound) {
+            if (!eventMatchesBinding(event, binding) || !command(view)) continue
+            event.preventDefault()
+            return true
+          }
+          return false
+        },
+      }),
+    )
+  }
+
+  private _appearanceExtensions() {
+    return [
+      ...(this.highlightActiveLine ? [highlightActiveLineGutter(), highlightActiveLine()] : []),
+      ...(this.wordWrap ? [EditorView.lineWrapping] : []),
+      // Both halves of "tab size": what Tab inserts, and how wide a literal tab
+      // renders (CodeMirror writes the CSS tab-size from this facet).
+      indentUnit.of(' '.repeat(this.tabSize)),
+      EditorState.tabSize.of(this.tabSize),
+    ]
+  }
+
+  private _emitCommand(command: EditorCommandDetail['command']) {
+    this.dispatchEvent(new CustomEvent<EditorCommandDetail>('editor-command', {
+      detail: { command },
+      bubbles: true,
+      composed: true,
+    }))
+    return true
   }
 
   private _completionSource() {

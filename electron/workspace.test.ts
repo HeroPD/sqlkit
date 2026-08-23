@@ -1,3 +1,4 @@
+import { APP_SETTINGS_VERSION, DEFAULT_APP_SETTINGS } from '../src/settings'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -9,11 +10,13 @@ import {
   readWorkspaceConfig,
   readWorkspaceConfigForRenderer,
   readWorkspaceHistory,
+  readAppSettings,
   readTheme,
   isWeakStorageBackend,
   workspaceProfileCount,
   writeWorkspaceConfig,
   writeWorkspaceHistory,
+  writeAppSettings,
   writeTheme,
 } from './workspace'
 
@@ -57,6 +60,25 @@ describe('global theme', () => {
     expect(readTheme()).toBe('warm-dark')
     fs.writeFileSync(path.join(state.userData, 'config.json'), JSON.stringify({ theme: 'unknown' }))
     expect(readTheme()).toBe('dark')
+  })
+})
+
+describe('global settings', () => {
+  it('persists settings alongside the legacy theme field', () => {
+    const settings = { ...readAppSettings(), editorFontSize: 17, editorWordWrap: false, theme: 'midnight-blue' as const }
+    writeAppSettings(settings)
+    expect(readAppSettings()).toEqual(settings)
+    expect(readTheme()).toBe('midnight-blue')
+  })
+
+  it('stamps the migration version it wrote, and repairs a hand-edited file', () => {
+    writeAppSettings({ ...readAppSettings(), editorFontSize: 17 })
+    const file = path.join(state.userData, 'config.json')
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8')) as { settingsVersion?: number }
+    expect(stored.settingsVersion).toBe(APP_SETTINGS_VERSION)
+
+    fs.writeFileSync(file, JSON.stringify({ settings: { editorFontSize: 900, editorWordWrap: 'yes' } }))
+    expect(readAppSettings()).toMatchObject({ editorFontSize: 20, editorWordWrap: DEFAULT_APP_SETTINGS.editorWordWrap })
   })
 })
 
@@ -329,7 +351,11 @@ describe('workspace config: missing vs corrupt', () => {
   it('returns defaults with no error when no config exists yet', () => {
     const result = readWorkspaceConfig(workspaceDir)
     expect(result.error).toBeUndefined()
-    expect(result.config).toEqual({ version: 1, connections: [] })
+    expect(result.config).toEqual({
+      version: 1,
+      connections: [],
+      preferences: { saveHistory: true, historyRetentionDays: 30, maxHistoryPerContext: 200 },
+    })
   })
 
   it('preserves a corrupt config and reports the error instead of wiping it', () => {

@@ -1,5 +1,5 @@
 import { LitElement, css, html } from 'lit'
-import { customElement } from 'lit/decorators.js'
+import { customElement, property } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import { APP_ICONS } from '../icons/app-icons'
 import { controls, typography } from '../shared-styles'
@@ -18,7 +18,7 @@ const ACTIONS: { action: EmptyAction; label: string; kbd?: string }[] = [
   { action: 'new-query', label: t('action.newQuery'), kbd: mod('N') },
   { action: 'quick-open', label: t('action.quickOpen').replace(/…$/, ''), kbd: mod('P') },
   { action: 'switch-database', label: t('action.switchDatabase').replace(/…$/, ''), kbd: mod('K') },
-  { action: 'command-palette', label: t('action.commandPalette'), kbd: isMac ? '⇧⌘P' : 'Ctrl+Shift+P' },
+  { action: 'command-palette', label: t('action.commandPalette') },
   { action: 'add-database', label: t('action.addDatabase') },
   { action: 'close-workspace', label: t('action.closeWorkspace') },
 ]
@@ -28,20 +28,25 @@ const ACTIONS: { action: EmptyAction; label: string; kbd?: string }[] = [
 // workbench decides what each action runs.
 @customElement('editor-empty')
 export class EditorEmpty extends LitElement {
+  /** The configured command-palette chord; the other hints are fixed keys. */
+  @property()
+  commandPaletteShortcut = isMac ? '⇧⌘P' : 'Ctrl+Shift+P'
+
   render() {
     return html`
       <div class="mark">${unsafeHTML(APP_ICONS.appicon)}</div>
       <h2>${t('app.name')}</h2>
       <p>${t('empty.noEditor')}</p>
       <div class="actions">
-        ${ACTIONS.map(
-          (entry) => html`
+        ${ACTIONS.map((entry) => {
+          const kbd = entry.action === 'command-palette' ? this.commandPaletteShortcut : entry.kbd
+          return html`
             <button type="button" @click=${() => this._emit(entry.action)}>
               <span>${entry.label}</span>
-              ${entry.kbd ? html`<kbd>${entry.kbd}</kbd>` : ''}
+              ${kbd ? html`<kbd>${kbd}</kbd>` : ''}
             </button>
-          `,
-        )}
+          `
+        })}
       </div>
     `
   }

@@ -17,10 +17,13 @@ import { t } from '../src/i18n'
 import { createConnectionManager, type ConnectionManager } from './db/manager'
 import { stopWorkspaceWatcher } from './files'
 import { registerDbIpc } from './ipc-db'
+import { appSettings as validateAppSettings } from './ipc-validation'
+import { THEMES, acceleratorFor, effectiveKeymapBindings, type MenuKeymapCommand } from '../src/settings'
+import { THEME_IDS, isThemeId } from '../src/themes'
 import { inspectionSwitch } from './hardening'
 import { registerWorkspaceIpc } from './ipc-workspace'
 import { markSessionClean } from './session'
-import { readGlobalConfig, readTheme, writeTheme } from './workspace'
+import { readAppSettings, readGlobalConfig, readTheme, writeAppSettings, writeTheme } from './workspace'
 import { titleBarOverlay, WINDOW_CHROME } from './window-chrome'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -271,6 +274,18 @@ function registerIpc() {
     if (!isThemeId(theme)) throw new Error('Unknown theme')
     selectTheme(theme)
   })
+  ipcMain.handle('app:get-settings', () => readAppSettings())
+  ipcMain.handle('app:set-settings', (_event, settings: unknown) => {
+    const parsed = validateAppSettings(settings)
+    const before = readAppSettings()
+    writeAppSettings(parsed)
+    selectTheme(parsed.theme)
+    // The menu owns a few of the keymap's chords; a rebind only takes effect
+    // once its accelerator is re-registered. Safe here because this arrives by
+    // IPC rather than from a menu click.
+    if (JSON.stringify(before.keymapOverrides) !== JSON.stringify(parsed.keymapOverrides)) buildAppMenu()
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('app:settings', parsed)
+  })
   registerWorkspaceIpc({
     workspaceFor,
     setWorkspace: (contentsId, path) => workspacePaths.set(contentsId, path),
@@ -351,10 +366,6 @@ function installQuitHandler() {
   })
 }
 
-// The Record makes tsc flag a theme added to ThemeId but not listed here.
-const THEMES: Record<ThemeId, true> = { dark: true, light: true, 'midnight-blue': true, 'warm-dark': true }
-const isThemeId = (value: unknown): value is ThemeId => typeof value === 'string' && value in THEMES
-
 // Persist the theme, repaint the Windows title bar, and tell every renderer.
 // Reached from the View menu and from the command palette, so the radio item is
 // checked here rather than left to the click Electron would have handled.
@@ -373,6 +384,10 @@ function selectTheme(theme: ThemeId) {
 function buildAppMenu() {
   const isMac = process.platform === 'darwin'
   const selectedTheme = readTheme()
+  // The menu registers these chords, so they come from the keymap settings —
+  // the accelerator shown here is the one the settings page lists.
+  const bindings = effectiveKeymapBindings(readAppSettings())
+  const chord = (command: MenuKeymapCommand) => acceleratorFor(bindings[command])
   const menuAction = (action: MenuAction) => (_item: unknown, window: unknown) => {
     if (window instanceof BrowserWindow) window.webContents.send('app:menu', action)
   }
@@ -385,19 +400,42 @@ function buildAppMenu() {
     registerAccelerator: false,
     click: menuAction(action),
   })
+  // macOS keeps Settings in the app menu, where ⌘, lives by convention; the
+  // other platforms have no app menu, so it leads the View menu instead.
+  const settingsItem: MenuItemConstructorOptions = {
+    label: t('menu.settings'),
+    accelerator: 'CmdOrCtrl+,',
+    click: menuAction('settings'),
+  }
+  const appMenu: MenuItemConstructorOptions = {
+    label: app.name,
+    submenu: [
+      { role: 'about' },
+      { type: 'separator' },
+      settingsItem,
+      { type: 'separator' },
+      { role: 'services' },
+      { type: 'separator' },
+      { role: 'hide' },
+      { role: 'hideOthers' },
+      { role: 'unhide' },
+      { type: 'separator' },
+      { role: 'quit' },
+    ],
+  }
   const template: MenuItemConstructorOptions[] = [
-    ...(isMac ? [{ role: 'appMenu' } as MenuItemConstructorOptions] : []),
+    ...(isMac ? [appMenu] : []),
     {
       label: t('menu.file'),
       submenu: [
-        { label: t('menu.newQuery'), accelerator: 'CmdOrCtrl+N', click: menuAction('new-query') },
+        { label: t('menu.newQuery'), accelerator: chord('newQuery'), click: menuAction('new-query') },
         { label: t('menu.newWindow'), accelerator: 'Shift+CmdOrCtrl+N', click: () => createWindow() },
         { type: 'separator' },
         { label: t('menu.openWorkspace'), accelerator: 'CmdOrCtrl+O', click: menuAction('open-workspace') },
         { label: isMac ? t('action.revealInFinder') : t('action.revealInExplorer'), click: menuAction('reveal-workspace') },
         { label: t('menu.closeWorkspace'), click: menuAction('close-workspace') },
         { type: 'separator' },
-        { label: t('menu.save'), accelerator: 'CmdOrCtrl+S', click: menuAction('save') },
+        { label: t('menu.save'), accelerator: chord('saveFile'), click: menuAction('save') },
         { label: t('menu.saveAs'), accelerator: 'Shift+CmdOrCtrl+S', click: menuAction('save-as') },
         { type: 'separator' },
         { label: t('menu.closeTab'), accelerator: 'CmdOrCtrl+W', click: menuAction('close-tab') },
@@ -429,15 +467,17 @@ function buildAppMenu() {
     {
       label: t('menu.view'),
       submenu: [
-        { label: t('menu.refreshResults'), accelerator: 'CmdOrCtrl+R', click: menuAction('refresh-results') },
+        ...(isMac ? [] : [settingsItem, { type: 'separator' } as MenuItemConstructorOptions]),
+        { label: t('menu.refreshResults'), accelerator: chord('refreshResults'), click: menuAction('refresh-results') },
         {
           label: t('menu.theme'),
-          submenu: [
-            { id: 'theme:dark', label: t('menu.theme.dark'), type: 'radio', checked: selectedTheme === 'dark', click: () => selectTheme('dark') },
-            { id: 'theme:light', label: t('menu.theme.light'), type: 'radio', checked: selectedTheme === 'light', click: () => selectTheme('light') },
-            { id: 'theme:midnight-blue', label: t('menu.theme.midnightBlue'), type: 'radio', checked: selectedTheme === 'midnight-blue', click: () => selectTheme('midnight-blue') },
-            { id: 'theme:warm-dark', label: t('menu.theme.warmDark'), type: 'radio', checked: selectedTheme === 'warm-dark', click: () => selectTheme('warm-dark') },
-          ],
+          submenu: THEME_IDS.map((id): MenuItemConstructorOptions => ({
+            id: `theme:${id}`,
+            label: THEMES[id].label,
+            type: 'radio',
+            checked: selectedTheme === id,
+            click: () => selectTheme(id),
+          })),
         },
         { type: 'separator' },
         { role: 'forceReload' },

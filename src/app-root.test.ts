@@ -14,4 +14,18 @@ describe('AppRoot menu actions', () => {
 
     expect(root._onOpenFolder).toHaveBeenCalledOnce()
   })
+
+  it('opens settings from the menu and remembers the screen to return to', () => {
+    const root = new AppRoot() as never as {
+      _screen: string
+      _settingsReturn: string
+      _onMenuAction(action: 'settings'): void
+    }
+    root._screen = 'welcome'
+
+    root._onMenuAction('settings')
+
+    expect(root._screen).toBe('settings')
+    expect(root._settingsReturn).toBe('welcome')
+  })
 })

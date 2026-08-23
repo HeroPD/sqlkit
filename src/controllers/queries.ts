@@ -6,10 +6,7 @@ import type { CellInput } from '../sql-write'
 import type { HistoryItem } from '../components/history-view'
 import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
 import { t } from '../i18n'
-
-// Keep the most recent runs per context (not globally), so a busy context can't
-// evict another context's history — the history view is filtered per context.
-const MAX_HISTORY = 200
+import { DEFAULT_WORKSPACE_PREFERENCES, type WorkspacePreferences } from '../settings'
 
 // History persists to .sqlkit/history.json; cap each entry's SQL so the file
 // (and the write-through IPC) stays small. The view never renders more anyway.
@@ -145,10 +142,13 @@ export class QueriesController implements ReactiveController {
   private generation = 0
   /** Tabs with a fetch-more page in flight, so scroll spam can't double-fetch. */
   private fetching = new Set<string>()
+  private historyPreferences: WorkspacePreferences = DEFAULT_WORKSPACE_PREFERENCES
+  private fetchPageSize: () => number
 
-  constructor(host: ReactiveControllerHost, tabExists: (tabId: string) => boolean) {
+  constructor(host: ReactiveControllerHost, tabExists: (tabId: string) => boolean, fetchPageSize: () => number = () => FETCH_PAGE) {
     this.host = host
     this.tabExists = tabExists
+    this.fetchPageSize = fetchPageSize
     host.addController(this)
   }
 
@@ -157,6 +157,27 @@ export class QueriesController implements ReactiveController {
   hostDisconnected() {
     if (this.timer !== null) clearInterval(this.timer)
     this.timer = null
+  }
+
+  applyHistoryPreferences(preferences: WorkspacePreferences) {
+    const before = this.history
+    this.historyPreferences = preferences
+    this.history = this.limitHistory(this.history)
+    // Retention is a promise about the file, not just the list: entries the new
+    // window drops have to leave the disk too, or they come back on reopen.
+    if (this.history.length !== before.length) this.writeHistoryFile()
+    this.host.requestUpdate()
+  }
+
+  private limitHistory(items: HistoryItem[]) {
+    const cutoff = this.historyPreferences.historyRetentionDays === 0
+      ? null
+      : Date.now() - this.historyPreferences.historyRetentionDays * 24 * 60 * 60 * 1000
+    const retained = cutoff === null ? items : items.filter((item) => {
+      const created = Date.parse(item.createdAt)
+      return !Number.isFinite(created) || created >= cutoff
+    })
+    return capHistoryPerContext(dedupeHistory(retained), this.historyPreferences.maxHistoryPerContext)
   }
 
   /** What the results panel shows: the visible entry of the tab's trail. */
@@ -684,8 +705,7 @@ export class QueriesController implements ReactiveController {
         : { phase: 'error', error: response.error, sql, params, ...(errorLine !== undefined ? { errorLine } : {}), ...(args.table ? { table: args.table } : {}) },
     )
     this.finishTask(task.id, response, task.startedAt)
-    this.history = capHistoryPerContext(
-      dedupeHistory([
+    this.history = this.limitHistory([
         {
           id: crypto.randomUUID(),
           contextKey,
@@ -697,9 +717,7 @@ export class QueriesController implements ReactiveController {
           createdAt: new Date().toISOString(),
         },
         ...this.history,
-      ]),
-      MAX_HISTORY,
-    )
+      ])
     this.persistHistory()
     this.host.requestUpdate()
     return response
@@ -765,13 +783,22 @@ export class QueriesController implements ReactiveController {
 
   clearHistory(contextKey: string) {
     this.history = this.history.filter((item) => item.contextKey !== contextKey)
-    this.persistHistory()
+    // Removal is written even with saving off — that switch stops recording,
+    // it does not make a delete a no-op.
+    this.writeHistoryFile()
+    this.host.requestUpdate()
+  }
+
+  clearAllHistory() {
+    this.history = []
+    this.writeHistoryFile()
     this.host.requestUpdate()
   }
 
   /** Restores the workspace's persisted history; called when a workspace opens.
    * Runs already recorded this session stay ahead of the loaded entries. */
   async loadHistory() {
+    if (!this.historyPreferences.saveHistory) return
     const gen = this.generation
     let items: HistoryItem[]
     try {
@@ -782,13 +809,22 @@ export class QueriesController implements ReactiveController {
     // A workspace switch happened while reading: this history belongs to the
     // old workspace and must not leak into the new one's list.
     if (this.generation !== gen || !items.length) return
-    this.history = capHistoryPerContext(dedupeHistory([...this.history, ...items]), MAX_HISTORY)
+    const merged = [...this.history, ...items]
+    this.history = this.limitHistory(merged)
+    // Entries the retention window drops on open leave the file too; otherwise
+    // they sit there until the next run happens to rewrite it.
+    if (this.history.length !== merged.length) this.writeHistoryFile()
     this.host.requestUpdate()
   }
 
   // Write-through: history changes at most once per run, so each mutation
   // persists immediately — no debounce timer to race a workspace switch.
   private persistHistory() {
+    if (!this.historyPreferences.saveHistory) return
+    this.writeHistoryFile()
+  }
+
+  private writeHistoryFile() {
     void window.sqlkit.writeHistory(this.history).catch(() => {})
   }
 
@@ -809,7 +845,7 @@ export class QueriesController implements ReactiveController {
     this.fetching.add(fetchKey)
     const gen = this.generation
     try {
-      const response = await window.sqlkit.fetchRows(result.sessionId, result.rows.length, FETCH_PAGE)
+      const response = await window.sqlkit.fetchRows(result.sessionId, result.rows.length, this.fetchPageSize())
       if (this.generation !== gen) return
       // The run may have been superseded (a re-run) or the trail stepped
       // elsewhere while fetching; only touch it when the visible entry is still

@@ -1,6 +1,7 @@
 import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, ObjectDdlRef, QuerySort, SessionContext, SessionInspectDraft, SessionTab, TableRef, WorkspaceConfig, WorkspaceSession } from '../src/electron'
 import type { ExportFormat } from '../src/result-export'
 import { isConnectionLabelColor } from '../src/connection-label-colors'
+import { SettingsError, validateAppSettings, validateWorkspacePreferences } from '../src/settings'
 
 const MAX_ID = 200
 const MAX_TEXT = 10 * 1024 * 1024
@@ -73,6 +74,19 @@ const booleanValue = (value: unknown, label: string) => {
   if (typeof value !== 'boolean') throw new IpcValidationError(`${label} must be a boolean`)
   return value
 }
+
+// Settings validation lives with the schema in src/settings.ts so the renderer
+// normalizer and this boundary can never disagree about a field's range.
+const settingsBoundary = <T>(parse: (value: unknown) => T) => (value: unknown): T => {
+  try {
+    return parse(value)
+  } catch (error) {
+    throw new IpcValidationError(error instanceof SettingsError ? error.message : 'Settings are invalid')
+  }
+}
+
+export const appSettings = settingsBoundary(validateAppSettings)
+export const workspacePreferences = settingsBoundary(validateWorkspacePreferences)
 
 export function connectionProfile(value: unknown): ConnectionProfile {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Connection profile is invalid')
@@ -162,6 +176,7 @@ export function workspaceConfig(value: unknown): WorkspaceConfig {
     version,
     connections: config.connections.map(connectionProfile),
     ...(activeDbId === undefined ? {} : { activeDbId }),
+    ...(config.preferences === undefined ? {} : { preferences: workspacePreferences(config.preferences) }),
   }
 }
 

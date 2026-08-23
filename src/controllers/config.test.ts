@@ -127,6 +127,31 @@ describe('ConfigController.defaultChild', () => {
   })
 })
 
+describe('ConfigController preferences', () => {
+  it('hands current preferences to a new subscriber and every later change', () => {
+    const { ctrl } = make()
+    const seen: number[] = []
+    const stop = ctrl.onPreferences((preferences) => seen.push(preferences.historyRetentionDays))
+
+    expect(seen).toEqual([30])
+    ctrl.setPreferences({ saveHistory: true, historyRetentionDays: 7, maxHistoryPerContext: 200 })
+    expect(seen).toEqual([30, 7])
+
+    stop()
+    ctrl.setPreferences({ saveHistory: true, historyRetentionDays: 90, maxHistoryPerContext: 200 })
+    expect(seen).toEqual([30, 7])
+  })
+
+  it('announces the defaults again when the workspace closes', () => {
+    const { ctrl } = make()
+    ctrl.setPreferences({ saveHistory: false, historyRetentionDays: 7, maxHistoryPerContext: 200 })
+    const seen: boolean[] = []
+    ctrl.onPreferences((preferences) => seen.push(preferences.saveHistory))
+    ctrl.reset()
+    expect(seen).toEqual([false, true])
+  })
+})
+
 describe('ConfigController.save', () => {
   it('appends a new profile to the written config without mutating local state', async () => {
     const api = stubSqlkit()
@@ -140,6 +165,7 @@ describe('ConfigController.save', () => {
       version: 1,
       connections: [{ id: 'a', name: 'A' }, profile],
       activeDbId: 'a',
+      preferences: { saveHistory: true, historyRetentionDays: 30, maxHistoryPerContext: 200 },
     })
     // The caller re-reads via load(); save itself leaves the list untouched.
     expect(ctrl.connections.map((c) => c.id)).toEqual(['a'])
@@ -155,6 +181,7 @@ describe('ConfigController.save', () => {
       version: 1,
       connections: [{ id: 'a', name: 'New' }, { id: 'b', name: 'B' }],
       activeDbId: null,
+      preferences: { saveHistory: true, historyRetentionDays: 30, maxHistoryPerContext: 200 },
     })
   })
 

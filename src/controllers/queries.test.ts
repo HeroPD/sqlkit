@@ -79,9 +79,10 @@ function deferRunQuery() {
   let settle!: (response: QueryResponse) => void
   const pending = new Promise<QueryResponse>((res) => (settle = res))
   const runQuery = vi.fn(() => pending)
+  const readHistory = vi.fn(() => Promise.resolve([] as HistoryItem[]))
   const writeHistory = vi.fn((_items: HistoryItem[]) => Promise.resolve({ success: true }))
-  ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery, writeHistory }
-  return { settle, runQuery, writeHistory }
+  ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery, readHistory, writeHistory }
+  return { settle, runQuery, readHistory, writeHistory }
 }
 
 afterEach(() => {
@@ -274,6 +275,63 @@ describe('QueriesController.execute', () => {
 })
 
 describe('QueriesController history persistence', () => {
+  it('does not read or write persisted history when saving is disabled', async () => {
+    const { settle, readHistory, writeHistory } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+    controller.applyHistoryPreferences({ saveHistory: false, historyRetentionDays: 30, maxHistoryPerContext: 200 })
+
+    await controller.loadHistory()
+    const done = controller.execute(runArgs)
+    settle({ success: true, result })
+    await done
+
+    expect(readHistory).not.toHaveBeenCalled()
+    expect(writeHistory).not.toHaveBeenCalled()
+    expect(controller.history).toHaveLength(1)
+  })
+
+  // Removing entries is not "saving" them: retention and the clear actions have
+  // to reach the file, or what the view dropped comes back on the next open.
+  it('writes removals to the file even with saving disabled', async () => {
+    const { settle, writeHistory } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute(runArgs)
+    settle({ success: true, result })
+    await done
+    writeHistory.mockClear()
+
+    controller.applyHistoryPreferences({ saveHistory: false, historyRetentionDays: 30, maxHistoryPerContext: 200 })
+    expect(writeHistory).not.toHaveBeenCalled()
+
+    controller.clearAllHistory()
+    expect(writeHistory).toHaveBeenLastCalledWith([])
+    expect(controller.history).toEqual([])
+  })
+
+  it('prunes entries past the retention window from the file too', async () => {
+    const { settle, writeHistory } = deferRunQuery()
+    const controller = new QueriesController(host(), () => true)
+
+    const done = controller.execute(runArgs)
+    settle({ success: true, result })
+    await done
+    const [recent] = controller.history
+    const ancient = {
+      ...recent!,
+      id: 'ancient',
+      sql: 'SELECT 2',
+      createdAt: new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString(),
+    }
+    controller.history = [ancient, ...controller.history]
+    writeHistory.mockClear()
+
+    controller.applyHistoryPreferences({ saveHistory: true, historyRetentionDays: 7, maxHistoryPerContext: 200 })
+
+    expect(controller.history.map((item) => item.id)).not.toContain('ancient')
+    expect(writeHistory).toHaveBeenCalledWith(controller.history)
+  })
+
   it('writes history through after every run', async () => {
     const { settle, writeHistory } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)

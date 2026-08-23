@@ -10,6 +10,7 @@ import { FilesController } from '../controllers/files'
 import { QueriesController } from '../controllers/queries'
 import { LayoutController } from '../controllers/layout'
 import { CommandPaletteController, type PaletteCommand } from '../controllers/command-palette'
+import type { PaletteMode } from './command-palette'
 import { DialogsController } from '../controllers/dialogs'
 import { ResultEditingController } from '../controllers/result-editing'
 import { SchemaOpsController } from '../controllers/schema-ops'
@@ -40,6 +41,7 @@ import './results-panel'
 import './search-view'
 import './sql-editor'
 import './status-bar'
+import './settings-view'
 import type { StatusConnection } from './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
@@ -74,6 +76,9 @@ import type { ImportColumn, ImportConfirmDetail } from './import-dialog'
 import { bindParameterValues, queryParameters, type QueryParameter } from '../query-parameters'
 import type { ParametersConfirmDetail } from './parameter-dialog'
 import { formatInteger, formatTime, rowWord, t } from '../i18n'
+import { RESERVED_BINDINGS, type AppSettings, type WindowKeymapCommand, type WorkspacePreferences } from '../settings'
+import { SettingsController } from '../controllers/settings'
+import { displayKeybinding, eventMatchesBinding } from '../keybindings'
 
 // icon markup lives in ACTIVITY_ICONS (inline SVG, keyed by id) — see the
 // activity-bar render and `.activity-bar svg` styles.
@@ -204,7 +209,7 @@ const COMMANDS: readonly PaletteCommand[] = [
   { id: 'close-workspace', category: 'file', label: t('action.closeWorkspace') },
   { id: 'new-window', category: 'file', label: t('action.newWindow'), keybind: shiftMod('N') },
 
-  { id: 'format-sql', category: 'editor', label: t('action.formatSql'), keybind: altShift('F') },
+  { id: 'format-sql', category: 'editor', label: t('action.formatSql') },
   { id: 'find', category: 'editor', label: t('action.find'), keybind: mod('F') },
   ...SELECTION_COMMANDS.map(({ id, label, keybind }) => ({
     id: `selection:${id}`,
@@ -213,7 +218,7 @@ const COMMANDS: readonly PaletteCommand[] = [
     keybind,
   })),
 
-  { id: 'run-query', category: 'run', label: t('action.runQuery'), keybind: isMac ? '⌘↵' : 'Ctrl+↵' },
+  { id: 'run-query', category: 'run', label: t('action.runQuery') },
   { id: 'cancel-query', category: 'run', label: t('action.cancelQuery') },
 
   { id: 'refresh-results', category: 'results', label: t('action.refreshResults'), keybind: mod('R') },
@@ -300,6 +305,9 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _activeView: ViewId | null = 'explorer'
 
+  @property({ type: Boolean })
+  settingsOpen = false
+
   @state()
   private _inspectDirtyTabIds = new Set<string>()
 
@@ -358,7 +366,7 @@ export class WorkbenchScreen extends LitElement {
   // ⌘⇧P / ⌘P / ⌘K palette: open/close state, entry list, and pick dispatch.
   private _cmdPalette = new CommandPaletteController(this, {
     live: this._live,
-    commands: COMMANDS,
+    commands: () => this._paletteCommands(),
     files: () => this._workspaceFiles.files,
     connections: () => this._config.connections,
     activeProfile: () => this._config.activeProfile(),
@@ -372,8 +380,12 @@ export class WorkbenchScreen extends LitElement {
       this._setActiveDb(profileId, childDb)
       this._activeView = 'explorer'
     },
-    newQuery: () => this._ctx.newQuery(),
+    newQuery: () => {
+      if (this.settingsOpen) this._setSettingsOpen(false)
+      this._ctx.newQuery()
+    },
     runActiveTab: () => {
+      if (this.settingsOpen) this._setSettingsOpen(false)
       const tab = this._ctx.activeSqlTab()
       if (!tab?.content.trim()) return
       const leading = tab.content.slice(0, tab.content.length - tab.content.trimStart().length)
@@ -428,8 +440,11 @@ export class WorkbenchScreen extends LitElement {
     closeWorkspace: () => this._onCloseWorkspace(),
   })
 
+  // App-wide settings: load, follow the cross-window broadcast, persist.
+  private _settings = new SettingsController(this)
+
   // Query results, tasks, and history; re-renders us as runs progress.
-  private _queries = new QueriesController(this, (tabId) => this._ctx.tabExists(tabId))
+  private _queries = new QueriesController(this, (tabId) => this._ctx.tabExists(tabId), () => this._settings.app.resultFetchSize)
 
   // Sidebar width/collapse and results-panel height, with their drag handlers.
   private _layout = new LayoutController(this, {
@@ -528,10 +543,15 @@ export class WorkbenchScreen extends LitElement {
   private _keyColumnCache: { result: QueryResult; columns: ColumnRef[]; keys: readonly number[] } | null = null
 
   private _unsubscribeMenu: (() => void) | null = null
+  private _unsubscribePreferences: (() => void) | null = null
+  private _settingsWereOpen = false
 
   connectedCallback() {
     super.connectedCallback()
     this._unsubscribeMenu = window.sqlkit.onMenuAction((action) => this._onMenuAction(action))
+    this._unsubscribePreferences = this._config.onPreferences((preferences) => {
+      this._queries.applyHistoryPreferences(preferences)
+    })
     window.addEventListener('keydown', this._onGlobalKeydown)
     window.addEventListener('pointerdown', this._onWindowPointerDown)
   }
@@ -540,6 +560,8 @@ export class WorkbenchScreen extends LitElement {
     super.disconnectedCallback()
     this._unsubscribeMenu?.()
     this._unsubscribeMenu = null
+    this._unsubscribePreferences?.()
+    this._unsubscribePreferences = null
     window.removeEventListener('keydown', this._onGlobalKeydown)
     window.removeEventListener('pointerdown', this._onWindowPointerDown)
   }
@@ -559,6 +581,16 @@ export class WorkbenchScreen extends LitElement {
   private _onMenuAction(action: MenuAction) {
     // The workbench stays mounted (hidden) on the welcome screen; File-menu
     // actions need an open workspace.
+    if (action === 'settings') {
+      this._setSettingsOpen(true)
+      return
+    }
+    // App-wide, so it applies from the welcome screen too. Main has already
+    // persisted it; this only mirrors it into the window.
+    if (action.startsWith('theme:')) {
+      this._settings.applyBroadcast({ ...this._settings.app, theme: action.slice('theme:'.length) as AppSettings['theme'] })
+      return
+    }
     if (!this.workspace) return
     switch (action) {
       case 'new-query':
@@ -591,6 +623,34 @@ export class WorkbenchScreen extends LitElement {
             ?.runSelectionCommand(action.slice('selection:'.length) as SelectionCommandId)
         }
     }
+  }
+
+  // The palette shows the configured chord for the commands the keymap page
+  // owns, so a rebind is visible everywhere the command is offered.
+  private _paletteCommands(): readonly PaletteCommand[] {
+    const bindings = this._settings.bindings
+    const configured: Record<string, string> = {
+      'run-query': displayKeybinding(bindings.runQuery),
+      'format-sql': displayKeybinding(bindings.formatSql),
+    }
+    return COMMANDS.map((command) => (configured[command.id] ? { ...command, keybind: configured[command.id] } : command))
+  }
+
+  private _onAppSettingsChange(event: CustomEvent<AppSettings>) {
+    this._settings.set(event.detail)
+  }
+
+  // The activity-bar toggle and ✕ both report through app-root, which owns the
+  // screen the workbench returns to when settings close.
+  private _setSettingsOpen(open: boolean) {
+    this.settingsOpen = open
+    if (!open) this.dispatchEvent(new CustomEvent('settings-close', { bubbles: true, composed: true }))
+    else this.dispatchEvent(new CustomEvent('open-settings', { bubbles: true, composed: true }))
+  }
+
+  private _onWorkspacePreferencesChange(event: CustomEvent<WorkspacePreferences>) {
+    // Consumers are subscribed in connectedCallback; setting is the whole job.
+    this._config.setPreferences(event.detail)
   }
 
   // ⌘R: re-run the active tab's current result query, keeping its filter and sort.
@@ -645,9 +705,9 @@ export class WorkbenchScreen extends LitElement {
       this._session.reset()
       this._tabScroll.clear()
       this._ctx.reset()
+      this._queries.reset()
       this._config.reset()
       this._cmdPalette.close()
-      this._queries.reset()
       this._transactionSessions = new Map()
       this._transactionPopoverProfileId = null
       this._transactionManagerOpen = false
@@ -674,6 +734,15 @@ export class WorkbenchScreen extends LitElement {
   }
 
   protected updated() {
+    // Leaving settings hands the keyboard back to the editor it covered, so the
+    // next keystroke goes where the caret is rather than nowhere.
+    if (this._settingsWereOpen && !this.settingsOpen) {
+      // The editor is re-created by this very render; its own update has to
+      // land before it has a CodeMirror view to focus.
+      const editor = this.renderRoot.querySelector('sql-editor')
+      if (editor) void editor.updateComplete.then(() => editor.focusEditor())
+    }
+    this._settingsWereOpen = this.settingsOpen
     // Every tab mutation ends in a re-render, so this is the one hook that can't
     // be missed. The write itself is debounced and skipped when the snapshot is
     // unchanged, which is what makes over-calling it cheap.
@@ -910,97 +979,113 @@ export class WorkbenchScreen extends LitElement {
     if (!this.workspace) return
     // Component keymaps prevent default when they own a chord.
     if (event.defaultPrevented) return
-    const key = event.key.toLowerCase()
-    const hasMod = event.metaKey || event.ctrlKey
 
-    if (key === 'escape' && (this._transactionPopoverProfileId !== null || this._transactionManagerOpen)) {
+    if (event.key === 'Escape' && (this._transactionPopoverProfileId !== null || this._transactionManagerOpen)) {
       event.preventDefault()
       this._transactionPopoverProfileId = null
       this._transactionManagerOpen = false
       return
     }
 
-    if (key === 'f5' && !hasMod && !event.altKey && !event.shiftKey) {
+    // A focused editor binds the same chords itself at the highest precedence;
+    // these run them from every other surface.
+    const bindings = this._settings.bindings
+    for (const [command, run] of this._shortcuts()) {
+      if (!eventMatchesBinding(event, bindings[command])) continue
+      if (WorkbenchScreen.TEXT_FIELD_SAFE.has(command) && this._inTextField(event)) return
+      if (this.settingsOpen && WorkbenchScreen.LEAVES_SETTINGS.has(command)) this._setSettingsOpen(false)
+      if (run()) event.preventDefault()
+      return
+    }
+    // A fixed alias rather than a rebindable command: ⌘R is Refresh results.
+    if (eventMatchesBinding(event, 'F5')) {
       event.preventDefault()
       void this._refreshResults()
-      return
-    }
-    if (key === 'r' && hasMod && !event.altKey && !event.shiftKey) {
-      event.preventDefault()
-      void this._refreshResults()
-      return
-    }
-
-    // ⇧⌥F formats the active SQL tab; event.code sidesteps Option-key characters
-    // on macOS. A focused editor already handled it (defaultPrevented above).
-    if (event.code === 'KeyF' && event.altKey && event.shiftKey && !hasMod) {
-      if (this._inTextField(event)) return
-      if (this.renderRoot.querySelector('sql-editor')?.formatSql()) event.preventDefault()
-      return
-    }
-
-    if (!hasMod) return
-
-    // ⌘Z / ⌘⇧Z steps the active tab's staged edits from anywhere in the
-    // workbench — unless focus is in a text field, which keeps its native undo.
-    if (key === 'z' && !event.altKey) {
-      if (this._inTextField(event)) return
-      if (this._stepEdit(event.shiftKey ? 'redo' : 'undo')) event.preventDefault()
-      return
-    }
-
-    if (key === 'p') {
-      event.preventDefault()
-      this._cmdPalette.toggle(event.shiftKey ? 'commands' : 'quick')
-      return
-    }
-    // ⌘⇧<letter> switches the sidebar activity view (toggling it shut if open).
-    if (event.shiftKey && !event.altKey) {
-      const view = VIEWS.find((candidate) => candidate.shortcutKey.toLowerCase() === key)
-      if (view) {
-        event.preventDefault()
-        this._activeView = this._activeView === view.id ? null : view.id
-        return
-      }
-    }
-    if (event.shiftKey) return
-    if (key === 'k') {
-      event.preventDefault()
-      this._cmdPalette.toggle('databases')
-      return
-    }
-    // Sublime-style tab switching: Mod+1..8 pick that tab, Mod+9 the last.
-    if (key >= '1' && key <= '9') {
-      const tab = key === '9' ? this._ctx.tabs[this._ctx.tabs.length - 1] : this._ctx.tabs[Number(key) - 1]
-      if (tab) {
-        event.preventDefault()
-        this._ctx.activeTabId = tab.id
-      }
-      return
-    }
-    if (key === 'b') {
-      event.preventDefault()
-      this._toggleSidebar()
-      return
-    }
-    if (key === 'j') {
-      event.preventDefault()
-      this._layout.togglePanelCollapse()
-      return
-    }
-    if (key === 'n') {
-      event.preventDefault()
-      this._ctx.newQuery()
-      return
-    }
-    if (key === 's') {
-      event.preventDefault()
-      this._saveActive()
-      return
     }
   }
 
+  // Every rebindable command the window itself runs. The Record is exhaustive
+  // over the roster, so a command added to the keymap has to be handled here
+  // before this compiles — and the bindings come from settings, so what the
+  // keymap page shows is what actually fires.
+  private _commandRunners(): Record<WindowKeymapCommand, () => boolean> {
+    const palette = (mode: PaletteMode) => () => {
+      this._cmdPalette.toggle(mode)
+      return true
+    }
+    const showView = (view: ViewId) => () => {
+      this._showView(view)
+      return true
+    }
+    const selectTab = (index: number) => () => {
+      const tab = index === 9 ? this._ctx.tabs[this._ctx.tabs.length - 1] : this._ctx.tabs[index - 1]
+      if (tab) this._ctx.activeTabId = tab.id
+      return !!tab
+    }
+    return {
+      formatSql: () => !!this.renderRoot.querySelector('sql-editor')?.formatSql(),
+      commandPalette: palette('commands'),
+      quickOpen: palette('quick'),
+      switchDatabase: palette('databases'),
+      toggleSidebar: () => { this._toggleSidebar(); return true },
+      toggleResults: () => { this._layout.togglePanelCollapse(); return true },
+      undoChange: () => this._stepEdit('undo'),
+      redoChange: () => this._stepEdit('redo'),
+      newQuery: () => { this._ctx.newQuery(); return true },
+      saveFile: () => { this._saveActive(); return true },
+      refreshResults: () => { void this._refreshResults(); return true },
+      'view:explorer': showView('explorer'),
+      'view:search': showView('search'),
+      'view:databases': showView('databases'),
+      'view:history': showView('history'),
+      'view:tasks': showView('tasks'),
+      'view:server': showView('server'),
+      'tab:1': selectTab(1),
+      'tab:2': selectTab(2),
+      'tab:3': selectTab(3),
+      'tab:4': selectTab(4),
+      'tab:5': selectTab(5),
+      'tab:6': selectTab(6),
+      'tab:7': selectTab(7),
+      'tab:8': selectTab(8),
+      'tab:9': selectTab(9),
+    }
+  }
+
+  // Commands whose keystroke must not be taken from a text field, where the
+  // native behaviour of the same chord belongs to the caret.
+  private static readonly TEXT_FIELD_SAFE: ReadonlySet<string> = new Set(['formatSql', 'undoChange', 'redoChange'])
+
+  // Commands that change what the settings page is covering: run them from
+  // behind it and the change happens where nobody can see it. The view and
+  // sidebar commands are absent because they close settings themselves, and
+  // have to know it was open to show the right thing.
+  private static readonly LEAVES_SETTINGS: ReadonlySet<string> = new Set([
+    'newQuery',
+    'toggleResults',
+    'undoChange',
+    'redoChange',
+    'refreshResults',
+    ...Array.from({ length: 9 }, (_unused, index) => `tab:${index + 1}`),
+  ])
+
+  // Built once: the closures capture the element, not any binding, so only the
+  // lookup below has to follow the settings. This runs on every keystroke.
+  private _shortcutEntries: Array<[WindowKeymapCommand, () => boolean]> | null = null
+
+  private _shortcuts(): Array<[WindowKeymapCommand, () => boolean]> {
+    this._shortcutEntries ??= Object.entries(this._commandRunners()) as Array<[WindowKeymapCommand, () => boolean]>
+    return this._shortcutEntries
+  }
+
   private _toggleSidebar() {
+    if (this.settingsOpen) {
+      // Same as the activity bar: leaving settings shows the sidebar rather
+      // than toggling the selection the user cannot see.
+      this._setSettingsOpen(false)
+      this._activeView ??= 'explorer'
+      return
+    }
     this._activeView = this._activeView === null ? 'explorer' : null
   }
 
@@ -1102,7 +1187,7 @@ export class WorkbenchScreen extends LitElement {
     // No engine gives us an undo, so an irreversible statement gets one look
     // first. After parameter binding, so the preview shows the values that will
     // really be sent.
-    const risks = preconfirmed ? [] : analyzeDestructive(sqlText, profile.engine)
+    const risks = preconfirmed || !this._settings.app.confirmDestructive ? [] : analyzeDestructive(sqlText, profile.engine)
     if (risks.length) {
       if (this._destructivePrompt) return
       const confirmed = await new Promise<boolean>((resolve) => {
@@ -1800,9 +1885,30 @@ export class WorkbenchScreen extends LitElement {
               </activity-button>
             `,
           )}
+          <span class="activity-spacer"></span>
+          <activity-button
+            view="settings"
+            class="tooltip-right"
+            data-tooltip="Settings (${isMac ? '⌘' : 'Ctrl+'},)"
+            aria-label="Settings"
+            .active=${this.settingsOpen}
+          >${unsafeHTML(ACTIVITY_ICONS.settings)}</activity-button>
         </nav>
 
-        ${activeView
+        ${this.settingsOpen
+          ? html`
+              <settings-view
+                .settings=${this._settings.app}
+                .workspacePreferences=${this._config.preferences}
+                .workspaceAvailable=${!!this.workspace}
+                .reservedBindings=${RESERVED_BINDINGS}
+                @app-settings-change=${this._onAppSettingsChange}
+                @workspace-preferences-change=${this._onWorkspacePreferencesChange}
+                @settings-clear-history=${this._onHistoryClearAll}
+                @settings-close=${(event: Event) => { event.stopPropagation(); this._setSettingsOpen(false) }}
+              ></settings-view>
+            `
+          : html`${activeView
           ? html`
               <aside class="sidebar ${this._layout.sidebarCollapsing ? 'collapsed' : ''}" style="width: ${this._layout.sidebarWidth}px">
                 <div class="sidebar-title">
@@ -1841,9 +1947,11 @@ export class WorkbenchScreen extends LitElement {
             : ''}
           ${this._renderEditorContent()}
         </div>
+        `}
       </div>
 
       <command-palette
+        .commandsShortcut=${displayKeybinding(this._settings.bindings.commandPalette)}
         .open=${this._cmdPalette.mode !== null}
         .mode=${this._cmdPalette.mode ?? 'commands'}
         .entries=${this._cmdPalette.entries()}
@@ -2150,6 +2258,16 @@ export class WorkbenchScreen extends LitElement {
     this._queries.clearHistory(this._activeContextKey())
   }
 
+  private _onHistoryClearAll() {
+    this._dialogs.confirm = {
+      message: t('settings.clearHistory.confirm'),
+      detail: t('settings.clearHistory.confirmDetail'),
+      confirmLabel: t('settings.clearHistory.label'),
+      danger: true,
+      action: () => this._queries.clearAllHistory(),
+    }
+  }
+
   private _renderEditorContent() {
     const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
     if (activeTab?.kind === 'config') {
@@ -2197,6 +2315,7 @@ export class WorkbenchScreen extends LitElement {
       const tables = this._ctx.activeDbId ? (this._live.tables[this._ctx.activeDbId] ?? []) : []
       const columns = this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? null) : null
       const dialect = dialectForEngine[this._config.activeProfile()?.engine ?? 'postgresql']
+      const bindings = this._settings.bindings
       return html`
         <div class="editor-content sql">
           <div class="editor-pane">
@@ -2206,6 +2325,13 @@ export class WorkbenchScreen extends LitElement {
               .dialect=${dialect}
               .tables=${tables}
               .columns=${columns}
+              .wordWrap=${this._settings.app.editorWordWrap}
+              .autocompleteEnabled=${this._settings.app.editorAutocomplete}
+              .highlightActiveLine=${this._settings.app.editorHighlightActiveLine}
+              .tabSize=${this._settings.app.editorTabSize}
+              .runQueryKey=${bindings.runQuery}
+              .formatSqlKey=${bindings.formatSql}
+              .commandPaletteKey=${bindings.commandPalette}
               @editor-notice=${this._onGridNotice}
               @editor-command=${this._onEditorCommand}
             ></sql-editor>
@@ -2242,6 +2368,8 @@ export class WorkbenchScreen extends LitElement {
             .filter=${this._queries.filterFor(this._ctx.activeTabId)}
             .columnWidths=${this._resultColumnWidths()}
             .streamExportAvailable=${this._canStreamExport()}
+            .alternateRowShading=${this._settings.app.alternateRowShading}
+            .runShortcut=${displayKeybinding(this._settings.bindings.runQuery)}
             @cancel-query=${this._onCancelQuery}
             @result-navigate=${this._onResultNavigate}
             @follow-foreign-key=${this._onFollowForeignKey}
@@ -2272,7 +2400,10 @@ export class WorkbenchScreen extends LitElement {
 
     return html`
       <div class="editor-content">
-        <editor-empty @empty-action=${this._onEmptyAction}></editor-empty>
+        <editor-empty
+          .commandPaletteShortcut=${displayKeybinding(this._settings.bindings.commandPalette)}
+          @empty-action=${this._onEmptyAction}
+        ></editor-empty>
       </div>
     `
   }
@@ -2280,7 +2411,23 @@ export class WorkbenchScreen extends LitElement {
   // --- event handlers --------------------------------------------------------
 
   private _onActivitySelect(event: Event) {
-    const { view } = (event as CustomEvent<{ view: ViewId }>).detail
+    const { view } = (event as CustomEvent<{ view: ViewId | 'settings' }>).detail
+    if (view === 'settings') {
+      this._setSettingsOpen(!this.settingsOpen)
+      return
+    }
+    this._showView(view)
+  }
+
+  // Picking a view is a toggle in the workbench, but leaving settings it is not:
+  // the icon that was active when settings opened is still remembered, so
+  // toggling would collapse the sidebar instead of showing what was asked for.
+  private _showView(view: ViewId) {
+    if (this.settingsOpen) {
+      this._setSettingsOpen(false)
+      this._activeView = view
+      return
+    }
     this._activeView = this._activeView === view ? null : view
   }
 
@@ -3912,6 +4059,10 @@ export class WorkbenchScreen extends LitElement {
         width: 22px;
         height: 22px;
         stroke-width: 1.5;
+      }
+
+      .activity-spacer {
+        flex: 1;
       }
 
       .sidebar {

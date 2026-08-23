@@ -95,7 +95,7 @@ function setup(opts: Opts = {}) {
   }
   const ctrl = new CommandPaletteController(host(), {
     live: live as unknown as ConnectionsController,
-    commands: opts.commands ?? TEST_COMMANDS,
+    commands: () => opts.commands ?? TEST_COMMANDS,
     files: () => opts.files ?? [],
     connections: () => opts.connections ?? [],
     activeProfile: () => opts.activeProfile ?? null,

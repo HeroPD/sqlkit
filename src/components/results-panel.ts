@@ -284,6 +284,13 @@ export class ResultsPanel extends LitElement {
   @property({ attribute: false })
   streamExportAvailable = false
 
+  @property({ attribute: false })
+  alternateRowShading = true
+
+  /** The configured Run query chord, shown in the idle hint. */
+  @property()
+  runShortcut = isMac ? '⌘↵' : 'Ctrl+↵'
+
   /** Source table the result's rows came from, used as the INSERT target when
    * copying/exporting rows as SQL. Null when the result has no single source (a
    * join, an expression-only select); the statements then name a placeholder
@@ -3048,7 +3055,7 @@ export class ResultsPanel extends LitElement {
   private _renderBody() {
     const run = this.run
     if (run.phase === 'idle') {
-      return html`<p class="hint">${t('results.idle', { shortcut: isMac ? '⌘↵' : 'Ctrl+↵' })}</p>`
+      return html`<p class="hint">${t('results.idle', { shortcut: this.runShortcut })}</p>`
     }
     if (run.phase === 'running') {
       // A note means connecting, which has no backend to cancel yet.
@@ -3149,7 +3156,7 @@ export class ResultsPanel extends LitElement {
             const display = resultToDisplay[absRow] ?? 0
             const editing = this._editing?.ref.kind === 'result' && this._editing.ref.row === absRow ? this._editing : null
             return html`
-              <tr data-row=${absRow} class="${absRow % 2 ? 'alt' : ''} ${this.pendingDeletes.has(absRow) ? 'deleting' : ''}">
+              <tr data-row=${absRow} class="${this.alternateRowShading && absRow % 2 ? 'alt' : ''} ${this.pendingDeletes.has(absRow) ? 'deleting' : ''}">
                 <td class="num" style="width: ${numColWidth}px; min-width: ${numColWidth}px; max-width: ${numColWidth}px">${absRow + 1}</td>
                 ${row.map((cell, col) => {
                   const sel = this._isSelectedDisplay(display, col) ? 'selected' : ''

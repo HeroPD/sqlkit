@@ -53,6 +53,9 @@ const SHORTCUTS: Record<PaletteMode, string> = {
   databases: isMac ? '⌘K' : 'Ctrl K',
 }
 
+const shortcutFor = (mode: PaletteMode, commandsShortcut: string) =>
+  mode === 'commands' ? commandsShortcut : SHORTCUTS[mode]
+
 // Every whitespace-separated term must appear somewhere in the entry's text.
 function matches(query: string, entry: PaletteEntry): boolean {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
@@ -119,6 +122,10 @@ export class CommandPalette extends LitElement {
   @property({ attribute: false })
   entries: PaletteEntry[] = []
 
+  /** The configured chord for ⌘⇧P; the other modes are fixed keys. */
+  @property()
+  commandsShortcut = SHORTCUTS.commands
+
   @state()
   private _query = ''
 
@@ -170,7 +177,7 @@ export class CommandPalette extends LitElement {
               autocomplete="off"
               spellcheck="false"
             />
-            <span class="palette-shortcut" aria-hidden="true">${SHORTCUTS[this.mode]}</span>
+            <span class="palette-shortcut" aria-hidden="true">${shortcutFor(this.mode, this.commandsShortcut)}</span>
           </div>
           <div class="list" role="listbox" @scroll=${this._hideNameTooltip}>
             ${filtered.length
