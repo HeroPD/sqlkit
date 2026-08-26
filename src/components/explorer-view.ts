@@ -287,10 +287,7 @@ export class ExplorerView extends LitElement {
               @mousedown=${(event: MouseEvent) => event.preventDefault()}
               @click=${() => this._toggleKind(kind)}
             >
-              <i
-                class="icon check ${this._hiddenKinds.has(kind) ? 'icon-square' : 'icon-square-check'}"
-                aria-hidden="true"
-              ></i>
+              <i class="icon check ${this._hiddenKinds.has(kind) ? '' : 'icon-check'}" aria-hidden="true"></i>
               <span class="label">${filterKindLabel(kind)}</span>
               <span class="meta">${this._kindCount(kind)}</span>
             </button>
@@ -968,13 +965,6 @@ export class ExplorerView extends LitElement {
       .pop.kinds .pop-item {
         grid-template-columns: 20px minmax(0, 1fr) auto;
         --icon-size: 14px;
-      }
-
-      /* Filter toggles read as checkboxes. The outline square is inset in its
-         em box, so oversize it a few px to match the visual weight of other icons. */
-      .pop.kinds .check {
-        font-size: calc(var(--icon-size) + 4px);
-        color: var(--text-2);
       }
 
       .pop-separator {

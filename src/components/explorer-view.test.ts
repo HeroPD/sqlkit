@@ -100,6 +100,28 @@ describe('ExplorerView database selection', () => {
 })
 
 describe('ExplorerView table sizes', () => {
+  it('uses the same checkmark indicator for table filters and sorting', async () => {
+    const view = new ExplorerView()
+    view.profileId = 'p1'
+    view.tables = [table('users')]
+    document.body.append(view)
+
+    await view.updateComplete
+    view.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Table options"]')!.click()
+    await view.updateComplete
+
+    const filter = view.shadowRoot!.querySelector<HTMLButtonElement>('[role="menuitemcheckbox"]')!
+    expect(filter.querySelector('.check')!.classList.contains('icon-check')).toBe(true)
+    expect(filter.querySelector('.icon-square, .icon-square-check')).toBeNull()
+
+    filter.click()
+    await view.updateComplete
+    expect(filter.querySelector('.check')!.classList.contains('icon-check')).toBe(false)
+    filter.click()
+    await view.updateComplete
+    view.remove()
+  })
+
   it('shows total size labels and marks estimated catalog values', async () => {
     const view = new ExplorerView()
     view.profileId = 'p1'
