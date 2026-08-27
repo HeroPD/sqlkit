@@ -21,8 +21,10 @@ import './json-cell-editor'
 import type { JsonProblemAt } from './json-cell-editor'
 import { formatJson, jsonError, minifyJson } from '../json-text'
 import './ui-select'
-import { formatInteger, rowWord, t } from '../i18n'
+import { formatDecimal, formatInteger, rowWord, t } from '../i18n'
 import { previewSql, sqlPreviewParts } from '../sql-preview'
+import { parseExecutionPlan, type ExecutionPlan, type ExecutionPlanNode } from '../execution-plan'
+import { GridSelectionController } from '../controllers/grid-selection'
 
 /** What the results panel is currently showing. */
 export type QueryRun =
@@ -141,6 +143,13 @@ const probeTextOf = (values: readonly unknown[]): string =>
 
 const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const isWordChar = (char: string | undefined) => char !== undefined && /[\p{L}\p{N}_]/u.test(char)
+
+// Operation, rows, metric — the flow number is the plan's row-number column,
+// which sits outside the selectable columns the way the result grid's does.
+const PLAN_COLUMN_COUNT = 3
+
+// Colour band for a reported time — the same scale for a query and a plan.
+const durationPace = (ms: number) => (ms < 500 ? 'fast' : ms < 2000 ? 'medium' : 'slow')
 
 const numberColumnWidth = (result: QueryResult) => {
   const maxRow = Math.max(1, result.bufferedRowCount ?? result.rowCount ?? result.rows.length)
@@ -318,6 +327,29 @@ export class ResultsPanel extends LitElement {
   private _resultSetIndex = 0
 
   @state()
+  private _planView: 'plan' | 'raw' = 'plan'
+
+  private _planCache: { result: QueryResult; sql: string | undefined; engine: Engine; plan: ExecutionPlan | null } | null = null
+
+  // A plan is a table of text, so it takes the shared selection controller
+  // as-is — rectangle select, drag, arrow nav, copy — and none of the editing
+  // the result grid layers on top. Columns exclude the flow number, which is
+  // the plan's row-number column.
+  private _planSel = new GridSelectionController(this, {
+    rowCount: () => this._executionPlan()?.nodes.length ?? 0,
+    colCount: () => PLAN_COLUMN_COUNT,
+    columnNames: () => {
+      const plan = this._executionPlan()
+      return [t('results.operation'), t('results.actualEstimate'), plan ? this._planMetricHeading(plan) : t('results.planMetric')]
+    },
+    valueAt: (row, col) => {
+      const plan = this._executionPlan()
+      const node = plan?.nodes[row]
+      return plan && node ? this._planCellText(node, col, plan) : ''
+    },
+  })
+
+  @state()
   private _record: { ref: RowRef; col: number } | null = null
 
   /** The JSON cell opened for editing, with the text as it was when it opened —
@@ -490,6 +522,7 @@ export class ResultsPanel extends LitElement {
   }
 
   protected willUpdate(changed: PropertyValues) {
+    if (changed.has('engine')) this._planCache = null
     if (changed.has('filter')) this._filterDraft = this.filter ?? ''
     if (changed.has('drafts')) {
       // Select a just-added draft once it lands in the property.
@@ -530,6 +563,9 @@ export class ResultsPanel extends LitElement {
       return
     }
     this._lastKey = key
+    this._planView = 'plan'
+    this._planCache = null
+    this._planSel.clear()
     this._findIndex = -1
     this._findCache = null
     // Bookmark the result that is leaving before anything below resets the
@@ -606,6 +642,8 @@ export class ResultsPanel extends LitElement {
   }
 
   firstUpdated() {
+    // elementFromPoint must go through the shadow root to see the dragged-over cell.
+    this._planSel.hitTest = (x, y) => this.shadowRoot?.elementFromPoint(x, y) ?? null
     const body = this._bodyEl()
     if (!body) return
     this._viewportH = body.clientHeight
@@ -1554,8 +1592,10 @@ export class ResultsPanel extends LitElement {
 
   render() {
     const result = this._shownResult()
-    const exportable = !!result?.columns.length
-    const canEditResult = this._canEditShownResult()
+    const plan = this._executionPlan()
+    const planOpen = plan !== null && this._planView === 'plan'
+    const exportable = !planOpen && !!result?.columns.length
+    const canEditResult = !planOpen && this._canEditShownResult()
     const pendingCount = this.drafts.length + this.edits.size + this.pendingDeletes.size
     // The JSON editor's text is not staged until a flush point, so Save and
     // Revert have to see it too — otherwise they read as dead while the user is
@@ -1577,7 +1617,7 @@ export class ResultsPanel extends LitElement {
     // Bound values are substituted for display only — the run itself stayed
     // parameterized, which is what keeps it correct across engines and types.
     const runParams = this.run.phase === 'done' || this.run.phase === 'error' ? (this.run.params ?? []) : []
-    const canFilter = !!runSql && isFilterableQuery(runSql, this.engine)
+    const canFilter = !planOpen && !!runSql && isFilterableQuery(runSql, this.engine)
     const selected = this.rowEditable && canEditResult ? this._selectedRefs() : { results: [], drafts: [] }
     const hasDeletable = selected.results.length > 0 || selected.drafts.length > 0
     return html`
@@ -1595,7 +1635,15 @@ export class ResultsPanel extends LitElement {
               </button>
             `
           : html`<span>${t('results.title')}</span>`}
-        ${this.run.phase === 'done' && (this.run.result.resultSets?.length ?? 0) > 1
+        ${plan
+          ? html`
+              <div class="plan-toggle" aria-label=${t('results.executionPlan')}>
+                <button class="plan-toggle-button ${this._planView === 'plan' ? 'active' : ''}" @click=${() => (this._planView = 'plan')}>${t('results.planView')}</button>
+                <button class="plan-toggle-button ${this._planView === 'raw' ? 'active' : ''}" @click=${() => (this._planView = 'raw')}>${t('results.rawPlanView')}</button>
+              </div>
+            `
+          : ''}
+        ${!planOpen && this.run.phase === 'done' && (this.run.result.resultSets?.length ?? 0) > 1
           ? html`
               <ui-select
                 class="result-set-select"
@@ -1723,7 +1771,7 @@ export class ResultsPanel extends LitElement {
               </div>
             `
           : ''}
-        <span class="status">${this._status()}</span>
+        <span class="status">${this._status(planOpen ? plan : null)}</span>
         ${this.canGoBack || this.canGoForward || jsonOpen || this._jsonForward
           ? html`
               <div class="toolbar" aria-label=${t('results.navActions')}>
@@ -3025,7 +3073,16 @@ export class ResultsPanel extends LitElement {
     this._commitEdit(event.target as HTMLInputElement)
   }
 
-  private _status() {
+  private _executionPlan(): ExecutionPlan | null {
+    if (this.run.phase !== 'done') return null
+    const cached = this._planCache
+    if (cached && cached.result === this.run.result && cached.sql === this.run.sql && cached.engine === this.engine) return cached.plan
+    const plan = parseExecutionPlan(this.engine, this.run.sql, this.run.result)
+    this._planCache = { result: this.run.result, sql: this.run.sql, engine: this.engine, plan }
+    return plan
+  }
+
+  private _status(plan: ExecutionPlan | null = null) {
     if (this._draining) {
       return html`${t('results.preparing', {
         done: formatInteger(this._draining.done),
@@ -3033,6 +3090,12 @@ export class ResultsPanel extends LitElement {
       })}`
     }
     if (this.run.phase !== 'done') return ''
+    if (plan) {
+      const duration = plan.executionMs
+      return html`${formatInteger(plan.nodes.length)} ${t('results.operations')}${duration === undefined
+        ? ''
+        : html` · <span class="duration ${durationPace(duration)}">${this._formatPlanMetric(duration, 'duration')}</span>`}`
+    }
     const result = this._shownResult()
     if (!result) return ''
     const buffered = result.bufferedRowCount
@@ -3048,8 +3111,95 @@ export class ResultsPanel extends LitElement {
       result.truncated && totalKnown && buffered !== undefined
         ? ` · ${t('results.loadedPrefix', { count: formatInteger(buffered) })}`
         : ''
-    const pace = result.durationMs < 500 ? 'fast' : result.durationMs < 2000 ? 'medium' : 'slow'
+    const pace = durationPace(result.durationMs)
     return html`${rows}${capped} · <span class="duration ${pace}">${Math.max(1, Math.round(result.durationMs))} ms</span>`
+  }
+
+  private _formatPlanMetric(value: number, metric: 'duration' | 'cost'): string {
+    if (metric === 'cost') return value < 10 ? value.toFixed(2) : value.toFixed(1)
+    const digits = value < 0.01 ? 4 : value < 1 ? 3 : value < 10 ? 2 : value < 100 ? 1 : 0
+    return `${value.toFixed(digits)} ms`
+  }
+
+  private _formatPlanRows(value: number | undefined): string {
+    if (value === undefined) return '—'
+    return Number.isInteger(value) ? formatInteger(value) : formatDecimal(value)
+  }
+
+  private _planMetricHeading(plan: ExecutionPlan): string {
+    if (plan.metric === 'duration') return t('results.durationShare')
+    return plan.metric === 'cost' ? t('results.costShare') : t('results.planMetric')
+  }
+
+  private _planRowsText(node: ExecutionPlanNode): string {
+    if (node.actualRows === undefined) return this._formatPlanRows(node.estimatedRows)
+    if (node.estimatedRows === undefined) return this._formatPlanRows(node.actualRows)
+    return `${this._formatPlanRows(node.actualRows)} / ${this._formatPlanRows(node.estimatedRows)}`
+  }
+
+  /** What a plan cell says, as text. The selection controller copies through
+   * this, and the rendered cell is built from the same pieces, so what lands on
+   * the clipboard is what the row shows. */
+  private _planCellText(node: ExecutionPlanNode, col: number, plan: ExecutionPlan): string {
+    if (col === 0) return node.detail ? `${node.operation} · ${node.detail}` : node.operation
+    if (col === 1) return this._planRowsText(node)
+    if (node.metric === undefined || plan.metric === 'none') return '—'
+    const value = this._formatPlanMetric(node.metric, plan.metric)
+    return node.percent === undefined ? value : `${value} · ${node.percent.toFixed(1)}%`
+  }
+
+  private _renderPlanNode(node: ExecutionPlanNode, index: number, plan: ExecutionPlan) {
+    const metric = node.metric === undefined || plan.metric === 'none'
+      ? '—'
+      : html`${this._formatPlanMetric(node.metric, plan.metric)}${node.percent === undefined ? '' : html` <span class="plan-percent">· ${node.percent.toFixed(1)}%</span>`}`
+    const sel = (col: number) => this._planSel.isSelected(index, col) ? 'selected' : ''
+    return html`
+      <tr class="plan-row ${this.alternateRowShading && index % 2 ? 'alt' : ''} ${node.hot ? 'hot' : ''}" data-grid-row=${index}>
+        <td class="num plan-flow">${node.flow}</td>
+        <td class="plan-operation ${sel(0)}" title=${this._planCellText(node, 0, plan)}>
+          <div class="plan-operation-inner" style="--plan-depth: ${node.depth}">
+            ${node.depth ? html`<span class="plan-branch" aria-hidden="true"></span>` : ''}
+            <span class="plan-operation-name">${node.operation}</span>
+            ${node.detail ? html`<span class="plan-detail">· ${node.detail}</span>` : ''}
+          </div>
+        </td>
+        <td class="plan-rows ${sel(1)}">${this._planRowsText(node)}</td>
+        <td class="plan-metric ${sel(2)}">${metric}</td>
+      </tr>
+    `
+  }
+
+  private _onPlanPointerDown = (event: PointerEvent) => {
+    if (!this._planSel.pointerDown(event)) return
+    ;(event.currentTarget as HTMLElement).focus() // so the nav and copy keys reach us
+  }
+
+  // The plan takes only what the controller handles — movement and copy. It has
+  // no editing, so there is nothing for the panel to claim ahead of it.
+  private _onPlanKeydown = (event: KeyboardEvent) => {
+    this._planSel.handleKeydown(event)
+  }
+
+  private _renderExecutionPlan(plan: ExecutionPlan) {
+    const metricHeading = this._planMetricHeading(plan)
+    const note = plan.metric === 'duration'
+      ? t('results.planDurationNote')
+      : plan.metric === 'cost'
+        ? t('results.planCostNote')
+        : ''
+    return html`
+      <table
+        class="execution-plan"
+        tabindex="0"
+        @pointerdown=${this._onPlanPointerDown}
+        @keydown=${this._onPlanKeydown}
+      >
+        <colgroup><col class="plan-flow-col" /><col /><col class="plan-rows-col" /><col class="plan-metric-col" /></colgroup>
+        <thead><tr><th class="num">#</th><th>${t('results.operation')}</th><th>${t('results.actualEstimate')}</th><th class="plan-metric">${metricHeading}</th></tr></thead>
+        <tbody>${plan.nodes.map((node, index) => this._renderPlanNode(node, index, plan))}</tbody>
+      </table>
+      ${note ? html`<div class="plan-note"><span aria-hidden="true">ⓘ</span><span>${note}</span></div>` : ''}
+    `
   }
 
   private _renderBody() {
@@ -3075,6 +3225,8 @@ export class ResultsPanel extends LitElement {
         : html`\n<button class="error-line" @click=${() => this._gotoErrorLine(line)}>${t('results.errorAtLine', { line })}</button>`}</pre>`
     }
 
+    const plan = this._executionPlan()
+    if (plan && this._planView === 'plan') return this._renderExecutionPlan(plan)
     const result = this._shownResult()!
     if (!result.columns.length) {
       return html`<p class="hint">${t('results.affected', {
@@ -3512,6 +3664,35 @@ export class ResultsPanel extends LitElement {
         display: flex;
         align-items: center;
         gap: 4px;
+      }
+
+      .plan-toggle {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 2px;
+        border-radius: 4px;
+        background: var(--header-bg);
+      }
+
+      .plan-toggle-button {
+        height: 20px;
+        padding: 0 7px;
+        color: var(--text-3);
+        background: transparent;
+        border: none;
+        border-radius: 3px;
+        font: inherit;
+        font-weight: 500;
+        text-transform: none;
+        letter-spacing: normal;
+        cursor: pointer;
+      }
+
+      .plan-toggle-button:hover,
+      .plan-toggle-button.active {
+        color: var(--text);
+        background: var(--list-hover);
       }
 
       .status {
@@ -3990,6 +4171,95 @@ export class ResultsPanel extends LitElement {
          parity as the windowing spacer rows come and go. */
       tbody tr.alt td {
         background: var(--row-alt);
+      }
+
+      table.execution-plan {
+        width: 100%;
+        min-width: 720px;
+      }
+
+      .execution-plan .plan-flow-col {
+        width: 42px;
+      }
+
+      .execution-plan .plan-rows-col {
+        width: 180px;
+      }
+
+      .execution-plan .plan-metric-col {
+        width: 164px;
+      }
+
+      .execution-plan .plan-flow {
+        width: 42px;
+      }
+
+      .execution-plan .plan-operation-inner {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+        padding-left: calc(var(--plan-depth) * 16px);
+      }
+
+      .plan-branch {
+        width: 11px;
+        height: 16px;
+        flex: none;
+        border-left: 1px solid var(--text-3);
+        border-bottom: 1px solid var(--text-3);
+        border-radius: 0 0 0 3px;
+        transform: translateY(-4px);
+        opacity: 0.65;
+      }
+
+      .plan-operation-name {
+        flex: none;
+        color: var(--editor-fg);
+        font-weight: 500;
+      }
+
+      .plan-detail {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--text-3);
+        font-family: var(--mono-font);
+        font-size: var(--font-size-sm);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .execution-plan .plan-rows,
+      .execution-plan .plan-metric {
+        font-family: var(--mono-font);
+        font-size: var(--font-size-sm);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .execution-plan .plan-metric {
+        text-align: right;
+      }
+
+      .plan-percent {
+        color: var(--text-3);
+      }
+
+      .plan-row.hot .plan-metric {
+        color: var(--status-dot-warning);
+        font-weight: 700;
+      }
+
+      .plan-note {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 32px;
+        padding: 7px 12px;
+        color: var(--text-3);
+        background: var(--header-bg);
+        border-bottom: 1px solid var(--grid-border);
+        font-size: var(--font-size-sm);
+        line-height: 1.35;
       }
 
       /* Windowing spacers stand in for off-screen rows: no grid lines, inert. */

@@ -10,6 +10,7 @@ import { MAX_BUFFERED_ROWS } from './driver'
 import { createMysqlDriver, mysqlVersion } from './mysql'
 import { endpointFor, profileFromUrl, testMysqlUrl } from './test-db'
 import { explainFlavors, explainStatement } from '../../src/sql-explain'
+import { parseExecutionPlan } from '../../src/execution-plan'
 
 const url = testMysqlUrl()
 const describeDb = url ? describe : describe.skip
@@ -78,8 +79,12 @@ describeDb('mysql driver (integration)', () => {
     try {
       const serverVersion = mysqlVersion(String((await driver.query('select version() as v')).rows[0]![0]))
       for (const flavor of explainFlavors('mysql', serverVersion)) {
-        const result = await driver.query(explainStatement({ engine: 'mysql', serverVersion, flavor, sql: 'select name from authors' }))
+        const statement = explainStatement({ engine: 'mysql', serverVersion, flavor, sql: 'select name from authors' })
+        const result = await driver.query(statement)
         expect(result.rows.length).toBeGreaterThan(0)
+        const plan = parseExecutionPlan('mysql', statement, result)
+        expect(plan?.nodes.length).toBeGreaterThan(0)
+        expect(plan?.metric).toBe(flavor === 'analyze' ? 'duration' : 'cost')
       }
     } finally {
       await driver.disconnect()

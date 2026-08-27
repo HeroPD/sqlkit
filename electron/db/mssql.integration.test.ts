@@ -330,19 +330,18 @@ describeDb('mssql driver (integration)', () => {
     const explain = (flavor: 'plan' | 'analyze') =>
       explainStatement({ engine: 'sqlserver', serverVersion: null, flavor, sql: 'select name from authors' })
     try {
-      // The estimated plan: SHOWPLAN_ALL owns its batch, so this is the GO
+      // The estimated plan: SHOWPLAN_XML owns its batch, so this is the GO
       // script, and the query itself never executes.
       const plan = await driver.query(explain('plan'))
-      expect(plan.columns).toContain('StmtText')
+      expect(plan.columns.some((column) => /showplan/i.test(column))).toBe(true)
       expect(plan.rows.length).toBeGreaterThan(0)
       // The switch must not outlive the run: the pool reset clears it, so the
       // next query returns rows again rather than another plan.
       expect((await driver.query('select name from authors order by name')).columns).toEqual(['name'])
 
-      // The actual plan: one batch, self-restoring, counters alongside estimates.
+      // The actual plan: one batch, self-restoring, with runtime counters in XML.
       const analyzed = await driver.query(explain('analyze'))
-      expect(analyzed.columns).toContain('Rows')
-      expect(analyzed.columns).toContain('StmtText')
+      expect(analyzed.columns.some((column) => /showplan/i.test(column))).toBe(true)
       expect(analyzed.rows.length).toBeGreaterThan(0)
       expect((await driver.query('select name from authors order by name')).columns).toEqual(['name'])
     } finally {
@@ -364,7 +363,7 @@ describeDb('mssql driver (integration)', () => {
       const plan = await driver.query(statement)
       // The plan is the run's result, not one grid among the empty ones the
       // SET batches return — the panel must not open on a blank grid.
-      expect(plan.columns).toContain('StmtText')
+      expect(plan.columns.some((column) => /showplan/i.test(column))).toBe(true)
       expect(plan.resultSets).toBeUndefined()
       // The pinned connection is never reset, so the script's own restore is
       // what keeps the rest of the transaction executing instead of compiling.

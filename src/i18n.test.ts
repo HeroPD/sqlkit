@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_LOCALE, formatBytes, formatInteger, getLocale, rowWord, setLocale, SUPPORTED_LOCALES, t } from './i18n'
+import { DEFAULT_LOCALE, formatBytes, formatDecimal, formatInteger, getLocale, rowWord, setLocale, SUPPORTED_LOCALES, t } from './i18n'
 
 describe('i18n', () => {
   it('uses en-US as the initial and only supported locale', () => {
@@ -18,6 +18,13 @@ describe('i18n', () => {
     expect(formatInteger(12_345)).toBe('12,345')
     expect(rowWord(1)).toBe('row')
     expect(rowWord(2)).toBe('rows')
+  })
+
+  it('groups and rounds decimals through the active locale', () => {
+    expect(formatDecimal(1_234.5)).toBe('1,234.5')
+    expect(formatDecimal(0.12345)).toBe('0.12')
+    expect(formatDecimal(0.12345, 4)).toBe('0.1235')
+    expect(formatDecimal(7)).toBe('7')
   })
 
   it('formats allocated byte counts for compact metadata labels', () => {

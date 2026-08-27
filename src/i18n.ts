@@ -126,6 +126,17 @@ const enUS = {
   'results.queryInfo': 'Show the query behind this result',
   'results.queryInfoHide': 'Hide the query',
   'results.queryInfoHeading': 'Applied query',
+  'results.planView': 'Plan',
+  'results.rawPlanView': 'Raw',
+  'results.executionPlan': 'Execution plan',
+  'results.operations': 'operations',
+  'results.operation': 'Operation',
+  'results.actualEstimate': 'Rows · actual / estimate',
+  'results.durationShare': 'Duration · %',
+  'results.costShare': 'Cost · %',
+  'results.planMetric': 'Metric',
+  'results.planDurationNote': 'Duration excludes child operations. Percent is each operation’s share of measured operator work and totals 100%.',
+  'results.planCostNote': 'Cost excludes child operations. Percent is each operation’s share of estimated operator cost and totals 100%.',
   'results.back': 'Back to the previous result',
   'results.forward': 'Forward to the next result',
   'results.idle': 'Run a query with {shortcut}; selection runs alone, otherwise nearest block.',
@@ -978,6 +989,9 @@ export function t(key: MessageKey, values: Record<string, MessageValue> = {}): s
 }
 
 export const formatInteger = (value: number) => new Intl.NumberFormat(activeLocale).format(value)
+
+export const formatDecimal = (value: number, maximumFractionDigits = 2) =>
+  new Intl.NumberFormat(activeLocale, { maximumFractionDigits }).format(value)
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'

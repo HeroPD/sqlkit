@@ -1101,6 +1101,76 @@ describe('results-panel draft rows', () => {
   })
 })
 
+// The pointer half of rectangle selection. Characterized before the selection
+// machinery moves behind a controller, so a lift that changes any of it fails
+// here rather than in someone's hands.
+describe('results-panel cell selection by pointer', () => {
+  const cellAt = (el: HTMLElement, row: number, col: number) =>
+    el.shadowRoot!.querySelector<HTMLTableCellElement>(`tr[data-row="${row}"] td:nth-child(${col + 2})`)!
+  const press = (cell: HTMLElement, init: PointerEventInit = {}) =>
+    cell.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true, button: 0, ...init }))
+  const selectedCells = (el: HTMLElement) =>
+    [...el.shadowRoot!.querySelectorAll('td.selected')].map(
+      (cell) => `${cell.closest('tr')!.getAttribute('data-row')}:${(cell as HTMLTableCellElement).cellIndex - 1}`,
+    )
+
+  it('extends the rectangle to the cell dragged over', async () => {
+    const el = await mountGrid(3)
+    // jsdom has no layout, so the hit test the drag relies on is stubbed to
+    // report the cell the pointer is meant to be over.
+    const target = cellAt(el, 1, 1)
+    Object.defineProperty(el.shadowRoot!, 'elementFromPoint', { configurable: true, value: () => target })
+
+    press(cellAt(el, 0, 0))
+    await el.updateComplete
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 40, clientY: 40 }))
+    await el.updateComplete
+
+    expect(selectedCells(el).sort()).toEqual(['0:0', '0:1', '1:0', '1:1'])
+    el.remove()
+  })
+
+  it('stops extending once the drag ends', async () => {
+    const el = await mountGrid(3)
+    const target = cellAt(el, 2, 1)
+    Object.defineProperty(el.shadowRoot!, 'elementFromPoint', { configurable: true, value: () => target })
+
+    press(cellAt(el, 0, 0))
+    await el.updateComplete
+    window.dispatchEvent(new PointerEvent('pointerup', {}))
+    // The window listeners are gone, so this move must not reach the grid.
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 40, clientY: 90 }))
+    await el.updateComplete
+
+    expect(selectedCells(el)).toEqual(['0:0'])
+    el.remove()
+  })
+
+  it('extends the rectangle from the anchor on shift-click', async () => {
+    const el = await mountGrid(3)
+    press(cellAt(el, 0, 0))
+    await el.updateComplete
+    press(cellAt(el, 2, 1), { shiftKey: true })
+    await el.updateComplete
+
+    expect(selectedCells(el).sort()).toEqual(['0:0', '0:1', '1:0', '1:1', '2:0', '2:1'])
+    el.remove()
+  })
+
+  it('leaves the selection where it is when the row-number cell is pressed', async () => {
+    const el = await mountGrid(3)
+    press(cellAt(el, 1, 0))
+    await el.updateComplete
+    expect(selectedCells(el)).toEqual(['1:0'])
+
+    press(el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-row="2"] td.num')!)
+    await el.updateComplete
+
+    expect(selectedCells(el)).toEqual(['1:0'])
+    el.remove()
+  })
+})
+
 describe('results-panel DBeaver-style editing', () => {
   it('type-to-edit opens the editor seeded with the typed character', async () => {
     const el = await mount() // editable, (0,0) selected by default
@@ -1660,6 +1730,139 @@ describe('results-panel query info', () => {
     await el.updateComplete
     el.remove()
     expect(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))).not.toThrow()
+  })
+})
+
+describe('results-panel execution plans', () => {
+  const mountPlan = async (executionMs = 0.042) => {
+    const el = document.createElement('results-panel')
+    el.engine = 'postgresql'
+    el.run = {
+      phase: 'done',
+      sql: 'explain (analyze, buffers, format json) select * from users',
+      result: {
+        columns: ['QUERY PLAN'],
+        rows: [[[{ Plan: {
+          'Node Type': 'Limit',
+          'Plan Rows': 10,
+          'Actual Rows': 4,
+          'Actual Loops': 1,
+          'Actual Total Time': 0.027,
+          Plans: [{
+            'Node Type': 'Seq Scan',
+            'Relation Name': 'users',
+            'Plan Rows': 610,
+            'Actual Rows': 4,
+            'Actual Loops': 1,
+            'Actual Total Time': 0.011,
+          }],
+        }, 'Execution Time': executionMs }]]],
+        rowCount: 1,
+        durationMs: 1,
+      },
+    }
+    document.body.append(el)
+    await el.updateComplete
+    return el
+  }
+
+  it('opens actual plans as a compact result-cell grid with 100% self-duration shares', async () => {
+    const el = await mountPlan()
+    const table = el.shadowRoot!.querySelector('.execution-plan')!
+    expect([...table.querySelectorAll('th')].map((cell) => cell.textContent?.trim())).toEqual([
+      '#', 'Operation', 'Rows · actual / estimate', 'Duration · %',
+    ])
+    expect([...table.querySelectorAll('tbody tr')].map((row) => [...row.children].map((cell) => cell.textContent?.replace(/\s+/g, ' ').trim()))).toEqual([
+      ['2', 'Limit', '4 / 10', '0.016 ms · 59.3%'],
+      ['1', 'Seq Scan · users', '4 / 610', '0.011 ms · 40.7%'],
+    ])
+    expect(el.shadowRoot!.querySelector('.plan-note')?.textContent).toContain('totals 100%')
+    expect(el.shadowRoot!.querySelector('.status')?.textContent).toContain('2 operations · 0.042 ms')
+    expect(el.shadowRoot!.querySelector('[aria-label="Export results…"]')).toBeNull()
+    el.remove()
+  })
+
+  it('selects a rectangle of plan cells and copies it as TSV', async () => {
+    const writeClipboardText = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }
+    const el = await mountPlan()
+    const cell = (row: number, col: number) =>
+      el.shadowRoot!.querySelector<HTMLTableCellElement>(`tr[data-grid-row="${row}"] td:nth-child(${col + 2})`)!
+
+    cell(0, 0).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true, button: 0 }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelectorAll('td.selected')).toHaveLength(1)
+
+    cell(1, 2).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true, button: 0, shiftKey: true }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelectorAll('td.selected')).toHaveLength(6)
+
+    el.shadowRoot!.querySelector('.execution-plan')!.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, key: 'c', metaKey: true, cancelable: true }),
+    )
+    expect(writeClipboardText).toHaveBeenCalledWith(
+      'Limit\t4 / 10\t0.016 ms · 59.3%\nSeq Scan · users\t4 / 610\t0.011 ms · 40.7%',
+    )
+    el.remove()
+  })
+
+  it('walks plan rows with the arrow keys and leaves the flow number unselectable', async () => {
+    const el = await mountPlan()
+    const table = el.shadowRoot!.querySelector('.execution-plan')!
+    const press = (init: KeyboardEventInit) =>
+      table.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
+
+    // The flow-number column is the plan's row number, so pressing it selects nothing.
+    el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-grid-row="0"] td.num')!
+      .dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true, button: 0 }))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelectorAll('td.selected')).toHaveLength(0)
+
+    el.shadowRoot!.querySelector<HTMLTableCellElement>('tr[data-grid-row="0"] td:nth-child(2)')!
+      .dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true, button: 0 }))
+    await el.updateComplete
+    press({ key: 'ArrowDown', shiftKey: true })
+    await el.updateComplete
+    expect(
+      [...el.shadowRoot!.querySelectorAll('td.selected')].map((cell) => cell.closest('tr')!.getAttribute('data-grid-row')),
+    ).toEqual(['0', '1'])
+
+    press({ key: 'ArrowUp' })
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelectorAll('td.selected')).toHaveLength(1)
+    el.remove()
+  })
+
+  it('bands a plan duration on the same pace scale as a query duration', async () => {
+    const pace = (el: HTMLElement) => el.shadowRoot!.querySelector('.status .duration')!.className
+
+    const fast = await mountPlan(0.042)
+    expect(pace(fast)).toBe('duration fast')
+    fast.remove()
+
+    const medium = await mountPlan(900)
+    expect(pace(medium)).toBe('duration medium')
+    medium.remove()
+
+    const slow = await mountPlan(4200)
+    expect(pace(slow)).toBe('duration slow')
+    expect(slow.shadowRoot!.querySelector('.status')?.textContent).toContain('4200 ms')
+    slow.remove()
+  })
+
+  it('keeps the engine-native plan available through Raw', async () => {
+    const el = await mountPlan()
+    const buttons = [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.plan-toggle-button')]
+    expect(buttons.map((button) => button.textContent)).toEqual(['Plan', 'Raw'])
+    buttons[1]!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.execution-plan')).toBeNull()
+    expect(el.shadowRoot!.querySelector('th')?.textContent).toBe('#')
+    expect(el.shadowRoot!.textContent).toContain('QUERY PLAN')
+    buttons[0]!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.execution-plan')).not.toBeNull()
+    el.remove()
   })
 })
 

@@ -55,21 +55,21 @@ const trimStatement = (sql: string) => sql.trim().replace(/;+\s*$/, '')
 /** SQL Server has no EXPLAIN: a plan comes from a session SET that makes the
  * statements after it report themselves, so each flavor is a small script.
  *
- * SET SHOWPLAN_ALL has to own its batch, hence the GO. Releasing the pooled
+ * SET SHOWPLAN_XML has to own its batch, hence the GO. Releasing the pooled
  * connection resets it (sp_reset_connection), which clears the switch; a
  * connection pinned by a manual transaction is never reset, so there the script
  * restores the session itself. Each SET batch returns nothing, which would
  * otherwise count as a result set and leave the run ending on an empty grid —
  * the driver drops those columnless sets, so the plan stays the run's last one.
  *
- * SET STATISTICS PROFILE carries no batch rule, so the analyze flavor turns
+ * SET STATISTICS XML carries no batch rule, so the analyze flavor turns
  * itself back off inside its single batch — which is also what lets it run with
  * parameters bound. */
 const sqlServerExplain = (flavor: ExplainFlavor, sql: string, inTransaction: boolean): string => {
   const statement = trimStatement(sql)
-  if (flavor === 'analyze') return `set statistics profile on; ${statement}; set statistics profile off`
-  const script = `set showplan_all on\ngo\n${statement}`
-  return inTransaction ? `${script}\ngo\nset showplan_all off` : script
+  if (flavor === 'analyze') return `set statistics xml on; ${statement}; set statistics xml off`
+  const script = `set showplan_xml on\ngo\n${statement}`
+  return inTransaction ? `${script}\ngo\nset showplan_xml off` : script
 }
 
 /** The statement that reports `sql`'s plan on this server. Any explain wrapper
@@ -86,9 +86,12 @@ export function explainStatement(args: {
   const sql = stripExplain(args.sql)
   if (args.engine === 'sqlserver') return sqlServerExplain(args.flavor, sql, args.inTransaction ?? false)
   if (args.engine === 'sqlite') return `explain query plan ${sql}`
-  if (args.flavor === 'plan') return `explain ${sql}`
-  if (args.engine === 'mysql') return (mysqlAnalyzePrefix(args.serverVersion) ?? 'explain ') + sql
-  return `explain analyze ${sql}`
+  if (args.engine === 'postgresql') return args.flavor === 'analyze'
+    ? `explain (analyze, buffers, format json) ${sql}`
+    : `explain (format json) ${sql}`
+  if (args.flavor === 'plan') return `explain format=json ${sql}`
+  if (/mariadb/i.test(args.serverVersion ?? '')) return `analyze format=json ${sql}`
+  return (mysqlAnalyzePrefix(args.serverVersion) ?? 'explain ') + sql
 }
 
 // Postgres/MySQL/SQLite wrappers, including pg's option list and MariaDB's bare
@@ -101,6 +104,14 @@ const PLAN_SET = /set\s+(?:showplan_(?:all|xml|text)|statistics\s+(?:xml|profile
 // Both only strip around a statement, so a run of the SET on its own survives.
 const PLAN_SET_ON = new RegExp(`^\\s*${PLAN_SET}\\s+on\\s*;?\\s*(?:go\\b[^\\n]*\\n)?(?=[\\s\\S]*\\S)`, 'i')
 const PLAN_SET_OFF = new RegExp(`(?<=\\S)\\s*(?:;|\\bgo\\b[^\\n]*\\n)?\\s*${PLAN_SET}\\s+off\\s*;?\\s*$`, 'i')
+
+/** Whether `sql` is one of the explain statements this module builds — the
+ * wrappers above, or a SQL Server plan SET in front of a statement. Bare
+ * ANALYZE is only a wrapper when a query follows it, so the ANALYZE TABLE that
+ * maintains statistics is not a plan. */
+export function isExplainStatement(sql: string): boolean {
+  return EXPLAIN_PREFIX.test(sql) || ANALYZE_PREFIX.test(sql) || PLAN_SET_ON.test(sql)
+}
 
 /** Strips whatever explain wrapper `sql` carries, so an explain of an explain
  * plans the original statement. */

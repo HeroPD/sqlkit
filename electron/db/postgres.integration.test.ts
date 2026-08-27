@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ConnectionProfile, InspectColumn } from '../../src/electron'
 import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildColumnAlter, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+import { parseExecutionPlan } from '../../src/execution-plan'
+import { explainStatement } from '../../src/sql-explain'
 
 const inspectColumnFixture = (name: string): InspectColumn =>
   ({ name, dataType: 'integer', nullable: true, default: null, primaryKey: false, comment: null })
@@ -73,6 +75,21 @@ describeDb('postgres driver (integration)', () => {
   const awaitBackend = (observer: Driver, marker: string) =>
     until(`a backend running ${marker}`, async () =>
       (await observer.query("select 1 from pg_stat_activity where state = 'active' and query like $1", [`%${marker}%`])).rows.length > 0)
+
+  it('returns structured JSON for both History explain flavors', async () => {
+    const driver = await connectDriver()
+    try {
+      for (const flavor of ['plan', 'analyze'] as const) {
+        const statement = explainStatement({ engine: 'postgresql', serverVersion: null, flavor, sql: 'select name from sqlkit_it.authors' })
+        const result = await driver.query(statement)
+        const plan = parseExecutionPlan('postgresql', statement, result)
+        expect(plan?.nodes.length).toBeGreaterThan(0)
+        expect(plan?.metric).toBe(flavor === 'analyze' ? 'duration' : 'cost')
+      }
+    } finally {
+      await driver.disconnect()
+    }
+  })
 
   it('swaps two column names in one runDdl without a transient collision', async () => {
     const driver = await connectDriver()
