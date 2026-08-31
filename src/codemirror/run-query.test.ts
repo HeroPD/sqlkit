@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { EditorState } from '@codemirror/state'
 import { MSSQL, MySQL, PostgreSQL, SQLite, sql, type SQLDialect } from '@codemirror/lang-sql'
-import { CONTINUATIONS, OPENER, queryToRun } from './run-query'
+import { CONTINUATIONS, explicitQueryToRun, OPENER, queryToRun } from './run-query'
+import { analyzeDestructive } from '../sql-destructive'
 import { SQL_DIALECTS, type SqlDialectName } from './dialects'
 
 // The app's postgres dialect: dollar-quoted bodies parse as plain SQL, so the
@@ -739,6 +740,97 @@ describe('queryToRun', () => {
       const doc = "SELECT 'abc' FROM t;"
       const state = stateAt(doc, doc.indexOf('bc'), { anchor: 0 })
       expect(queryToRun(state)?.sql).toBe("SELECT 'abc' FROM t;")
+    })
+
+    // Dragging down from the caret at the end of a statement's first line
+    // leaves that line's text outside the range, though the drag covered it.
+    it('reads a selection dragged from the end of a line as whole lines', () => {
+      const doc = 'ALTER TABLE t\n    ALTER COLUMN c TYPE bigint USING c::bigint;'
+      const state = stateAt(doc, doc.length, { anchor: doc.indexOf('\n') })
+      expect(queryToRun(state)?.sql).toBe(doc)
+      expect(explicitQueryToRun(state)?.sql).toBe(doc)
+    })
+
+    it('keeps a one-line selection exact, however it was dragged', () => {
+      const doc = 'SELECT a, b FROM t;'
+      const state = stateAt(doc, doc.indexOf(' FROM'), { anchor: doc.indexOf('a, b') })
+      expect(queryToRun(state)?.sql).toBe('a, b')
+    })
+
+    it('stops above a line the selection only reached', () => {
+      const doc = 'SELECT 1;\nSELECT 2;'
+      const state = stateAt(doc, doc.indexOf('SELECT 2'), { anchor: 0 })
+      expect(queryToRun(state)?.sql).toBe('SELECT 1;')
+    })
+
+    it('does not grow back over a statement the selection never touched', () => {
+      const doc = 'DELETE FROM t; SELECT 1\nFROM u;'
+      const state = stateAt(doc, doc.length, { anchor: doc.indexOf('SELECT 1') })
+      expect(queryToRun(state)?.sql).toBe('SELECT 1\nFROM u;')
+    })
+
+    it('does not grow forward over a statement the selection never touched', () => {
+      const doc = 'SELECT 1\nFROM u; DELETE FROM t;'
+      const state = stateAt(doc, doc.indexOf('; DELETE'), { anchor: 0 })
+      expect(queryToRun(state)?.sql).toBe('SELECT 1\nFROM u')
+    })
+
+    // A script dragged from the caret at the end of its first line: every
+    // statement runs, and the offset still points at that line, so a driver
+    // error maps back to the line the user is looking at.
+    const script = [
+      'ALTER TABLE tier_level_products',
+      '    ALTER COLUMN product_id TYPE bigint USING product_id::bigint;',
+      '',
+      'ALTER TABLE merchants',
+      '    RENAME COLUMN max_point_earn_per_day TO max_earn_txs_per_day;',
+    ].join('\n')
+
+    it('keeps a whole script dragged from the end of its first line', () => {
+      const state = stateAt(script, script.length, { anchor: script.indexOf('\n') })
+      expect(queryToRun(state)).toEqual({ sql: script, from: 0 })
+    })
+
+    it('reads the same range when the drag ran upward', () => {
+      const state = stateAt(script, script.indexOf('\n'), { anchor: script.length })
+      expect(queryToRun(state)).toEqual({ sql: script, from: 0 })
+    })
+
+    // The line-wise reading grows to the lines the drag covered, never to the
+    // statement around them: a subquery selected on its own still runs alone.
+    it('runs a multi-line fragment of one statement as selected', () => {
+      const doc = 'SELECT *\nFROM (\n  SELECT a\n  FROM t\n) sub;'
+      const state = stateAt(doc, doc.indexOf('\n) sub'), { anchor: doc.indexOf('  SELECT a') })
+      expect(queryToRun(state)?.sql).toBe('SELECT a\n  FROM t')
+    })
+
+    // Selecting only a clause line still runs only that line. Growing it back
+    // to its statement head would also have to grow the end, and a selection
+    // stopping short of a WHERE would silently become an unqualified write.
+    it('leaves a clause line selected on its own alone', () => {
+      const doc = 'ALTER TABLE t\n    ALTER COLUMN c TYPE bigint;'
+      const state = stateAt(doc, doc.length, { anchor: doc.indexOf('\n') + 1 })
+      expect(queryToRun(state)?.sql).toBe('ALTER COLUMN c TYPE bigint;')
+    })
+
+    // A `;` is read as written, so one inside a string blocks the growth it
+    // could not have opened. Refusing to grow returns what was selected —
+    // the shipped behaviour — where growing wrongly would run a stranger.
+    it('does not grow back over a semicolon inside a string', () => {
+      const doc = "SELECT ';' AS marker, x\nFROM t;"
+      const state = stateAt(doc, doc.length, { anchor: doc.indexOf('x') })
+      expect(queryToRun(state)?.sql).toBe('x\nFROM t;')
+    })
+
+    // The one case the line-wise reading makes runnable that was a syntax
+    // error before: a drag that stops above the WHERE. The destructive
+    // preflight is what stands between that and every row.
+    it('hands an unqualified write to the destructive preflight', () => {
+      const doc = 'UPDATE t\nSET x = 1\nWHERE id = 2;'
+      const state = stateAt(doc, doc.indexOf('\nWHERE'), { anchor: doc.indexOf('\n') })
+      const sql = queryToRun(state)?.sql
+      expect(sql).toBe('UPDATE t\nSET x = 1')
+      expect(analyzeDestructive(sql!, 'postgresql')).toEqual(['updateAll'])
     })
   })
 })

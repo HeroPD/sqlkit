@@ -457,33 +457,51 @@ const cutsToken = (state: EditorState, pos: number) => {
 }
 
 /**
+ * The text a selection means. Inside one line it is taken exactly: that is how
+ * a sub-expression is selected and run on its own. Across lines it is read
+ * line-wise, because a drag says which lines it covered and not which columns
+ * it happened to start and stop at — an endpoint left at the end of a line is
+ * the caret the drag began from, with that line's statement still under it,
+ * and one mid-token could never run as written. A selection ending at a line
+ * start stops above that line, the line-wise convention editors share: the
+ * drag reached it, none of it is highlighted. Growth stops at a `;` in the
+ * text it would cross, which is a statement the selection never touched.
+ */
+const selectedRange = (state: EditorState, from: number, to: number): [number, number] => {
+  if (cutsToken(state, from) || cutsToken(state, to)) return [state.doc.lineAt(from).from, state.doc.lineAt(to).to]
+  const first = state.doc.lineAt(from)
+  const reached = state.doc.lineAt(to)
+  const stopsAbove = to === reached.from && reached.number > first.number
+  const last = stopsAbove ? state.doc.line(reached.number - 1) : reached
+  if (last.number === first.number) return [from, to]
+  return [
+    state.sliceDoc(first.from, from).includes(';') ? from : first.from,
+    stopsAbove || state.sliceDoc(to, last.to).includes(';') ? to : last.to,
+  ]
+}
+
+/** The SQL a run command sends: the selection if any, else the query block. */
+const selectedQuery = (state: EditorState, from: number, to: number): QueryBlock | null => {
+  if (from >= to) return null
+  const [runFrom, runTo] = selectedRange(state, from, to)
+  const raw = state.sliceDoc(runFrom, runTo)
+  const selected = raw.trim()
+  return selected ? { sql: selected, from: runFrom + raw.length - raw.trimStart().length } : null
+}
+
+/**
  * The SQL that Mod-Enter would run: the selection if any, else the query
- * block at/nearest the cursor. A selection with an endpoint mid-token is
- * snapped out to whole lines — the cut fragment could never run, and a drag
- * across lines rarely lands exactly on token edges.
+ * block at/nearest the cursor.
  */
 export const queryToRun = (state: EditorState, dialect?: SqlDialectName): QueryBlock | null => {
   const { from, to, head } = state.selection.main
-  if (from < to) {
-    const snap = cutsToken(state, from) || cutsToken(state, to)
-    const runFrom = snap ? state.doc.lineAt(from).from : from
-    const runTo = snap ? state.doc.lineAt(to).to : to
-    const raw = state.sliceDoc(runFrom, runTo)
-    const selected = raw.trim()
-    if (selected) return { sql: selected, from: runFrom + raw.length - raw.trimStart().length }
-  }
-  return closestQueryBlock(state, head, true, dialect)
+  return selectedQuery(state, from, to) ?? closestQueryBlock(state, head, true, dialect)
 }
 
 /** An explicit selection, or only the statement that actually contains the caret. */
 export const explicitQueryToRun = (state: EditorState, dialect?: SqlDialectName): QueryBlock | null => {
   const { from, to, head } = state.selection.main
-  if (from < to) {
-    const raw = state.sliceDoc(from, to)
-    const selected = raw.trim()
-    if (selected) return { sql: selected, from: from + raw.length - raw.trimStart().length }
-  }
-  return closestQueryBlock(state, head, false, dialect)
+  return selectedQuery(state, from, to) ?? closestQueryBlock(state, head, false, dialect)
 }
 
 /** Cheap UI-state check; execution itself uses the fully parsed explicitQueryToRun path. */

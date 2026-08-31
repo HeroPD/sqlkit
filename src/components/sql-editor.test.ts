@@ -873,6 +873,30 @@ test('runExplicitQuery runs a selection or only the statement containing the car
   el.remove()
 })
 
+// A drag that began at the caret sitting at the end of the first line: the
+// statement's own head is outside the selected characters, and running from
+// the line below it would send a clause the server cannot parse. The reported
+// line is the head's, so a driver error maps to the statement, not its tail.
+test('runs the whole statement when the drag started at the end of its first line', async () => {
+  const doc = 'ALTER TABLE t\n    ALTER COLUMN c TYPE bigint;\n\nALTER TABLE u\n    RENAME COLUMN a TO b;'
+  const el = await mount('titlebar-drag-run', doc)
+  const runs: Array<{ sql: string; line: number }> = []
+  el.addEventListener('run-query', (event) =>
+    runs.push((event as CustomEvent<{ sql: string; line: number }>).detail),
+  )
+  const view = (el as unknown as { _view: EditorView })._view
+  view.focus()
+  view.dispatch({ selection: { anchor: doc.indexOf('\n'), head: doc.length } })
+
+  expect(el.runCurrentQuery()).toBe(true)
+  expect(el.runExplicitQuery()).toBe(true)
+  expect(runs).toEqual([
+    { sql: doc, line: 1 },
+    { sql: doc, line: 1 },
+  ])
+  el.remove()
+})
+
 // Regression: the host swapping `value` on a live tab (the History list
 // recycling its preview tab to another entry) dispatched the new doc into the
 // view, which fired the change listener — so the host saw a programmatic load
