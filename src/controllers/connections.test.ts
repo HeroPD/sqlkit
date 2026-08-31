@@ -206,6 +206,48 @@ describe('ConnectionsController metadata', () => {
     expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_b'])
   })
 
+  it('shows a revisited database at once and reloads underneath it', async () => {
+    const { api, emit, resolveMetadata } = stubSqlkit()
+    const controller = new ConnectionsController(host())
+    controller.hostConnected()
+
+    emit([status('db_a')])
+    await resolveMetadata(0, 'fn_only_in_a', 0, [tableRef('users')])
+
+    // First visit: there is nothing to show until the read lands.
+    emit([status('db_b')])
+    expect(controller.tables.p1).toBeUndefined()
+    await resolveMetadata(1, 'fn_only_in_b', 1, [tableRef('orders')])
+
+    emit([status('db_a')])
+    expect(controller.tables.p1?.map((table) => table.name)).toEqual(['users'])
+    expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_only_in_a'])
+    // Shown from what was read before, not instead of reading again.
+    expect(api.listTables).toHaveBeenCalledTimes(3)
+
+    await resolveMetadata(2, 'fn_a_reloaded', null, [tableRef('users')])
+    expect(controller.objects.p1?.functions.map((fn) => fn.name)).toEqual(['fn_a_reloaded'])
+    // The sizes came back with that list, so returning never re-reads them.
+    expect(api.listTableStats).toHaveBeenCalledTimes(2)
+    expect(controller.tableStats.p1?.[0]?.totalBytes).toBe(1)
+  })
+
+  it('forgets a connection metadata when it drops, which may return on another schema', async () => {
+    const { api, emit, resolveMetadata } = stubSqlkit()
+    const controller = new ConnectionsController(host())
+    controller.hostConnected()
+
+    emit([status('db_a')])
+    await resolveMetadata(0, 'fn_only_in_a', 0, [tableRef('users')])
+
+    emit([])
+    expect(controller.tables.p1).toBeUndefined()
+
+    emit([status('db_a')])
+    expect(controller.tables.p1).toBeUndefined()
+    expect(api.listTables).toHaveBeenCalledTimes(2)
+  })
+
   it('re-reads table sizes only when the table list changed', async () => {
     const { api, emit, resolveMetadata } = stubSqlkit()
     const controller = new ConnectionsController(host())

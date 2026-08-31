@@ -100,6 +100,11 @@ export class SqlExpressionEditor extends LitElement {
   protected firstUpdated() {
     const parent = this.shadowRoot?.querySelector<HTMLElement>('.host')
     if (!parent) return
+    const submit = () => {
+      if (!this.submitOnEnter) return false
+      this.dispatchEvent(new CustomEvent('expression-submit', { bubbles: true, composed: true }))
+      return true
+    }
     this._view = new EditorView({
       parent,
       state: EditorState.create({
@@ -110,14 +115,9 @@ export class SqlExpressionEditor extends LitElement {
           closeBrackets(),
           keymap.of([
             ...completionKeymap,
-            {
-              key: 'Enter',
-              run: () => {
-                if (!this.submitOnEnter) return false
-                this.dispatchEvent(new CustomEvent('expression-submit', { bubbles: true, composed: true }))
-                return true
-              },
-            },
+            // Enter submits because the bar is a filter box; Mod-Enter matches Run.
+            { key: 'Enter', run: submit },
+            { key: 'Mod-Enter', run: submit },
             {
               key: 'Escape',
               run: () => {

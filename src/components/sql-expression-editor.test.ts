@@ -26,7 +26,7 @@ describe('SQL expression completion', () => {
     expect(sqlserver).toContainEqual(expect.objectContaining({ label: 'GETDATE', type: 'function' }))
   })
 
-  it('submits and cancels a compact expression with Enter and Escape', async () => {
+  it('submits and cancels a compact expression with Enter, Mod-Enter and Escape', async () => {
     const editor = document.createElement('sql-expression-editor')
     editor.compact = true
     editor.submitOnEnter = true
@@ -42,10 +42,16 @@ describe('SQL expression completion', () => {
     expect(editor.value).toBe('\n')
     expect(submit).not.toHaveBeenCalled()
     content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    expect(submit).toHaveBeenCalledOnce()
+
+    // The key that runs a query applies the filter here; CodeMirror resolves
+    // Mod to Ctrl under jsdom, Cmd on the mac app.
+    content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))
     content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 
-    expect(submit).toHaveBeenCalledOnce()
+    expect(submit).toHaveBeenCalledTimes(2)
     expect(cancel).toHaveBeenCalledOnce()
+    expect(editor.value).toBe('\n')
     editor.remove()
   })
 

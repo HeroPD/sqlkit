@@ -7,6 +7,26 @@ const activeChildName = (status: ConnectionStatus | undefined): string | null =>
 /** Identity of a table list, so sizes can be re-read only when it changes. */
 const tableListKey = (tables: TableRef[]): string => tables.map((table) => `${table.schema ?? ''}.${table.name}`).join('\n')
 
+/** What was last read for one database, so returning to it renders at once. */
+type DatabaseMetadata = {
+  tables?: TableRef[]
+  columns?: ColumnRef[]
+  tableStats?: TableStat[]
+  objects?: DbObjects
+  statsKey?: string
+}
+
+// Databases remembered per connection, least-recently-used first: the handful
+// a session moves between, not every column of a whole server.
+const REMEMBERED_DATABASES = 12
+
+const withEntry = <T>(map: Record<string, T>, id: string, value: T | undefined): Record<string, T> => {
+  const next = { ...map }
+  if (value === undefined) delete next[id]
+  else next[id] = value
+  return next
+}
+
 // Owns the live-connection picture pushed from the main process: statuses by
 // profile id, and the table/column metadata of every connected database
 // (fetched once per connection). Pure data + IPC wrappers — what to render
@@ -37,6 +57,11 @@ export class ConnectionsController implements ReactiveController {
   private metaGen: Record<string, number> = {}
   /** The table list each profile's sizes were read for, so an unchanged list skips the re-read. */
   private statsKey: Record<string, string> = {}
+  /** Metadata of every database visited on a connection, so switching back to
+   * one shows its tree at once. Dropped with the connection it came from. */
+  private remembered = new Map<string, Map<string, DatabaseMetadata>>()
+  /** Which child database each profile's visible metadata describes. */
+  private metaChild: Record<string, string | null> = {}
   /** In-flight connect per profile, so two cold tabs don't open two tunnels/pools. */
   private connecting = new Map<string, Promise<ConnectResult>>()
   /**
@@ -153,10 +178,10 @@ export class ConnectionsController implements ReactiveController {
       // resolves — connect does, to pick the context — would otherwise pick the
       // database we just switched away from, and then disagree with the driver.
       this.apply(await window.sqlkit.getConnectionStatuses())
-      // apply() drops and refetches this profile's metadata when it sees the
-      // child change; force it only when the status did not report one.
-      if (profileId in this.tables) {
-        this.invalidateMetadata(profileId)
+      // apply() swaps this profile's metadata when it sees the child change;
+      // force it only when the status did not report one.
+      if (profileId in this.metaChild && this.metaChild[profileId] !== database) {
+        this.showMetadata(profileId, database)
         this.host.requestUpdate()
         void this.queueLoad(profileId)
       }
@@ -165,18 +190,9 @@ export class ConnectionsController implements ReactiveController {
   }
 
   private apply(statuses: ConnectionStatus[]) {
-    const previous = this.statuses
     const byId: Record<string, ConnectionStatus> = {}
     for (const status of statuses) byId[status.profileId] = status
-
-    const childChanged = new Set<string>()
-    for (const status of statuses) {
-      const prev = previous[status.profileId]
-      if (prev?.phase === 'connected' && status.phase === 'connected' && activeChildName(prev) !== activeChildName(status)) {
-        this.bumpMetadataGeneration(status.profileId)
-        childChanged.add(status.profileId)
-      }
-    }
+    const live = (id: string) => byId[id]?.phase === 'connected'
 
     this.statuses = byId
 
@@ -186,31 +202,29 @@ export class ConnectionsController implements ReactiveController {
     const columns: Record<string, ColumnRef[]> = {}
     const tableStats: Record<string, TableStat[]> = {}
     const objects: Record<string, DbObjects> = {}
-    for (const [id, list] of Object.entries(this.tables)) {
-      if (byId[id]?.phase === 'connected' && !childChanged.has(id)) tables[id] = list
-    }
-    for (const [id, list] of Object.entries(this.columns)) {
-      if (byId[id]?.phase === 'connected' && !childChanged.has(id)) columns[id] = list
-    }
-    for (const [id, list] of Object.entries(this.tableStats)) {
-      if (byId[id]?.phase === 'connected' && !childChanged.has(id)) tableStats[id] = list
-    }
+    for (const [id, list] of Object.entries(this.tables)) if (live(id)) tables[id] = list
+    for (const [id, list] of Object.entries(this.columns)) if (live(id)) columns[id] = list
+    for (const [id, list] of Object.entries(this.tableStats)) if (live(id)) tableStats[id] = list
+    for (const [id, list] of Object.entries(this.objects)) if (live(id)) objects[id] = list
     // Drop the cached list identity wherever the sizes went, so a reconnect
     // onto the same schema reads them again instead of skipping as unchanged.
     for (const id of Object.keys(this.statsKey)) {
       if (!(id in tableStats)) delete this.statsKey[id]
     }
-    for (const [id, list] of Object.entries(this.objects)) {
-      if (byId[id]?.phase === 'connected' && !childChanged.has(id)) objects[id] = list
-    }
     this.tables = tables
     this.columns = columns
     this.tableStats = tableStats
     this.objects = objects
+    for (const id of [...this.remembered.keys()]) if (!live(id)) this.remembered.delete(id)
+    for (const id of Object.keys(this.metaChild)) if (!live(id)) delete this.metaChild[id]
+
     for (const status of statuses) {
-      if (status.phase === 'connected' && !(status.profileId in this.tables)) {
-        void this.queueLoad(status.profileId)
-      }
+      if (status.phase !== 'connected') continue
+      const id = status.profileId
+      // The active child moved: show it as last seen, reload underneath.
+      const switched = id in this.metaChild && this.metaChild[id] !== activeChildName(status)
+      if (switched) this.showMetadata(id, activeChildName(status))
+      if (switched || !(id in this.tables)) void this.queueLoad(id)
     }
     this.host.requestUpdate()
   }
@@ -257,10 +271,18 @@ export class ConnectionsController implements ReactiveController {
     }
     if (this.metaGen[profileId] !== gen) return
     if (this.statuses[profileId]?.phase !== 'connected') return
+    this.metaChild[profileId] = childDb
     if (tables.success) this.tables = { ...this.tables, [profileId]: tables.tables }
     if (columns.success) this.columns = { ...this.columns, [profileId]: columns.columns }
     if (objects.success) this.objects = { ...this.objects, [profileId]: objects.objects }
-    if (tables.success || columns.success || objects.success) this.host.requestUpdate()
+    if (tables.success || columns.success || objects.success) {
+      this.remember(profileId, childDb, {
+        ...(tables.success ? { tables: tables.tables } : {}),
+        ...(columns.success ? { columns: columns.columns } : {}),
+        ...(objects.success ? { objects: objects.objects } : {}),
+      })
+      this.host.requestUpdate()
+    }
 
     // Storage statistics are optional and sometimes permission-gated. Essential
     // explorer metadata is already visible before this best-effort read starts.
@@ -284,27 +306,48 @@ export class ConnectionsController implements ReactiveController {
     if (!stats.success) return
     this.statsKey[profileId] = key
     this.tableStats = { ...this.tableStats, [profileId]: stats.stats }
+    this.remember(profileId, childDb, { tableStats: stats.stats, statsKey: key })
     this.host.requestUpdate()
   }
 
-  private bumpMetadataGeneration(profileId: string) {
+  /** Points a profile's visible metadata at `childDb`: what that database
+   * looked like when last read, or nothing on a first visit. */
+  private showMetadata(profileId: string, childDb: string | null) {
+    // A load already in flight was reading the database being left.
     this.metaGen[profileId] = (this.metaGen[profileId] ?? 0) + 1
+    const entry = this.recall(profileId, childDb)
+    this.metaChild[profileId] = childDb
+    this.tables = withEntry(this.tables, profileId, entry?.tables)
+    this.columns = withEntry(this.columns, profileId, entry?.columns)
+    this.tableStats = withEntry(this.tableStats, profileId, entry?.tableStats)
+    this.objects = withEntry(this.objects, profileId, entry?.objects)
+    if (entry?.statsKey === undefined) delete this.statsKey[profileId]
+    else this.statsKey[profileId] = entry.statsKey
   }
 
-  private invalidateMetadata(profileId: string) {
-    this.bumpMetadataGeneration(profileId)
-    const tables = { ...this.tables }
-    delete tables[profileId]
-    this.tables = tables
-    const columns = { ...this.columns }
-    delete columns[profileId]
-    this.columns = columns
-    const tableStats = { ...this.tableStats }
-    delete tableStats[profileId]
-    this.tableStats = tableStats
-    delete this.statsKey[profileId]
-    const objects = { ...this.objects }
-    delete objects[profileId]
-    this.objects = objects
+  /** One database's remembered metadata, moved to most-recently-used. */
+  private recall(profileId: string, childDb: string | null): DatabaseMetadata | undefined {
+    const byChild = this.remembered.get(profileId)
+    const key = childDb ?? ''
+    const entry = byChild?.get(key)
+    if (byChild && entry) {
+      byChild.delete(key)
+      byChild.set(key, entry)
+    }
+    return entry
+  }
+
+  private remember(profileId: string, childDb: string | null, patch: DatabaseMetadata) {
+    const byChild = this.remembered.get(profileId) ?? new Map<string, DatabaseMetadata>()
+    this.remembered.set(profileId, byChild)
+    const key = childDb ?? ''
+    // A partial read keeps what the last one saw, as the visible metadata does.
+    const entry = { ...byChild.get(key), ...patch }
+    byChild.delete(key)
+    byChild.set(key, entry)
+    for (const oldest of byChild.keys()) {
+      if (byChild.size <= REMEMBERED_DATABASES) break
+      byChild.delete(oldest)
+    }
   }
 }

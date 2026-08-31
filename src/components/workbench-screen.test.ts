@@ -1615,6 +1615,71 @@ describe('WorkbenchScreen connect entrance', () => {
   })
 })
 
+describe('WorkbenchScreen database switch points the driver', () => {
+  const allDatabases = { ...profile, databaseMode: 'all' } as ConnectionProfile
+
+  const mount = () => {
+    let inUse = 'db_a'
+    const children = () => [{ name: 'db_a', inUse: inUse === 'db_a' }, { name: 'db_b', inUse: inUse === 'db_b' }]
+    const setActiveChildDb = vi.fn((_id: string, database: string) => {
+      inUse = database
+      return Promise.resolve({ success: true })
+    })
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
+      getConnectionStatuses: vi.fn(() => Promise.resolve([{ profileId: 'p1', phase: 'connected', children: children() }])),
+      setActiveChildDb,
+      listTables: vi.fn(() => Promise.resolve({ success: true, tables: [] })),
+      listColumns: vi.fn(() => Promise.resolve({ success: true, columns: [] })),
+      listObjects: vi.fn(() => Promise.resolve({ success: true, objects: { functions: [], types: [] } })),
+      listTableStats: vi.fn(() => Promise.resolve({ success: true, stats: [] })),
+    }
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _config: { connections: ConnectionProfile[] }
+      _ctx: { switchInstance(a: string | null, b: string | null): void; activeChildDb: string | null }
+      _live: { statuses: Record<string, unknown> }
+      _setActiveDb(id: string, child?: string | null): void
+    }
+    workbench._config.connections = [allDatabases]
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', children: children() } }
+    workbench._ctx.switchInstance('p1', 'db_a')
+    return { workbench, setActiveChildDb, driverChild: () => inUse }
+  }
+
+  const settle = async () => { for (let i = 0; i < 60; i += 1) await Promise.resolve() }
+
+  it('follows a context switch instead of waiting for a query to run', async () => {
+    // The palette (⌘K) only moves the context. With the driver left behind, the
+    // explorer has no metadata for the database now named in the titlebar.
+    const { workbench, driverChild } = mount()
+
+    workbench._setActiveDb('p1', 'db_b')
+    await settle()
+
+    expect(workbench._ctx.activeChildDb).toBe('db_b')
+    expect(driverChild()).toBe('db_b')
+  })
+
+  it('re-points a driver that drifted, even though the context does not move', async () => {
+    const { workbench, setActiveChildDb, driverChild } = mount()
+
+    workbench._setActiveDb('p1', 'db_b')
+    await settle()
+    setActiveChildDb.mockClear()
+
+    // Picking db_b again in the Databases list is how a driver left on another
+    // database is brought back, so an unchanged context still aligns.
+    workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', children: [
+      { name: 'db_a', inUse: true }, { name: 'db_b', inUse: false }] } }
+    workbench._setActiveDb('p1', 'db_b')
+    await settle()
+
+    expect(setActiveChildDb).toHaveBeenCalledWith('p1', 'db_b')
+    expect(driverChild()).toBe('db_b')
+  })
+})
+
 describe('WorkbenchScreen connect lands in the remembered database', () => {
   // Measured against the live MySQL server: an all-databases connection opens
   // on its own pick (app_db, empty) rather than the child last worked in

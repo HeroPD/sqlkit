@@ -901,24 +901,28 @@ export class WorkbenchScreen extends LitElement {
     if (!profile) return
     const child = childDb === undefined ? this._config.defaultChild(profile) : childDb
 
-    if (this._ctx.activeDbId === profileId && this._ctx.activeChildDb === child) return
+    if (this._ctx.activeDbId !== profileId || this._ctx.activeChildDb !== child) {
+      // A child switch the manager will refuse (open manual transaction on
+      // another database) must not move the UI either: every switch flow
+      // funnels through here, so this is the one place that keeps the
+      // workbench from claiming a database the driver never switched to.
+      const transaction = this._live.transaction(profileId)
+      if (transaction && child && child !== transaction.childDb) {
+        this._surfaceTransactionNotice(t('query.transactionSwitchBlocked', { database: transaction.childDb }))
+        return
+      }
 
-    // A child switch the manager will refuse (open manual transaction on
-    // another database) must not move the UI either: every switch flow
-    // funnels through here, so this is the one place that keeps the
-    // workbench from claiming a database the driver never switched to.
-    const transaction = this._live.transaction(profileId)
-    if (transaction && child && child !== transaction.childDb) {
-      this._surfaceTransactionNotice(t('query.transactionSwitchBlocked', { database: transaction.childDb }))
-      return
+      // Remember the pick so reopening the workspace lands on the same child.
+      if (child) this._config.setLastChildDb(profileId, child)
+
+      this._ctx.switchInstance(profileId, child)
+      this._workspaceFiles.setFolder(this._contextFolder())
+      this._config.persist()
     }
 
-    // Remember the pick so reopening the workspace lands on the same child.
-    if (child) this._config.setLastChildDb(profileId, child)
-
-    this._ctx.switchInstance(profileId, child)
-    this._workspaceFiles.setFolder(this._contextFolder())
-    this._config.persist()
+    // The driver follows every pick, re-pick included: the explorer only has
+    // metadata for the database it is on. Refusals report through the status.
+    void this._alignActiveChild(profileId, child).catch(() => {})
   }
 
   // After a connect, the driver targets the discovery database; if the
@@ -2495,12 +2499,10 @@ export class WorkbenchScreen extends LitElement {
     this._schemaOps.dropDatabase(id, database)
   }
 
-  // Switch an all-databases connection's active child from the Databases list:
-  // move the working context and point the driver at it (so the ACTIVE tag follows).
+  // Switch an all-databases connection's active child from the Databases list.
   private _onDbUseChild(event: Event) {
     const { id, database } = (event as CustomEvent<{ id: string; database: string }>).detail
     this._setActiveDb(id, database)
-    void this._alignActiveChild(id, database)
   }
 
   // Workbench cleanup after a child database is dropped on the server.
