@@ -60,6 +60,50 @@ describe('parseExecutionPlan', () => {
     expect(plan?.nodes[0]).toMatchObject({ operation: 'Seq Scan', estimatedRows: 610, metric: 16.1, percent: 100 })
   })
 
+  it('parses the PostgreSQL text plan a row per line, leaving a never-executed node unmeasured', () => {
+    // psql prints one line per node with the detail lines between them, and the
+    // grid hands them over a row each.
+    const lines = [
+      'Nested Loop  (cost=0.58..15.08 rows=10 width=13) (actual time=0.022..0.027 rows=0.00 loops=1)',
+      '  Buffers: shared hit=2',
+      "  ->  Index Scan using customers_pkey on customers c  (cost=0.29..2.51 rows=1 width=13) (actual time=0.022..0.022 rows=0.00 loops=1)",
+      "        Index Cond: (id = '-1'::integer)",
+      "  ->  Index Scan using orders_customer on orders o  (cost=0.29..12.48 rows=10 width=8) (never executed)",
+      "        Index Cond: (customer_id = '-1'::integer)",
+      'Planning Time: 0.853 ms',
+      'Execution Time: 0.150 ms',
+    ]
+    const plan = parseExecutionPlan('postgresql', 'explain (analyze, buffers) select * from customers', result(['QUERY PLAN'], lines.map((line) => [line])))
+
+    expect(plan?.metric).toBe('duration')
+    expect(plan?.executionMs).toBe(0.15)
+    expect(plan?.planningMs).toBe(0.853)
+    expect(plan?.nodes.map((node) => ({ flow: node.flow, depth: node.depth, operation: node.operation }))).toEqual([
+      { flow: 3, depth: 0, operation: 'Nested Loop' },
+      { flow: 1, depth: 1, operation: 'Index Scan using customers_pkey on customers c' },
+      { flow: 2, depth: 1, operation: 'Index Scan using orders_customer on orders o' },
+    ])
+    expect(plan?.nodes[1]?.metric).toBeCloseTo(0.022)
+    // Its cost is not a duration, so the node the query never ran carries none.
+    expect(plan?.nodes[2]?.metric).toBeUndefined()
+    expect(plan?.nodes[2]?.estimatedRows).toBe(10)
+    expect(percentTotal(plan!)).toBe(100)
+  })
+
+  it('reads the PostgreSQL text estimate plan as cost', () => {
+    const lines = [
+      'Sort  (cost=1.12..1.13 rows=610 width=13)',
+      '  Sort Key: name',
+      '  ->  Seq Scan on users  (cost=0.00..16.10 rows=610 width=13)',
+    ]
+    const plan = parseExecutionPlan('postgresql', 'explain select * from users', result(['QUERY PLAN'], lines.map((line) => [line])))
+
+    expect(plan?.metric).toBe('cost')
+    expect(plan?.nodes.map((node) => node.operation)).toEqual(['Sort', 'Seq Scan on users'])
+    expect(plan?.nodes[1]?.metric).toBeCloseTo(16.1)
+    expect(percentTotal(plan!)).toBe(100)
+  })
+
   it('parses the MySQL EXPLAIN ANALYZE tree and makes self-duration shares total 100%', () => {
     const tree = `-> Limit: 10 row(s)  (cost=10..10 rows=10) (actual time=0.055..0.0555 rows=10 loops=1)
     -> Sort: total_spent DESC  (cost=9..9 rows=19) (actual time=0.0549..0.0552 rows=10 loops=1)

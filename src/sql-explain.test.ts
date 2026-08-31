@@ -39,8 +39,8 @@ describe('explainFlavors', () => {
 
 describe('explainStatement', () => {
   it('prefixes the postgres and sqlite forms', () => {
-    expect(explain('postgresql', 'plan', 'select 1')).toBe('explain (format json) select 1')
-    expect(explain('postgresql', 'analyze', 'select 1')).toBe('explain (analyze, buffers, format json) select 1')
+    expect(explain('postgresql', 'plan', 'select 1')).toBe('explain select 1')
+    expect(explain('postgresql', 'analyze', 'select 1')).toBe('explain (analyze, buffers) select 1')
     expect(explain('sqlite', 'plan', 'select 1')).toBe('explain query plan select 1')
   })
 
@@ -66,7 +66,7 @@ describe('explainStatement', () => {
   })
 
   it('re-explains the original statement rather than stacking wrappers', () => {
-    expect(explain('postgresql', 'plan', 'explain analyze select 1')).toBe('explain (format json) select 1')
+    expect(explain('postgresql', 'plan', 'explain analyze select 1')).toBe('explain select 1')
     expect(explain('mysql', 'plan', 'analyze select 1')).toBe('explain format=json select 1')
     expect(explain('sqlserver', 'plan', 'set showplan_xml on\ngo\nselect 1')).toBe('set showplan_xml on\ngo\nselect 1')
     expect(explain('sqlserver', 'analyze', 'set statistics xml on; select 1; set statistics xml off')).toBe(

@@ -76,14 +76,17 @@ describeDb('postgres driver (integration)', () => {
     until(`a backend running ${marker}`, async () =>
       (await observer.query("select 1 from pg_stat_activity where state = 'active' and query like $1", [`%${marker}%`])).rows.length > 0)
 
-  it('returns structured JSON for both History explain flavors', async () => {
+  it('reports both History explain flavors as a plan line per row', async () => {
     const driver = await connectDriver()
     try {
       for (const flavor of ['plan', 'analyze'] as const) {
-        const statement = explainStatement({ engine: 'postgresql', serverVersion: null, flavor, sql: 'select name from sqlkit_it.authors' })
+        const statement = explainStatement({ engine: 'postgresql', serverVersion: null, flavor, sql: 'select name from sqlkit_it.authors order by name' })
         const result = await driver.query(statement)
+        // The text form is what keeps the raw view a grid of lines rather than
+        // one cell holding the whole plan.
+        expect(result.rows.length).toBeGreaterThan(1)
         const plan = parseExecutionPlan('postgresql', statement, result)
-        expect(plan?.nodes.length).toBeGreaterThan(0)
+        expect(plan?.nodes.length).toBeGreaterThan(1)
         expect(plan?.metric).toBe(flavor === 'analyze' ? 'duration' : 'cost')
       }
     } finally {

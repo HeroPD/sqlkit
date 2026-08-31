@@ -208,7 +208,7 @@ const postgresJson = (value: unknown): ExecutionPlan | null => {
 
 const postgresText = (set: QueryResultSet): ExecutionPlan | null => {
   const lines = set.rows.flatMap((row) => text(row[0]).split('\n'))
-  const entries: Array<{ indent: number; node: RawNode }> = []
+  const entries: Array<{ indent: number; node: RawNode; cost?: number; actual?: number }> = []
   let executionMs: number | undefined
   let planningMs: number | undefined
   for (const line of lines) {
@@ -217,22 +217,30 @@ const postgresText = (set: QueryResultSet): ExecutionPlan | null => {
     const cost = /\(cost=[\d.]+\.\.([\d.]+)\s+rows=([\d.]+)/i.exec(line)
     if (!cost) continue
     const actual = /\(actual time=[\d.]+\.\.([\d.]+)\s+rows=([\d.]+)\s+loops=([\d.]+)/i.exec(line)
+    // The prefix already names the relation and index the way psql prints them,
+    // so it stands as the whole operation.
     const prefix = line.slice(0, line.indexOf('(cost=')).trim().replace(/^->\s*/, '')
-    const relation = /\bon\s+([^\s(]+)/i.exec(prefix)?.[1]
     const loops = number(actual?.[3]) ?? 1
     entries.push({
       indent: line.search(/\S/),
+      cost: number(cost[1]),
+      ...(actual ? { actual: number(actual[1])! * loops } : {}),
       node: {
         operation: prefix,
-        ...(relation ? { detail: relation } : {}),
         ...(number(actual?.[2]) !== undefined ? { actualRows: number(actual?.[2])! * loops } : {}),
         estimatedRows: number(cost[2]),
-        inclusive: actual ? number(actual[1])! * loops : number(cost[1]),
         children: [],
       },
     })
   }
-  return finalize(fromIndented(entries), entries.some(({ node }) => node.actualRows !== undefined) ? 'duration' : 'cost', { executionMs, planningMs })
+  // A never-executed node reports its estimate and no time, so on a timed plan
+  // its cost stays out of the metric rather than counting as milliseconds.
+  const timed = entries.some((entry) => entry.actual !== undefined)
+  for (const entry of entries) {
+    const inclusive = timed ? entry.actual : entry.cost
+    if (inclusive !== undefined) entry.node.inclusive = inclusive
+  }
+  return finalize(fromIndented(entries), timed ? 'duration' : 'cost', { executionMs, planningMs })
 }
 
 const mysqlTree = (set: QueryResultSet): ExecutionPlan | null => {

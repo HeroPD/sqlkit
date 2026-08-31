@@ -86,9 +86,11 @@ export function explainStatement(args: {
   const sql = stripExplain(args.sql)
   if (args.engine === 'sqlserver') return sqlServerExplain(args.flavor, sql, args.inTransaction ?? false)
   if (args.engine === 'sqlite') return `explain query plan ${sql}`
+  // Text rather than FORMAT JSON: the plan arrives a line per node, which the
+  // raw grid shows as rows instead of one cell holding the whole plan.
   if (args.engine === 'postgresql') return args.flavor === 'analyze'
-    ? `explain (analyze, buffers, format json) ${sql}`
-    : `explain (format json) ${sql}`
+    ? `explain (analyze, buffers) ${sql}`
+    : `explain ${sql}`
   if (args.flavor === 'plan') return `explain format=json ${sql}`
   if (/mariadb/i.test(args.serverVersion ?? '')) return `analyze format=json ${sql}`
   return (mysqlAnalyzePrefix(args.serverVersion) ?? 'explain ') + sql
