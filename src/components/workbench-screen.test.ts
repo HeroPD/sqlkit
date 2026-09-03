@@ -1009,7 +1009,7 @@ describe('WorkbenchScreen title-bar actions', () => {
       p3: { profileId: 'p3', phase: 'connected', transaction: { childDb: 'billing', failed: true } },
     }
     workbench._live.endTransaction = vi.fn(() => Promise.resolve({ success: true }))
-    window.sqlkit.saveWorkspaceConfig = vi.fn(() => Promise.resolve({ success: true as const }))
+    window.sqlkit.updateWorkspaceConfig = vi.fn(() => Promise.resolve({ success: true as const }))
     workbench._transactionManagerOpen = true
     workbench._expandedTransactionProfileIds = new Set(['p2', 'p3'])
     const host = document.createElement('div')
@@ -1438,7 +1438,7 @@ describe('WorkbenchScreen inspect state follows any close path', () => {
 describe('WorkbenchScreen drop of the active child database', () => {
   const setup = () => {
     // _setActiveDb persists the remembered child through this channel.
-    ;(window as unknown as { sqlkit: unknown }).sqlkit = { saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })) }
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { updateWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })) }
     const screen = new WorkbenchScreen()
     Object.defineProperty(screen, 'renderRoot', { value: { querySelector: () => null } })
     const workbench = screen as never as {
@@ -1590,7 +1590,7 @@ describe('WorkbenchScreen connect entrance', () => {
       ] },
     ]
     ;(window as unknown as { sqlkit: unknown }).sqlkit = {
-      saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
+      updateWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
       connectDatabase: vi.fn(() => Promise.resolve({ success: true })),
       getConnectionStatuses: vi.fn(() => Promise.resolve(statuses())),
       // The manager moves the pin, and the next status read reports it.
@@ -1626,7 +1626,7 @@ describe('WorkbenchScreen database switch points the driver', () => {
       return Promise.resolve({ success: true })
     })
     ;(window as unknown as { sqlkit: unknown }).sqlkit = {
-      saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
+      updateWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
       getConnectionStatuses: vi.fn(() => Promise.resolve([{ profileId: 'p1', phase: 'connected', children: children() }])),
       setActiveChildDb,
       listTables: vi.fn(() => Promise.resolve({ success: true, tables: [] })),
@@ -1699,7 +1699,7 @@ describe('WorkbenchScreen connect lands in the remembered database', () => {
         tables: Array.from({ length: tableCount[child ?? inUse] ?? 0 }, (_, i) => ({ schema: null, name: `t${i}`, kind: 'table' })),
       }))
     ;(window as unknown as { sqlkit: unknown }).sqlkit = {
-      saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
+      updateWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
       connectDatabase: vi.fn(() => Promise.resolve({ success: true })),
       getConnectionStatuses: vi.fn(() => Promise.resolve([{
         profileId: 'p1',

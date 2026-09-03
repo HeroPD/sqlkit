@@ -21,9 +21,9 @@ const api: SqlkitApi = {
     return () => ipcRenderer.off('app:settings', handler)
   },
   getWorkspaceConfig: () => ipcRenderer.invoke('workspace:get-config'),
-  saveWorkspaceConfig: (config) => ipcRenderer.invoke('workspace:save-config', config),
+  updateWorkspaceConfig: (patch) => ipcRenderer.invoke('workspace:update-config', patch),
   readHistory: () => ipcRenderer.invoke('workspace:history-read'),
-  writeHistory: (items) => ipcRenderer.invoke('workspace:history-write', items),
+  updateHistory: (patch) => ipcRenderer.invoke('workspace:history-update', patch),
   readSession: () => ipcRenderer.invoke('session:read'),
   writeSession: (session) => ipcRenderer.invoke('session:write', session),
   readSessionBackup: (tabId) => ipcRenderer.invoke('session:read-backup', tabId),
@@ -91,6 +91,11 @@ const api: SqlkitApi = {
     const handler = () => listener()
     ipcRenderer.on('workspace:files-changed', handler)
     return () => ipcRenderer.off('workspace:files-changed', handler)
+  },
+  onSharedChanged: (listener) => {
+    const handler = (_event: IpcRendererEvent, kind: Parameters<typeof listener>[0]) => listener(kind)
+    ipcRenderer.on('workspace:shared-changed', handler)
+    return () => ipcRenderer.off('workspace:shared-changed', handler)
   },
   onMenuAction: (listener) => {
     const handler = (_event: IpcRendererEvent, action: Parameters<typeof listener>[0]) => listener(action)

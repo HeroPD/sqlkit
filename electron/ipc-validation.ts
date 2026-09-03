@@ -1,4 +1,4 @@
-import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, ObjectDdlRef, QuerySort, SessionContext, SessionInspectDraft, SessionTab, TableRef, WorkspaceConfig, WorkspaceSession } from '../src/electron'
+import type { BatchStatement, ConnectionProfile, DbObject, DbObjectKind, HistoryItem, ObjectDdlRef, QuerySort, SessionContext, SessionInspectDraft, SessionTab, TableRef, WorkspaceConfig, WorkspaceConfigPatch, WorkspaceHistoryPatch, WorkspaceSession } from '../src/electron'
 import type { ExportFormat } from '../src/result-export'
 import { isConnectionLabelColor } from '../src/connection-label-colors'
 import { SettingsError, validateAppSettings, validateWorkspacePreferences } from '../src/settings'
@@ -177,6 +177,54 @@ export function workspaceConfig(value: unknown): WorkspaceConfig {
     connections: config.connections.map(connectionProfile),
     ...(activeDbId === undefined ? {} : { activeDbId }),
     ...(config.preferences === undefined ? {} : { preferences: workspacePreferences(config.preferences) }),
+  }
+}
+
+/** A window writes what it changed, never the whole file: two windows share one
+ * config, and a full replacement from either would drop what the other did. */
+export function workspaceConfigPatch(value: unknown): WorkspaceConfigPatch {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('Workspace config patch is invalid')
+  const patch = value as Record<string, unknown>
+  const upsert = patch.upsertConnections
+  const remove = patch.removeConnections
+  if (upsert !== undefined && (!Array.isArray(upsert) || upsert.length > 1_000)) {
+    throw new IpcValidationError('Workspace connections are invalid')
+  }
+  if (remove !== undefined && (!Array.isArray(remove) || remove.length > 1_000)) {
+    throw new IpcValidationError('Workspace connections are invalid')
+  }
+  const children = patch.lastChildDb
+  if (children !== undefined && (!Array.isArray(children) || children.length > 1_000)) {
+    throw new IpcValidationError('Workspace connections are invalid')
+  }
+  const active = patch.activeDbId
+  const activeDbId = active === undefined || active === null ? active : stringValue(active, 'Active database id', MAX_ID)
+  return {
+    ...(upsert === undefined ? {} : { upsertConnections: upsert.map(connectionProfile) }),
+    ...(remove === undefined ? {} : { removeConnections: remove.map((id) => stringValue(id, 'Connection id', MAX_ID)) }),
+    ...(children === undefined ? {} : {
+      lastChildDb: children.map((entry) => {
+        const child = entry as Record<string, unknown>
+        return {
+          id: stringValue(child.id, 'Connection id', MAX_ID),
+          database: nullableStringValue(child.database, 'Last database', 2_000),
+        }
+      }),
+    }),
+    ...(activeDbId === undefined ? {} : { activeDbId }),
+    ...(patch.preferences === undefined ? {} : { preferences: workspacePreferences(patch.preferences) }),
+  }
+}
+
+/** A window writes the runs it recorded, not the list it holds: two windows
+ * finishing a query at once would each drop the other's newest entry. */
+export function workspaceHistoryPatch(value: unknown): WorkspaceHistoryPatch {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IpcValidationError('History patch is invalid')
+  const patch = value as Record<string, unknown>
+  return {
+    ...(patch.append === undefined ? {} : { append: historyItems(patch.append) }),
+    ...(patch.clearContext === undefined ? {} : { clearContext: stringValue(patch.clearContext, 'History context', MAX_ID) }),
+    ...(patch.clearAll === undefined ? {} : { clearAll: booleanValue(patch.clearAll, 'clearAll') }),
   }
 }
 

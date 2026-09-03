@@ -7,6 +7,8 @@ import type {
   RecentWorkspace,
   SaveResult,
   WorkspaceConfig,
+  WorkspaceConfigPatch,
+  WorkspaceHistoryPatch,
   WorkspaceConfigResult,
   WorkspaceResult,
 } from '../src/electron'
@@ -21,6 +23,8 @@ import {
 } from '../src/settings'
 import { DEFAULT_THEME, themeOrDefault } from '../src/themes'
 import { workspaceConfig as validateWorkspaceConfig } from './ipc-validation'
+import { limitHistory } from '../src/history-retention'
+import type { HistoryLimits } from '../src/electron'
 import { t } from '../src/i18n'
 
 // temp+rename so a crash mid-write can't leave a half-written (and for the
@@ -148,6 +152,9 @@ const GITIGNORE_RULES = [
   'history.json.tmp',
   'session.json',
   'session.json.tmp',
+  // A workspace open in more than one window has a session file per window.
+  'session.*.json',
+  'session.*.json.tmp',
   'backups/',
 ]
 export const ensureInternalGitignore = (workspacePath: string) => {
@@ -320,6 +327,36 @@ export function hydrateConnectionProfile(workspacePath: string | null, incoming:
   return stripSecretMarkers(mapSecrets(restoreSavedSecrets(incoming, saved), decryptSecret))
 }
 
+/** Applies one window's change to the config on disk. A workspace open in two
+ * windows has one config, and a whole-file write from either would drop what
+ * the other did between its load and its save — so a window sends what it
+ * changed and the rest of the file stands. */
+export function updateWorkspaceConfig(workspacePath: string | null, patch: WorkspaceConfigPatch): SaveResult {
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
+  const outcome = loadWorkspaceConfig(workspacePath)
+  // Never patch onto defaults: a config that exists but cannot be read (corrupt,
+  // or sealed on another machine) would be replaced by whatever this window has.
+  if (outcome.status === 'error') return { success: false, error: outcome.error }
+  const current = outcome.status === 'ok' ? outcome.config : defaultWorkspaceConfig()
+  const removed = new Set(patch.removeConnections ?? [])
+  const byId = new Map(current.connections.filter((connection) => !removed.has(connection.id)).map((c) => [c.id, c]))
+  for (const connection of patch.upsertConnections ?? []) {
+    if (!removed.has(connection.id)) byId.set(connection.id, connection)
+  }
+  for (const { id, database } of patch.lastChildDb ?? []) {
+    const connection = byId.get(id)
+    if (!connection) continue
+    const { lastChildDb: _dropped, ...rest } = connection
+    byId.set(id, database === null ? rest : { ...rest, lastChildDb: database })
+  }
+  return writeWorkspaceConfig(workspacePath, {
+    ...current,
+    connections: [...byId.values()],
+    ...(patch.activeDbId === undefined ? {} : { activeDbId: patch.activeDbId }),
+    ...(patch.preferences === undefined ? {} : { preferences: patch.preferences }),
+  })
+}
+
 export function writeWorkspaceConfig(workspacePath: string | null, config: WorkspaceConfig): SaveResult {
   if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   try {
@@ -369,6 +406,40 @@ export function readWorkspaceHistory(workspacePath: string | null): HistoryItem[
   } catch {
     return []
   }
+}
+
+/** The workspace's retention rules, read straight from its config: a window may
+ * be holding the ones from before another window changed them, and pruning to
+ * those would delete entries the workspace is now meant to keep. Null when the
+ * config exists but cannot be read — then nothing is pruned at all. */
+function historyLimitsFor(workspacePath: string): HistoryLimits | null {
+  let raw: string
+  try {
+    raw = fs.readFileSync(workspaceConfigPathFor(workspacePath), 'utf8')
+  } catch {
+    // No config yet is a new workspace, which has the defaults.
+    return DEFAULT_WORKSPACE_PREFERENCES
+  }
+  try {
+    return normalizeWorkspacePreferences((JSON.parse(raw) as { preferences?: unknown }).preferences)
+  } catch {
+    return null
+  }
+}
+
+/** Applies one window's change to the history on disk. Two windows finishing a
+ * query at once would each write a list missing the other's newest entry, so a
+ * window sends the runs it recorded and the file keeps the rest. A patch with
+ * nothing in it is a prune: retention alone, applied to what is there. */
+export function updateWorkspaceHistory(workspacePath: string | null, patch: WorkspaceHistoryPatch): SaveResult {
+  if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
+  const current = patch.clearAll ? [] : readWorkspaceHistory(workspacePath)
+  const kept = patch.clearContext === undefined
+    ? current
+    : current.filter((item) => item.contextKey !== patch.clearContext)
+  const merged = [...(patch.append ?? []), ...kept]
+  const limits = historyLimitsFor(workspacePath)
+  return writeWorkspaceHistory(workspacePath, limits ? limitHistory(merged, limits) : merged)
 }
 
 export function writeWorkspaceHistory(workspacePath: string | null, items: HistoryItem[]): SaveResult {

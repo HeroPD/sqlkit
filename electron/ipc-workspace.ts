@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell, type WebContents } from 'el
 import { mkdirSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { WorkspaceConfig } from '../src/electron'
+import type { SharedWorkspaceFile } from '../src/electron'
 import type { ConnectionManager } from './db/manager'
 import { t } from '../src/i18n'
 import {
@@ -17,7 +17,7 @@ import {
   startWorkspaceWatcher,
   stopWorkspaceWatcher,
 } from './files'
-import { historyItems, stringValue, workspaceConfig, workspaceSession } from './ipc-validation'
+import { stringValue, workspaceConfigPatch, workspaceHistoryPatch, workspaceSession } from './ipc-validation'
 import { recoverableContexts } from '../src/session-recovery'
 import {
   dropBackup,
@@ -36,8 +36,8 @@ import {
   readWorkspaceConfigForRenderer,
   readWorkspaceHistory,
   workspaceProfileCount,
-  writeWorkspaceConfig,
-  writeWorkspaceHistory,
+  updateWorkspaceConfig,
+  updateWorkspaceHistory,
 } from './workspace'
 
 const IPC_PATH_LIMIT = 20_000
@@ -54,10 +54,14 @@ const fsMkdir = (dir: string) => {
 
 export type WorkspaceIpcContext = {
   workspaceFor(contents: WebContents): string | null
+  /** Which session file this window owns; windows sharing a workspace differ. */
+  sessionSlotFor(contents: WebContents): number
   setWorkspace(contentsId: number, path: string): void
   clearWorkspace(contentsId: number): void
   managerFor(contentsId: number): ConnectionManager | undefined
   focusExistingWorkspace(path: string, requesterId: number): boolean
+  /** Tells the other windows on this workspace that a file they share moved. */
+  notifySharedChanged(contentsId: number, kind: SharedWorkspaceFile): void
   isAuthorizedRecentWorkspace(path: string): boolean
   createWindow(): void
   /** A renderer finished its pre-quit session flush; releases main's wait. */
@@ -74,7 +78,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     // them under the wrong folder. Leaving a workspace deliberately is an
     // orderly exit from it, so its crash marker comes off too.
     await context.flushSession(contents)
-    markSessionClean(context.workspaceFor(contents))
+    markSessionClean(context.workspaceFor(contents), context.sessionSlotFor(contents))
     await context.managerFor(contents.id)?.disconnectAll()
     context.setWorkspace(contents.id, opened.path)
     startWorkspaceWatcher(contents.id, opened.path, () => {
@@ -118,7 +122,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
 
   ipcMain.handle('workspace:close', async (event) => {
     await context.flushSession(event.sender)
-    markSessionClean(context.workspaceFor(event.sender))
+    markSessionClean(context.workspaceFor(event.sender), context.sessionSlotFor(event.sender))
     context.clearWorkspace(event.sender.id)
     stopWorkspaceWatcher(event.sender.id)
     await context.managerFor(event.sender.id)?.disconnectAll()
@@ -252,24 +256,26 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
       .map((workspace) => ({ ...workspace, profileCount: workspaceProfileCount(workspace.path) })))
   ipcMain.handle('app:get-theme', () => readTheme())
   ipcMain.handle('workspace:get-config', (event) => readWorkspaceConfigForRenderer(context.workspaceFor(event.sender)))
-  ipcMain.handle('workspace:save-config', (event, config: WorkspaceConfig) => {
+  ipcMain.handle('workspace:update-config', (event, patch: unknown) => {
     try {
-      return writeWorkspaceConfig(context.workspaceFor(event.sender), workspaceConfig(config))
+      const written = updateWorkspaceConfig(context.workspaceFor(event.sender), workspaceConfigPatch(patch))
+      if (written.success) context.notifySharedChanged(event.sender.id, 'config')
+      return written
     } catch (error) {
       return { success: false as const, error: (error as Error).message }
     }
   })
-  ipcMain.handle('session:read', (event) => readSession(context.workspaceFor(event.sender)))
+  ipcMain.handle('session:read', (event) => readSession(context.workspaceFor(event.sender), context.sessionSlotFor(event.sender)))
   ipcMain.handle('session:write', (event, session: unknown) => {
     try {
-      return writeSession(context.workspaceFor(event.sender), workspaceSession(session))
+      return writeSession(context.workspaceFor(event.sender), workspaceSession(session), context.sessionSlotFor(event.sender))
     } catch (error) {
       return { success: false as const, error: (error as Error).message }
     }
   })
   ipcMain.handle('session:read-backup', (event, tabId: unknown) => {
     try {
-      return readBackup(context.workspaceFor(event.sender), stringValue(tabId, 'Tab id', IPC_PATH_LIMIT))
+      return readBackup(context.workspaceFor(event.sender), stringValue(tabId, 'Tab id', IPC_PATH_LIMIT), context.sessionSlotFor(event.sender))
     } catch {
       return null
     }
@@ -280,6 +286,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
         context.workspaceFor(event.sender),
         stringValue(tabId, 'Tab id', IPC_PATH_LIMIT),
         stringValue(content, 'Buffer', IPC_SQL_FILE_LIMIT),
+        context.sessionSlotFor(event.sender),
       )
     } catch (error) {
       return { success: false as const, error: (error as Error).message }
@@ -287,7 +294,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
   })
   ipcMain.handle('session:drop-backup', (event, tabId: unknown) => {
     try {
-      dropBackup(context.workspaceFor(event.sender), stringValue(tabId, 'Tab id', IPC_PATH_LIMIT))
+      dropBackup(context.workspaceFor(event.sender), stringValue(tabId, 'Tab id', IPC_PATH_LIMIT), context.sessionSlotFor(event.sender))
     } catch {
       // A malformed id has no backup to drop.
     }
@@ -300,13 +307,14 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     event.returnValue = true
     try {
       const workspacePath = context.workspaceFor(event.sender)
+      const slot = context.sessionSlotFor(event.sender)
       const flush = payload as { session?: unknown; backups?: unknown }
       const unbacked = new Set<string>()
       if (Array.isArray(flush?.backups)) {
         for (const entry of flush.backups.slice(0, 500)) {
           const backup = entry as { tabId?: unknown; content?: unknown }
           const tabId = stringValue(backup.tabId, 'Tab id', IPC_PATH_LIMIT)
-          const written = writeShutdownBackup(workspacePath, tabId, stringValue(backup.content, 'Buffer', IPC_SQL_FILE_LIMIT))
+          const written = writeShutdownBackup(workspacePath, tabId, stringValue(backup.content, 'Buffer', IPC_SQL_FILE_LIMIT), slot)
           if (written.unbacked) unbacked.add(tabId)
         }
       }
@@ -316,7 +324,11 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
         // replace a session the renderer had already filtered with one
         // promising text that no backup holds.
         const session = workspaceSession(flush.session)
-        writeSession(workspacePath, { ...session, contexts: recoverableContexts(session.contexts, unbacked) })
+        writeSession(
+          workspacePath,
+          { ...session, contexts: recoverableContexts(session.contexts, unbacked) },
+          slot,
+        )
       }
     } catch {
       // A shutdown is the worst moment to throw; the debounced writes stand.
@@ -326,9 +338,11 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
   })
 
   ipcMain.handle('workspace:history-read', (event) => readWorkspaceHistory(context.workspaceFor(event.sender)))
-  ipcMain.handle('workspace:history-write', (event, items: unknown) => {
+  ipcMain.handle('workspace:history-update', (event, patch: unknown) => {
     try {
-      return writeWorkspaceHistory(context.workspaceFor(event.sender), historyItems(items))
+      const written = updateWorkspaceHistory(context.workspaceFor(event.sender), workspaceHistoryPatch(patch))
+      if (written.success) context.notifySharedChanged(event.sender.id, 'history')
+      return written
     } catch (error) {
       return { success: false as const, error: (error as Error).message }
     }

@@ -14,6 +14,8 @@ import {
   readTheme,
   isWeakStorageBackend,
   workspaceProfileCount,
+  updateWorkspaceConfig,
+  updateWorkspaceHistory,
   writeWorkspaceConfig,
   writeWorkspaceHistory,
   writeAppSettings,
@@ -317,6 +319,65 @@ describe('workspace profile count', () => {
   })
 })
 
+describe('workspace config: one file, two windows', () => {
+  it('keeps a connection this window never saw, which another just added', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ id: 'a' })] })
+    // The other window adds 'b' straight to disk.
+    updateWorkspaceConfig(workspaceDir, { upsertConnections: [profile({ id: 'b' })] })
+
+    // This window still holds the list it loaded, and switches database.
+    updateWorkspaceConfig(workspaceDir, { upsertConnections: [profile({ id: 'a', lastChildDb: 'billing' })] })
+
+    const saved = readWorkspaceConfig(workspaceDir).config.connections
+    expect(saved.map((connection) => connection.id)).toEqual(['a', 'b'])
+    expect(saved.find((connection) => connection.id === 'a')?.lastChildDb).toBe('billing')
+  })
+
+  it('moves the last database of one connection without touching the rest of it', () => {
+    updateWorkspaceConfig(workspaceDir, { upsertConnections: [profile({ id: 'a', host: 'db.internal' })] })
+
+    updateWorkspaceConfig(workspaceDir, { lastChildDb: [{ id: 'a', database: 'billing' }] })
+
+    const saved = readWorkspaceConfig(workspaceDir).config.connections[0]
+    expect(saved).toMatchObject({ id: 'a', host: 'db.internal', lastChildDb: 'billing' })
+
+    updateWorkspaceConfig(workspaceDir, { lastChildDb: [{ id: 'a', database: null }] })
+    expect(readWorkspaceConfig(workspaceDir).config.connections[0]?.lastChildDb).toBeUndefined()
+  })
+
+  it('removes a connection only when the window says so', () => {
+    updateWorkspaceConfig(workspaceDir, { upsertConnections: [profile({ id: 'a' }), profile({ id: 'b' })] })
+
+    updateWorkspaceConfig(workspaceDir, { removeConnections: ['b'] })
+
+    expect(readWorkspaceConfig(workspaceDir).config.connections.map((c) => c.id)).toEqual(['a'])
+  })
+
+  it('carries the active database and preferences without touching the connections', () => {
+    updateWorkspaceConfig(workspaceDir, { upsertConnections: [profile({ id: 'a' })] })
+
+    updateWorkspaceConfig(workspaceDir, { activeDbId: 'a', preferences: { saveHistory: false, historyRetentionDays: 7, maxHistoryPerContext: 50 } })
+
+    const config = readWorkspaceConfig(workspaceDir).config
+    expect(config.connections.map((c) => c.id)).toEqual(['a'])
+    expect(config.activeDbId).toBe('a')
+    expect(config.preferences?.historyRetentionDays).toBe(7)
+  })
+
+  it('refuses to patch a config it cannot read, rather than replacing it', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ id: 'a' })] })
+    const file = path.join(workspaceDir, '.sqlkit', 'config.json')
+    fs.writeFileSync(file, '{ not json')
+
+    const result = updateWorkspaceConfig(workspaceDir, { upsertConnections: [profile({ id: 'b' })] })
+
+    // A corrupt or foreign-sealed config is the user's data: it is left exactly
+    // as it is, the same way opening a workspace leaves it.
+    expect(result.success).toBe(false)
+    expect(fs.readFileSync(file, 'utf8')).toBe('{ not json')
+  })
+})
+
 describe('workspace config: credential .gitignore guard', () => {
   const gitignore = () => fs.readFileSync(path.join(workspaceDir, '.sqlkit', '.gitignore'), 'utf8')
 
@@ -327,6 +388,17 @@ describe('workspace config: credential .gitignore guard', () => {
     expect(lines).toContain('config.json.tmp')
     expect(lines).toContain('history.json')
     expect(lines).toContain('history.json.tmp')
+  })
+
+  it('ignores the session file of every window, not only the first', () => {
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] })
+    const lines = gitignore().split('\n')
+    // A second window's session names its tabs and their paths, and its buffers
+    // sit under backups/ — none of it belongs in the user's repository.
+    expect(lines).toContain('session.json')
+    expect(lines).toContain('session.*.json')
+    expect(lines).toContain('session.*.json.tmp')
+    expect(lines).toContain('backups/')
   })
 
   it('augments a hand-edited .gitignore with the missing rules instead of skipping', () => {
@@ -428,5 +500,72 @@ describe('workspace query history', () => {
   it('reports no-workspace instead of writing anywhere', () => {
     expect(writeWorkspaceHistory(null, [item('a')]).success).toBe(false)
     expect(readWorkspaceHistory(null)).toEqual([])
+  })
+
+  // The retention the workspace itself keeps; 0 days keeps every entry, so the
+  // merge tests are about the merge and not about ageing.
+  const keepEverything = () =>
+    updateWorkspaceConfig(workspaceDir, { preferences: { saveHistory: true, historyRetentionDays: 0, maxHistoryPerContext: 200 } })
+
+  it('keeps the run another window recorded while this one was busy', () => {
+    keepEverything()
+    updateWorkspaceHistory(workspaceDir, { append: [item('theirs', 'select 2')] })
+
+    // This window never saw 'theirs' — it appends what it ran, not what it holds.
+    updateWorkspaceHistory(workspaceDir, { append: [item('mine', 'select 3')] })
+
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['mine', 'theirs'])
+  })
+
+  it('collapses a repeat against the file, not against one window list', () => {
+    keepEverything()
+    updateWorkspaceHistory(workspaceDir, { append: [item('first', 'select 1')] })
+    updateWorkspaceHistory(workspaceDir, { append: [item('again', 'select 1')] })
+
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['again'])
+  })
+
+  it('clears a context, or everything, because the window said so', () => {
+    keepEverything()
+    updateWorkspaceHistory(workspaceDir, { append: [item('a'), { ...item('b'), contextKey: 'p2' }] })
+
+    updateWorkspaceHistory(workspaceDir, { clearContext: 'p1' })
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['b'])
+
+    updateWorkspaceHistory(workspaceDir, { clearAll: true })
+    expect(readWorkspaceHistory(workspaceDir)).toEqual([])
+  })
+
+  it('prunes to the retention the workspace config holds, not the one a window sent', () => {
+    const ancient = { ...item('ancient'), createdAt: new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString() }
+    const fresh = { ...item('fresh', 'select 2'), createdAt: new Date().toISOString() }
+    writeWorkspaceHistory(workspaceDir, [fresh, ancient])
+    updateWorkspaceConfig(workspaceDir, { preferences: { saveHistory: true, historyRetentionDays: 7, maxHistoryPerContext: 200 } })
+
+    updateWorkspaceHistory(workspaceDir, {})
+
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['fresh'])
+  })
+
+  it('keeps what a raised cap allows, even for a window that has not seen it', () => {
+    updateWorkspaceConfig(workspaceDir, { preferences: { saveHistory: true, historyRetentionDays: 0, maxHistoryPerContext: 3 } })
+    writeWorkspaceHistory(workspaceDir, ['d', 'c', 'b', 'a'].map((id) => item(id, `select ${id}`)))
+    // The other window raises the cap; this one is still on 3 and runs a query.
+    updateWorkspaceConfig(workspaceDir, { preferences: { saveHistory: true, historyRetentionDays: 0, maxHistoryPerContext: 10 } })
+
+    updateWorkspaceHistory(workspaceDir, { append: [item('new', 'select new')] })
+
+    // Nothing was dropped: the cap comes from the config, never from the sender.
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['new', 'd', 'c', 'b', 'a'])
+  })
+
+  it('prunes nothing when the config cannot be read', () => {
+    writeWorkspaceHistory(workspaceDir, [item('a'), item('b', 'select 2')])
+    fs.writeFileSync(path.join(workspaceDir, '.sqlkit', 'config.json'), '{ not json')
+
+    updateWorkspaceHistory(workspaceDir, { append: [item('c', 'select 3')] })
+
+    // An unreadable config is no licence to apply a policy nobody chose.
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['c', 'a', 'b'])
   })
 })

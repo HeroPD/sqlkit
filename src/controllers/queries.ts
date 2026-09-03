@@ -4,40 +4,16 @@ import type { QueryRun } from '../components/results-panel'
 import type { DraftRow } from '../result-editing'
 import type { CellInput } from '../sql-write'
 import type { HistoryItem } from '../components/history-view'
+import type { WorkspaceHistoryPatch } from '../electron'
 import { LONG_RUNNING_MS, type TaskItem } from '../components/tasks-view'
 import { t } from '../i18n'
 import { DEFAULT_WORKSPACE_PREFERENCES, type WorkspacePreferences } from '../settings'
+import { limitHistory } from '../history-retention'
+import type { HistoryLimits } from '../electron'
 
 // History persists to .sqlkit/history.json; cap each entry's SQL so the file
 // (and the write-through IPC) stays small. The view never renders more anyway.
 const MAX_HISTORY_SQL = 10_000
-
-// Collapses repeats of the same SQL in the same context to their newest run.
-// Re-running one query twenty times says nothing the newest entry doesn't, and it
-// pushes everything else out of view. Keyed per context, since the same SQL
-// against another database is a different thing to re-run. Input is newest-first,
-// so the first occurrence seen is the one to keep.
-export const dedupeHistory = (items: HistoryItem[]): HistoryItem[] => {
-  const seen = new Set<string>()
-  return items.filter((item) => {
-    // Trimmed, so an edit that only added trailing whitespace isn't a new entry;
-    // the stored SQL itself is left exactly as it ran.
-    const key = `${item.contextKey}\u0000${item.sql.trim()}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
-
-// Caps each context's entries to `max`, keeping the newest. Input is newest-first.
-export const capHistoryPerContext = (items: HistoryItem[], max: number): HistoryItem[] => {
-  const seen = new Map<string, number>()
-  return items.filter((item) => {
-    const count = (seen.get(item.contextKey) ?? 0) + 1
-    seen.set(item.contextKey, count)
-    return count <= max
-  })
-}
 
 const MAX_TASKS = 50
 
@@ -165,19 +141,19 @@ export class QueriesController implements ReactiveController {
     this.history = this.limitHistory(this.history)
     // Retention is a promise about the file, not just the list: entries the new
     // window drops have to leave the disk too, or they come back on reopen.
-    if (this.history.length !== before.length) this.writeHistoryFile()
+    if (this.history.length !== before.length) this.pruneHistoryFile()
     this.host.requestUpdate()
   }
 
   private limitHistory(items: HistoryItem[]) {
-    const cutoff = this.historyPreferences.historyRetentionDays === 0
-      ? null
-      : Date.now() - this.historyPreferences.historyRetentionDays * 24 * 60 * 60 * 1000
-    const retained = cutoff === null ? items : items.filter((item) => {
-      const created = Date.parse(item.createdAt)
-      return !Number.isFinite(created) || created >= cutoff
-    })
-    return capHistoryPerContext(dedupeHistory(retained), this.historyPreferences.maxHistoryPerContext)
+    return limitHistory(items, this.historyLimits)
+  }
+
+  // What main needs to apply retention to the file, without the recording
+  // switch that is this window's business alone.
+  private get historyLimits(): HistoryLimits {
+    const { historyRetentionDays, maxHistoryPerContext } = this.historyPreferences
+    return { historyRetentionDays, maxHistoryPerContext }
   }
 
   /** What the results panel shows: the visible entry of the tab's trail. */
@@ -705,20 +681,18 @@ export class QueriesController implements ReactiveController {
         : { phase: 'error', error: response.error, sql, params, ...(errorLine !== undefined ? { errorLine } : {}), ...(args.table ? { table: args.table } : {}) },
     )
     this.finishTask(task.id, response, task.startedAt)
-    this.history = this.limitHistory([
-        {
-          id: crypto.randomUUID(),
-          contextKey,
-          sql: sql.slice(0, MAX_HISTORY_SQL),
-          success: response.success,
-          durationMs: response.success ? response.result.durationMs : 0,
-          rowCount: response.success ? response.result.rowCount : null,
-          error: response.success ? '' : response.error,
-          createdAt: new Date().toISOString(),
-        },
-        ...this.history,
-      ])
-    this.persistHistory()
+    const recorded: HistoryItem = {
+      id: crypto.randomUUID(),
+      contextKey,
+      sql: sql.slice(0, MAX_HISTORY_SQL),
+      success: response.success,
+      durationMs: response.success ? response.result.durationMs : 0,
+      rowCount: response.success ? response.result.rowCount : null,
+      error: response.success ? '' : response.error,
+      createdAt: new Date().toISOString(),
+    }
+    this.history = this.limitHistory([recorded, ...this.history])
+    this.persistHistory(recorded)
     this.host.requestUpdate()
     return response
   }
@@ -785,13 +759,13 @@ export class QueriesController implements ReactiveController {
     this.history = this.history.filter((item) => item.contextKey !== contextKey)
     // Removal is written even with saving off — that switch stops recording,
     // it does not make a delete a no-op.
-    this.writeHistoryFile()
+    this.updateHistoryFile({ clearContext: contextKey })
     this.host.requestUpdate()
   }
 
   clearAllHistory() {
     this.history = []
-    this.writeHistoryFile()
+    this.updateHistoryFile({ clearAll: true })
     this.host.requestUpdate()
   }
 
@@ -813,19 +787,44 @@ export class QueriesController implements ReactiveController {
     this.history = this.limitHistory(merged)
     // Entries the retention window drops on open leave the file too; otherwise
     // they sit there until the next run happens to rewrite it.
-    if (this.history.length !== merged.length) this.writeHistoryFile()
+    if (this.history.length !== merged.length) this.pruneHistoryFile()
+    this.host.requestUpdate()
+  }
+
+  /** Another window on this workspace rewrote the history file: its contents are
+   * the list now. Merging instead would bring back what that window just
+   * cleared, and put it back on disk at this window's next run. */
+  async adoptSharedHistory() {
+    if (!this.historyPreferences.saveHistory) return
+    const gen = this.generation
+    let items: HistoryItem[]
+    try {
+      items = await window.sqlkit.readHistory()
+    } catch {
+      return
+    }
+    if (this.generation !== gen) return
+    this.history = this.limitHistory(items)
     this.host.requestUpdate()
   }
 
   // Write-through: history changes at most once per run, so each mutation
   // persists immediately — no debounce timer to race a workspace switch.
-  private persistHistory() {
+  private persistHistory(recorded: HistoryItem) {
     if (!this.historyPreferences.saveHistory) return
-    this.writeHistoryFile()
+    this.updateHistoryFile({ append: [recorded] })
   }
 
-  private writeHistoryFile() {
-    void window.sqlkit.writeHistory(this.history).catch(() => {})
+  // The run, or the deletion — never the whole list. Another window's newest
+  // entry is on disk, and a snapshot from this one would drop it.
+  private updateHistoryFile(patch: WorkspaceHistoryPatch) {
+    void window.sqlkit.updateHistory(patch).catch(() => {})
+  }
+
+  // Retention is a policy, not a payload: main reads the workspace's own, so a
+  // window still holding the previous one cannot prune to it.
+  private pruneHistoryFile() {
+    this.updateHistoryFile({})
   }
 
   // Pulls the next page of a paged result from the main-process buffer and

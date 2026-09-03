@@ -9,10 +9,9 @@ import {
   type MenuItemConstructorOptions,
   type WebContents,
 } from 'electron'
-import { realpathSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import type { ConnectionStatus, MenuAction, ThemeId } from '../src/electron'
+import type { ConnectionStatus, MenuAction, SharedWorkspaceFile, ThemeId } from '../src/electron'
 import { t } from '../src/i18n'
 import { createConnectionManager, type ConnectionManager } from './db/manager'
 import { stopWorkspaceWatcher } from './files'
@@ -23,6 +22,7 @@ import { THEME_IDS, isThemeId } from '../src/themes'
 import { inspectionSwitch } from './hardening'
 import { registerWorkspaceIpc } from './ipc-workspace'
 import { markSessionClean } from './session'
+import { normalizeWorkspacePath, WorkspaceWindows } from './workspace-windows'
 import { readAppSettings, readGlobalConfig, readTheme, writeAppSettings, writeTheme } from './workspace'
 import { titleBarOverlay, WINDOW_CHROME } from './window-chrome'
 
@@ -59,7 +59,7 @@ if (devServerUrl && Number.isInteger(devParentPid) && devParentPid > 0) {
 }
 if (smokeTest) app.commandLine.appendSwitch('no-sandbox')
 const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
-const workspacePaths = new Map<number, string>()
+const workspaceWindows = new WorkspaceWindows()
 const dbManagers = new Map<number, ConnectionManager>()
 const pendingDisconnects = new Set<Promise<void>>()
 let quitting = false
@@ -119,14 +119,7 @@ function installContentSecurityPolicy() {
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
 }
 
-const workspaceFor = (contents: WebContents) => workspacePaths.get(contents.id) ?? null
-const normalizeWorkspacePath = (wsPath: string) => {
-  try {
-    return resolve(realpathSync(wsPath))
-  } catch {
-    return resolve(wsPath)
-  }
-}
+const workspaceFor = (contents: WebContents) => workspaceWindows.pathFor(contents.id)
 
 const isAuthorizedRecentWorkspace = (wsPath: string) => {
   const target = normalizeWorkspacePath(wsPath)
@@ -140,10 +133,7 @@ function focusWindow(window: BrowserWindow) {
 }
 
 function focusExistingWorkspace(wsPath: string, requesterId: number) {
-  const target = normalizeWorkspacePath(wsPath)
-  for (const [contentsId, openedPath] of workspacePaths) {
-    if (normalizeWorkspacePath(openedPath) !== target) continue
-    if (contentsId === requesterId) return false
+  for (const contentsId of workspaceWindows.raiseInstead(wsPath, requesterId)) {
     const window = BrowserWindow.getAllWindows().find((entry) => entry.webContents.id === contentsId)
     if (!window) {
       cleanupWindow(contentsId)
@@ -156,7 +146,7 @@ function focusExistingWorkspace(wsPath: string, requesterId: number) {
 }
 
 function cleanupWindow(contentsId: number) {
-  workspacePaths.delete(contentsId)
+  workspaceWindows.close(contentsId)
   stopWorkspaceWatcher(contentsId)
   const manager = dbManagers.get(contentsId)
   dbManagers.delete(contentsId)
@@ -213,7 +203,7 @@ function createWindow() {
     // Closing a window is an orderly exit from its workspace, and on macOS the
     // app outlives it — so the crash marker comes off here, not only at quit.
     // Before cleanupWindow, which is what forgets the workspace this window had.
-    markSessionClean(workspacePaths.get(contentsId) ?? null)
+    markSessionClean(workspaceWindows.pathFor(contentsId), workspaceWindows.slotFor(contentsId))
     cleanupWindow(contentsId)
   })
 
@@ -288,8 +278,10 @@ function registerIpc() {
   })
   registerWorkspaceIpc({
     workspaceFor,
-    setWorkspace: (contentsId, path) => workspacePaths.set(contentsId, path),
-    clearWorkspace: (contentsId) => { workspacePaths.delete(contentsId) },
+    setWorkspace: (contentsId, path) => workspaceWindows.open(contentsId, path),
+    clearWorkspace: (contentsId) => workspaceWindows.close(contentsId),
+    sessionSlotFor: (contents) => workspaceWindows.slotFor(contents.id),
+    notifySharedChanged,
     managerFor: (contentsId) => dbManagers.get(contentsId),
     focusExistingWorkspace,
     isAuthorizedRecentWorkspace,
@@ -311,8 +303,8 @@ const SESSION_FLUSH_MS = 1_000
 
 const pendingSessionFlushes = new Map<number, () => void>()
 // Captured when the quit starts: closing each window clears its entry from
-// workspacePaths, and the crash marker has to be cleared after that.
-let quittingWorkspaces: string[] = []
+// the window registry, and the crash marker has to be cleared after that.
+let quittingWorkspaces: Array<{ path: string; slot: number }> = []
 
 function notifySessionFlushed(contentsId: number) {
   const resolve = pendingSessionFlushes.get(contentsId)
@@ -326,7 +318,7 @@ function notifySessionFlushed(contentsId: number) {
 // belong to the workspace that is on its way out, so they have to reach disk
 // before this window's path is repointed at the new one.
 function flushRendererSession(contents: WebContents): Promise<void> {
-  if (contents.isDestroyed() || !workspacePaths.has(contents.id)) return Promise.resolve()
+  if (contents.isDestroyed() || !workspaceWindows.has(contents.id)) return Promise.resolve()
   return new Promise<void>((resolve) => {
     pendingSessionFlushes.set(contents.id, resolve)
     contents.send('app:flush-session')
@@ -335,6 +327,18 @@ function flushRendererSession(contents: WebContents): Promise<void> {
       resolve()
     }, SESSION_FLUSH_MS)
   })
+}
+
+// The config and the history are one file per workspace, whatever it has open
+// on it, so a window that saves one tells its siblings to re-read: a window
+// writing from a list it loaded before their change would write over it.
+function notifySharedChanged(contentsId: number, kind: SharedWorkspaceFile) {
+  const openedPath = workspaceWindows.pathFor(contentsId)
+  if (!openedPath) return
+  for (const id of workspaceWindows.owners(openedPath, contentsId)) {
+    const window = BrowserWindow.getAllWindows().find((entry) => entry.webContents.id === id)
+    if (window && !window.webContents.isDestroyed()) window.webContents.send('workspace:shared-changed', kind)
+  }
 }
 
 function flushRendererSessions(): Promise<unknown> {
@@ -347,7 +351,7 @@ function installQuitHandler() {
     quitting = true
     event.preventDefault()
     stopWorkspaceWatcher()
-    quittingWorkspaces = [...new Set(workspacePaths.values())]
+    quittingWorkspaces = workspaceWindows.all()
     const closed = Promise.all([
       flushRendererSessions(),
       ...[...dbManagers.values()].map((active) => active.disconnectAll().catch(() => {})),
@@ -361,7 +365,7 @@ function installQuitHandler() {
   // can't re-mark the session it just cleared. The marker is what tells the
   // next launch whether this exit was orderly.
   app.on('will-quit', () => {
-    for (const workspacePath of quittingWorkspaces) markSessionClean(workspacePath)
+    for (const { path, slot } of quittingWorkspaces) markSessionClean(path, slot)
     quittingWorkspaces = []
   })
 }

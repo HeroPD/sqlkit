@@ -1,5 +1,5 @@
 import type { ReactiveControllerHost } from 'lit'
-import type { ConnectionProfile } from '../electron'
+import type { ConnectionProfile, WorkspaceConfigPatch } from '../electron'
 import type { ConnectionsController } from './connections'
 import type { DialogsController } from './dialogs'
 import { t } from '../i18n'
@@ -44,7 +44,7 @@ export class ConfigController {
     this._preferences = normalizeWorkspacePreferences(value)
     this.announcePreferences()
     this.host.requestUpdate()
-    this.persist()
+    this.write({ preferences: this._preferences })
   }
 
   /** Registers a consumer of the workspace preferences and hands it the current
@@ -136,26 +136,36 @@ export class ConfigController {
     return { profileId: restored, child: profile ? this.defaultChild(profile) : null }
   }
 
-  persist() {
-    void window.sqlkit.saveWorkspaceConfig({
-      version: 1,
-      connections: this._connections,
-      activeDbId: this.deps.activeDbId(),
-      preferences: this._preferences,
-    }).then((result) => {
+  /** Another window on this workspace rewrote the config. Its connections and
+   * preferences are the shared truth; the active database stays this window's. */
+  async adoptSharedChanges() {
+    const { config, error } = await window.sqlkit.getWorkspaceConfig()
+    if (error) return
+    this.connections = config.connections
+    const preferences = normalizeWorkspacePreferences(config.preferences)
+    if (JSON.stringify(preferences) === JSON.stringify(this._preferences)) return
+    this._preferences = preferences
+    this.announcePreferences()
+  }
+
+  /** Writes what changed and nothing else: another window on this workspace may
+   * have written the rest of the config since this one loaded it. */
+  private write(patch: WorkspaceConfigPatch) {
+    void window.sqlkit.updateWorkspaceConfig(patch).then((result) => {
       if (!result.success) this.deps.dialogs.notice(t('config.saveFailed'), result.error)
     }).catch((error: unknown) => this.deps.dialogs.notice(t('config.saveFailed'), (error as Error).message))
+  }
+
+  // The active database is all a context switch changes, and all it writes:
+  // connections and preferences belong to the windows that actually edit them.
+  persist() {
+    this.write({ activeDbId: this.deps.activeDbId() })
   }
 
   // Upserts a profile and writes the config; the caller re-reads via load() to
   // pick up the files folder the save assigned. Returns whether the write stuck.
   async save(profile: ConnectionProfile): Promise<boolean> {
-    const existing = this._connections.findIndex((connection) => connection.id === profile.id)
-    const connections =
-      existing >= 0
-        ? this._connections.map((connection) => (connection.id === profile.id ? profile : connection))
-        : [...this._connections, profile]
-    const result = await window.sqlkit.saveWorkspaceConfig({ version: 1, connections, activeDbId: this.deps.activeDbId(), preferences: this._preferences })
+    const result = await window.sqlkit.updateWorkspaceConfig({ upsertConnections: [profile] })
     if (!result.success) {
       console.error('Failed to save workspace config:', result.error)
       return false
@@ -165,8 +175,12 @@ export class ConfigController {
     return true
   }
 
-  remove(id: string) {
+  /** Removing is said out loud, because a write that merely omits a connection
+   * cannot be told from one made before another window added it. */
+  async remove(id: string) {
     this.connections = this._connections.filter((connection) => connection.id !== id)
+    const result = await window.sqlkit.updateWorkspaceConfig({ removeConnections: [id] }).catch(() => null)
+    if (!result?.success) this.deps.dialogs.notice(t('config.saveFailed'), result?.error ?? '')
   }
 
   // Remembers the child a context switched to, so reopening lands on it.
@@ -175,6 +189,7 @@ export class ConfigController {
     this.connections = this._connections.map((connection) =>
       connection.id === profileId ? { ...connection, lastChildDb: child } : connection,
     )
+    this.write({ lastChildDb: [{ id: profileId, database: child }] })
   }
 
   // Forgets a remembered child after it's dropped on the server. Returns
@@ -188,6 +203,7 @@ export class ConfigController {
         ? { ...connection, lastChildDb: undefined }
         : connection,
     )
+    this.write({ lastChildDb: [{ id: profileId, database: null }] })
     return true
   }
 }

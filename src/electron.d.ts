@@ -248,6 +248,9 @@ export type QueryResult = QueryResultSet & {
  * within the submitted SQL, when the engine reported a usable position. */
 export type QueryResponse = { success: true; result: QueryResult } | { success: false; error: string; cancelled?: boolean; errorLine?: number }
 
+/** How much query history a workspace keeps. 0 days means "no time limit". */
+export type HistoryLimits = { historyRetentionDays: number; maxHistoryPerContext: number }
+
 /** One entry of the per-workspace query history (persisted in .sqlkit/history.json). */
 export type HistoryItem = {
   id: string
@@ -515,11 +518,13 @@ export type SqlkitApi = {
   setSettings: (settings: AppSettings) => Promise<void>
   onSettingsChange: (listener: (settings: AppSettings) => void) => () => void
   getWorkspaceConfig: () => Promise<WorkspaceConfigResult>
-  saveWorkspaceConfig: (config: WorkspaceConfig) => Promise<SaveResult>
+  /** Applies this window's change to the workspace config other windows share. */
+  updateWorkspaceConfig: (patch: WorkspaceConfigPatch) => Promise<SaveResult>
   /** The workspace's persisted query history, newest first. */
   readHistory: () => Promise<HistoryItem[]>
   /** Replaces the workspace's persisted query history (write-through per run). */
-  writeHistory: (items: HistoryItem[]) => Promise<SaveResult>
+  /** Applies this window's change to the history other windows share. */
+  updateHistory: (patch: WorkspaceHistoryPatch) => Promise<SaveResult>
   /** The workspace's open tabs from the last session; null when there is none. */
   readSession: () => Promise<WorkspaceSession | null>
   /** Replaces the persisted session and prunes backups no tab claims. */
@@ -642,6 +647,8 @@ export type SqlkitApi = {
   revealFile: (path: string) => Promise<{ success: boolean; error?: string }>
   /** Fires when .sql files in the workspace change on disk; returns unsubscribe. */
   onFilesChanged: (listener: () => void) => () => void
+  /** Fires when another window on this workspace rewrote a file they share; returns unsubscribe. */
+  onSharedChanged: (listener: (kind: SharedWorkspaceFile) => void) => () => void
   /** Fires on app-menu items (File > New Query / Save / …); returns unsubscribe. */
   onMenuAction: (listener: (action: MenuAction) => void) => () => void
   /** Fires when the window enters or leaves fullscreen, and on load; returns unsubscribe. */
@@ -649,6 +656,33 @@ export type SqlkitApi = {
 }
 
 /** Action ids the app menu sends over `app:menu`. */
+/** One window's change to the shared workspace config. Connections are named,
+ * never replaced wholesale: what this window did not touch stays as it is on
+ * disk, which is what another window may have just written. */
+export type WorkspaceConfigPatch = {
+  upsertConnections?: ConnectionProfile[]
+  removeConnections?: string[]
+  /** The database a connection was last used in: a field rather than a profile,
+   * so a routine switch never carries a stale copy of everything else with it. */
+  lastChildDb?: Array<{ id: string; database: string | null }>
+  activeDbId?: string | null
+  preferences?: WorkspacePreferences
+}
+
+/** One window's change to the shared query history. Runs are appended rather
+ * than sent as a whole list: two windows finishing a query at once would
+ * otherwise each write a snapshot missing the other's newest entry. */
+export type WorkspaceHistoryPatch = {
+  append?: HistoryItem[]
+  /** Drop one context's entries, or all of them — a deletion, never staleness. */
+  clearContext?: string
+  clearAll?: boolean
+}
+
+/** A workspace file every window open on it shares, and so re-reads when
+ * another window writes it. */
+export type SharedWorkspaceFile = 'config' | 'history'
+
 export type MenuAction =
   | 'open-workspace'
   | 'reveal-workspace'

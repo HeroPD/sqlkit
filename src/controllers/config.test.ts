@@ -18,10 +18,10 @@ const make = (over: { activeDbId?: string | null; statuses?: Record<string, Conn
   return { ctrl, notice, setActive: (id: string | null) => (activeDbId = id) }
 }
 
-function stubSqlkit(over: Partial<Record<'getWorkspaceConfig' | 'saveWorkspaceConfig', unknown>> = {}) {
+function stubSqlkit(over: Partial<Record<'getWorkspaceConfig' | 'updateWorkspaceConfig', unknown>> = {}) {
   const api = {
     getWorkspaceConfig: vi.fn(() => Promise.resolve({ config: { version: 1, connections: [], activeDbId: null } })),
-    saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
+    updateWorkspaceConfig: vi.fn(() => Promise.resolve({ success: true })),
     ...over,
   }
   ;(window as unknown as { sqlkit: unknown }).sqlkit = api
@@ -38,6 +38,40 @@ const profiles = (): ConnectionProfile[] => [
 
 afterEach(() => {
   vi.restoreAllMocks()
+})
+
+describe('ConfigController.adoptSharedChanges', () => {
+  it('takes a sibling window connections without adopting its active database', async () => {
+    const api = stubSqlkit(withConfig(profiles(), 'a'))
+    const { ctrl, setActive } = make({ activeDbId: 'b' })
+    await ctrl.load()
+    setActive('b')
+
+    // The other window added a connection and is on a different database.
+    const added = [...profiles(), { id: 'c', name: 'C', engine: 'sqlite' } as ConnectionProfile]
+    api.getWorkspaceConfig = vi.fn(() => Promise.resolve({ config: { version: 1, connections: added, activeDbId: 'a' } }))
+    await ctrl.adoptSharedChanges()
+
+    expect(ctrl.connections.map((c) => c.id)).toEqual(['a', 'b', 'c'])
+    // What this window persists is its own active database — never a connection
+    // list that would put back what another window removed.
+    ctrl.persist()
+    expect(api.updateWorkspaceConfig).toHaveBeenCalledWith({ activeDbId: 'b' })
+  })
+
+  it('keeps what it has when the config cannot be read', async () => {
+    const api = stubSqlkit(withConfig(profiles(), 'a'))
+    const { ctrl, notice } = make()
+    await ctrl.load()
+
+    api.getWorkspaceConfig = vi.fn(() => Promise.resolve({ config: { version: 1, connections: [], activeDbId: null }, error: 'parse failed' }))
+    await ctrl.adoptSharedChanges()
+
+    // A half-read config must not empty the list, and the window that wrote it
+    // is the one that reports the failure.
+    expect(ctrl.connections.map((c) => c.id)).toEqual(['a', 'b'])
+    expect(notice).not.toHaveBeenCalled()
+  })
 })
 
 describe('ConfigController.load', () => {
@@ -161,12 +195,9 @@ describe('ConfigController.save', () => {
     const profile = { id: 'b', name: 'B' } as ConnectionProfile
 
     expect(await ctrl.save(profile)).toBe(true)
-    expect(api.saveWorkspaceConfig).toHaveBeenCalledWith({
-      version: 1,
-      connections: [{ id: 'a', name: 'A' }, profile],
-      activeDbId: 'a',
-      preferences: { saveHistory: true, historyRetentionDays: 30, maxHistoryPerContext: 200 },
-    })
+    // Only the profile being saved: the rest of the file is another window's to
+    // have changed.
+    expect(api.updateWorkspaceConfig).toHaveBeenCalledWith({ upsertConnections: [profile] })
     // The caller re-reads via load(); save itself leaves the list untouched.
     expect(ctrl.connections.map((c) => c.id)).toEqual(['a'])
   })
@@ -177,16 +208,11 @@ describe('ConfigController.save', () => {
     ctrl.connections = [{ id: 'a', name: 'Old' } as ConnectionProfile, { id: 'b', name: 'B' } as ConnectionProfile]
 
     await ctrl.save({ id: 'a', name: 'New' } as ConnectionProfile)
-    expect(api.saveWorkspaceConfig).toHaveBeenCalledWith({
-      version: 1,
-      connections: [{ id: 'a', name: 'New' }, { id: 'b', name: 'B' }],
-      activeDbId: null,
-      preferences: { saveHistory: true, historyRetentionDays: 30, maxHistoryPerContext: 200 },
-    })
+    expect(api.updateWorkspaceConfig).toHaveBeenCalledWith({ upsertConnections: [{ id: 'a', name: 'New' }] })
   })
 
   it('returns false when the write fails', async () => {
-    stubSqlkit({ saveWorkspaceConfig: vi.fn(() => Promise.resolve({ success: false, error: 'disk full' })) })
+    stubSqlkit({ updateWorkspaceConfig: vi.fn(() => Promise.resolve({ success: false, error: 'disk full' })) })
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const { ctrl } = make()
     expect(await ctrl.save({ id: 'a' } as ConnectionProfile)).toBe(false)
@@ -204,11 +230,41 @@ describe('ConfigController profile list', () => {
     expect(ctrl.activeProfile()?.id).toBe('a')
   })
 
-  it('removes a profile from the list', () => {
+  it('removes a profile from the list, and says so on disk', async () => {
+    const api = stubSqlkit()
     const { ctrl } = make()
     ctrl.connections = profiles()
-    ctrl.remove('a')
+
+    await ctrl.remove('a')
+
     expect(ctrl.connections.map((c) => c.id)).toEqual(['b'])
+    expect(api.updateWorkspaceConfig).toHaveBeenCalledWith({ removeConnections: ['a'] })
+  })
+
+  it('writes only the field a database switch changes, not the whole profile', () => {
+    const api = stubSqlkit()
+    const { ctrl } = make()
+    ctrl.connections = [{ id: 'a', name: 'A', host: 'old-host' } as ConnectionProfile]
+
+    ctrl.setLastChildDb('a', 'billing')
+
+    // Carrying the cached profile here would put this window's stale host back
+    // over an edit another window just made.
+    expect(api.updateWorkspaceConfig).toHaveBeenCalledWith({ lastChildDb: [{ id: 'a', database: 'billing' }] })
+
+    ctrl.clearLastChildDb('a', 'billing')
+    expect(api.updateWorkspaceConfig).toHaveBeenLastCalledWith({ lastChildDb: [{ id: 'a', database: null }] })
+  })
+
+  it('writes preferences on their own, so a context switch cannot revert them', () => {
+    const api = stubSqlkit()
+    const { ctrl } = make()
+
+    ctrl.setPreferences({ saveHistory: false, historyRetentionDays: 7, maxHistoryPerContext: 50 })
+
+    expect(api.updateWorkspaceConfig).toHaveBeenCalledWith({
+      preferences: { saveHistory: false, historyRetentionDays: 7, maxHistoryPerContext: 50 },
+    })
   })
 
   it('remembers and forgets the last child database', () => {

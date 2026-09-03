@@ -176,6 +176,57 @@ describe('session file', () => {
   })
 })
 
+describe('session slots', () => {
+  it('keeps a second window in its own file, leaving the first untouched', () => {
+    writeSession(workspace, session([sqlTab({ id: 'first' })]))
+    writeSession(workspace, session([sqlTab({ id: 'second' })]), 1)
+
+    expect(readSession(workspace)?.contexts[0]?.tabs[0]?.id).toBe('first')
+    expect(readSession(workspace, 1)?.contexts[0]?.tabs[0]?.id).toBe('second')
+    // Slot 0 stays session.json, so a workspace one window ever opens is the
+    // file it has always been.
+    expect(fs.existsSync(sessionFile())).toBe(true)
+    expect(fs.existsSync(path.join(workspace, '.sqlkit', 'session.1.json'))).toBe(true)
+  })
+
+  it('keeps a window buffers out of reach of the other, under the same tab id', () => {
+    // Two windows with the same file open give their tabs the same id, so only
+    // the slot keeps one window's unsaved text off the other's.
+    writeBackup(workspace, 'file:/ws/a.sql', 'window one edit')
+    writeBackup(workspace, 'file:/ws/a.sql', 'window two edit', 1)
+
+    expect(readBackup(workspace, 'file:/ws/a.sql')).toBe('window one edit')
+    expect(readBackup(workspace, 'file:/ws/a.sql', 1)).toBe('window two edit')
+
+    // Saving in the first window drops its own copy, not the second's.
+    dropBackup(workspace, 'file:/ws/a.sql')
+    expect(readBackup(workspace, 'file:/ws/a.sql')).toBeNull()
+    expect(readBackup(workspace, 'file:/ws/a.sql', 1)).toBe('window two edit')
+  })
+
+  it('sweeps only its own slot, so one window cannot orphan another', () => {
+    writeBackup(workspace, 'kept-by-slot-1', 'select 1', 1)
+    writeBackup(workspace, 'orphan', 'select 2')
+    writeSession(workspace, session([sqlTab({ id: 'kept-by-slot-1', path: null })]), 1)
+
+    // Slot 0 claims neither, and sweeps only what lives in its own directory.
+    writeSession(workspace, session([sqlTab({ id: 'mine', path: null })]))
+
+    expect(readBackup(workspace, 'kept-by-slot-1', 1)).toBe('select 1')
+    expect(readBackup(workspace, 'orphan')).toBeNull()
+  })
+
+  it('clears the crash marker of one slot at a time', () => {
+    writeSession(workspace, session([sqlTab({ id: 'first' })]))
+    writeSession(workspace, session([sqlTab({ id: 'second' })]), 1)
+
+    markSessionClean(workspace, 1)
+
+    expect(readSession(workspace)?.unclean).toBe(true)
+    expect(readSession(workspace, 1)?.unclean).toBe(false)
+  })
+})
+
 describe('buffer backups', () => {
   it('round-trips a buffer and drops it on request', () => {
     expect(writeBackup(workspace, 'file:/ws/a.sql', 'select 1').success).toBe(true)

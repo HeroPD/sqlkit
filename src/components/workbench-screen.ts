@@ -544,6 +544,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _unsubscribeMenu: (() => void) | null = null
   private _unsubscribePreferences: (() => void) | null = null
+  private _unsubscribeShared: (() => void) | null = null
   private _settingsWereOpen = false
 
   connectedCallback() {
@@ -551,6 +552,12 @@ export class WorkbenchScreen extends LitElement {
     this._unsubscribeMenu = window.sqlkit.onMenuAction((action) => this._onMenuAction(action))
     this._unsubscribePreferences = this._config.onPreferences((preferences) => {
       this._queries.applyHistoryPreferences(preferences)
+    })
+    // Another window on this workspace wrote a file they share; taking its copy
+    // now is what keeps this window's next write from going over it.
+    this._unsubscribeShared = window.sqlkit.onSharedChanged((kind) => {
+      if (kind === 'config') void this._config.adoptSharedChanges()
+      else void this._queries.adoptSharedHistory()
     })
     window.addEventListener('keydown', this._onGlobalKeydown)
     window.addEventListener('pointerdown', this._onWindowPointerDown)
@@ -562,6 +569,8 @@ export class WorkbenchScreen extends LitElement {
     this._unsubscribeMenu = null
     this._unsubscribePreferences?.()
     this._unsubscribePreferences = null
+    this._unsubscribeShared?.()
+    this._unsubscribeShared = null
     window.removeEventListener('keydown', this._onGlobalKeydown)
     window.removeEventListener('pointerdown', this._onWindowPointerDown)
   }
@@ -2546,7 +2555,7 @@ export class WorkbenchScreen extends LitElement {
       this._ctx.switchInstance(next?.id ?? null, next ? this._config.defaultChild(next) : null)
     }
 
-    this._config.remove(id)
+    await this._config.remove(id)
 
     // Drop the profile's stashed contexts and its config tab wherever it's open.
     this._ctx.removeProfile(id)

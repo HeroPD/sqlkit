@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactiveControllerHost } from 'lit'
-import type { ConnectionProfile, QueryResponse } from '../electron'
+import type { ConnectionProfile, QueryResponse, WorkspaceHistoryPatch } from '../electron'
 import type { HistoryItem } from '../components/history-view'
 import type { QueryRun } from '../components/results-panel'
-import { QueriesController, capHistoryPerContext, dedupeHistory } from './queries'
+import { QueriesController } from './queries'
+import { capHistoryPerContext, dedupeHistory } from '../history-retention'
 
 const historyItem = (contextKey: string, id: string): HistoryItem =>
   ({ id, contextKey, sql: id, success: true, durationMs: 0, rowCount: 0, error: '', createdAt: '' })
@@ -60,13 +61,13 @@ const paged = { columns: ['n'], rows: [[0], [1]], rowCount: 5, durationMs: 1, se
 const runArgs = { tabId: 't1', profile, childDb: null, contextKey: 'p1', sql: 'SELECT 1', executionId: 'exec1' }
 
 // window.sqlkit stub with the query/paging/history methods the controller calls.
-function stubSqlkit(over: Partial<Record<'runQuery' | 'fetchRows' | 'closeSession' | 'readHistory' | 'writeHistory', unknown>> = {}) {
+function stubSqlkit(over: Partial<Record<'runQuery' | 'fetchRows' | 'closeSession' | 'readHistory' | 'updateHistory', unknown>> = {}) {
   const api = {
     runQuery: vi.fn(() => Promise.resolve({ success: true, result: paged })),
     fetchRows: vi.fn(() => Promise.resolve({ success: true, rows: [] as unknown[][] })),
     closeSession: vi.fn(() => Promise.resolve()),
     readHistory: vi.fn(() => Promise.resolve([] as HistoryItem[])),
-    writeHistory: vi.fn(() => Promise.resolve({ success: true })),
+    updateHistory: vi.fn(() => Promise.resolve({ success: true })),
     ...over,
   }
   ;(window as unknown as { sqlkit: unknown }).sqlkit = api
@@ -80,9 +81,9 @@ function deferRunQuery() {
   const pending = new Promise<QueryResponse>((res) => (settle = res))
   const runQuery = vi.fn(() => pending)
   const readHistory = vi.fn(() => Promise.resolve([] as HistoryItem[]))
-  const writeHistory = vi.fn((_items: HistoryItem[]) => Promise.resolve({ success: true }))
-  ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery, readHistory, writeHistory }
-  return { settle, runQuery, readHistory, writeHistory }
+  const updateHistory = vi.fn((_patch: WorkspaceHistoryPatch) => Promise.resolve({ success: true }))
+  ;(window as unknown as { sqlkit: unknown }).sqlkit = { runQuery, readHistory, updateHistory }
+  return { settle, runQuery, readHistory, updateHistory }
 }
 
 afterEach(() => {
@@ -137,10 +138,11 @@ describe('QueriesController.execute', () => {
 
     // One entry per distinct query, the repeat back at the top as the newest run.
     expect(controller.history.map((item) => item.sql)).toEqual(['SELECT 1', 'SELECT 2'])
-    // Every run still persists, so the file follows the collapsed list.
-    const writeHistory = api.writeHistory as ReturnType<typeof vi.fn<(items: HistoryItem[]) => unknown>>
-    expect(writeHistory).toHaveBeenCalledTimes(4)
-    expect(writeHistory.mock.calls.at(-1)?.[0].map((entry) => entry.sql)).toEqual(['SELECT 1', 'SELECT 2'])
+    // Every run still persists, and each write carries the run it recorded —
+    // the collapsing happens against whatever the file already holds.
+    const updateHistory = api.updateHistory as ReturnType<typeof vi.fn<(patch: WorkspaceHistoryPatch) => unknown>>
+    expect(updateHistory).toHaveBeenCalledTimes(4)
+    expect(updateHistory.mock.calls.at(-1)?.[0].append?.map((entry) => entry.sql)).toEqual(['SELECT 1'])
   })
 
   it('keeps the same query separate per context', async () => {
@@ -263,7 +265,7 @@ describe('QueriesController.execute', () => {
   it('marks the run errored instead of stuck when the IPC call rejects', async () => {
     ;(window as unknown as { sqlkit: unknown }).sqlkit = {
       runQuery: () => Promise.reject(new Error('channel closed')),
-      writeHistory: () => Promise.resolve({ success: true }),
+      updateHistory: () => Promise.resolve({ success: true }),
     }
     const controller = new QueriesController(host(), () => true)
 
@@ -276,7 +278,7 @@ describe('QueriesController.execute', () => {
 
 describe('QueriesController history persistence', () => {
   it('does not read or write persisted history when saving is disabled', async () => {
-    const { settle, readHistory, writeHistory } = deferRunQuery()
+    const { settle, readHistory, updateHistory } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)
     controller.applyHistoryPreferences({ saveHistory: false, historyRetentionDays: 30, maxHistoryPerContext: 200 })
 
@@ -286,31 +288,31 @@ describe('QueriesController history persistence', () => {
     await done
 
     expect(readHistory).not.toHaveBeenCalled()
-    expect(writeHistory).not.toHaveBeenCalled()
+    expect(updateHistory).not.toHaveBeenCalled()
     expect(controller.history).toHaveLength(1)
   })
 
   // Removing entries is not "saving" them: retention and the clear actions have
   // to reach the file, or what the view dropped comes back on the next open.
   it('writes removals to the file even with saving disabled', async () => {
-    const { settle, writeHistory } = deferRunQuery()
+    const { settle, updateHistory } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)
 
     const done = controller.execute(runArgs)
     settle({ success: true, result })
     await done
-    writeHistory.mockClear()
+    updateHistory.mockClear()
 
     controller.applyHistoryPreferences({ saveHistory: false, historyRetentionDays: 30, maxHistoryPerContext: 200 })
-    expect(writeHistory).not.toHaveBeenCalled()
+    expect(updateHistory).not.toHaveBeenCalled()
 
     controller.clearAllHistory()
-    expect(writeHistory).toHaveBeenLastCalledWith([])
+    expect(updateHistory).toHaveBeenLastCalledWith({ clearAll: true })
     expect(controller.history).toEqual([])
   })
 
   it('prunes entries past the retention window from the file too', async () => {
-    const { settle, writeHistory } = deferRunQuery()
+    const { settle, updateHistory } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)
 
     const done = controller.execute(runArgs)
@@ -324,25 +326,27 @@ describe('QueriesController history persistence', () => {
       createdAt: new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString(),
     }
     controller.history = [ancient, ...controller.history]
-    writeHistory.mockClear()
+    updateHistory.mockClear()
 
     controller.applyHistoryPreferences({ saveHistory: true, historyRetentionDays: 7, maxHistoryPerContext: 200 })
 
     expect(controller.history.map((item) => item.id)).not.toContain('ancient')
-    expect(writeHistory).toHaveBeenCalledWith(controller.history)
+    // The file is pruned to the workspace's retention, which main reads for
+    // itself — a window that sent its own could apply one already superseded.
+    expect(updateHistory).toHaveBeenCalledWith({})
   })
 
   it('writes history through after every run', async () => {
-    const { settle, writeHistory } = deferRunQuery()
+    const { settle, updateHistory } = deferRunQuery()
     const controller = new QueriesController(host(), () => true)
 
     const done = controller.execute(runArgs)
     settle({ success: true, result })
     await done
 
-    expect(writeHistory).toHaveBeenCalledOnce()
-    const written = writeHistory.mock.calls[0]?.[0]
-    expect(written?.[0]).toMatchObject({ contextKey: 'p1', sql: 'SELECT 1', success: true })
+    expect(updateHistory).toHaveBeenCalledOnce()
+    const written = updateHistory.mock.calls[0]?.[0]
+    expect(written?.append?.[0]).toMatchObject({ contextKey: 'p1', sql: 'SELECT 1', success: true })
   })
 
   it('loads persisted history behind entries already recorded this session', async () => {
@@ -354,6 +358,43 @@ describe('QueriesController history persistence', () => {
 
     expect(controller.history.map((item) => item.id)).toEqual(['fresh-run', 'old-run'])
     expect(api.readHistory).toHaveBeenCalledOnce()
+  })
+
+  it('takes a sibling window cleared history instead of merging it back', async () => {
+    const api = stubSqlkit({ readHistory: vi.fn(() => Promise.resolve([])) })
+    const controller = new QueriesController(host(), () => true)
+    controller.history = [historyItem('p1', 'mine'), historyItem('p1', 'theirs')]
+
+    await controller.adoptSharedHistory()
+
+    // Clear All in the other window emptied the file; merging would keep this
+    // window's copy and write every entry back on its next run.
+    expect(controller.history).toEqual([])
+    expect(api.readHistory).toHaveBeenCalledOnce()
+  })
+
+  it('takes a sibling window partial deletion too', async () => {
+    stubSqlkit({ readHistory: vi.fn(() => Promise.resolve([historyItem('p1', 'kept')])) })
+    const controller = new QueriesController(host(), () => true)
+    controller.history = [historyItem('p1', 'deleted'), historyItem('p1', 'kept')]
+
+    await controller.adoptSharedHistory()
+
+    expect(controller.history.map((item) => item.id)).toEqual(['kept'])
+  })
+
+  it('drops a shared history read that resolves after a workspace switch', async () => {
+    let resolve!: (items: HistoryItem[]) => void
+    stubSqlkit({ readHistory: vi.fn(() => new Promise<HistoryItem[]>((res) => (resolve = res))) })
+    const controller = new QueriesController(host(), () => true)
+    controller.history = [historyItem('p1', 'mine')]
+
+    const adopting = controller.adoptSharedHistory()
+    controller.reset()
+    resolve([historyItem('p1', 'stale')])
+    await adopting
+
+    expect(controller.history).toEqual([])
   })
 
   it('drops a history load that resolves after a workspace switch', async () => {
