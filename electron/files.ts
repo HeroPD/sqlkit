@@ -161,6 +161,10 @@ export async function listWorkspaceFilesAsync(workspacePath: string | null, fold
 // Reads a .sql file, refusing paths that escape the workspace root — the
 // renderer only ever hands back paths it got from listSqlFiles, but IPC input
 // is untrusted by construction.
+// Gone is not the same as unreadable: a tab whose file was deleted keeps its
+// text as the only copy, where a locked or half-written one is left to retry.
+const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT'
+
 export function readWorkspaceFile(workspacePath: string | null, filePath: string): FileReadResult {
   if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
 
@@ -174,7 +178,7 @@ export function readWorkspaceFile(workspacePath: string | null, filePath: string
     if (fs.statSync(resolved).size > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToOpen') }
     return { success: true, content: fs.readFileSync(resolved, 'utf8') }
   } catch (error) {
-    return { success: false, error: (error as Error).message }
+    return { success: false, error: (error as Error).message, ...(isMissing(error) ? { missing: true } : {}) }
   }
 }
 
@@ -187,7 +191,7 @@ export async function readWorkspaceFileAsync(workspacePath: string | null, fileP
     if ((await fsp.stat(resolved)).size > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToOpen') }
     return { success: true, content: await fsp.readFile(resolved, 'utf8') }
   } catch (error) {
-    return { success: false, error: (error as Error).message }
+    return { success: false, error: (error as Error).message, ...(isMissing(error) ? { missing: true } : {}) }
   }
 }
 

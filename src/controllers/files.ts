@@ -10,15 +10,20 @@ export class FilesController implements ReactiveController {
   private folder: string | null = null
 
   private host: ReactiveControllerHost
+  private onChanged: (() => void) | null
   private unsubscribe: (() => void) | null = null
 
-  constructor(host: ReactiveControllerHost) {
+  constructor(host: ReactiveControllerHost, onChanged?: () => void) {
     this.host = host
+    this.onChanged = onChanged ?? null
     host.addController(this)
   }
 
   hostConnected() {
-    this.unsubscribe = window.sqlkit.onFilesChanged(() => void this.reload())
+    this.unsubscribe = window.sqlkit.onFilesChanged(() => {
+      void this.reload()
+      this.onChanged?.()
+    })
   }
 
   hostDisconnected() {

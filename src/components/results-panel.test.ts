@@ -1280,6 +1280,7 @@ describe('results-panel DBeaver-style editing', () => {
     expect(editor.placeholderText).not.toMatch(/^WHERE/i)
     expect(editor.columns).toEqual(['a', 'b'])
     expect(editor.engine).toBe('postgresql')
+    expect(editor.submitKey).toBe('Mod-Enter')
     expect(el.shadowRoot!.querySelector('.filter-apply .icon-check')).toBeTruthy()
     expect(el.shadowRoot!.querySelector('.filter-clear .icon-x')).toBeTruthy()
 
@@ -1287,7 +1288,9 @@ describe('results-panel DBeaver-style editing', () => {
       detail: { value: "a = 'a1'" },
       bubbles: true,
     }))
-    editor.dispatchEvent(new CustomEvent('expression-submit', { bubbles: true, cancelable: true }))
+    editor.shadowRoot!.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true, cancelable: true }),
+    )
     expect(applied.mock.calls[0]?.[0].detail).toEqual({ condition: "a = 'a1'" })
 
     el.filter = "a = 'a1'"

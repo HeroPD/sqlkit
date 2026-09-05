@@ -275,7 +275,7 @@ export class WorkbenchScreen extends LitElement {
 
   private _live = new ConnectionsController(this)
 
-  private _workspaceFiles = new FilesController(this)
+  private _workspaceFiles = new FilesController(this, () => void this._fileOps.refreshOpenFiles())
 
   // Aggregate over the result grid's selected cells, shown in the status bar.
   // Published by results-panel on selection change, not computed here.
@@ -711,6 +711,7 @@ export class WorkbenchScreen extends LitElement {
       // state is gone. A switch is the other way round — main flushes before it
       // repoints the window, and writing here would land in the new workspace.
       if (!this.workspace) this._session.flushOutgoing()
+      this._fileOps.reset()
       this._session.reset()
       this._tabScroll.clear()
       this._ctx.reset()
@@ -2383,6 +2384,7 @@ export class WorkbenchScreen extends LitElement {
             .streamExportAvailable=${this._canStreamExport()}
             .alternateRowShading=${this._settings.app.alternateRowShading}
             .runShortcut=${displayKeybinding(this._settings.bindings.runQuery)}
+            .runQueryKey=${this._settings.bindings.runQuery}
             @cancel-query=${this._onCancelQuery}
             @result-navigate=${this._onResultNavigate}
             @follow-foreign-key=${this._onFollowForeignKey}

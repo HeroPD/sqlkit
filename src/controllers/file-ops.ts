@@ -1,5 +1,5 @@
 import type { FileInfo, FileSaveResult } from '../electron'
-import type { ContextsController } from './contexts'
+import type { ConflictedFileTab, ContextsController } from './contexts'
 import type { FilesController } from './files'
 import type { QueriesController } from './queries'
 import type { DialogsController } from './dialogs'
@@ -36,9 +36,19 @@ type ContextRef = { profileId: string | null; childDb: string | null }
 // results, and the file listing in step. Pure file I/O is in the main process.
 export class FileOpsController {
   private deps: Deps
+  private refreshGeneration = 0
+  /** The file text each tab was last asked about, so a watcher event for an
+   * unrelated file does not re-open a question the user already answered. */
+  private askedDiskText = new Map<string, string>()
 
   constructor(deps: Deps) {
     this.deps = deps
+  }
+
+  /** Invalidates reads that belong to the workspace being left. */
+  reset() {
+    this.refreshGeneration += 1
+    this.askedDiskText.clear()
   }
 
   private currentContext(): ContextRef {
@@ -53,6 +63,70 @@ export class FileOpsController {
   private freeTabId(path: string) {
     const id = fileTabId(path)
     return this.deps.ctx.tabExists(id) ? crypto.randomUUID() : id
+  }
+
+  /** A workspace watcher event may have come from another window. Re-read the
+   * open files so clean editor documents follow disk without risking unsaved
+   * work in dirty tabs. A newer watcher pass supersedes an older slow one. */
+  async refreshOpenFiles() {
+    const generation = ++this.refreshGeneration
+    const files = await Promise.all(this.deps.ctx.openFilePaths().map(async (path) => ({
+      path,
+      result: await window.sqlkit.readFile(path).catch(() => null),
+    })))
+    if (generation !== this.refreshGeneration) return
+    const conflicting = new Set<string>()
+    for (const { path, result } of files) {
+      if (!result) continue
+      // A file that is merely unreadable (locked, briefly mid-write) is left for
+      // the next pass; one that is gone leaves its tab holding the only copy.
+      if (!result.success) {
+        if (result.missing) this.deps.ctx.orphanFileTabs(path)
+        continue
+      }
+      const { cleaned, conflicted } = this.deps.ctx.adoptFileContent(path, result.content)
+      for (const tabId of cleaned) this.deps.onTabSaved?.(tabId)
+      for (const tab of conflicted) {
+        conflicting.add(tab.id)
+        this.askToReload(path, result.content, tab)
+      }
+    }
+    // A tab that is no longer at odds with its file — saved, reloaded, closed —
+    // forgets it was ever asked, so a later clash asks again.
+    for (const tabId of this.askedDiskText.keys()) {
+      if (!conflicting.has(tabId)) this.askedDiskText.delete(tabId)
+    }
+  }
+
+  /** A tab with unsaved changes cannot silently follow the file, so it asks —
+   * once per version of the file, or every watcher event would ask again. Each
+   * tab is asked separately: the answer discards that tab's work alone, and one
+   * under another database is not the one the user is looking at. */
+  private askToReload(path: string, content: string, tab: ConflictedFileTab) {
+    if (this.askedDiskText.get(tab.id) === content) return
+    // Recorded before the answer, not after: declining is a dismissal, which
+    // reports nothing back, and the same file must not ask twice.
+    this.askedDiskText.set(tab.id, content)
+    this.deps.dialogs.confirm = {
+      message: t('file.changedOnDisk', { name: tab.name }),
+      detail: tab.live ? t('file.changedOnDiskDetail') : t('file.changedOnDiskOtherDatabase'),
+      confirmLabel: t('file.reloadFromDisk'),
+      cancelLabel: t('file.keepMyChanges'),
+      action: () => void this.reloadFromDisk(path, tab.id),
+    }
+  }
+
+  /** Re-reads on the way in: the file may have moved again while the question
+   * sat unanswered, and the answer is about the file, not that older copy. */
+  private async reloadFromDisk(path: string, tabId: string) {
+    const result = await window.sqlkit.readFile(path).catch(() => null)
+    if (!result) return
+    if (!result.success) {
+      if (result.missing) this.deps.ctx.orphanFileTabs(path)
+      return
+    }
+    if (this.deps.ctx.reloadFileTab(tabId, result.content)) this.deps.onTabSaved?.(tabId)
+    this.askedDiskText.delete(tabId)
   }
 
   async openFile(file: FileInfo, context = this.currentContext()) {

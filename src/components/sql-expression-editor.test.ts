@@ -44,14 +44,32 @@ describe('SQL expression completion', () => {
     content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
     expect(submit).toHaveBeenCalledOnce()
 
-    // The key that runs a query applies the filter here; CodeMirror resolves
-    // Mod to Ctrl under jsdom, Cmd on the mac app.
+    // The key that runs a query applies the filter with either platform's Mod.
     content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))
+    content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
     content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 
-    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit).toHaveBeenCalledTimes(3)
     expect(cancel).toHaveBeenCalledOnce()
     expect(editor.value).toBe('\n')
+    editor.remove()
+  })
+
+  it('uses the configured Run Query binding for compact submission', async () => {
+    const editor = document.createElement('sql-expression-editor')
+    editor.compact = true
+    editor.submitOnEnter = true
+    editor.submitKey = 'Mod-Shift-Enter'
+    const submit = vi.fn()
+    editor.addEventListener('expression-submit', submit)
+    document.body.append(editor)
+    await editor.updateComplete
+
+    const content = editor.shadowRoot!.querySelector<HTMLElement>('.cm-content')!
+    content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
+    content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, shiftKey: true, bubbles: true }))
+
+    expect(submit).toHaveBeenCalledOnce()
     editor.remove()
   })
 

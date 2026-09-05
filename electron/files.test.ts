@@ -7,6 +7,7 @@ import {
   externalOpenAction,
   listWorkspaceFiles,
   readWorkspaceFile,
+  readWorkspaceFileAsync,
   resolveWorkspaceItem,
   saveWorkspaceFile,
   saveWorkspaceFileAsync,
@@ -36,6 +37,31 @@ describe('workspace file containment', () => {
     fs.writeFileSync(path.join(ws, 'query.sql'), 'SELECT 1;')
     const result = readWorkspaceFile(ws, path.join(ws, 'query.sql'))
     expect(result).toEqual({ success: true, content: 'SELECT 1;' })
+  })
+
+  it('reports a deleted file as missing, through the reader the app uses', async () => {
+    const { ws } = setup()
+    const file = path.join(ws, 'query.sql')
+
+    // Deliberately the async reader: `file:read` goes through that one, and a
+    // `missing` flag only the sync twin sets would never reach the renderer.
+    const gone = await readWorkspaceFileAsync(ws, file)
+    expect(gone).toMatchObject({ success: false, missing: true })
+
+    fs.writeFileSync(file, 'SELECT 1;')
+    expect(await readWorkspaceFileAsync(ws, file)).toEqual({ success: true, content: 'SELECT 1;' })
+    expect(readWorkspaceFile(ws, file)).toEqual({ success: true, content: 'SELECT 1;' })
+  })
+
+  it('leaves an unreadable file unflagged, so a tab is not orphaned over a bad read', () => {
+    const { ws } = setup()
+    // A directory where a file is expected reads as EISDIR, not ENOENT.
+    fs.mkdirSync(path.join(ws, 'query.sql'))
+
+    const result = readWorkspaceFile(ws, path.join(ws, 'query.sql'))
+
+    expect(result.success).toBe(false)
+    expect(result).not.toHaveProperty('missing')
   })
 
   it('refuses to read through a symlinked directory that escapes the workspace', () => {

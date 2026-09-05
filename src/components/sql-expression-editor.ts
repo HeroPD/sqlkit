@@ -1,6 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
-import { Compartment, EditorState } from '@codemirror/state'
+import { Compartment, EditorState, Prec } from '@codemirror/state'
 import { EditorView, keymap, placeholder } from '@codemirror/view'
 import { bracketMatching, syntaxHighlighting } from '@codemirror/language'
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, type Completion, type CompletionContext } from '@codemirror/autocomplete'
@@ -10,6 +10,7 @@ import { oneDarkTheme } from '@codemirror/theme-one-dark'
 import type { Engine } from '../electron'
 import { dialectForEngine, KEYWORD_BOOSTS, SQL_FUNCTIONS, matchesCompletionTerm, resolveDialect } from '../codemirror/dialects'
 import { softHighlightStyle } from '../codemirror/highlight'
+import { eventMatchesBinding } from '../keybindings'
 
 const configCompartment = new Compartment()
 const EXPRESSION_TERMS = new Set([
@@ -83,6 +84,10 @@ export class SqlExpressionEditor extends LitElement {
   @property({ type: Boolean })
   submitOnEnter = false
 
+  /** The workbench's configured Run Query chord also applies a compact filter. */
+  @property()
+  submitKey = 'Mod-Enter'
+
   @property()
   placeholderText = 'age >= 0'
 
@@ -113,11 +118,19 @@ export class SqlExpressionEditor extends LitElement {
           history(),
           bracketMatching(),
           closeBrackets(),
+          // Match the workbench's physical-key handling instead of relying on
+          // CodeMirror's import-time platform detection for Cmd versus Ctrl.
+          Prec.highest(EditorView.domEventHandlers({
+            keydown: (event) => {
+              if (!this.submitOnEnter || !eventMatchesBinding(event, this.submitKey)) return false
+              event.preventDefault()
+              return submit()
+            },
+          })),
           keymap.of([
             ...completionKeymap,
-            // Enter submits because the bar is a filter box; Mod-Enter matches Run.
+            // Enter submits because the bar is a filter box.
             { key: 'Enter', run: submit },
-            { key: 'Mod-Enter', run: submit },
             {
               key: 'Escape',
               run: () => {

@@ -461,7 +461,10 @@ export type FileInfo = {
 
 export type FilesResult = { success: true; files: FileInfo[] } | { success: false; error: string }
 
-export type FileReadResult = { success: true; content: string } | { success: false; error: string }
+export type FileReadResult =
+  | { success: true; content: string }
+  /** `missing` marks a file that is no longer there, as opposed to unreadable. */
+  | { success: false; error: string; missing?: boolean }
 
 export type FileSaveResult =
   | { success: true; path: string; name: string }

@@ -101,6 +101,10 @@ const sessionTabFrom = (tab: EditorTabState): SessionTab => {
 // Fields use get/set so assigning re-renders the host, exactly like the @state
 // they replaced. Query results live in the QueriesController, keyed by tab id,
 // so they follow their tab through any switch.
+/** A tab whose unsaved text differs from the file it came from. `live` is false
+ * when it sits under a database context other than the one on screen. */
+export type ConflictedFileTab = { id: string; name: string; live: boolean }
+
 export class ContextsController {
   private _tabs: EditorTabState[] = []
   private _activeTabId: string | null = null
@@ -310,6 +314,94 @@ export class ContextsController {
     collect(this._tabs)
     for (const instance of this._instances.values()) collect(instance.tabs)
     return [...ids]
+  }
+
+  /** Every file currently represented by an editor tab, including tabs stashed
+   * under inactive database contexts. */
+  openFilePaths(): string[] {
+    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
+    const paths = new Set<string>()
+    const collect = (tabs: EditorTabState[]) => {
+      for (const tab of tabs) if (tab.kind === 'sql' && tab.path) paths.add(tab.path)
+    }
+    collect(this._tabs)
+    for (const [key, instance] of this._instances) if (key !== liveKey) collect(instance.tabs)
+    return [...paths]
+  }
+
+  /** Reconciles an externally changed file with every tab showing it. A tab
+   * whose buffer matches disk takes the new text; one holding unsaved changes
+   * is left exactly as it is and reported instead, for the caller to ask about
+   * — moving its baseline underneath would erase the only sign of the clash.
+   *
+   * `cleaned` are tabs that now match disk and no longer need a backup. */
+  adoptFileContent(path: string, content: string): { cleaned: string[]; conflicted: ConflictedFileTab[] } {
+    const cleaned = new Set<string>()
+    const conflicted: ConflictedFileTab[] = []
+    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
+    const apply = (tab: EditorTabState, key: string) => {
+      if (tab.kind !== 'sql' || tab.path !== path) return tab
+      if (content === tab.savedContent) return tab
+      if (tab.content !== tab.savedContent && tab.content !== content) {
+        // One entry per tab, whichever context holds it: each is answered on
+        // its own, since reloading discards that tab's unsaved text alone.
+        if (!conflicted.some((entry) => entry.id === tab.id)) {
+          conflicted.push({ id: tab.id, name: tab.name, live: key === liveKey })
+        }
+        return tab
+      }
+      cleaned.add(tab.id)
+      return { ...tab, content, savedContent: content }
+    }
+    if (this.updateFileTabs(apply)) this.host.requestUpdate()
+    return { cleaned: [...cleaned], conflicted }
+  }
+
+  /** Takes the file's text into one tab, unsaved changes and all — the answer
+   * to the question adoptFileContent raised. Returns whether anything moved. */
+  reloadFileTab(tabId: string, content: string): boolean {
+    const changed = this.updateFileTabs((tab) =>
+      tab.kind === 'sql' && tab.id === tabId && (tab.content !== content || tab.savedContent !== content)
+        ? { ...tab, content, savedContent: content }
+        : tab)
+    if (changed) this.host.requestUpdate()
+    return changed
+  }
+
+  /** The file behind these tabs is gone. Their text is now its only copy, so it
+   * reads as unsaved: the tab keeps its path, and saving writes the file back. */
+  orphanFileTabs(path: string): boolean {
+    const changed = this.updateFileTabs((tab) =>
+      tab.kind === 'sql' && tab.path === path && tab.savedContent !== '' ? { ...tab, savedContent: '' } : tab)
+    if (changed) this.host.requestUpdate()
+    return changed
+  }
+
+  // Runs `apply` over the live tabs and every stashed instance's, reporting
+  // whether anything moved.
+  private updateFileTabs(apply: (tab: EditorTabState, contextKey: string) => EditorTabState): boolean {
+    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
+    let changed = false
+    const update = (tabs: EditorTabState[], key: string) => {
+      let tabsChanged = false
+      const next = tabs.map((tab) => {
+        const applied = apply(tab, key)
+        if (applied !== tab) tabsChanged = true
+        return applied
+      })
+      if (tabsChanged) changed = true
+      return tabsChanged ? next : tabs
+    }
+
+    this._tabs = update(this._tabs, liveKey)
+    for (const [key, instance] of this._instances) {
+      // The live key can hold an older array left from the last context switch;
+      // the live fields are authoritative until they are stashed again.
+      if (key === liveKey) continue
+      const tabs = update(instance.tabs, key)
+      if (tabs !== instance.tabs) this._instances.set(key, { ...instance, tabs })
+    }
+    return changed
   }
 
   activateTabInContext(profileId: string | null, childDb: string | null, id: string) {

@@ -300,6 +300,10 @@ export class ResultsPanel extends LitElement {
   @property()
   runShortcut = isMac ? '⌘↵' : 'Ctrl+↵'
 
+  /** The configured Run query binding, used to apply the result filter. */
+  @property()
+  runQueryKey = 'Mod-Enter'
+
   /** Source table the result's rows came from, used as the INSERT target when
    * copying/exporting rows as SQL. Null when the result has no single source (a
    * join, an expression-only select); the statements then name a placeholder
@@ -1838,6 +1842,7 @@ export class ResultsPanel extends LitElement {
                 .columns=${result?.columns ?? this._filterColumns}
                 .compact=${true}
                 .submitOnEnter=${true}
+                .submitKey=${this.runQueryKey}
                 .placeholderText=${t('results.filterPlaceholder')}
                 @expression-change=${(event: CustomEvent<{ value: string }>) => (this._filterDraft = event.detail.value)}
                 @expression-submit=${this._applyFilter}

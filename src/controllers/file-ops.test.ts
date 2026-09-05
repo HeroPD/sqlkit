@@ -17,13 +17,15 @@ const contextKey = (profileId: string | null, childDb: string | null) =>
 const fileInfo = (path: string, name = path.split('/').pop() ?? path): FileInfo =>
   ({ type: 'file', name, path, relativePath: name })
 
+const settle = async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve() }
+
 const defer = <T>() => {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((res) => (resolve = res))
   return { promise, resolve }
 }
 
-const make = (over: { contextFolder?: string | null; listing?: FileInfo[] } = {}) => {
+const make = (over: { contextFolder?: string | null; listing?: FileInfo[]; onTabSaved?: (tabId: string) => void } = {}) => {
   const folder = 'contextFolder' in over ? (over.contextFolder ?? null) : '/ws/ctx'
   const ctx = new ContextsController(host(), { contextKey, dropQuery: vi.fn() })
   const files = {
@@ -43,6 +45,7 @@ const make = (over: { contextFolder?: string | null; listing?: FileInfo[] } = {}
     dialogs,
     contextFolder: () => folder,
     sweepOrphanTabState,
+    onTabSaved: over.onTabSaved,
   })
   return { ctrl, ctx, files, queries, dialogs, sweepOrphanTabState }
 }
@@ -130,6 +133,335 @@ describe('FileOpsController.openFileOrExternal', () => {
     ctrl.openFileOrExternal(fileInfo('/ws/ctx/data.csv'))
     expect(api.openExternal).toHaveBeenCalledWith('/ws/ctx/data.csv')
     expect(ctx.tabs).toEqual([])
+  })
+})
+
+describe('FileOpsController.refreshOpenFiles', () => {
+  it('preserves unsaved edits without prompting when disk still matches the saved baseline', async () => {
+    const onTabSaved = vi.fn()
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'select 1' })) })
+    const { ctrl, ctx, dialogs } = make({ onTabSaved })
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'my unsaved query',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'my unsaved query', savedContent: 'select 1' })
+    expect(dialogs.confirm).toBeNull()
+    expect(onTabSaved).not.toHaveBeenCalled()
+  })
+
+  it('adopts another window save in a clean open tab', async () => {
+    const onTabSaved = vi.fn()
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'select 2' })) })
+    const { ctrl, ctx } = make({ onTabSaved })
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'select 1',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'select 2', savedContent: 'select 2' })
+    expect(onTabSaved).toHaveBeenCalledWith('file:/ws/ctx/q.sql')
+  })
+
+  it('leaves an unsaved tab exactly as it is, and asks whether to reload', async () => {
+    const onTabSaved = vi.fn()
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'select 2' })) })
+    const { ctrl, ctx, dialogs } = make({ onTabSaved })
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'my unsaved query',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+
+    // The baseline stays put: moving it would leave the next save looking like
+    // an ordinary one, with nothing to tell the user the file had moved.
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'my unsaved query', savedContent: 'select 1' })
+    expect(onTabSaved).not.toHaveBeenCalled()
+    expect(dialogs.confirm?.message).toContain('q.sql')
+  })
+
+  it('reloads the file over unsaved text once the user says so', async () => {
+    const onTabSaved = vi.fn()
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'select 2' })) })
+    const { ctrl, ctx, dialogs } = make({ onTabSaved })
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'my unsaved query',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+    dialogs.acceptConfirm()
+    await settle()
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'select 2', savedContent: 'select 2' })
+    // Nothing unsaved is left, so the crash-recovery copy goes with it.
+    expect(onTabSaved).toHaveBeenCalledWith('file:/ws/ctx/q.sql')
+  })
+
+  it('reloads what the file says now, not what it said when it asked', async () => {
+    const readFile = vi.fn(() => Promise.resolve({ success: true, content: 'select 2' }))
+    stubSqlkit({ readFile })
+    const { ctrl, ctx, dialogs } = make()
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'my unsaved query',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+    // The file moves again while the question sits unanswered.
+    readFile.mockResolvedValue({ success: true, content: 'select 3' })
+    dialogs.acceptConfirm()
+    await settle()
+
+    // Loading the copy captured at ask time would leave the tab clean on text
+    // the file no longer holds — the next save then overwrites 'select 3'.
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'select 3', savedContent: 'select 3' })
+  })
+
+  it('asks again once a conflict has been resolved, even for text already declined', async () => {
+    const readFile = vi.fn(() => Promise.resolve({ success: true, content: 'select 2' }))
+    stubSqlkit({ readFile })
+    const { ctrl, ctx, dialogs } = make()
+    const openDialog = () => dialogs.confirm
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'my unsaved query',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+    dialogs.confirm = null // declined 'select 2'
+
+    // The tab is saved locally, so it is no longer at odds with anything.
+    ctx.setActiveContent('select 9')
+    ctx.applySaveResult(ctx.activeSqlTab()!, { success: true, path: '/ws/ctx/q.sql', name: 'q.sql' })
+    readFile.mockResolvedValue({ success: true, content: 'select 9' })
+    await ctrl.refreshOpenFiles()
+    expect(openDialog()).toBeNull()
+
+    // 'select 2' comes back — a new clash, however familiar the text.
+    ctx.setActiveContent('editing again')
+    readFile.mockResolvedValue({ success: true, content: 'select 2' })
+    await ctrl.refreshOpenFiles()
+
+    expect(openDialog()?.message).toContain('q.sql')
+  })
+
+  it('asks per tab, so reloading one cannot discard another database unsaved work', async () => {
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'select 2' })) })
+    const { ctrl, ctx, dialogs } = make()
+    ctx.switchInstance('p1', 'db_a')
+    ctx.addTab({
+      id: 'file:/ws/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/q.sql',
+      content: 'hidden unsaved work',
+      savedContent: 'select 1',
+    })
+    ctx.switchInstance('p1', 'db_b')
+    ctx.addTab({
+      id: 'file:/ws/q.sql#b',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/q.sql',
+      content: 'visible unsaved work',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+    // Two tabs, two questions. The live one is asked first; answering it must
+    // not reach into the tab stashed under the other database.
+    dialogs.acceptConfirm()
+    await settle()
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'select 2', savedContent: 'select 2' })
+    ctx.switchInstance('p1', 'db_a')
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'hidden unsaved work', savedContent: 'select 1' })
+  })
+
+  it('asks once per version of the file, not once per watcher event', async () => {
+    const readFile = vi.fn(() => Promise.resolve({ success: true, content: 'select 2' }))
+    stubSqlkit({ readFile })
+    const { ctrl, ctx, dialogs } = make()
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'my unsaved query',
+      savedContent: 'select 1',
+    })
+
+    const openDialog = () => dialogs.confirm
+
+    await ctrl.refreshOpenFiles()
+    dialogs.confirm = null // declined
+    // Any change anywhere in the workspace runs another pass.
+    await ctrl.refreshOpenFiles()
+    expect(openDialog()).toBeNull()
+
+    // The file moving again is a new question.
+    readFile.mockResolvedValue({ success: true, content: 'select 3' })
+    await ctrl.refreshOpenFiles()
+    expect(openDialog()?.message).toContain('q.sql')
+  })
+
+  it('keeps the text of a tab whose file was deleted, as its only copy', async () => {
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: false, error: 'ENOENT', missing: true })) })
+    const { ctrl, ctx, dialogs } = make()
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'select 1',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+
+    // Unsaved against nothing: the tab still names the file, so saving writes
+    // it back, and hot exit now keeps a backup of the text.
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'select 1', savedContent: '', path: '/ws/ctx/q.sql' })
+    expect(dialogs.confirm).toBeNull()
+  })
+
+  it('leaves a tab alone when the file is merely unreadable', async () => {
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: false, error: 'EBUSY' })) })
+    const { ctrl, ctx } = make()
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'select 1',
+      savedContent: 'select 1',
+    })
+
+    await ctrl.refreshOpenFiles()
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'select 1', savedContent: 'select 1' })
+  })
+
+  it('does not let the active context stale cache hide a dirty live tab', async () => {
+    // The stashed copy under the live key is stale; the live tab is the dirty
+    // one, and it must be the one that decides whether this is a conflict.
+
+    const onTabSaved = vi.fn()
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'select 2' })) })
+    const { ctrl, ctx } = make({ onTabSaved })
+    ctx.switchInstance('p1', 'db_a')
+    ctx.addTab({
+      id: 'file:/ws/a/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/a/q.sql',
+      content: 'select 1',
+      savedContent: 'select 1',
+    })
+    ctx.switchInstance('p1', 'db_b')
+    ctx.switchInstance('p1', 'db_a')
+    ctx.setActiveContent('my unsaved query')
+
+    await ctrl.refreshOpenFiles()
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'my unsaved query', savedContent: 'select 1' })
+    expect(onTabSaved).not.toHaveBeenCalled()
+  })
+
+  it('also refreshes tabs stashed under an inactive database context', async () => {
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'select 2' })) })
+    const { ctrl, ctx } = make()
+    ctx.switchInstance('p1', 'db_a')
+    ctx.addTab({
+      id: 'file:/ws/a/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/a/q.sql',
+      content: 'select 1',
+      savedContent: 'select 1',
+    })
+    ctx.switchInstance('p1', 'db_b')
+
+    await ctrl.refreshOpenFiles()
+    ctx.switchInstance('p1', 'db_a')
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'select 2', savedContent: 'select 2' })
+  })
+
+  it('does not let an older watcher pass overwrite a newer one', async () => {
+    const first = defer<{ success: true; content: string }>()
+    const readFile = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({ success: true, content: 'newest' })
+    stubSqlkit({ readFile })
+    const { ctrl, ctx } = make()
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'original',
+      savedContent: 'original',
+    })
+
+    const older = ctrl.refreshOpenFiles()
+    await ctrl.refreshOpenFiles()
+    first.resolve({ success: true, content: 'stale' })
+    await older
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'newest', savedContent: 'newest' })
+  })
+
+  it('discards a watcher read when the workspace resets', async () => {
+    const read = defer<{ success: true; content: string }>()
+    stubSqlkit({ readFile: vi.fn(() => read.promise) })
+    const { ctrl, ctx } = make()
+    ctx.addTab({
+      id: 'file:/ws/ctx/q.sql',
+      kind: 'sql',
+      name: 'q.sql',
+      path: '/ws/ctx/q.sql',
+      content: 'original',
+      savedContent: 'original',
+    })
+
+    const refreshing = ctrl.refreshOpenFiles()
+    ctrl.reset()
+    read.resolve({ success: true, content: 'old workspace' })
+    await refreshing
+
+    expect(ctx.activeSqlTab()).toMatchObject({ content: 'original', savedContent: 'original' })
   })
 })
 
