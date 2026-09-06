@@ -787,6 +787,18 @@ describeDb('postgres driver (integration)', () => {
       }
     })
 
+    it('clears the pin when a script commits before a later statement fails', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN')
+        await expect(driver.query('COMMIT; select bogus_column_xyz')).rejects.toThrow()
+        expect(driver.openTransaction!()).toBeNull()
+        expect((await driver.query('select 1')).rows).toEqual([[1]])
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
     it('cancelling a statement inside the transaction leaves it failed but recoverable', async () => {
       const driver = await connectDriver()
       const observer = await connectDriver()

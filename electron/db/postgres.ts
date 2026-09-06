@@ -1,4 +1,5 @@
 import pg from 'pg'
+import type { EventEmitter } from 'node:events'
 import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -1364,7 +1365,23 @@ function streamQuery(
         })
         .catch(reject)
     }
-    query.on('error', reject)
+    query.on('error', (error: Error & { severity?: string }) => {
+      const connection = (client as pg.PoolClient & { connection: EventEmitter }).connection
+      if (error.severity !== 'ERROR') return reject(error)
+      // ErrorResponse precedes ReadyForQuery; only the latter updates transaction status.
+      const finishError = (failure: Error) => {
+        connection.removeListener('readyForQuery', onReady)
+        client.removeListener('error', onError)
+        client.removeListener('end', onEnd)
+        reject(failure)
+      }
+      const onReady = () => finishError(error)
+      const onError = (failure: Error) => finishError(failure)
+      const onEnd = () => finishError(new Error('Connection ended before query completion.'))
+      connection.once('readyForQuery', onReady)
+      client.once('error', onError)
+      client.once('end', onEnd)
+    })
     query.on('end', finish)
     client.query(query)
   })

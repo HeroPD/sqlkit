@@ -251,4 +251,9 @@ describe('prepareSqlRun', () => {
     expect(() => prepareSqlRun({ engine: 'sqlite', sql: 'BEGIN' })).toThrow(/same query run/i)
     expect(() => prepareSqlRun({ engine: 'sqlite', sql: 'COMMIT' })).toThrow(/No transaction is active/i)
   })
+
+  it('recognizes SQL Server rollback of a transaction opened by an earlier run', () => {
+    expect(prepareSqlRun({ engine: 'sqlserver', sql: 'SELECT @p1; ROLLBACK', params: [1] }).transaction)
+      .toMatchObject({ sawControl: true, depth: 0, lastControl: 'close' })
+  })
 })

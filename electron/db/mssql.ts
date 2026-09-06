@@ -16,6 +16,7 @@ import { openExportWriter, type ExportWriter } from './export'
 import { prepareSqlRun } from './sql-script'
 import { installLosslessTediousParsers } from './tedious-lossless'
 import { t } from '../../src/i18n'
+import { sqlLiteral } from '../../src/result-sql'
 
 // Always-present databases; hidden from all-databases children except master,
 // which is a legitimate browsing target (it's the default sa database).
@@ -40,6 +41,22 @@ const tediousTypeFor = (value: unknown) => {
   if (value instanceof Date) return TediousTypes.DateTime
   if (Buffer.isBuffer(value)) return TediousTypes.VarBinary
   return TediousTypes.NVarChar
+}
+
+function parameterizedBatch(text: string, params: unknown[]): string {
+  const declarations = params.map((input, index) => {
+    const bindable = toBindable(typeof input === 'bigint' ? input.toString() : input)
+    const type = tediousTypeFor(bindable)
+    const value: unknown = type.validate(bindable, undefined)
+    const name = `p${index + 1}`
+    const declaration = type.declaration({ name, type, value, output: false })
+    // UTF-16 hex keeps Unicode and newlines exact without shifting SQL error lines.
+    const literal = typeof value === 'string'
+      ? `CONVERT(nvarchar(max), 0x${Buffer.from(value, 'utf16le').toString('hex')})`
+      : sqlLiteral(value instanceof Date ? value.toISOString().slice(0, -1) : value, 'sqlserver')
+    return `@${name} ${declaration} = ${literal}`
+  })
+  return `DECLARE ${declarations.join(', ')}; ${text}`
 }
 
 const mssqlTypeExpression = `concat(
@@ -448,15 +465,11 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           rowCountExact: result.rowCountExact,
         }]))
 
-      // Parameterized runs stay on a throwaway one-connection pool — parameter
-      // binding goes through node-mssql's Request, and a fresh connection gives
-      // session isolation. The common no-parameter path (every ad-hoc SELECT /
-      // browse / re-run) instead borrows a pooled connection and resets its
-      // session, so it pays no per-query login handshake.
+      // Transaction-control scripts need a retainable connection, including bound runs.
       const mapCancelled = (error: unknown) =>
         isCancelled(error) || (error as Error).message === t('query.cancelled') ? new Error(t('query.cancelled')) : error
 
-      if (plan.params.length === 0) {
+      if (plan.params.length === 0 || plan.transaction.sawControl) {
         const entry = { executionId, request: null as sql.Request | null, tediousCancel: null as (() => void) | null, cancelRequested: false }
         running.add(entry)
 
@@ -482,7 +495,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             try {
               for (const batch of plan.batches) {
                 if (entry.cancelRequested) throw new Error(t('query.cancelled'))
-                result = await streamTediousBatch(pinned.conn, batch, started, budget)
+                result = await streamTediousBatch(pinned.conn, batch, started, budget, plan.params, true)
                 collect(result, resultSets)
               }
               // COMMIT at @@TRANCOUNT > 1 sends no ENVCHANGE, so inTransaction
@@ -542,7 +555,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           const budget = { bytes: 0 }
           for (const batch of plan.batches) {
             if (entry.cancelRequested) throw new Error(t('query.cancelled'))
-            result = await streamTediousBatch(conn, batch, started, budget)
+            result = await streamTediousBatch(conn, batch, started, budget, plan.params, true)
             collect(result, resultSets)
           }
           // The run left a transaction open (manual BEGIN TRAN): pin the
@@ -565,7 +578,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
             sets[sets.length - 1] ?? result,
             plan.batches,
             sets.length,
-            0,
+            plan.params.length,
             childDb,
           )
           return { ...selected, durationMs: result.durationMs, ...(sets.length > 1 ? { resultSets: sets } : {}) }
@@ -1546,8 +1559,11 @@ function streamTediousBatch(
   started: number,
   budget: { bytes: number },
   params?: unknown[],
+  batchParameters = false,
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
+    // RPC scope rejects a changed transaction count; typed batch locals preserve it.
+    if (batchParameters && params?.length) sqlText = parameterizedBatch(sqlText, params)
     let columns: string[] = []
     let fields: MssqlColumn[] = []
     let rows: unknown[][] = []
@@ -1613,7 +1629,7 @@ function streamTediousBatch(
     const onDone = (rowCount: number | undefined) => { if (typeof rowCount === 'number') affected += rowCount }
     withEvents.on('done', onDone)
     withEvents.on('doneInProc', onDone)
-    if (params?.length) {
+    if (params?.length && !batchParameters) {
       for (const [index, value] of params.entries()) {
         const bindable = toBindable(typeof value === 'bigint' ? value.toString() : value)
         request.addParameter(`p${index + 1}`, tediousTypeFor(bindable), bindable)

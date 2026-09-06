@@ -66,8 +66,12 @@ export function analyzeTransactionControl(sql: string, engine: Engine, mode?: Sq
           sawControl = true
           lastControl = 'close'
           if (depth > 0) depth -= 1
-        } else if (depth > 0) {
+        } else {
           sawControl = true
+          if (depth <= 0) {
+            lastControl = 'close'
+            continue
+          }
           const rollbackName = match[7]?.toLowerCase()
           // An unnamed rollback, or one naming the outer transaction, clears
           // SQL Server's entire transaction stack. A known savepoint rollback

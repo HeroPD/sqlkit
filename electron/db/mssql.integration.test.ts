@@ -962,6 +962,47 @@ describeDb('mssql driver (integration)', () => {
       }
     })
 
+    it('parameterized scripts open a transaction that later runs can roll back', async () => {
+      const driver = await connectDriver()
+      try {
+        await driver.query('BEGIN TRAN; insert into txn_probe values (@p1)', [43])
+        expect(driver.openTransaction!()).not.toBeNull()
+        expect((await driver.query('select id from txn_probe where id = @p1', [43])).rows).toEqual([[43]])
+        await driver.query('SELECT @p1; ROLLBACK', [43])
+        expect(driver.openTransaction!()).toBeNull()
+        expect((await driver.query('select id from txn_probe where id = @p1', [43])).rows).toEqual([])
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('keeps batch parameters lossless and lets a bound COMMIT close the transaction', async () => {
+      const driver = await connectDriver()
+      const text = "Монгол\n'; ROLLBACK; --"
+      try {
+        const result = await driver.query('BEGIN TRAN; SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7',
+          [text, new Uint8Array([0, 255]), true, null, '', 3.25, new Date('2024-05-06T07:08:09.000Z')])
+        expect(result.rows).toEqual([[text, Buffer.from([0, 255]), true, null, '', 3.25, '2024-05-06 07:08:09.000']])
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.query('SELECT @p1; COMMIT', [1])
+        expect(driver.openTransaction!()).toBeNull()
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
+    it('retains a transaction opened by a failing parameterized script', async () => {
+      const driver = await connectDriver()
+      try {
+        await expect(driver.query("BEGIN TRAN; SELECT @p1; RAISERROR('probe failure', 16, 1)", [1])).rejects.toThrow('probe failure')
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.endTransaction!('rollback')
+        expect(driver.openTransaction!()).toBeNull()
+      } finally {
+        await driver.disconnect()
+      }
+    })
+
     it('parameterized runs join the open transaction on the pinned connection', async () => {
       const driver = await connectDriver()
       try {
