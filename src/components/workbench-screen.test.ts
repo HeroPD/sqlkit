@@ -3,6 +3,105 @@ import { describe, expect, it, vi } from 'vitest'
 import { render } from 'lit'
 import type { ColumnRef, ConnectionProfile, QueryResponse, TableRef } from '../electron'
 import { WorkbenchScreen } from './workbench-screen'
+import type { DialogsController } from '../controllers/dialogs'
+import type { ContextsController } from '../controllers/contexts'
+
+describe('WorkbenchScreen modal command guards', () => {
+  const setup = () => {
+    const screen = new WorkbenchScreen()
+    screen.workspace = { name: 'Workspace', path: '/workspace' }
+    const workbench = screen as unknown as {
+      _ctx: ContextsController
+      _dialogs: DialogsController
+      _onMenuAction(action: string): void
+      _onGlobalKeydown(event: KeyboardEvent): void
+      _requestCloseTab(id: string): void
+      _saveActive(): void
+      _onCloseWorkspace(): void
+      _queries: { hasAnyStaged(): boolean }
+      _resultEditing: { hasPendingChanges(): boolean; saveChanges(): void }
+      _refreshResults(): Promise<void>
+      _parameterPrompt: unknown
+      _destructivePrompt: unknown
+      _csvImport: unknown
+      _session: { dropBuffer(tabId: string): void }
+    }
+    workbench._session.dropBuffer = vi.fn()
+    workbench._ctx.newQuery()
+    workbench._ctx.setActiveContent('select 1')
+    return workbench
+  }
+
+  it.each(['cancel', 'accept'])('queues only one close confirmation and permits closing again after %s', (answer) => {
+    const workbench = setup()
+    const id = workbench._ctx.activeTabId!
+    for (let i = 0; i < 10; i += 1) {
+      workbench._onMenuAction('close-tab')
+      workbench._requestCloseTab(id)
+    }
+    expect(workbench._dialogs.confirm).not.toBeNull()
+    if (answer === 'accept') workbench._dialogs.acceptConfirm()
+    else workbench._dialogs.confirm = null
+    expect(workbench._dialogs.confirm).toBeNull()
+    expect(workbench._ctx.tabExists(id)).toBe(answer === 'cancel')
+    if (answer === 'accept') {
+      workbench._ctx.newQuery()
+      workbench._ctx.setActiveContent('select 2')
+    }
+    workbench._onMenuAction('close-tab')
+    expect(workbench._dialogs.confirm).not.toBeNull()
+  })
+
+  it('does not queue repeated save reviews', () => {
+    const workbench = setup()
+    const run = vi.fn(() => Promise.resolve(null))
+    const saveChanges = vi.fn(() => {
+      workbench._dialogs.review = { sql: 'UPDATE t SET x = 1', params: [], run }
+    })
+    workbench._resultEditing = { hasPendingChanges: () => true, saveChanges }
+    for (let i = 0; i < 10; i += 1) {
+      workbench._onMenuAction('save')
+      workbench._saveActive()
+    }
+    expect(saveChanges).toHaveBeenCalledOnce()
+    workbench._dialogs.review = null
+    expect(workbench._dialogs.review).toBeNull()
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('does not queue repeated workspace-close confirmations', () => {
+    const workbench = setup()
+    workbench._queries.hasAnyStaged = () => true
+    for (let i = 0; i < 10; i += 1) {
+      workbench._onMenuAction('close-workspace')
+      workbench._onCloseWorkspace()
+    }
+    expect(workbench._dialogs.confirm).not.toBeNull()
+    workbench._dialogs.confirm = null
+    expect(workbench._dialogs.confirm).toBeNull()
+  })
+
+  it.each(['confirm', 'prompt', 'review', 'createDb', 'parameters', 'destructive', 'import'])('blocks background commands during a %s dialog', (kind) => {
+    const workbench = setup()
+    if (kind === 'confirm') workbench._dialogs.notice('Notice', 'Details')
+    if (kind === 'prompt') workbench._dialogs.prompt = { message: 'Name', detail: '', confirmLabel: 'OK', placeholder: '', action: vi.fn() }
+    if (kind === 'review') workbench._dialogs.review = { sql: '', params: [], run: vi.fn(() => Promise.resolve(null)) }
+    if (kind === 'createDb') workbench._dialogs.createDb = { meta: { engine: 'postgresql', collations: [] }, action: vi.fn() }
+    if (kind === 'parameters') workbench._parameterPrompt = {}
+    if (kind === 'destructive') workbench._destructivePrompt = {}
+    if (kind === 'import') workbench._csvImport = {}
+    const refresh = vi.fn(async () => {})
+    workbench._refreshResults = refresh
+    const before = workbench._ctx.tabs.length
+    workbench._onMenuAction('new-query')
+    workbench._onMenuAction('refresh-results')
+    const refreshKey = new KeyboardEvent('keydown', { key: 'F5', cancelable: true })
+    workbench._onGlobalKeydown(refreshKey)
+    expect(refreshKey.defaultPrevented).toBe(true)
+    expect(workbench._ctx.tabs).toHaveLength(before)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+})
 
 const profile: ConnectionProfile = {
   id: 'p1',
