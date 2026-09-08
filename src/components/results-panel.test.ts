@@ -342,26 +342,32 @@ describe('results-panel multiple and paged results', () => {
     el.remove()
   })
 
-  it('drains the full export in large pages, retrying when a page comes back short', async () => {
-    const all = Array.from({ length: 450 }, (_, index) => [index])
-    // First page returns short of the requested limit (the main process caps
-    // pages by bytes); the loop must continue from where it left off.
-    const fetchRows = vi.fn((_session: string, offset: number, limit: number) =>
-      Promise.resolve({ success: true as const, rows: all.slice(offset, offset + Math.min(limit, 300)) }),
-    )
-    ;(window as unknown as { sqlkit: unknown }).sqlkit = { fetchRows }
-    const el = document.createElement('results-panel')
-    const internal = el as unknown as {
-      _allRows(result: { columns: string[]; rows: unknown[][]; rowCount: number; durationMs: number; sessionId: string; bufferedRowCount: number }, limit: number): Promise<unknown[][]>
+})
+
+// The dialog's confirmation reaches the export controller, and what it reports
+// reaches the owner: draining, format and file writing are covered where they
+// live, in controllers/result-export.test.ts.
+describe('results-panel export wiring', () => {
+  it('carries a failed write from the export dialog out as a notice', async () => {
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      exportFile: vi.fn(() => Promise.resolve({ success: false, error: 'EACCES: permission denied' })),
     }
-    const rows = await internal._allRows(
-      { columns: ['n'], rows: all.slice(0, 200), rowCount: 450, durationMs: 1, sessionId: 's1', bufferedRowCount: 450 },
-      450,
-    )
-    expect(rows).toHaveLength(450)
-    expect(fetchRows).toHaveBeenCalledTimes(2)
-    expect(fetchRows).toHaveBeenNthCalledWith(1, 's1', 0, 450)
-    expect(fetchRows).toHaveBeenNthCalledWith(2, 's1', 300, 150)
+    const el = document.createElement('results-panel')
+    el.run = { phase: 'done', result: { columns: ['n'], rows: [[1]], rowCount: 1, durationMs: 1 } }
+    document.body.append(el)
+    const notice = vi.fn()
+    el.addEventListener('grid-notice', notice)
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Export results…"]')!.click()
+    await el.updateComplete
+
+    const dialog = el.shadowRoot!.querySelector('export-dialog')!
+    dialog.dispatchEvent(new CustomEvent('export-confirm', { detail: { format: 'csv', rows: 1, stream: false } }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(notice).toHaveBeenCalledOnce()
+    expect(notice.mock.calls[0]![0].detail).toEqual({ title: 'Export failed', detail: 'EACCES: permission denied' })
+    el.remove()
   })
 })
 

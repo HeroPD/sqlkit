@@ -1,7 +1,7 @@
 import type { ColumnRef, Engine, QueryResult, TableRef } from './electron'
 import type { QueryRun, CellCoord } from './components/results-panel'
 import type { SqlTabState } from './controllers/contexts'
-import { inferEditableTable } from './sql-edit-context'
+import { editSourceRefusal, inferEditableTable, tableReferencedTwice } from './sql-edit-context'
 import { supportsOptimisticComparison, type BatchUpdateEdit, type CellInput, type RowKey } from './sql-write'
 import { t } from './i18n'
 
@@ -41,6 +41,29 @@ export type EditResult<T> = { ok: true; value: T } | { ok: false; issue: EditIss
 const cannotEditColumn: EditIssue = {
   title: t('editing.cannotEditColumnTitle'),
   detail: t('editing.cannotEditColumnDetail'),
+}
+
+const ambiguousSource = (table: TableRef, reason: 'cte' | 'repeated-table'): EditIssue => ({
+  title: t('editing.ambiguousSourceTitle'),
+  detail: reason === 'cte' ? t('editing.cteSourceDetail') : t('editing.ambiguousSourceDetail', { table: table.name }),
+})
+
+/** The SQL the shown rows came from — what the source scan and the projection
+ * fallback both read. Falls back to the tab's text for a result whose run
+ * carried none. */
+function editedSql(input: ResultEditInput): string {
+  const runSql = input.run.phase === 'done' || input.run.phase === 'error' ? input.run.sql : undefined
+  return runSql ?? input.tab?.content ?? ''
+}
+
+// Why a cell has no edit context, when the reason is one the user can act on.
+// Ambiguity refuses a column that is otherwise perfectly editable, so saying
+// only "not an editable column" would send them looking at the wrong thing.
+function cellEditIssue(input: ResultEditInput, cell: CellCoord): EditIssue {
+  const source = input.run.phase === 'done' ? input.run.result.columnSources?.[cell.col] : undefined
+  const table = source ? input.tables.find((candidate) => tableMatchesSource(candidate, source)) : undefined
+  const reason = table ? editSourceRefusal(editedSql(input), table, input.engine ?? undefined) : null
+  return table && reason ? ambiguousSource(table, reason) : cannotEditColumn
 }
 
 export function hasResultCells(run: QueryRun): boolean {
@@ -95,7 +118,7 @@ export function singleTableEditContext(input: ResultEditInput): SingleTableEditC
   if (!table) return null
   if (run.result.columnSources?.some((source) => source.table !== null && !tableMatchesSource(table, source))) return null
   const columns = columnsForTable(input.columns, table)
-  const pkIndexes = primaryKeyIndexes(run.result, table, columns, true, run.sql ?? tab.content)
+  const pkIndexes = primaryKeyIndexes(run.result, table, columns, true, run.sql ?? tab.content, input.engine ?? null)
   const sql = run.sql ?? tab.content
   return pkIndexes.length ? { engine: input.engine ?? null, table, columns, result: run.result, sql, pkIndexes } : null
 }
@@ -128,7 +151,7 @@ export function cellEditContext(input: ResultEditInput, cell: CellCoord): CellEd
   if (!table) return null
   const columns = columnsForTable(input.columns, table)
   const columnMeta = findColumnMeta(columns, source.column)
-  const pkIndexes = primaryKeyIndexes(input.run.result, table, columns, false, input.run.sql ?? input.tab?.content ?? '')
+  const pkIndexes = primaryKeyIndexes(input.run.result, table, columns, false, editedSql(input), input.engine ?? null)
   return columnMeta && pkIndexes.length
     ? {
         engine: input.engine ?? null,
@@ -153,7 +176,7 @@ export function buildEditSpecs(input: ResultEditInput, cells: CellCoord[], value
   let table: TableRef | null = null
   for (const cell of cells) {
     const ctx = cellEditContext(input, cell)
-    if (!ctx) return { ok: false, issue: cannotEditColumn }
+    if (!ctx) return { ok: false, issue: cellEditIssue(input, cell) }
     if (table && !sameTable(table, ctx.table)) {
       return { ok: false, issue: { title: t('editing.cannotEditSelectionTitle'), detail: t('editing.sameTableDetail') } }
     }
@@ -194,6 +217,11 @@ export function buildInsertRows(
   if (!drafts.length) return { ok: false, issue: { title: t('editing.noNewRowsTitle'), detail: t('editing.addRowFirst') } }
   const ctx = singleTableEditContext(input)
   if (!ctx) {
+    const table = resultSourceTable(input)
+    const reason = table ? editSourceRefusal(editedSql(input), table, input.engine ?? undefined) : null
+    if (table && reason) {
+      return { ok: false, issue: ambiguousSource(table, reason) }
+    }
     return { ok: false, issue: { title: t('editing.cannotAddRowsTitle'), detail: t('editing.singleTableResult') } }
   }
   const rows: Array<{ columns: { name: string; columnMeta: ColumnRef | undefined }[]; values: CellInput[] }> = []
@@ -224,7 +252,7 @@ export function buildPendingUpdate(
   let table: TableRef | null = null
   for (const edit of edits) {
     const ctx = cellEditContext(input, { row: edit.row, col: edit.col })
-    if (!ctx) return { ok: false, issue: cannotEditColumn }
+    if (!ctx) return { ok: false, issue: cellEditIssue(input, { row: edit.row, col: edit.col }) }
     if (table && !sameTable(table, ctx.table)) {
       return { ok: false, issue: { title: t('editing.cannotSaveEditsTitle'), detail: t('editing.sameSourceTable') } }
     }
@@ -289,7 +317,14 @@ function primaryKeyIndexes(
   columns: ColumnRef[],
   allowNameFallback: boolean,
   sql: string,
+  engine: Engine | null,
 ): Array<{ name: string; index: number; columnMeta: ColumnRef }> {
+  // A second reference to the table (a self-join, or a derived table over it)
+  // makes every origin for it ambiguous, and columnSourceIndex would answer with
+  // whichever reference projected first. No key means no write: an UPDATE would
+  // guard on the wrong row's value, and a DELETE, which matches on the key
+  // alone, would simply remove it.
+  if (tableReferencedTwice(sql, table, engine ?? undefined)) return []
   const pk = columns.filter((column) => column.primaryKey)
   if (!pk.length) return []
   const hasSources = result.columnSources !== undefined

@@ -251,7 +251,10 @@ const mysqlTree = (set: QueryResultSet): ExecutionPlan | null => {
     const arrow = line.indexOf('->')
     if (arrow < 0) continue
     const actual = /\(actual time=[\d.]+\.\.([\d.]+)\s+rows=([\d.]+)\s+loops=([\d.]+)/i.exec(line)
-    const estimate = /\(cost=[\d.]+\.\.([\d.]+)\s+rows=([\d.]+)/i.exec(line)
+    // MySQL prints one cost per node, not the `first..total` range Postgres uses
+    // — the range stays optional so a plan that carries one still reads.
+    const estimate = /\(cost=([\d.]+)(?:\.\.([\d.]+))?\s+rows=([\d.]+)/i.exec(line)
+    const estimatedCost = number(estimate?.[2] ?? estimate?.[1])
     const end = [line.indexOf('(cost='), line.indexOf('(actual time=')].filter((at) => at >= 0).sort((a, b) => a - b)[0] ?? line.length
     const label = line.slice(arrow + 2, end).trim().replace(/:\s*$/, '')
     const loops = number(actual?.[3]) ?? 1
@@ -260,8 +263,8 @@ const mysqlTree = (set: QueryResultSet): ExecutionPlan | null => {
       node: {
         operation: label || 'Operation',
         ...(number(actual?.[2]) !== undefined ? { actualRows: number(actual?.[2])! * loops } : {}),
-        ...(number(estimate?.[2]) !== undefined ? { estimatedRows: number(estimate?.[2]) } : {}),
-        ...(actual ? { inclusive: number(actual[1])! * loops } : estimate ? { inclusive: number(estimate[1]) } : {}),
+        ...(number(estimate?.[3]) !== undefined ? { estimatedRows: number(estimate?.[3]) } : {}),
+        ...(actual ? { inclusive: number(actual[1])! * loops } : estimatedCost !== undefined ? { inclusive: estimatedCost } : {}),
         children: [],
       },
     })
@@ -269,9 +272,58 @@ const mysqlTree = (set: QueryResultSet): ExecutionPlan | null => {
   return finalize(fromIndented(entries), entries.some(({ node }) => node.actualRows !== undefined) ? 'duration' : 'cost')
 }
 
+// Schema 2.0's children hang off `inputs`, and off `inputs_from_select_list`
+// for a correlated subquery. Recognised by shape rather than by key name, so a
+// child list this release has not seen still lands in the tree.
+const mysqlV2Inputs = (source: Record<string, unknown>): Array<Record<string, unknown>> =>
+  Object.values(source)
+    .flatMap((value): unknown[] => (Array.isArray(value) ? value as unknown[] : [value]))
+    .filter((entry): entry is Record<string, unknown> =>
+      typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+      && ('operation' in entry || 'access_type' in entry))
+
+const mysqlV2Node = (source: Record<string, unknown>): RawNode => {
+  const loops = number(source.actual_loops) ?? 1
+  const actualRows = number(source.actual_rows)
+  // Per loop, like the tree format's `actual time=…`, so both multiply out.
+  const duration = number(source.actual_last_row_ms)
+  const cost = number(source.estimated_total_cost)
+  const operation = text(source.operation) || `${text(source.access_type) || 'Operation'} access`
+  // The label names the alias ("Table scan on a"); the table behind it is worth
+  // showing whenever the label does not already say it.
+  const table = text(source.table_name)
+  return {
+    operation,
+    ...(table && !operation.includes(table) ? { detail: table } : {}),
+    ...(actualRows !== undefined ? { actualRows: actualRows * loops } : {}),
+    ...(number(source.estimated_rows) !== undefined ? { estimatedRows: number(source.estimated_rows) } : {}),
+    // Both are totals over the node's own subtree, which is what finalize
+    // subtracts children from to get each node's share.
+    ...(duration !== undefined ? { inclusive: duration * loops } : cost !== undefined ? { inclusive: cost } : {}),
+    children: mysqlV2Inputs(source).map(mysqlV2Node),
+  }
+}
+
+// EXPLAIN FORMAT=JSON schema 2.0 — MySQL 8.3 and later, and the default from
+// 9.0 (explain_json_format_version). It replaces query_block/cost_info with a
+// plain operation tree: one labelled node per step, the same steps the tree
+// format prints, carrying estimated_total_cost or, under ANALYZE, real timings.
+const mysqlJsonV2 = (root: Record<string, unknown>): ExecutionPlan | null => {
+  const node = mysqlV2Node(root)
+  const some = (candidate: RawNode, predicate: (entry: RawNode) => boolean): boolean =>
+    predicate(candidate) || candidate.children.some((child) => some(child, predicate))
+  const metric = some(node, (entry) => entry.actualRows !== undefined)
+    ? 'duration'
+    : some(node, (entry) => entry.inclusive !== undefined) ? 'cost' : 'none'
+  return finalize([node], metric)
+}
+
 const mysqlJson = (value: unknown): ExecutionPlan | null => {
   const parsed = jsonValue(value)
   if (!parsed || typeof parsed !== 'object') return null
+  const v2Root = (parsed as Record<string, unknown>).query_plan
+  // Only schema 2.0 has a query_plan; MariaDB and older MySQL keep query_block.
+  if (v2Root && typeof v2Root === 'object' && !Array.isArray(v2Root)) return mysqlJsonV2(v2Root as Record<string, unknown>)
   const visit = (value: unknown, label?: string): RawNode[] => {
     if (Array.isArray(value)) {
       const children = value.flatMap((item) => visit(item))
@@ -411,7 +463,9 @@ export function parseExecutionPlan(engine: Engine, sql: string | undefined, resu
   }
   if (engine === 'mysql') {
     const set = planSet(result, (column) => /explain|query_block|json/i.test(column)) ?? result
-    return mysqlTree(set) ?? mysqlJson(firstCell(set))
+    // JSON first: a plan that parses as JSON is JSON, while the tree reader only
+    // looks for `->` — which a JSON plan can carry inside a quoted literal.
+    return mysqlJson(firstCell(set)) ?? mysqlTree(set)
   }
   if (engine === 'sqlserver') {
     const set = planSet(result, (column) => /showplan|stmttext/i.test(column)) ?? result

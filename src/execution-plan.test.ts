@@ -117,6 +117,181 @@ describe('parseExecutionPlan', () => {
     expect(percentTotal(plan!)).toBe(100)
   })
 
+  // MySQL prints a single cost per node; the `first..total` range in the fixture
+  // above is Postgres's shape, and reading only that dropped every row estimate.
+  it('reads the single per-node cost the MySQL tree actually prints', () => {
+    const tree = `-> Nested loop inner join  (cost=0.7 rows=1) (actual time=0.02..0.03 rows=1 loops=1)
+    -> Table scan on a  (cost=0.45 rows=2) (actual time=0.011..0.013 rows=2 loops=1)
+    -> Index lookup on b using author_id  (cost=0.35 rows=3) (actual time=0.002..0.004 rows=3 loops=2)`
+    const plan = parseExecutionPlan('mysql', 'explain analyze select * from authors', result(['EXPLAIN'], [[tree]]))
+
+    expect(plan?.nodes.map((node) => node.estimatedRows)).toEqual([1, 2, 3])
+    // Rows are per loop in the tree format too.
+    expect(plan?.nodes[2]?.actualRows).toBe(6)
+  })
+
+  // Without timings the same single cost is all a tree plan has to measure by.
+  it('measures a tree plan with no timings by its costs', () => {
+    const tree = `-> Sort: b.title  (cost=1.2 rows=4)
+    -> Table scan on b  (cost=0.45 rows=4)`
+    const plan = parseExecutionPlan('mysql', 'explain format=tree select * from books', result(['EXPLAIN'], [[tree]]))
+
+    expect(plan?.metric).toBe('cost')
+    expect(plan?.nodes[0]).toMatchObject({ operation: 'Sort: b.title', estimatedRows: 4, metric: 0.75 })
+    expect(percentTotal(plan!)).toBe(100)
+  })
+
+  // MySQL 8.3 added EXPLAIN FORMAT=JSON schema 2.0 and 9.0 made it the default:
+  // query_block/cost_info give way to an operation tree under query_plan, whose
+  // metrics live under different names. Read as v1 it yielded metric 'none' and
+  // dropped every row estimate.
+  it('parses MySQL EXPLAIN FORMAT=JSON schema 2.0 costs and row estimates', () => {
+    const plan = parseExecutionPlan('mysql', 'explain format=json select * from customers', result(['EXPLAIN'], [[JSON.stringify({
+      query: '/* select#1 */ select ...',
+      query_plan: {
+        operation: 'Sort: b.title',
+        access_type: 'sort',
+        sort_fields: ['b.title'],
+        inputs: [{
+          operation: 'Nested loop inner join',
+          access_type: 'join',
+          estimated_rows: 1.0,
+          estimated_total_cost: 0.7,
+          inputs: [
+            {
+              alias: 'a',
+              operation: 'Table scan on a',
+              table_name: 'authors',
+              access_type: 'table',
+              schema_name: 'shop',
+              used_columns: ['id', 'name'],
+              estimated_rows: 2.0,
+              estimated_total_cost: 0.35,
+            },
+            {
+              alias: 'b',
+              operation: 'Index lookup on b using author_id (author_id = a.id)',
+              index_name: 'author_id',
+              table_name: 'books',
+              access_type: 'index',
+              estimated_rows: 1.0,
+              estimated_total_cost: 0.35,
+            },
+          ],
+        }],
+      },
+      query_type: 'select',
+      json_schema_version: '2.0',
+    })]]))
+
+    expect(plan?.metric).toBe('cost')
+    expect(plan?.nodes.map((node) => node.operation)).toEqual([
+      'Sort: b.title', 'Nested loop inner join', 'Table scan on a', 'Index lookup on b using author_id (author_id = a.id)',
+    ])
+    // The label names the alias, so the table it stands for becomes the detail.
+    expect(plan?.nodes[2]).toMatchObject({ detail: 'authors', estimatedRows: 2, metric: 0.35 })
+    expect(plan?.nodes[3]).toMatchObject({ detail: 'books', estimatedRows: 1, metric: 0.35 })
+    expect(percentTotal(plan!)).toBe(100)
+  })
+
+  it('parses schema 2.0 timings, multiplying the per-loop figures out', () => {
+    const plan = parseExecutionPlan('mysql', 'explain analyze format=json select * from customers', result(['EXPLAIN'], [[JSON.stringify({
+      query_plan: {
+        operation: 'Nested loop inner join',
+        access_type: 'join',
+        actual_rows: 6.0,
+        actual_loops: 1,
+        estimated_rows: 6.0,
+        actual_last_row_ms: 0.9,
+        estimated_total_cost: 2.2,
+        inputs: [
+          {
+            operation: 'Table scan on a',
+            table_name: 'authors',
+            access_type: 'table',
+            actual_rows: 2.0,
+            actual_loops: 1,
+            actual_last_row_ms: 0.1,
+            estimated_rows: 2.0,
+          },
+          {
+            operation: 'Index lookup on b using author_id',
+            table_name: 'books',
+            access_type: 'index',
+            actual_rows: 3.0,
+            actual_loops: 2,
+            actual_last_row_ms: 0.2,
+            estimated_rows: 3.0,
+          },
+        ],
+      },
+      json_schema_version: '2.0',
+    })]]))
+
+    expect(plan?.metric).toBe('duration')
+    // Rows and time are reported per loop, as in the tree format.
+    expect(plan?.nodes[2]).toMatchObject({ operation: 'Index lookup on b using author_id', actualRows: 6, metric: 0.4 })
+    expect(plan?.nodes[1]).toMatchObject({ actualRows: 2, metric: 0.1 })
+    // The join's own share is what is left after its two inputs.
+    expect(plan?.nodes[0]?.metric).toBeCloseTo(0.4)
+    expect(percentTotal(plan!)).toBe(100)
+  })
+
+  // The tree reader only looks for `->`, which a JSON plan carries whenever the
+  // query holds one in a literal. JSON is tried first so it cannot be misread.
+  it('reads a schema 2.0 plan whose condition contains a tree arrow', () => {
+    const plan = parseExecutionPlan('mysql', 'explain format=json select * from authors', result(['EXPLAIN'], [[JSON.stringify({
+      query: "select `id` from `authors` where (`name` = 'a->b')",
+      query_plan: {
+        operation: "Filter: (authors.`name` = 'a->b')",
+        access_type: 'filter',
+        estimated_rows: 1.0,
+        estimated_total_cost: 0.35,
+        inputs: [{
+          operation: 'Table scan on authors',
+          table_name: 'authors',
+          access_type: 'table',
+          estimated_rows: 2.0,
+          estimated_total_cost: 0.35,
+        }],
+      },
+      json_schema_version: '2.0',
+    })]]))
+
+    expect(plan?.metric).toBe('cost')
+    expect(plan?.nodes.map((node) => node.operation)).toEqual(["Filter: (authors.`name` = 'a->b')", 'Table scan on authors'])
+  })
+
+  // A correlated subquery hangs off inputs_from_select_list rather than inputs.
+  it('follows every schema 2.0 input list, not just the one named inputs', () => {
+    const plan = parseExecutionPlan('mysql', 'explain format=json select * from authors', result(['EXPLAIN'], [[JSON.stringify({
+      query_plan: {
+        operation: 'Covering index scan on a using PRIMARY',
+        table_name: 'authors',
+        access_type: 'index',
+        estimated_rows: 2.0,
+        estimated_total_cost: 0.45,
+        inputs_from_select_list: [{
+          operation: 'Aggregate: count(0)',
+          access_type: 'aggregate',
+          estimated_rows: 1.0,
+          estimated_total_cost: 0.58,
+          inputs: [{
+            operation: 'Covering index lookup on b using author_id (author_id = a.id)',
+            table_name: 'books',
+            access_type: 'index',
+            estimated_rows: 1.0,
+            estimated_total_cost: 0.35,
+          }],
+        }],
+      },
+      json_schema_version: '2.0',
+    })]]))
+
+    expect(plan?.nodes.map((node) => node.depth)).toEqual([0, 1, 2])
+    expect(plan?.nodes[2]?.detail).toBe('books')
+  })
+
   it('parses MariaDB ANALYZE FORMAT=JSON table timing', () => {
     const plan = parseExecutionPlan('mysql', 'analyze format=json select * from customers', result(['ANALYZE'], [[JSON.stringify({
       query_block: {

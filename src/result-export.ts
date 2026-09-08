@@ -3,7 +3,7 @@
 // IPC boundary), never a re-run of the query.
 
 import type { Engine, TableRef } from './electron'
-import { insertStatementForRow } from './result-sql'
+import { insertStatementForRow, toInsertStatements } from './result-sql'
 import { jsonError } from './json-text'
 import { t } from './i18n'
 
@@ -169,6 +169,23 @@ export type ExportFormat = 'csv' | 'tsv' | 'json' | 'sql'
 /** What the SQL format needs beyond the rows: literals are spelled per engine,
  * and every statement names a target table (null → a placeholder name). */
 export type SqlExportTarget = { engine: Engine; table: TableRef | null }
+
+/** A whole buffered result in one string. The single place the buffered format
+ * dispatch lives, so copying rows and exporting the same rows to a file cannot
+ * drift apart; a streamed export of them goes through createExportSerializer
+ * below, which shares the escaping. */
+export function bufferedExport(args: {
+  format: ExportFormat
+  columns: string[]
+  rows: unknown[][]
+  sqlTarget: SqlExportTarget
+  jsonColumns?: ReadonlySet<number>
+}): string {
+  const { format, columns, rows, sqlTarget, jsonColumns } = args
+  if (format === 'sql') return toInsertStatements({ columns, rows, engine: sqlTarget.engine, table: sqlTarget.table })
+  if (format === 'json') return toJson(columns, rows, jsonColumns)
+  return toDelimited(columns, rows, format === 'tsv' ? '\t' : ',')
+}
 
 // Emits an export one piece at a time (header, then a line per row, then a
 // footer) so a full result can be streamed straight to disk without ever

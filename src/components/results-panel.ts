@@ -4,9 +4,8 @@ import { icons, popover, scrollbars, sqlHighlight, tooltip, typography } from '.
 import { isMac } from '../platform'
 import type { ColumnReference, Engine, QueryResult, QuerySort, TableRef } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
-import { MAX_FETCH_ROWS } from '../result-limits'
 import { aggregateCells } from '../result-aggregate'
-import { cellToTsv, cellsToTsv, parseClipboardTsv, toDelimited, toJson, type ExportFormat } from '../result-export'
+import { cellToTsv, cellsToTsv, parseClipboardTsv, type ExportFormat, type SqlExportTarget } from '../result-export'
 import { toInsertStatements } from '../result-sql'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
 import { uuidv4, uuidv7 } from '../uuid'
@@ -24,6 +23,7 @@ import './ui-select'
 import { formatDecimal, formatInteger, rowWord, t } from '../i18n'
 import { previewSql, sqlPreviewParts } from '../sql-preview'
 import { parseExecutionPlan, type ExecutionPlan, type ExecutionPlanNode } from '../execution-plan'
+import { ResultExportController } from '../controllers/result-export'
 import { GridSelectionController } from '../controllers/grid-selection'
 
 /** What the results panel is currently showing. */
@@ -324,8 +324,16 @@ export class ResultsPanel extends LitElement {
   @state()
   private _menu: { x: number; y: number; row: number; col: number; sortOnly?: boolean; draftIndex?: number } | null = null
 
-  @state()
-  private _exportOpen = false
+  // Export coordination — dialog state, draining the buffer, writing the file —
+  // is the controller's; the panel only renders what it reports.
+  private _export = new ResultExportController(this, {
+    result: () => this._shownResult(),
+    sqlTarget: () => this._sqlTarget(),
+    jsonColumns: () => this.jsonColumns,
+    streamExport: (format) =>
+      this.dispatchEvent(new CustomEvent<{ format: ExportFormat }>('stream-export', { detail: { format }, bubbles: true, composed: true })),
+    notice: (title, detail) => this._notice(title, detail),
+  })
 
   @state()
   private _resultSetIndex = 0
@@ -452,7 +460,6 @@ export class ResultsPanel extends LitElement {
 
   // Non-null while export/copy-all pages the buffer out of the main process;
   // rendered in the status span so a long drain doesn't look like a dead click.
-  @state() private _draining: { done: number; total: number } | null = null
 
   // Rendered column geometry (leading # column + each data column's width), so
   // keyboard nav can scroll a selected column into view without re-measuring.
@@ -985,14 +992,7 @@ export class ResultsPanel extends LitElement {
     if (!result || result.truncated || !results.every((row) => result.rows[row]?.every((value) =>
       value === null || value === undefined || ['string', 'number', 'bigint', 'boolean'].includes(typeof value),
     ))) {
-      this.dispatchEvent(new CustomEvent('grid-notice', {
-        detail: {
-          title: t('results.cannotDuplicateTitle'),
-          detail: t('results.cannotDuplicateDetail'),
-        },
-        bubbles: true,
-        composed: true,
-      }))
+      this._notice(t('results.cannotDuplicateTitle'), t('results.cannotDuplicateDetail'))
       return
     }
     // Stack every duplicate below the last selected row, in selection order,
@@ -1115,7 +1115,7 @@ export class ResultsPanel extends LitElement {
   /** Opens the export dialog, for a caller that is not the toolbar button. */
   openExport(): boolean {
     if (this.run.phase !== 'done') return false
-    this._exportOpen = true
+    this._export.dialogOpen = true
     return true
   }
 
@@ -1806,7 +1806,7 @@ export class ResultsPanel extends LitElement {
                 class="head-action tooltip-end"
                 data-tooltip=${t('results.export')}
                 aria-label=${t('results.export')}
-                @click=${() => (this._exportOpen = true)}
+                @click=${() => (this._export.dialogOpen = true)}
               >
                 <i class="icon icon-download" aria-hidden="true"></i>
               </button>
@@ -1874,65 +1874,29 @@ export class ResultsPanel extends LitElement {
       ${this._renderFind()}
       <div class="body" @scroll=${this._onScroll}>${this._renderBody()}</div>
       ${this._renderMenu()}
-      ${this._exportOpen && this.run.phase === 'done'
+      ${this._export.dialogOpen && this.run.phase === 'done'
         ? html`
             <export-dialog
               .total=${result?.bufferedRowCount ?? result?.rows.length ?? 0}
               .truncated=${result?.truncated ?? false}
               .streamable=${this.streamExportAvailable}
-              @dialog-cancel=${() => (this._exportOpen = false)}
-              @export-confirm=${this._onExportConfirm}
+              @dialog-cancel=${() => (this._export.dialogOpen = false)}
+              @export-confirm=${(event: CustomEvent<ExportConfirmDetail>) => void this._export.confirm(event.detail)}
             ></export-dialog>
           `
         : ''}
     `
   }
 
-  private _onExportConfirm = async (event: CustomEvent<ExportConfirmDetail>) => {
-    this._exportOpen = false
-    if (this.run.phase !== 'done') return
-    const { format, rows, stream } = event.detail
-    // A full streamed export re-runs the query in the main process; the owner
-    // has the query context (profile/child/sort) to drive it.
-    if (stream) {
-      this.dispatchEvent(new CustomEvent<{ format: ExportFormat }>('stream-export', { detail: { format }, bubbles: true, composed: true }))
-      return
-    }
-    const result = this._shownResult()
-    if (!result) return
-    const slice = (await this._allRows(result, rows)).slice(0, rows)
-    const content =
-      format === 'sql'
-        ? toInsertStatements({ columns: result.columns, rows: slice, engine: this.engine, table: this.insertTable })
-        : format === 'json'
-          ? toJson(result.columns, slice, this.jsonColumns)
-          : toDelimited(result.columns, slice, format === 'tsv' ? '\t' : ',')
-    void window.sqlkit.exportFile(`results.${format}`, content)
+  /** Raises a message through the owner's dialogs — the panel has none of its own. */
+  private _notice(title: string, detail: string) {
+    this.dispatchEvent(new CustomEvent('grid-notice', { detail: { title, detail }, bubbles: true, composed: true }))
   }
 
-  // Buffered rows up to `limit` (default: all) — the loaded prefix plus
-  // whatever pages haven't been scrolled into yet — so export / copy-all aren't
-  // limited to what's on screen. Exporting N rows only pulls N, not the whole
-  // buffer. Falls back to the loaded rows if the buffer has expired.
-  private async _allRows(result: QueryResult, limit?: number): Promise<unknown[][]> {
-    const total = result.bufferedRowCount ?? result.rows.length
-    const need = Math.min(limit ?? total, total)
-    if (result.sessionId === undefined || result.rows.length >= need) return result.rows
-    const rows: unknown[][] = []
-    this._draining = { done: 0, total: need }
-    try {
-      while (rows.length < need) {
-        // Pages stay byte-capped main-side, so a short return just loops again.
-        const response = await window.sqlkit.fetchRows(result.sessionId, rows.length, Math.min(MAX_FETCH_ROWS, need - rows.length))
-        if (!response.success) return result.rows.slice(0, need)
-        if (response.rows.length === 0) break
-        rows.push(...response.rows)
-        this._draining = { done: rows.length, total: need }
-      }
-      return rows
-    } finally {
-      this._draining = null
-    }
+  /** Where the SQL format's INSERTs are aimed: the engine spells the literals,
+   * and the result's source table names the statements. */
+  private _sqlTarget(): SqlExportTarget {
+    return { engine: this.engine, table: this.insertTable }
   }
 
   // One delegated listener instead of one per cell. The data row index is read
@@ -2094,18 +2058,17 @@ export class ResultsPanel extends LitElement {
     if (action === 'sort-desc') this._setSort(at.col, 'desc')
     if (action === 'sort-clear') this._setSort(at.col, null)
     // Copy-all / export cover every buffered row, not just what's loaded on screen.
-    if (action === 'copy-csv') copy(toDelimited(result.columns, await this._allRows(result), ','))
-    if (action === 'copy-tsv') copy(toDelimited(result.columns, await this._allRows(result), '\t'))
-    if (action === 'copy-json') copy(toJson(result.columns, await this._allRows(result), this.jsonColumns))
-    if (action === 'copy-all-insert') {
-      copy(toInsertStatements({
-        columns: result.columns,
-        rows: await this._allRows(result),
-        engine: this.engine,
-        table: this.insertTable,
-      }))
+    // Null when the buffer could not give every row: the controller has already
+    // said so, and a short paste must not look like the whole result.
+    const copyAll = async (format: ExportFormat) => {
+      const text = await this._export.copyAll(format)
+      if (text !== null) copy(text)
     }
-    if (action === 'export') this._exportOpen = true
+    if (action === 'copy-csv') await copyAll('csv')
+    if (action === 'copy-tsv') await copyAll('tsv')
+    if (action === 'copy-json') await copyAll('json')
+    if (action === 'copy-all-insert') await copyAll('sql')
+    if (action === 'export') this._export.dialogOpen = true
     if (action === 'view-record' && at.row >= 0 && at.col >= 0) this._enterRecord({ kind: 'result', row: at.row }, at.col)
     // Edit opens the inline editor on the clicked cell; if it's inside a
     // multi-cell selection, the committed value fills the whole selection.
@@ -3088,10 +3051,11 @@ export class ResultsPanel extends LitElement {
   }
 
   private _status(plan: ExecutionPlan | null = null) {
-    if (this._draining) {
+    const draining = this._export.draining
+    if (draining) {
       return html`${t('results.preparing', {
-        done: formatInteger(this._draining.done),
-        total: formatInteger(this._draining.total),
+        done: formatInteger(draining.done),
+        total: formatInteger(draining.total),
       })}`
     }
     if (this.run.phase !== 'done') return ''

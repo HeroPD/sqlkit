@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'lit'
-import type { ColumnRef, ConnectionProfile, QueryResponse, TableRef } from '../electron'
+import type { ColumnRef, ConnectionProfile, TableRef } from '../electron'
+import type { TransactionsController } from '../controllers/transactions'
 import { WorkbenchScreen } from './workbench-screen'
 
 const profile: ConnectionProfile = {
@@ -961,8 +962,7 @@ describe('WorkbenchScreen title-bar actions', () => {
       _config: { connections: ConnectionProfile[] }
       _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
       _live: { statuses: unknown; phase: ReturnType<typeof vi.fn>; endTransaction: ReturnType<typeof vi.fn> }
-      _transactionManagerOpen: boolean
-      _expandedTransactionProfileIds: Set<string>
+      _txn: TransactionsController
       _renderTitlebar(): unknown
     }
     const other: ConnectionProfile = { ...profile, id: 'p2', name: 'Other' }
@@ -976,8 +976,8 @@ describe('WorkbenchScreen title-bar actions', () => {
       p2: { profileId: 'p2', phase: 'connected' },
     }
     workbench._live.endTransaction = vi.fn(() => Promise.resolve({ success: true }))
-    workbench._transactionManagerOpen = true
-    workbench._expandedTransactionProfileIds = new Set(['p1'])
+    workbench._txn.toggleManager(true)
+    workbench._txn.toggleExpanded('p1')
     const host = document.createElement('div')
     render(workbench._renderTitlebar(), host)
 
@@ -994,8 +994,7 @@ describe('WorkbenchScreen title-bar actions', () => {
       _config: { connections: ConnectionProfile[] }
       _ctx: { activeDbId: string | null; activeChildDb: string | null; switchInstance(profileId: string | null, childDb: string | null): void }
       _live: { statuses: unknown; phase: ReturnType<typeof vi.fn>; endTransaction: ReturnType<typeof vi.fn> }
-      _transactionManagerOpen: boolean
-      _expandedTransactionProfileIds: Set<string>
+      _txn: TransactionsController
       _renderTitlebar(): unknown
     }
     const reporting: ConnectionProfile = { ...profile, id: 'p2', name: 'Reporting' }
@@ -1010,8 +1009,9 @@ describe('WorkbenchScreen title-bar actions', () => {
     }
     workbench._live.endTransaction = vi.fn(() => Promise.resolve({ success: true }))
     window.sqlkit.updateWorkspaceConfig = vi.fn(() => Promise.resolve({ success: true as const }))
-    workbench._transactionManagerOpen = true
-    workbench._expandedTransactionProfileIds = new Set(['p2', 'p3'])
+    workbench._txn.toggleManager(true)
+    workbench._txn.toggleExpanded('p2')
+    workbench._txn.toggleExpanded('p3')
     const host = document.createElement('div')
 
     render(workbench._renderTitlebar(), host)
@@ -1032,7 +1032,7 @@ describe('WorkbenchScreen title-bar actions', () => {
     others[0]?.querySelector<HTMLButtonElement>('.txn-switch')?.click()
     expect(workbench._ctx.activeDbId).toBe('p2')
     expect(workbench._ctx.activeChildDb).toBe('analytics')
-    expect(workbench._transactionManagerOpen).toBe(false)
+    expect(workbench._txn.managerOpen).toBe(false)
     others[0]?.querySelector<HTMLButtonElement>('.txn-commit')?.click()
     others[1]?.querySelector<HTMLButtonElement>('.txn-rollback')?.click()
     expect(workbench._live.endTransaction).toHaveBeenNthCalledWith(1, 'p2', 'commit')
@@ -1069,27 +1069,25 @@ describe('WorkbenchScreen title-bar actions', () => {
       _config: { connections: ConnectionProfile[] }
       _ctx: { switchInstance(profileId: string | null, childDb: string | null): void }
       _live: { statuses: unknown; phase: ReturnType<typeof vi.fn> }
-      _transactionPopoverProfileId: string | null
-      _transactionSessions: Map<string, {
-        childDb: string
-        startedAt: string
-        runs: Array<{ sql: string; tabName: string; success: boolean; durationMs: number; rowCount: number | null; error: string; createdAt: string }>
-      }>
+      _txn: TransactionsController
       _renderTitlebar(): unknown
     }
     workbench._config.connections = [profile]
     workbench._ctx.switchInstance(profile.id, 'db_a')
     workbench._live.phase = vi.fn(() => 'connected')
     workbench._live.statuses = { p1: { profileId: 'p1', phase: 'connected', transaction: { childDb: 'db_a' } } }
-    workbench._transactionPopoverProfileId = 'p1'
-    workbench._transactionSessions = new Map([['p1', {
-      childDb: 'db_a',
-      startedAt: '2026-08-08T12:00:00.000Z',
-      runs: [
-        { sql: 'BEGIN', tabName: 'customers.sql', success: true, durationMs: 2, rowCount: 0, error: '', createdAt: '2026-08-08T12:00:01.000Z' },
-        { sql: 'UPDATE missing SET value = 1', tabName: 'scratch.sql', success: false, durationMs: 4, rowCount: null, error: 'relation missing', createdAt: '2026-08-08T12:00:02.000Z' },
-      ],
-    }]])
+    workbench._txn.togglePopover('p1')
+    const started = Date.parse('2026-08-08T12:00:00.000Z')
+    workbench._txn.recordRun({
+      profileId: 'p1', childDb: 'db_a', sourceTabName: 'customers.sql', sql: 'BEGIN',
+      response: { success: true, result: { columns: [], rows: [], rowCount: 0, durationMs: 2 } },
+      runStartedAt: started, wasOpen: false, isOpen: true, restarted: false,
+    })
+    workbench._txn.recordRun({
+      profileId: 'p1', childDb: 'db_a', sourceTabName: 'scratch.sql', sql: 'UPDATE missing SET value = 1',
+      response: { success: false, error: 'relation missing' },
+      runStartedAt: started, wasOpen: true, isOpen: true, restarted: false,
+    })
     const host = document.createElement('div')
 
     render(workbench._renderTitlebar(), host)
@@ -1102,58 +1100,6 @@ describe('WorkbenchScreen title-bar actions', () => {
     expect(host.querySelector('.txn-popover')?.textContent).toContain('scratch.sql')
     expect(host.querySelector('.txn-popover')?.textContent).toContain('relation missing')
     expect(host.querySelector('.txn-outcome.error')).toBeTruthy()
-  })
-
-  it('records and clears the renderer-local transaction session', () => {
-    const workbench = new WorkbenchScreen() as never as {
-      _transactionSessions: Map<string, { runs: Array<{ success: boolean; tabName: string }> }>
-      _updateTransactionSession(args: {
-        profileId: string; childDb: string; sourceTabName: string; sql: string; response: QueryResponse
-        runStartedAt: number; wasOpen: boolean; isOpen: boolean
-      }): void
-    }
-    const success: QueryResponse = {
-      success: true,
-      result: { columns: [], rows: [], rowCount: 1, durationMs: 3 },
-    }
-
-    workbench._updateTransactionSession({
-      profileId: 'p1', childDb: 'db_a', sourceTabName: 'customers.sql', sql: 'BEGIN', response: success,
-      runStartedAt: Date.now(), wasOpen: false, isOpen: true,
-    })
-
-    expect(workbench._transactionSessions.get('p1')?.runs).toHaveLength(1)
-    expect(workbench._transactionSessions.get('p1')?.runs[0]?.tabName).toBe('customers.sql')
-
-    workbench._updateTransactionSession({
-      profileId: 'p1', childDb: 'db_a', sourceTabName: 'customers.sql', sql: 'COMMIT', response: success,
-      runStartedAt: Date.now(), wasOpen: true, isOpen: false,
-    })
-    expect(workbench._transactionSessions.has('p1')).toBe(false)
-  })
-
-  it('keeps session history when a nested SQL Server commit leaves the transaction open', async () => {
-    const workbench = new WorkbenchScreen() as never as {
-      _live: { endTransaction: ReturnType<typeof vi.fn> }
-      _transactionSessions: Map<string, { runs: unknown[] }>
-      _transactionPopoverProfileId: string | null
-      _expandedTransactionProfileIds: Set<string>
-      _endTransaction(profileId: string, mode: 'commit' | 'rollback'): Promise<void>
-    }
-    const session = { runs: [{ sql: 'BEGIN TRAN; BEGIN TRAN' }] }
-    workbench._transactionSessions = new Map([['p1', session]])
-    workbench._transactionPopoverProfileId = 'p1'
-    workbench._expandedTransactionProfileIds = new Set(['p1'])
-    workbench._live.endTransaction = vi.fn(() => Promise.resolve({
-      success: true,
-      transaction: { childDb: 'db_a' },
-    }))
-
-    await workbench._endTransaction('p1', 'commit')
-
-    expect(workbench._transactionSessions.get('p1')).toBe(session)
-    expect(workbench._transactionPopoverProfileId).toBe('p1')
-    expect(workbench._expandedTransactionProfileIds.has('p1')).toBe(true)
   })
 
   it('refuses a run against another database while a transaction is open', async () => {

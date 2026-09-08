@@ -12,13 +12,14 @@ import { LayoutController } from '../controllers/layout'
 import { CommandPaletteController, type PaletteCommand } from '../controllers/command-palette'
 import type { PaletteMode } from './command-palette'
 import { DialogsController } from '../controllers/dialogs'
+import { TransactionsController, summarizeTransactionSql } from '../controllers/transactions'
 import { ResultEditingController } from '../controllers/result-editing'
 import { SchemaOpsController } from '../controllers/schema-ops'
 import { ConfigController } from '../controllers/config'
 import { FileOpsController } from '../controllers/file-ops'
 import { ContextsController, needsSessionBackup, type EditorTabState, type RestoredContext } from '../controllers/contexts'
 import { SessionController, type RestoredBuffer } from '../controllers/session'
-import type { ConnectionPhase, ConnectionProfile, Engine, FileInfo, MenuAction, QueryResponse, SessionContext, SessionEndMode, SessionTab, TableRef } from '../electron'
+import type { ConnectionPhase, ConnectionProfile, Engine, FileInfo, MenuAction, SessionContext, SessionEndMode, SessionTab, TableRef } from '../electron'
 import { buildInsertBatches, type CellInput } from '../sql-write'
 import './activity-button'
 import './command-palette'
@@ -139,26 +140,6 @@ type CsvImportState = {
   engine: Engine
   columns: ImportColumn[]
 }
-
-type TransactionRun = {
-  sql: string
-  tabName: string
-  success: boolean
-  durationMs: number
-  rowCount: number | null
-  error: string
-  createdAt: string
-}
-
-type TransactionSession = {
-  childDb: string
-  startedAt: string
-  runs: TransactionRun[]
-}
-
-const MAX_TRANSACTION_RUNS = 100
-
-const summarizeTransactionSql = (sql: string) => sql.replace(/\s+/g, ' ').trim().slice(0, 180)
 
 // Child database names become folder segments (connection/child/file.sql);
 // strip anything that isn't a safe path character.
@@ -290,17 +271,17 @@ export class WorkbenchScreen extends LitElement {
   @state()
   private _resultHasUnstagedJson = false
 
-  @state()
-  private _transactionPopoverProfileId: string | null = null
-
-  @state()
-  private _transactionManagerOpen = false
-
-  @state()
-  private _expandedTransactionProfileIds = new Set<string>()
-
-  @state()
-  private _transactionSessions = new Map<string, TransactionSession>()
+  // Manual-transaction presentation — which connections hold one, what has run
+  // inside it, and the popovers over it.
+  private _txn = new TransactionsController(this, {
+    connections: () => this._config.connections,
+    activeProfile: () => this._config.activeProfile(),
+    profileById: (profileId) => this._config.byId(profileId) ?? null,
+    openOn: (profileId) => this._live.transaction(profileId),
+    endTransaction: (profileId, mode) => this._live.endTransaction(profileId, mode),
+    notice: (message) => this._surfaceTransactionNotice(message),
+    setActiveDb: (profileId, childDb) => this._setActiveDb(profileId, childDb),
+  })
 
   @state()
   private _activeView: ViewId | null = 'explorer'
@@ -401,14 +382,12 @@ export class WorkbenchScreen extends LitElement {
     openFind: () => this.renderRoot.querySelector('sql-editor')?.openFind(),
     stepTab: (delta) => this._stepTab(delta),
     endTransaction: (mode) => {
-      const profileId = this._openTransactionProfile()?.id
-      if (profileId) void this._endTransaction(profileId, mode)
+      const profileId = this._txn.openProfile()?.id
+      if (profileId) void this._txn.end(profileId, mode)
     },
-    showTransactionManager: () => {
-      this._transactionManagerOpen = true
-    },
+    showTransactionManager: () => this._txn.toggleManager(true),
     hasSqlTab: () => this._ctx.activeSqlTab() !== null,
-    openTransaction: () => this._openTransactionProfile()?.name ?? null,
+    openTransaction: () => this._txn.openProfile()?.name ?? null,
     queryRunning: () => this._queries.runFor(this._ctx.activeTabId).phase === 'running',
     hasPendingEdits: () => this._hasPendingEdits(),
     hasResult: () => this._queries.runFor(this._ctx.activeTabId).phase === 'done',
@@ -576,14 +555,7 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onWindowPointerDown = (event: PointerEvent) => {
-    if (this._transactionPopoverProfileId === null && !this._transactionManagerOpen) return
-    const inside = event.composedPath().some(
-      (node) => node instanceof HTMLElement && (node.classList.contains('txn-control') || node.classList.contains('txn-overflow')),
-    )
-    if (!inside) {
-      this._transactionPopoverProfileId = null
-      this._transactionManagerOpen = false
-    }
+    this._txn.dismissOnPointerDown(event)
   }
 
   /** App-menu items (File > …) arriving from the main process. */
@@ -718,10 +690,7 @@ export class WorkbenchScreen extends LitElement {
       this._queries.reset()
       this._config.reset()
       this._cmdPalette.close()
-      this._transactionSessions = new Map()
-      this._transactionPopoverProfileId = null
-      this._transactionManagerOpen = false
-      this._expandedTransactionProfileIds = new Set()
+      this._txn.reset()
       clearEditorStateCache()
       clearInspectDraftCache()
       this._inspectDirtyTabIds = new Set()
@@ -760,17 +729,7 @@ export class WorkbenchScreen extends LitElement {
     const tabId = this._restoreScrollTabId
     this._restoreScrollTabId = null
     if (tabId) void this._restoreTabScroll(tabId)
-    if (
-      this._transactionPopoverProfileId &&
-      (this._transactionPopoverProfileId !== this._config.activeProfile()?.id || !this._live.transaction(this._transactionPopoverProfileId))
-    ) {
-      this._transactionPopoverProfileId = null
-    }
-    if (this._transactionManagerOpen) {
-      const activeProfileId = this._config.activeProfile()?.id
-      const backgroundCount = this._transactionOwners().filter((owner) => owner.profile.id !== activeProfileId).length
-      if (backgroundCount === 0) this._transactionManagerOpen = false
-    }
+    this._txn.reconcile()
   }
 
   // --- workspace config + context -----------------------------------------
@@ -994,10 +953,9 @@ export class WorkbenchScreen extends LitElement {
     // Component keymaps prevent default when they own a chord.
     if (event.defaultPrevented) return
 
-    if (event.key === 'Escape' && (this._transactionPopoverProfileId !== null || this._transactionManagerOpen)) {
+    if (event.key === 'Escape' && this._txn.anyPopoverOpen) {
       event.preventDefault()
-      this._transactionPopoverProfileId = null
-      this._transactionManagerOpen = false
+      this._txn.closePopovers()
       return
     }
 
@@ -1275,7 +1233,7 @@ export class WorkbenchScreen extends LitElement {
       const restarted = Boolean(transactionBeforeRun) && splitScript(sqlText, profile.engine).statements.some(
         ({ masked }) => /^\s*(?:commit\b|rollback\b(?!\s+to\b))/i.test(masked),
       )
-      this._updateTransactionSession({
+      this._txn.recordRun({
         profileId: profile.id,
         childDb: transactionAfterRun?.childDb ?? transactionBeforeRun?.childDb ?? childDb ?? '',
         sourceTabName,
@@ -1295,64 +1253,6 @@ export class WorkbenchScreen extends LitElement {
     if (!isReadOnlyQuery(sqlText, profile.engine) && !this._live.transaction(profile.id)) {
       this._live.refresh(profile.id)
     }
-  }
-
-  private _updateTransactionSession(args: {
-    profileId: string
-    childDb: string
-    sourceTabName: string
-    sql: string
-    response: QueryResponse
-    runStartedAt: number
-    wasOpen: boolean
-    isOpen: boolean
-    /** The run closed the previous transaction (even if a new one is open). */
-    restarted: boolean
-  }) {
-    if (!args.isOpen) {
-      if (args.wasOpen && this._transactionSessions.has(args.profileId)) {
-        const next = new Map(this._transactionSessions)
-        next.delete(args.profileId)
-        this._transactionSessions = next
-        if (this._transactionPopoverProfileId === args.profileId) this._transactionPopoverProfileId = null
-      }
-      return
-    }
-
-    const existing = args.wasOpen && !args.restarted ? this._transactionSessions.get(args.profileId) : undefined
-    const session = existing?.childDb === args.childDb
-      ? existing
-      : { childDb: args.childDb, startedAt: new Date(args.runStartedAt).toISOString(), runs: [] }
-    const run: TransactionRun = {
-      sql: args.sql.slice(0, 10_000),
-      tabName: args.sourceTabName,
-      success: args.response.success,
-      durationMs: args.response.success ? args.response.result.durationMs : Math.max(1, Date.now() - args.runStartedAt),
-      rowCount: args.response.success ? args.response.result.rowCount : null,
-      error: args.response.success ? '' : args.response.error,
-      createdAt: new Date().toISOString(),
-    }
-    const next = new Map(this._transactionSessions)
-    next.set(args.profileId, { ...session, runs: [...session.runs, run].slice(-MAX_TRANSACTION_RUNS) })
-    this._transactionSessions = next
-  }
-
-  private async _endTransaction(profileId: string, mode: 'commit' | 'rollback') {
-    const result = await this._live.endTransaction(profileId, mode)
-    if (result.success && !result.transaction) {
-      const next = new Map(this._transactionSessions)
-      next.delete(profileId)
-      this._transactionSessions = next
-      this._transactionPopoverProfileId = null
-      if (this._expandedTransactionProfileIds.has(profileId)) {
-        const expanded = new Set(this._expandedTransactionProfileIds)
-        expanded.delete(profileId)
-        this._expandedTransactionProfileIds = expanded
-      }
-    }
-    // Surface a failure where run errors already show; the control itself stays
-    // truthful through the status rebroadcast.
-    if (!result.success && result.error) this._surfaceTransactionNotice(result.error)
   }
 
   // Surfaces a transaction-guard message where run errors already show —
@@ -1472,18 +1372,8 @@ export class WorkbenchScreen extends LitElement {
     this._cmdPalette.open('databases')
   }
 
-  private _transactionOwners(): Array<{
-    profile: ConnectionProfile
-    transaction: { childDb: string; failed?: boolean }
-  }> {
-    return this._config.connections.flatMap((profile) => {
-      const transaction = this._live.transaction(profile.id)
-      return transaction ? [{ profile, transaction }] : []
-    })
-  }
-
   private _renderTransactionRuns(profileId: string) {
-    const runs = this._transactionSessions.get(profileId)?.runs ?? []
+    const runs = this._txn.runsFor(profileId)
     return html`
       <div class="txn-runs">
         ${runs.length
@@ -1513,9 +1403,9 @@ export class WorkbenchScreen extends LitElement {
     profile: ConnectionProfile,
     transaction: { childDb: string; failed?: boolean },
   ) {
-    const session = this._transactionSessions.get(profile.id)
+    const session = this._txn.sessionFor(profile.id)
     const runs = session?.runs ?? []
-    const open = this._transactionPopoverProfileId === profile.id
+    const open = this._txn.popoverProfileId === profile.id
     const label = transaction.failed ? t('transaction.failedShort') : t('transaction.manualShort')
     return html`
       <div class="txn-control ${transaction.failed ? 'failed' : ''}">
@@ -1526,8 +1416,7 @@ export class WorkbenchScreen extends LitElement {
           aria-haspopup="dialog"
           aria-expanded=${String(open)}
           @click=${() => {
-            this._transactionPopoverProfileId = open ? null : profile.id
-            if (!open) this._transactionManagerOpen = false
+            this._txn.togglePopover(profile.id)
           }}
         >
           <span class="txn-dot" aria-hidden="true"></span>
@@ -1544,7 +1433,7 @@ export class WorkbenchScreen extends LitElement {
                 class="txn-commit"
                 aria-label=${t('transaction.commit')}
                 data-tooltip=${t('transaction.commit')}
-                @click=${() => this._endTransaction(profile.id, 'commit')}
+                @click=${() => this._txn.end(profile.id, 'commit')}
               >
                 <i class="icon icon-check" aria-hidden="true"></i>${t('transaction.commit')}
               </button>
@@ -1555,7 +1444,7 @@ export class WorkbenchScreen extends LitElement {
           class="txn-rollback"
           aria-label=${t('transaction.rollback')}
           data-tooltip=${t('transaction.rollback')}
-          @click=${() => this._endTransaction(profile.id, 'rollback')}
+          @click=${() => this._txn.end(profile.id, 'rollback')}
         >
           <i class="icon icon-undo-2" aria-hidden="true"></i>${t('transaction.rollback')}
         </button>
@@ -1583,18 +1472,6 @@ export class WorkbenchScreen extends LitElement {
     `
   }
 
-  private _toggleExpandedTransaction(profileId: string) {
-    const next = new Set(this._expandedTransactionProfileIds)
-    if (next.has(profileId)) next.delete(profileId)
-    else next.add(profileId)
-    this._expandedTransactionProfileIds = next
-  }
-
-  private _switchToTransaction(profileId: string, childDb: string) {
-    this._transactionManagerOpen = false
-    this._setActiveDb(profileId, childDb)
-  }
-
   private _renderTransactionOverflow(
     owners: Array<{ profile: ConnectionProfile; transaction: { childDb: string; failed?: boolean } }>,
   ) {
@@ -1606,15 +1483,14 @@ export class WorkbenchScreen extends LitElement {
           class="txn-overflow-trigger"
           aria-label=${t('transaction.otherAria', { count: owners.length })}
           aria-haspopup="dialog"
-          aria-expanded=${String(this._transactionManagerOpen)}
+          aria-expanded=${String(this._txn.managerOpen)}
           @click=${() => {
-            this._transactionManagerOpen = !this._transactionManagerOpen
-            if (this._transactionManagerOpen) this._transactionPopoverProfileId = null
+            this._txn.toggleManager()
           }}
         >
           +${owners.length}<i class="icon icon-chevron-down" aria-hidden="true"></i>
         </button>
-        ${this._transactionManagerOpen
+        ${this._txn.managerOpen
           ? html`
               <div class="txn-manager" role="dialog" aria-label=${t('transaction.otherTitle')}>
                 <div class="txn-manager-head">
@@ -1623,15 +1499,15 @@ export class WorkbenchScreen extends LitElement {
                 </div>
                 <div class="txn-manager-list">
                   ${owners.map(({ profile, transaction }) => {
-                    const session = this._transactionSessions.get(profile.id)
-                    const expanded = this._expandedTransactionProfileIds.has(profile.id)
+                    const session = this._txn.sessionFor(profile.id)
+                    const expanded = this._txn.isExpanded(profile.id)
                     return html`
                       <section class="txn-other ${transaction.failed ? 'failed' : ''} ${expanded ? 'expanded' : ''}">
                         <button
                           type="button"
                           class="txn-other-main"
                           aria-expanded=${String(expanded)}
-                          @click=${() => this._toggleExpandedTransaction(profile.id)}
+                          @click=${() => this._txn.toggleExpanded(profile.id)}
                         >
                           <span class="txn-other-copy">
                             <strong>${profile.name}${transaction.failed
@@ -1652,18 +1528,18 @@ export class WorkbenchScreen extends LitElement {
                                   <button
                                     type="button"
                                     class="txn-switch"
-                                    @click=${() => this._switchToTransaction(profile.id, transaction.childDb)}
+                                    @click=${() => this._txn.switchTo(profile.id, transaction.childDb)}
                                   >
                                     <i class="icon icon-database" aria-hidden="true"></i>${t('transaction.switchTo')}
                                   </button>
                                   ${transaction.failed
                                     ? ''
                                     : html`
-                                        <button type="button" class="txn-commit" @click=${() => this._endTransaction(profile.id, 'commit')}>
+                                        <button type="button" class="txn-commit" @click=${() => this._txn.end(profile.id, 'commit')}>
                                           <i class="icon icon-check" aria-hidden="true"></i>${t('transaction.commit')}
                                         </button>
                                       `}
-                                  <button type="button" class="txn-rollback" @click=${() => this._endTransaction(profile.id, 'rollback')}>
+                                  <button type="button" class="txn-rollback" @click=${() => this._txn.end(profile.id, 'rollback')}>
                                     <i class="icon icon-undo-2" aria-hidden="true"></i>${t('transaction.rollback')}
                                   </button>
                                 </div>
@@ -1712,7 +1588,7 @@ export class WorkbenchScreen extends LitElement {
     // The full control always describes the active connection. Transactions
     // on other connections stay visible behind +N, without implying that the
     // database currently shown in the center owns them.
-    const transactionOwners = this._transactionOwners()
+    const transactionOwners = this._txn.owners()
     const primaryTransaction = transactionOwners.find((owner) => owner.profile.id === profile?.id)
     const otherTransactions = primaryTransaction
       ? transactionOwners.filter((owner) => owner.profile.id !== primaryTransaction.profile.id)
@@ -2910,14 +2786,6 @@ export class WorkbenchScreen extends LitElement {
   // The connection a transaction command would end. The in-use context answers
   // first; failing that a single open transaction is unambiguous, and two are
   // not — committing the wrong connection is not a mistake to guess into.
-  private _openTransactionProfile(): ConnectionProfile | null {
-    const active = this._config.activeProfile()
-    if (active && this._transactionSessions.has(active.id)) return active
-    const open = [...this._transactionSessions.keys()]
-    const only = open.length === 1 ? open[0] : undefined
-    return only ? this._config.byId(only) : null
-  }
-
   private _onResultNavigate(event: Event) {
     this._navigateResult((event as CustomEvent<ResultNavigateDetail>).detail.direction)
   }

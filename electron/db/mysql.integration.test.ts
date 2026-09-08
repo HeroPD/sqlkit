@@ -85,6 +85,10 @@ describeDb('mysql driver (integration)', () => {
         const plan = parseExecutionPlan('mysql', statement, result)
         expect(plan?.nodes.length).toBeGreaterThan(0)
         expect(plan?.metric).toBe(flavor === 'analyze' ? 'duration' : 'cost')
+        // A plan format the parser only half-recognises still reports nodes and
+        // can still name a metric, while quietly carrying none of the numbers.
+        expect(plan?.nodes.some((node) => node.estimatedRows !== undefined)).toBe(true)
+        expect(plan?.nodes.some((node) => node.metric !== undefined)).toBe(true)
       }
     } finally {
       await driver.disconnect()
