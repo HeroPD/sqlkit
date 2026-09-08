@@ -560,6 +560,7 @@ export class WorkbenchScreen extends LitElement {
 
   /** App-menu items (File > …) arriving from the main process. */
   private _onMenuAction(action: MenuAction) {
+    if (this._hasModal() && !action.startsWith('theme:')) return
     // The workbench stays mounted (hidden) on the welcome screen; File-menu
     // actions need an open workspace.
     if (action === 'settings') {
@@ -658,6 +659,7 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _saveActive() {
+    if (this._hasModal()) return
     const activeTab = this._ctx.tabs.find((tab) => tab.id === this._ctx.activeTabId)
     if (activeTab?.kind === 'inspect' || activeTab?.kind === 'inspect-object') {
       this.renderRoot.querySelector('table-inspect')?.save()
@@ -946,12 +948,22 @@ export class WorkbenchScreen extends LitElement {
     )
   }
 
+  // State guards also cover repeated commands before the dialog's first render.
+  private _hasModal(): boolean {
+    return !!(this._dialogs.confirm || this._dialogs.prompt || this._dialogs.review || this._dialogs.createDb
+      || this._parameterPrompt || this._destructivePrompt || this._csvImport)
+  }
+
   private _onGlobalKeydown = (event: KeyboardEvent) => {
     // Mounted but hidden on the welcome screen; ignore global keys until a
     // workspace is open.
     if (!this.workspace) return
     // Component keymaps prevent default when they own a chord.
     if (event.defaultPrevented) return
+    if (this._hasModal()) {
+      if (eventMatchesBinding(event, 'F5')) event.preventDefault()
+      return
+    }
 
     if (event.key === 'Escape' && this._txn.anyPopoverOpen) {
       event.preventDefault()
@@ -1065,6 +1077,7 @@ export class WorkbenchScreen extends LitElement {
 
   // Close via ⌘W, the tab ✕, etc.: unsaved editor/grid state gets a confirmation first.
   private _requestCloseTab(id: string) {
+    if (this._hasModal()) return
     const tab = this._ctx.tabs.find((entry) => entry.id === id)
     const fileDirty = tab?.kind === 'sql' && tab.content !== tab.savedContent
     const inspectDirty = this._inspectDirtyTabIds.has(id)
@@ -3146,6 +3159,7 @@ export class WorkbenchScreen extends LitElement {
   }
 
   private _onCloseWorkspace() {
+    if (this._hasModal()) return
     if (this._queries.hasAnyStaged()) {
       this._dialogs.confirm = {
         message: t('workbench.closeWorkspacePrompt'),
