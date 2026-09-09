@@ -125,3 +125,71 @@ describe('CTE declaration detection', () => {
     expect(editSourceRefusal(sql, notes, 'postgresql')).toBe('cte')
   })
 })
+
+
+describe('grouped joins and script boundaries', () => {
+  const table: TableRef = { schema: 'public', name: 'employees', kind: 'table' }
+  it.each<[Engine, string]>([
+    ['postgresql', '"public"."employees"'],
+    ['mysql', '`public`.`employees`'],
+    ['sqlserver', '[public].[employees]'],
+  ])('counts the first source in nested join groups for %s', (engine, name) => {
+    for (const from of [
+      `(${name} e join ${name} m on m.id=e.manager_id)`,
+      `((${name} e join ${name} m on m.id=e.manager_id))`,
+      `(${name} e, ${name} m)`,
+      `(/* first source */ ${name} e join (select * from ${name}) m on m.id=e.manager_id)`,
+    ]) {
+      const sql = `select e.id, m.id, m.name from ${from}`
+      expect(sqlSourceTables(sql, engine).filter(source => source.name === 'employees')).toHaveLength(2)
+      expect(editSourceRefusal(sql, table, engine)).toBe('repeated-table')
+    }
+  })
+  it('keeps unambiguous grouped tables and nested subqueries usable', () => {
+    for (const from of ['(employees e)', '((select * from employees)) e', '(employees e join departments d on d.id=e.department_id)']) {
+      expect(editSourceRefusal(`select e.id from ${from}`, table, 'postgresql')).toBeNull()
+    }
+  })
+  it.each<[Engine, string]>([
+    ['postgresql', "select '; with fake as (select 1)'; /* next */"],
+    ['postgresql', 'select $$; with fake as (select 1)$$;'],
+    ['mysql', 'select 0; # next statement\n'],
+    ['sqlserver', 'select 0\ngo\n'],
+  ])('finds later CTEs using %s statement boundaries', (engine, prefix) => {
+    const cte = 'with c as (select * from employees) select e.id, m.id, m.name from c e join c m on m.id=e.manager_id'
+    expect(editSourceRefusal(`${prefix} ${cte}`, table, engine)).toBe('cte')
+  })
+  it('does not mistake a later named window for a CTE', () => {
+    expect(editSourceRefusal('select 0; select id, row_number() over w from employees window w as (partition by manager_id)', table, 'postgresql')).toBeNull()
+  })
+})
+
+
+describe('query operands and independent results', () => {
+  const table: TableRef = { schema: 'public', name: 'employees', kind: 'table' }
+  it.each([
+    'table employees',
+    'table only employees',
+    'table /* source */ "public"."employees"',
+    '(table employees)',
+  ])('counts TABLE query sources: %s', operand => {
+    const sql = `select e.id, m.name from (${operand}) e join employees m on m.id=e.manager_id`
+    expect(sqlSourceTables(sql, 'postgresql')).toHaveLength(2)
+    expect(editSourceRefusal(sql, table, 'postgresql')).toBe('repeated-table')
+    expect(editSourceRefusal(operand, table, 'postgresql')).toBeNull()
+  })
+  it.each(['union all', 'intersect', 'except'])('walks parenthesized %s operands', operator => {
+    const sql = `select * from ((select * from employees) ${operator} ((table employees))) u`
+    expect(sqlSourceTables(sql, 'postgresql').map(source => source.name)).toEqual(['employees', 'employees'])
+    expect(editSourceRefusal(sql, table, 'postgresql')).toBe('repeated-table')
+  })
+  it.each<Engine>(['postgresql', 'mysql', 'sqlserver'])('counts references separately for %s statements', engine => {
+    const separator = engine === 'sqlserver' ? '\nGO\n' : ';'
+    const single = 'select id, name from employees'
+    expect(editSourceRefusal(`${single}${separator}${single}`, table, engine)).toBeNull()
+    const ambiguous = 'select e.id, m.name from employees e join employees m on m.id=e.manager_id'
+    for (const sql of [`${single}${separator}${ambiguous}`, `${ambiguous}${separator}${single}`]) {
+      expect(editSourceRefusal(sql, table, engine)).toBe('repeated-table')
+    }
+  })
+})

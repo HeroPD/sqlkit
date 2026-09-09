@@ -307,6 +307,20 @@ describe('result edit context: ambiguous sources', () => {
     expect(buildPendingUpdate(editInput, [{ row: 0, col: 2, value: '2' }])).toMatchObject({ ok: false })
   })
 
+  it('refuses grouped self-joins and CTEs after earlier statements', () => {
+    for (const sql of [
+      'select e.id, m.id, m.name from (employees e join employees m on m.id=e.manager_id)',
+      'select e.id, m.id, m.name from (table employees) e join employees m on m.id=e.manager_id',
+      'select 0; with c as (select * from employees) select e.id, m.id, m.name from c e join c m on m.id=e.manager_id',
+    ]) {
+      const editInput = selfJoinInput(sql, employees)
+      expect(buildPendingUpdate(editInput, [{ row: 0, col: 2, value: 'Changed manager' }])).toMatchObject({ ok: false })
+      expect(singleTableEditContext(editInput)).toBeNull()
+      expect(resultKeyColumns(editInput)).toEqual([])
+      expect(buildInsertRows(editInput, [{ after: 0, cells: [null, null, 'Ada'] }])).toMatchObject({ ok: false })
+    }
+  })
+
   it('refuses quoted self-joins and a CTE joined to itself', () => {
     for (const sql of [
       'select e.id, m.id, m.name from "employees" e join "employees" m on m.id=e.manager_id',
@@ -326,6 +340,28 @@ describe('result edit context: ambiguous sources', () => {
     ]) {
       expect(buildPendingUpdate(selfJoinInput(sql), [{ row: 0, col: 2, value: 'Grace Hopper' }])).toMatchObject({ ok: false })
     }
+  })
+
+  it('edits the final independent result using its column origins', () => {
+    const sql = 'select * from employees; select id, name from employees'
+    const editInput: ResultEditInput = {
+      ...selfJoinInput(sql, employees),
+      run: { phase: 'done', sql, result: {
+        columns: ['id', 'name'],
+        columnSources: [source(employees, 'id'), source(employees, 'name')],
+        rows: [[2, 'Grace']], rowCount: 1, durationMs: 1,
+      } },
+    }
+    expect(buildPendingUpdate(editInput, [{ row: 0, col: 1, value: 'Changed' }])).toMatchObject({
+      ok: true, value: { edits: [{ column: 'name', pks: [{ name: 'id', value: 2 }] }] },
+    })
+    // The first SELECT cannot establish provenance for a later computed result.
+    const computedSql = 'select id, name from employees; select 1 as id, \'Grace\' as name'
+    editInput.run = { phase: 'done', sql: computedSql, result: {
+      columns: ['id', 'name'], rows: [[1, 'Grace']], rowCount: 1, durationMs: 1,
+    } }
+    expect(buildPendingUpdate(editInput, [{ row: 0, col: 1, value: 'Changed' }])).toMatchObject({ ok: false })
+    expect(resultKeyColumns(editInput)).toEqual([])
   })
 
   // The guard must not cost the common shape it resembles: a subquery filter

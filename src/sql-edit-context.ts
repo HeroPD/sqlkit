@@ -1,5 +1,6 @@
 import type { Engine, TableRef } from './electron'
 import { maskSql, maskSqlRegions } from './sql-mask'
+import { scanGoBatches, splitScript } from './sql-statements'
 
 const identEqual = (a: string | null, b: string | null) => a === b || (a !== null && b !== null && a.toLowerCase() === b.toLowerCase())
 
@@ -97,7 +98,7 @@ const CLAUSE_ENDERS = ['where', 'group', 'having', 'window', 'order', 'limit', '
 // reach the result: derived tables and CTE bodies. A subquery in expression
 // position (WHERE ... IN, a scalar SELECT) is skipped whole — nothing it
 // selects is projected, so re-using a table there is not a second source.
-function collectSources(masked: string, source: string, from: number, to: number, out: Array<{ schema: string | null; name: string }>, state: { hasCte: boolean }) {
+function collectSources(masked: string, source: string, from: number, to: number, out: Array<{ schema: string | null; name: string }>, state: { hasCte: boolean }, sourceList = false) {
   // The source after `from`, a comma, or a join keyword: a derived table to
   // walk into, or a name to record. Returns where scanning resumes.
   const readSource = (at: number): number => {
@@ -113,7 +114,8 @@ function collectSources(masked: string, source: string, from: number, to: number
     while (/\s/.test(source[i] ?? '')) i += 1
     if (masked[i] === '(') {
       const close = matchingParen(masked, i)
-      collectSources(masked, source, i + 1, close, out, state)
+      const subquery = /^\s*(?:select|with|values|table)\b/i.test(masked.slice(i + 1, close))
+      collectSources(masked, source, i + 1, close, out, state, !subquery)
       return close + 1
     }
     // Identifiers are read from the unmasked text: masking blanks quoted names.
@@ -123,12 +125,16 @@ function collectSources(masked: string, source: string, from: number, to: number
     return parsed.end
   }
 
-  let i = from
+  // A grouped join begins with a table, whereas a subquery begins with SQL.
+  let i = sourceList ? readSource(from) : from
   let inCteList = /^[\s;]*with\b/i.test(masked.slice(from, to))
-  let inFromList = false
+  let inFromList = sourceList
+  let queryStart = !sourceList
   while (i < to) {
     if (masked[i] === '(') {
-      i = matchingParen(masked, i) + 1
+      // Parenthesized set operands are queries; expression parentheses are not.
+      i = queryStart ? readSource(i) : matchingParen(masked, i) + 1
+      queryStart = false
       continue
     }
     if (inFromList && masked[i] === ',') {
@@ -136,10 +142,18 @@ function collectSources(masked: string, source: string, from: number, to: number
       continue
     }
     if (isWord(masked[i]) && !isWord(masked[i - 1])) {
+      if (['union', 'intersect', 'except'].some(word => wordAt(masked, i, word))) queryStart = true
+      if (queryStart && wordAt(masked, i, 'table')) {
+        i = readSource(i + 'table'.length)
+        queryStart = false
+        continue
+      }
+      if (wordAt(masked, i, 'select') || wordAt(masked, i, 'values')) queryStart = false
       const keyword = SOURCE_KEYWORDS.find((word) => wordAt(masked, i, word))
       if (keyword) {
         i = readSource(i + keyword.length)
         inFromList = true
+        queryStart = false
         continue
       }
       if (wordAt(masked, i, 'select')) inCteList = false
@@ -167,20 +181,25 @@ function collectSources(masked: string, source: string, from: number, to: number
 
 /** Every table the statement names as a source, in order, including repeats. */
 function scanSources(sql: string, engine?: Engine) {
-  const out: Array<{ schema: string | null; name: string }> = []
-  const { masked, regions } = maskSqlRegions(sql, engine)
-  const chars = sql.split('')
-  for (const region of regions) {
-    if (region.kind !== 'comment') continue
-    for (let i = region.from; i < region.to; i += 1) chars[i] = masked[i]!
+  const statements: Array<{ tables: Array<{ schema: string | null; name: string }>; hasCte: boolean }> = []
+  const batches = engine === 'sqlserver' ? scanGoBatches(sql).map(batch => batch.sql) : [sql]
+  for (const { raw } of batches.flatMap(batch => splitScript(batch, engine).statements)) {
+    const out: Array<{ schema: string | null; name: string }> = []
+    const state = { hasCte: false }
+    const { masked, regions } = maskSqlRegions(raw, engine)
+    const chars = raw.split('')
+    for (const region of regions) {
+      if (region.kind !== 'comment') continue
+      for (let i = region.from; i < region.to; i += 1) chars[i] = masked[i]!
+    }
+    collectSources(masked, chars.join(''), 0, raw.length, out, state)
+    statements.push({ tables: out, hasCte: state.hasCte })
   }
-  const state = { hasCte: false }
-  collectSources(masked, chars.join(''), 0, sql.length, out, state)
-  return { tables: out, hasCte: state.hasCte }
+  return statements
 }
 
 export function sqlSourceTables(sql: string, engine?: Engine): Array<{ schema: string | null; name: string }> {
-  return scanSources(sql, engine).tables
+  return scanSources(sql, engine).flatMap(statement => statement.tables)
 }
 
 /** Whether the statement names `table` as a source more than once — a self-join,
@@ -190,15 +209,17 @@ export function sqlSourceTables(sql: string, engine?: Engine): Array<{ schema: s
  * from one reference can address a different row than the one on screen.
  * CTE provenance is unresolved and has a separate refusal reason. */
 export function editSourceRefusal(sql: string, table: TableRef, engine?: Engine): 'cte' | 'repeated-table' | null {
-  const scan = scanSources(sql, engine)
-  // CTE references need scope-aware provenance; refuse writes until that is resolved.
-  if (scan.hasCte) return 'cte'
-  let seen = 0
-  for (const source of scan.tables) {
-    if (!identEqual(table.name, source.name)) continue
-    if (source.schema !== null && !identEqual(table.schema, source.schema)) continue
-    seen += 1
-    if (seen > 1) return 'repeated-table'
+  const statements = scanSources(sql, engine)
+  // Every possible result must be safe, but separate statements are not self-joins.
+  if (statements.some(statement => statement.hasCte)) return 'cte'
+  for (const statement of statements) {
+    let seen = 0
+    for (const source of statement.tables) {
+      if (!identEqual(table.name, source.name)) continue
+      if (source.schema !== null && !identEqual(table.schema, source.schema)) continue
+      seen += 1
+      if (seen > 1) return 'repeated-table'
+    }
   }
   return null
 }

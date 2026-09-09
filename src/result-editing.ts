@@ -4,6 +4,7 @@ import type { SqlTabState } from './controllers/contexts'
 import { editSourceRefusal, inferEditableTable, tableReferencedTwice } from './sql-edit-context'
 import { supportsOptimisticComparison, type BatchUpdateEdit, type CellInput, type RowKey } from './sql-write'
 import { t } from './i18n'
+import { isSingleStatement } from './sql-statements'
 
 // An unsaved new row staged in the grid. `cells` align to the result's columns:
 // null = never touched (omit from INSERT so the DB default applies); CellInput
@@ -328,6 +329,8 @@ function primaryKeyIndexes(
   const pk = columns.filter((column) => column.primaryKey)
   if (!pk.length) return []
   const hasSources = result.columnSources !== undefined
+  // A script's first projection cannot prove the identity of its final result.
+  if (!hasSources && !isSingleStatement(sql, engine ?? undefined)) return []
   const indexes = pk.map((column) => {
     const sourceIndex = columnSourceIndex(result, table, column.name)
     const fallbackIndex = !hasSources && allowNameFallback ? simpleColumnProjectionIndex(result.columns, sql, column.name) : -1
