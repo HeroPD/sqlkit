@@ -3576,7 +3576,7 @@ export class ResultsPanel extends LitElement {
         display: flex;
         align-items: center;
         gap: 10px;
-        padding: 0 12px;
+        padding: 0 var(--panel-gutter);
         font-size: var(--font-size-sm);
         font-weight: 700;
         color: var(--text-2);

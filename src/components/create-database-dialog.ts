@@ -174,14 +174,14 @@ export class CreateDatabaseDialog extends LitElement {
 
       .panel {
         width: min(420px, calc(100vw - 80px));
-        padding: 16px;
-        gap: 10px;
+        padding: var(--dialog-padding);
+        gap: var(--form-gap);
       }
 
       .field {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: var(--space-1);
       }
 
       label {
@@ -189,15 +189,7 @@ export class CreateDatabaseDialog extends LitElement {
         color: var(--text-3);
       }
 
-      input {
-        padding: 5px 8px;
-        font: inherit;
-        color: var(--input-fg);
-        background: var(--input-bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        outline: none;
-      }
+      input { min-width: 0; }
 
       input:focus {
         border-color: var(--input-focus-border);
@@ -206,8 +198,8 @@ export class CreateDatabaseDialog extends LitElement {
       .actions {
         display: flex;
         justify-content: flex-end;
-        gap: 8px;
-        margin-top: 8px;
+        gap: var(--action-gap);
+        margin-top: var(--space-2);
       }
     `,
   ]

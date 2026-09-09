@@ -69,14 +69,14 @@ export class ParameterDialog extends LitElement {
 
   static styles = [typography, controls, overlay, css`
     :host { display: contents; }
-    .panel { width: min(440px, calc(100vw - 80px)); max-height: calc(100vh - 80px); overflow: auto; padding: 18px 20px; gap: 8px; }
+    .panel { width: min(440px, calc(100vw - 80px)); max-height: calc(100vh - 80px); overflow: auto; padding: var(--dialog-padding); gap: var(--action-gap); }
     code { color: var(--text); }
-    .fields { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
-    label { display: grid; grid-template-columns: 72px 1fr; align-items: center; gap: 10px; }
+    .fields { display: flex; flex-direction: column; gap: var(--action-gap); margin-top: 4px; }
+    label { display: grid; grid-template-columns: 72px 1fr; align-items: center; gap: var(--form-gap); }
     label span { color: var(--text-2); font-family: var(--mono-font); }
-    input { padding: 5px 8px; font: inherit; color: var(--input-fg); background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px; outline: none; }
+    input { min-width: 0; }
     input:focus { border-color: var(--input-focus-border); }
-    .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+    .actions { display: flex; justify-content: flex-end; gap: var(--action-gap); margin-top: var(--space-2); }
   `]
 }
 

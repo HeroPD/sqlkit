@@ -27,6 +27,21 @@
 
   /* Control sizing — inputs, selects, and form buttons share one height. */
   --control-h: 28px;
+  --control-radius: 6px;
+  --control-padding-x: 12px;
+
+  /* Shared spacing; dense workbench surfaces keep a smaller gutter than forms. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --panel-gutter: var(--space-3);
+  --page-gutter: var(--space-5);
+  --dialog-padding: var(--space-4);
+  --form-gap: var(--space-3);
+  --action-gap: var(--space-2);
 
   /* Layout */
   --titlebar-h: 38px;

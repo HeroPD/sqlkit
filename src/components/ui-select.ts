@@ -224,13 +224,13 @@ export class UiSelect extends LitElement {
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        padding: 0 10px 0 12px;
+        padding: 0 var(--control-padding-x);
         font-size: var(--font-size);
         font-family: var(--ui-font);
         color: var(--input-fg);
         background: var(--input-bg);
         border: 1px solid var(--input-border);
-        border-radius: 6px;
+        border-radius: var(--control-radius);
         box-sizing: border-box;
         outline: none;
         cursor: pointer;

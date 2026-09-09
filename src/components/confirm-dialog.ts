@@ -155,12 +155,12 @@ export class ConfirmDialog extends LitElement {
       }
 
       .dialog-head {
-        padding: 20px 22px 19px;
+        padding: var(--dialog-padding);
       }
 
       .dialog-head h4 {
-        margin-bottom: 5px;
-        font-size: 16px;
+        margin-bottom: var(--space-2);
+        font-size: var(--font-size-xl);
         font-weight: 600;
       }
 
@@ -172,7 +172,7 @@ export class ConfirmDialog extends LitElement {
         display: flex;
         align-items: center;
         justify-content: flex-end;
-        padding: 12px 22px;
+        padding: var(--space-3) var(--dialog-padding);
         background: color-mix(in srgb, var(--bg) 18%, transparent);
         border-top: 1px solid var(--border-subtle);
       }
@@ -180,13 +180,13 @@ export class ConfirmDialog extends LitElement {
       .actions {
         display: flex;
         flex: none;
-        gap: 8px;
+        gap: var(--action-gap);
       }
 
       .actions button {
         display: inline-flex;
         align-items: center;
-        gap: 7px;
+        gap: var(--space-2);
         white-space: nowrap;
       }
 
