@@ -236,18 +236,37 @@ export function saveWorkspaceFile(workspacePath: string | null, filePath: string
   }
 }
 
-export async function saveWorkspaceFileAsync(workspacePath: string | null, filePath: string, content: string): Promise<FileSaveResult> {
+/** `expected` is the text the editor last had from this file. When the file now
+ * holds something else, it changed behind the editor — outside the app, or on a
+ * share the watcher never hears from — and the save reports a conflict instead
+ * of overwriting it. A file that is gone is no conflict: saving writes it back. */
+export async function saveWorkspaceFileAsync(
+  workspacePath: string | null,
+  filePath: string,
+  content: string,
+  expected?: string,
+): Promise<FileSaveResult> {
   if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   const resolved = path.resolve(filePath)
   if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: t('file.filesInsideWorkspace') }
   if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: t('file.internalFolder') }
   if (!isSqlFile(resolved)) return { success: false, error: t('file.saveSqlOnly') }
   if (Buffer.byteLength(content, 'utf8') > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToSave') }
-  const temp = tempSavePath(resolved)
+  // A symlinked file is saved through to its target (inside the workspace, or it
+  // was refused above): renaming over the link itself would swap it for a copy.
+  const target = await fsp.realpath(resolved).catch(() => resolved)
+  const existing = await fsp.stat(target).catch(() => null)
+  if (expected !== undefined && existing) {
+    const current = await fsp.readFile(target, 'utf8').catch(() => null)
+    if (current !== null && current !== expected) return { success: false, conflict: true }
+  }
+  const temp = tempSavePath(target)
   try {
-    await fsp.mkdir(path.dirname(resolved), { recursive: true })
+    await fsp.mkdir(path.dirname(target), { recursive: true })
     await fsp.writeFile(temp, content, 'utf8')
-    await fsp.rename(temp, resolved)
+    // A fresh temp file takes the umask's mode; the file it replaces keeps its own (a 0600 query stays 0600).
+    if (existing) await fsp.chmod(temp, existing.mode & 0o7777)
+    await fsp.rename(temp, target)
     return { success: true, path: resolved, name: path.basename(resolved) }
   } catch (error) {
     await fsp.unlink(temp).catch(() => {})

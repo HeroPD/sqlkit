@@ -471,7 +471,8 @@ describe('FileOpsController.saveActive', () => {
     const { ctrl, ctx } = make()
     ctx.addTab({ id: 'file:/ws/ctx/q.sql', kind: 'sql', name: 'q.sql', path: '/ws/ctx/q.sql', content: 'select 2', savedContent: 'select 1' })
     await ctrl.saveActive()
-    expect(api.saveFile).toHaveBeenCalledWith('/ws/ctx/q.sql', 'select 2')
+    // The baseline rides along, so main can tell whether the file moved underneath.
+    expect(api.saveFile).toHaveBeenCalledWith('/ws/ctx/q.sql', 'select 2', 'select 1')
     expect(ctx.activeSqlTab()?.savedContent).toBe('select 2')
   })
 
@@ -554,6 +555,27 @@ describe('FileOpsController.openFile', () => {
     await Promise.all([first, second])
     expect(ctx.tabs).toHaveLength(1)
     expect(ctx.tabs[0]).toMatchObject({ id: 'file:/ws/ctx/q.sql', path: '/ws/ctx/q.sql' })
+  })
+})
+
+describe('FileOpsController save conflicts', () => {
+  it('sends what the tab last had from disk, and asks before overwriting a file changed since', async () => {
+    const saveFile = vi.fn((path: string, _content: string, expected?: string) => Promise.resolve(
+      expected === undefined ? { success: true, path, name: 'q.sql' } : { success: false, conflict: true },
+    ))
+    stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'select 1' })), saveFile })
+    const { ctrl, ctx, dialogs } = make()
+    await ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+    ctx.setActiveContent('select 2')
+
+    await ctrl.saveActive()
+    expect(saveFile).toHaveBeenLastCalledWith('/ws/ctx/q.sql', 'select 2', 'select 1')
+    expect(dialogs.confirm).toMatchObject({ message: '"q.sql" changed on disk', confirmLabel: 'Overwrite', danger: true })
+    expect(ctx.activeSqlTab()?.savedContent).toBe('select 1')
+
+    dialogs.acceptConfirm()
+    await vi.waitFor(() => expect(saveFile).toHaveBeenLastCalledWith('/ws/ctx/q.sql', 'select 2', undefined))
+    await vi.waitFor(() => expect(ctx.activeSqlTab()?.savedContent).toBe('select 2'))
   })
 })
 

@@ -18,15 +18,14 @@ import {
   stopWorkspaceWatcher,
 } from './files'
 import { stringValue, workspaceConfigPatch, workspaceHistoryPatch, workspaceSession } from './ipc-validation'
-import { recoverableContexts } from '../src/session-recovery'
 import {
+  applyShutdownFlush,
   dropBackup,
   markSessionClean,
   readBackup,
   readSession,
   writeBackup,
   writeSession,
-  writeShutdownBackup,
 } from './session'
 import {
   isDirectory,
@@ -144,11 +143,12 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
   ipcMain.handle('file:read', (event, filePath: string) =>
     readWorkspaceFileAsync(context.workspaceFor(event.sender), stringValue(filePath, 'File path', IPC_PATH_LIMIT)))
 
-  ipcMain.handle('file:save', (event, filePath: string, content: string) =>
+  ipcMain.handle('file:save', (event, filePath: string, content: string, expected?: unknown) =>
     saveWorkspaceFileAsync(
       context.workspaceFor(event.sender),
       stringValue(filePath, 'File path', IPC_PATH_LIMIT),
       stringValue(content, 'File content', IPC_SQL_FILE_LIMIT),
+      expected === undefined ? undefined : stringValue(expected, 'Saved content', IPC_SQL_FILE_LIMIT),
     ))
 
   ipcMain.handle('file:create', (event, folder: string, relativePath: string) =>
@@ -306,30 +306,12 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
   ipcMain.on('session:flush', (event, payload: unknown) => {
     event.returnValue = true
     try {
-      const workspacePath = context.workspaceFor(event.sender)
-      const slot = context.sessionSlotFor(event.sender)
-      const flush = payload as { session?: unknown; backups?: unknown }
-      const unbacked = new Set<string>()
-      if (Array.isArray(flush?.backups)) {
-        for (const entry of flush.backups.slice(0, 500)) {
-          const backup = entry as { tabId?: unknown; content?: unknown }
-          const tabId = stringValue(backup.tabId, 'Tab id', IPC_PATH_LIMIT)
-          const written = writeShutdownBackup(workspacePath, tabId, stringValue(backup.content, 'Buffer', IPC_SQL_FILE_LIMIT), slot)
-          if (written.unbacked) unbacked.add(tabId)
-        }
-      }
-      if (flush?.session !== undefined) {
-        // Only this side knows which of those writes landed, so the claims of
-        // the ones that didn't are dropped here — otherwise a shutdown would
-        // replace a session the renderer had already filtered with one
-        // promising text that no backup holds.
-        const session = workspaceSession(flush.session)
-        writeSession(
-          workspacePath,
-          { ...session, contexts: recoverableContexts(session.contexts, unbacked) },
-          slot,
-        )
-      }
+      applyShutdownFlush(
+        context.workspaceFor(event.sender),
+        payload,
+        { tabId: IPC_PATH_LIMIT, content: IPC_SQL_FILE_LIMIT },
+        context.sessionSlotFor(event.sender),
+      )
     } catch {
       // A shutdown is the worst moment to throw; the debounced writes stand.
     } finally {

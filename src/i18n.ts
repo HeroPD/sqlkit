@@ -232,6 +232,8 @@ const enUS = {
   'file.empty': 'No .sql files yet. Right-click to create one.',
   'file.deletePrompt': 'Delete "{name}"?',
   'file.deleteTrashDetail': 'It will be moved to the Trash.',
+  'file.saveConflictDetail': 'It was changed outside SqlKit Studio since you opened it. Saving replaces those changes with yours.',
+  'file.overwrite': 'Overwrite',
   'file.deleteKeepsUnsavedOne': '"{name}" has unsaved changes the Trash won\'t hold. They stay open in an untitled tab.',
   'file.deleteKeepsUnsavedMany': '{count} open files have unsaved changes the Trash won\'t hold. They stay open as untitled tabs.',
   'file.moveToTrash': 'Move to Trash',

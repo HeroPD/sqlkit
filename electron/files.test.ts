@@ -216,3 +216,51 @@ describe('concurrent saves of one file', () => {
     expect(leftovers).toEqual([])
   })
 })
+
+// The watcher is the only other thing that notices a file changing, and on a
+// network share it may never fire; the save itself has to check.
+describe('saving over a file that changed on disk', () => {
+  it('reports a conflict instead of overwriting, and saves when told to', async () => {
+    const { ws } = setup()
+    const file = path.join(ws, 'q.sql')
+    fs.writeFileSync(file, 'select 1')
+    fs.writeFileSync(file, 'select 1 -- pulled')
+
+    expect(await saveWorkspaceFileAsync(ws, file, 'select 2', 'select 1')).toEqual({ success: false, conflict: true })
+    expect(fs.readFileSync(file, 'utf8')).toBe('select 1 -- pulled')
+    expect(await saveWorkspaceFileAsync(ws, file, 'select 2', 'select 1 -- pulled')).toMatchObject({ success: true })
+    expect(await saveWorkspaceFileAsync(ws, file, 'select 3')).toMatchObject({ success: true })
+    expect(fs.readFileSync(file, 'utf8')).toBe('select 3')
+  })
+
+  it('writes a deleted file back rather than calling it a conflict', async () => {
+    const { ws } = setup()
+    const file = path.join(ws, 'gone.sql')
+    expect(await saveWorkspaceFileAsync(ws, file, 'select 1', 'what it held')).toMatchObject({ success: true })
+    expect(fs.readFileSync(file, 'utf8')).toBe('select 1')
+  })
+})
+
+describe('saving keeps what the file was', () => {
+  it('writes through a symlink to its target instead of replacing the link', async () => {
+    const { ws } = setup()
+    fs.mkdirSync(path.join(ws, 'shared'))
+    const real = path.join(ws, 'shared', 'q.sql')
+    const link = path.join(ws, 'q.sql')
+    fs.writeFileSync(real, 'select 1')
+    fs.symlinkSync(real, link)
+
+    expect(await saveWorkspaceFileAsync(ws, link, 'select 2', 'select 1')).toMatchObject({ success: true, path: link })
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(fs.readFileSync(real, 'utf8')).toBe('select 2')
+  })
+
+  it('keeps the file mode', async () => {
+    const { ws } = setup()
+    const file = path.join(ws, 'private.sql')
+    fs.writeFileSync(file, 'select 1', { mode: 0o600 })
+    fs.chmodSync(file, 0o600)
+    await saveWorkspaceFileAsync(ws, file, 'select 2')
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+  })
+})

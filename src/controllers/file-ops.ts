@@ -176,13 +176,25 @@ export class FileOpsController {
   }
 
   // Untitled queries go through the native dialog, defaulting into the active
-  // context's folder; saved files write in place.
-  async saveActive() {
+  // context's folder; saved files write in place. A save in place first checks
+  // the file still holds what the tab last had from it, unless the user has
+  // already chosen to overwrite what changed.
+  async saveActive({ overwrite = false } = {}) {
     const tab = this.deps.ctx.activeSqlTab()
     if (!tab) return
     const result = tab.path
-      ? await window.sqlkit.saveFile(tab.path, tab.content)
+      ? await window.sqlkit.saveFile(tab.path, tab.content, overwrite ? undefined : tab.savedContent)
       : await window.sqlkit.saveFileAs(this.deps.contextFolder() ?? '', suggestedSqlName(tab.name), tab.content)
+    if (!result.success && result.conflict) {
+      this.deps.dialogs.confirm = {
+        message: t('file.changedOnDisk', { name: tab.name }),
+        detail: t('file.saveConflictDetail'),
+        confirmLabel: t('file.overwrite'),
+        danger: true,
+        action: () => void this.saveActive({ overwrite: true }),
+      }
+      return
+    }
     if (!this.reportSaveError(result)) return
     this.deps.ctx.applySaveResult(tab, result)
     this.deps.onTabSaved?.(tab.id)

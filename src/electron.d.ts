@@ -468,7 +468,7 @@ export type FileReadResult =
 
 export type FileSaveResult =
   | { success: true; path: string; name: string }
-  | { success: false; canceled?: boolean; error?: string }
+  | { success: false; canceled?: boolean; error?: string; conflict?: boolean }
 
 export type FileDeleteResult = { success: true } | { success: false; canceled?: boolean; error?: string }
 
@@ -630,7 +630,8 @@ export type SqlkitApi = {
   /** Lists the .sql files of one database context's workspace subfolder. */
   listFiles: (folder: string) => Promise<FilesResult>
   readFile: (path: string) => Promise<FileReadResult>
-  saveFile: (path: string, content: string) => Promise<FileSaveResult>
+  /** `expected` is the text last read from or written to the file; the save reports `conflict` if the file now holds other text. */
+  saveFile: (path: string, content: string, expected?: string) => Promise<FileSaveResult>
   /** Native save dialog defaulting into a database context's folder. */
   saveFileAs: (folder: string, suggestedName: string, content: string) => Promise<FileSaveResult>
   /** Save-dialog export to anywhere on disk (results CSV, not workspace files). */

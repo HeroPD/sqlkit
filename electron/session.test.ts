@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { SessionTab, WorkspaceSession } from '../src/electron'
-import { dropBackup, hasBackup, markSessionClean, readBackup, readSession, writeBackup, writeSession, writeShutdownBackup } from './session'
+import { applyShutdownFlush, dropBackup, hasBackup, markSessionClean, readBackup, readSession, writeBackup, writeSession, writeShutdownBackup } from './session'
 
 const state = vi.hoisted(() => ({ userData: '' }))
 
@@ -369,5 +369,34 @@ describe('replacing a session that could not be read', () => {
     writeSession(workspace, session([]))
     expect(readBackup(workspace, 'tab-1')).toBeNull()
     expect(setAside()).toEqual([])
+  })
+})
+
+// Quitting flushes every tab at once, so one refused buffer must not take the rest with it.
+describe('applyShutdownFlush', () => {
+  const limits = { tabId: 20_000, content: 1_000 }
+
+  it('writes the other buffers and the session when one buffer is refused', () => {
+    applyShutdownFlush(workspace, {
+      backups: [
+        { tabId: 'big', content: 'x'.repeat(2_000) },
+        { tabId: 'small', content: 'select 1' },
+      ],
+      session: session([sqlTab({ id: 'big' }), sqlTab({ id: 'small' })]),
+    }, limits)
+
+    expect(readBackup(workspace, 'small')).toBe('select 1')
+    // The refused tab had nothing on disk, so the session stops promising it.
+    expect(readSession(workspace)?.contexts[0]?.tabs.map((tab) => tab.id)).toEqual(['small'])
+  })
+
+  it('keeps claiming a refused tab whose older backup is still there', () => {
+    writeBackup(workspace, 'big', 'version A')
+    applyShutdownFlush(workspace, {
+      backups: [{ tabId: 'big', content: 'x'.repeat(2_000) }, { tabId: 42 }],
+      session: session([sqlTab({ id: 'big' })]),
+    }, limits)
+    expect(readBackup(workspace, 'big')).toBe('version A')
+    expect(readSession(workspace)?.contexts[0]?.tabs.map((tab) => tab.id)).toEqual(['big'])
   })
 })

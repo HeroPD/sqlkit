@@ -3,7 +3,8 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import type { SaveResult, WorkspaceSession } from '../src/electron'
 import { t } from '../src/i18n'
-import { workspaceSession as validateWorkspaceSession } from './ipc-validation'
+import { stringValue, workspaceSession as validateWorkspaceSession } from './ipc-validation'
+import { recoverableContexts } from '../src/session-recovery'
 import { ensureInternalGitignore, fileStamp, internalDir, writeFileAtomic } from './workspace'
 
 // Hot exit: the workbench's open tabs and their unsaved buffers, so quitting or
@@ -200,6 +201,39 @@ export function hasBackup(workspacePath: string | null, tabId: string, slot = 0)
 export function writeShutdownBackup(workspacePath: string | null, tabId: string, content: string, slot = 0): { unbacked: boolean } {
   if (writeBackup(workspacePath, tabId, content, slot).success) return { unbacked: false }
   return { unbacked: !hasBackup(workspacePath, tabId, slot) }
+}
+
+/** The synchronous shutdown flush: every buffer it can write, then the session,
+ * claiming only tabs whose text is on disk — only this side learns which writes
+ * landed. Each buffer stands alone: one too large or malformed costs that tab,
+ * never the rest of the flush. */
+export function applyShutdownFlush(
+  workspacePath: string | null,
+  payload: unknown,
+  limits: { tabId: number; content: number },
+  slot = 0,
+) {
+  const flush = payload as { session?: unknown; backups?: unknown } | null
+  const unbacked = new Set<string>()
+  if (Array.isArray(flush?.backups)) {
+    for (const entry of flush.backups.slice(0, 500)) {
+      const backup = entry as { tabId?: unknown; content?: unknown }
+      let tabId: string
+      try {
+        tabId = stringValue(backup.tabId, 'Tab id', limits.tabId)
+      } catch {
+        continue
+      }
+      try {
+        if (writeShutdownBackup(workspacePath, tabId, stringValue(backup.content, 'Buffer', limits.content), slot).unbacked) unbacked.add(tabId)
+      } catch {
+        if (!hasBackup(workspacePath, tabId, slot)) unbacked.add(tabId)
+      }
+    }
+  }
+  if (flush?.session === undefined) return
+  const session = validateWorkspaceSession(flush.session)
+  writeSession(workspacePath, { ...session, contexts: recoverableContexts(session.contexts, unbacked) }, slot)
 }
 
 /** The tab was saved, reverted, or closed — its buffer is no longer unsaved. */
