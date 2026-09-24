@@ -63,6 +63,7 @@ import { analyzeDestructive, type DestructiveKind } from '../sql-destructive'
 import { isSingleStatement, splitScript, splitTopLevelStatements } from '../sql-statements'
 import { foreignKeyTargets } from '../foreign-keys'
 import { jsonColumns } from '../json-columns'
+import { numericColumns } from '../numeric-columns'
 import type { ExportFormat } from '../result-export'
 import type { FollowForeignKeyDetail, ResultNavigateDetail, SortColumnDetail } from './results-panel'
 import type { SelectionStats } from '../result-aggregate'
@@ -520,6 +521,7 @@ export class WorkbenchScreen extends LitElement {
   private _foreignKeyCache: { result: QueryResult; columns: ColumnRef[]; map: ReadonlyMap<number, ColumnReference> } | null = null
 
   private _jsonColumnCache: { result: QueryResult; columns: ColumnRef[]; set: ReadonlySet<number> } | null = null
+  private _numericColumnCache: { result: QueryResult; columns: ColumnRef[]; set: ReadonlySet<number> } | null = null
 
   private _keyColumnCache: { result: QueryResult; columns: ColumnRef[]; keys: readonly number[] } | null = null
 
@@ -2286,6 +2288,7 @@ export class WorkbenchScreen extends LitElement {
             .canGoForward=${this._queries.canGoForward(this._ctx.activeTabId)}
             .foreignKeys=${this._resultForeignKeys()}
             .jsonColumns=${this._resultJsonColumns()}
+            .numericColumns=${this._resultNumericColumns()}
             .keyColumns=${this._resultKeyColumns()}
             .tabId=${this._ctx.activeTabId}
             .editable=${this._resultEditing.hasResultCells()}
@@ -2870,6 +2873,18 @@ export class WorkbenchScreen extends LitElement {
     if (cached && cached.result === run.result && cached.columns === columns) return cached.set
     const set = jsonColumns(run.result, columns)
     this._jsonColumnCache = { result: run.result, columns, set }
+    return set
+  }
+
+  /** Result columns holding numbers, memoised and silent for a multi-set run like the JSON columns. */
+  private _resultNumericColumns(): ReadonlySet<number> {
+    const run = this._queries.runFor(this._ctx.activeTabId)
+    const columns = this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? []) : []
+    if (run.phase !== 'done' || (run.result.resultSets?.length ?? 0) > 1) return NO_JSON_COLUMNS
+    const cached = this._numericColumnCache
+    if (cached && cached.result === run.result && cached.columns === columns) return cached.set
+    const set = numericColumns(run.result, columns)
+    this._numericColumnCache = { result: run.result, columns, set }
     return set
   }
 

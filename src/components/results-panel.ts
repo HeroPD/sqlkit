@@ -52,6 +52,7 @@ export type FollowForeignKeyDetail = { row: number; col: number }
 // would read as "the data changed" to anything memoising on identity.
 const NO_FOREIGN_KEYS: ReadonlyMap<number, ColumnReference> = new Map()
 const NO_JSON_COLUMNS: ReadonlySet<number> = new Set()
+const NO_NUMERIC_COLUMNS: ReadonlySet<number> = new Set()
 const NO_KEY_COLUMNS: readonly number[] = []
 
 // A header sort button click: re-sort by `column`, or clear the sort (null).
@@ -235,6 +236,10 @@ export class ResultsPanel extends LitElement {
    * Their cells open in the JSON editor instead of the one-line inline input. */
   @property({ attribute: false })
   jsonColumns: ReadonlySet<number> = NO_JSON_COLUMNS
+
+  /** Result columns holding numbers, by column index (see src/numeric-columns.ts); right-aligned. */
+  @property({ attribute: false })
+  numericColumns: ReadonlySet<number> = NO_NUMERIC_COLUMNS
 
   /** Result columns holding the row's primary key. The one thing that still
    * names a row after a save re-runs the query — row numbers move, and values
@@ -3268,8 +3273,9 @@ export class ResultsPanel extends LitElement {
         this._renderDraft(draft.cells, index, draftToDisplay[index] ?? 0, result.columns.length, numColWidth),
       )
     return html`
+      ${this.numericColumns.size ? html`<style>${this._numericColumnStyle()}</style>` : ''}
       <table
-        class=${this._resizing ? 'resizing' : ''}
+        class="data ${this._resizing ? 'resizing' : ''}"
         style="width: ${tableWidth}px"
         tabindex="0"
         @contextmenu=${this._onTableContextMenu}
@@ -3379,6 +3385,19 @@ export class ResultsPanel extends LitElement {
   // A column header with an optional sort button. The button shows the active
   // direction when this column is sorted; clicking it opens a sort-only menu
   // (Ascending / Descending / Clear). Sorting is also in the right-click menu.
+  // Numbers line up on their right edge, header included; the sort arrow moves to the
+  // left edge there, or on hover it would sit over the end of the column name.
+  private _numericColumnStyle() {
+    const cells = (select: (nth: string) => string) =>
+      [...this.numericColumns].map((col) => select(`:nth-child(${col + 2})`)).join(', ')
+    return `
+      ${cells((nth) => `table.data tbody td${nth}`)} { text-align: right; font-variant-numeric: tabular-nums; }
+      ${cells((nth) => `table.data thead th${nth} .th-inner`)} { justify-content: flex-end; }
+      ${cells((nth) => `table.data thead th${nth} .th-sort`)} { right: auto; left: 6px; }
+      ${cells((nth) => `table.data thead th.sorted${nth} .th-inner`)} { padding-right: 0; padding-left: 18px; }
+    `
+  }
+
   private _renderHeader(column: string, col: number, sortable: boolean, dir: SortDir | null) {
     // A thin grip on the header's right edge, dragged to resize the column;
     // double-click restores the measured width.
@@ -4055,6 +4074,12 @@ export class ResultsPanel extends LitElement {
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.03em;
+      }
+
+      /* A column name is an identifier, and identifiers can be case-sensitive ("userId" is not USERID). */
+      table.data th {
+        text-transform: none;
+        letter-spacing: normal;
       }
 
       th.sorted {

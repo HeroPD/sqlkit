@@ -62,6 +62,22 @@ async function mountGrid(n: number) {
 const key = (el: HTMLElement, init: KeyboardEventInit) =>
   el.shadowRoot!.querySelector('table')!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }))
 
+describe('results-panel column presentation', () => {
+  it('right-aligns the numeric columns it is given and keeps each name in its own case', async () => {
+    const el = document.createElement('results-panel')
+    el.run = { phase: 'done', result: { columns: ['name', 'sum(o.total)'], rows: [['Ada', 50]], rowCount: 1, durationMs: 1 } }
+    el.numericColumns = new Set([1])
+    document.body.append(el)
+    await el.updateComplete
+
+    const rule = el.shadowRoot!.querySelector('style')?.textContent ?? ''
+    expect(rule).toContain('table.data tbody td:nth-child(3)')
+    expect(rule).toContain('text-align: right')
+    expect(el.shadowRoot!.querySelectorAll('.th-name')[1]?.textContent).toBe('sum(o.total)')
+    el.remove()
+  })
+})
+
 describe('results-panel Find', () => {
   it('opens from Ctrl/Cmd+F and navigates matching cells', async () => {
     const el = await mountGrid(3)

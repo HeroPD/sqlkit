@@ -171,6 +171,9 @@ export class ConfirmDialog extends LitElement {
 
       .dialog-head p {
         line-height: 1.5;
+        /* Details can carry paragraphs (an error, then what to do about it) and long file paths. */
+        white-space: pre-line;
+        overflow-wrap: anywhere;
       }
 
       .footer {

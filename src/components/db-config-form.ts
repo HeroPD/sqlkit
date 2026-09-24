@@ -89,9 +89,13 @@ export class DbConfigForm extends LitElement {
     }
   }
 
+  // Numbers each field in render order, so a label and its control find each other.
+  private _fieldCount = 0
+
   render() {
     const draft = this.profile
     if (!draft) return html``
+    this._fieldCount = 0
 
     return html`
       <div class="card" @keydown=${this._onFieldKeydown}>
@@ -126,7 +130,7 @@ export class DbConfigForm extends LitElement {
           <button class="primary" @click=${this._onSave}>${t('common.save')}</button>
           <button class="secondary" @click=${this._onCancel}>${t('common.cancel')}</button>
           <span class="spacer"></span>
-          <span class="test-result ${this._test.phase}" title=${'message' in this._test ? this._test.message : ''}>
+          <span class="test-result ${this._test.phase}" role="status" title=${'message' in this._test ? this._test.message : ''}>
             ${'message' in this._test ? this._test.message : ''}
           </span>
           <button class="secondary" @click=${this._onTest} ?disabled=${this._test.phase === 'testing'}>
@@ -296,7 +300,7 @@ export class DbConfigForm extends LitElement {
           ssl.mode === 'require' ? '' : t('config.verifyFullHelp'),
         )}
         ${ssl.mode === 'require'
-          ? html`<p class="ssl-warning" role="alert">
+          ? html`<p class="ssl-warning">
               <span aria-hidden="true">⚠</span>
               <span
                 ><strong>${t('config.requireWarningStrong')}</strong>${t('config.requireWarningTail')}</span
@@ -405,7 +409,7 @@ export class DbConfigForm extends LitElement {
             <button class="secondary" @click=${this._onTestSsh} ?disabled=${this._sshTest.phase === 'testing'}>
               ${this._sshTest.phase === 'testing' ? t('config.testing') : t('config.testSsh')}
             </button>
-            <span class="test-result ${this._sshTest.phase}" title=${'message' in this._sshTest ? this._sshTest.message : ''}>
+            <span class="test-result ${this._sshTest.phase}" role="status" title=${'message' in this._sshTest ? this._sshTest.message : ''}>
               ${'message' in this._sshTest ? this._sshTest.message : ''}
             </span>
           </div>
@@ -480,13 +484,34 @@ export class DbConfigForm extends LitElement {
   }
 
   private _field(label: string, control: TemplateResult, helper = '') {
+    const id = `field-${(this._fieldCount += 1)}`
     return html`
-      <div class="field">
-        <span class="field-label">${label}</span>
+      <div class="field" data-field=${id}>
+        ${label ? html`<label class="field-label" for="${id}-control">${label}</label>` : html`<span class="field-label"></span>`}
         <div class="field-control">${control}</div>
-        ${helper ? html`<div class="field-helper muted small">${helper}</div>` : ''}
+        ${helper ? html`<div class="field-helper muted small" id="${id}-help">${helper}</div>` : ''}
       </div>
     `
+  }
+
+  // The controls come from several helpers, so they are tied to their field's label and
+  // helper here: the label names the control, the helper describes it, a click on the label focuses it.
+  protected updated() {
+    for (const field of this.renderRoot.querySelectorAll<HTMLElement>('.field[data-field]')) {
+      const id = field.dataset.field!
+      const label = field.querySelector<HTMLLabelElement>('label.field-label')
+      if (!label) continue
+      const select = field.querySelector<UiSelect>('.field-control ui-select')
+      if (select) {
+        select.label = label.textContent ?? ''
+        continue
+      }
+      const input = field.querySelector<HTMLInputElement>(".field-control input:not([type='checkbox'])")
+      if (!input) continue
+      input.id = `${id}-control`
+      if (field.querySelector(`#${id}-help`)) input.setAttribute('aria-describedby', `${id}-help`)
+      else input.removeAttribute('aria-describedby')
+    }
   }
 
   private _patch(partial: Partial<ConnectionProfile>) {

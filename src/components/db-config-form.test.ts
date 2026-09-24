@@ -325,3 +325,31 @@ describe('DbConfigForm sqlite file picker', () => {
     expect(changes).toHaveLength(0)
   })
 })
+
+describe('DbConfigForm accessibility', () => {
+  it('names every text field by its label and describes it by its helper', async () => {
+    const { form } = setup()
+    document.body.appendChild(form)
+    await form.updateComplete
+
+    const root = form.shadowRoot!
+    const host = [...root.querySelectorAll<HTMLLabelElement>('label.field-label')].find((label) => label.textContent === 'Host')!
+    const input = root.getElementById(host.htmlFor) as HTMLInputElement
+    expect(input.tagName).toBe('INPUT')
+    expect(input.labels?.[0]).toBe(host)
+    expect(root.getElementById(input.getAttribute('aria-describedby')!)?.textContent).toBe('Hostname, IP, or server name.')
+    expect(root.querySelector('ui-select')?.label).toBe('Driver')
+    form.remove()
+  })
+
+  it('announces a test result, and does not interrupt with the static SSL note', async () => {
+    const { form } = setup({ ssl: { mode: 'require', ca: '' } })
+    document.body.appendChild(form)
+    await form.updateComplete
+
+    const root = form.shadowRoot!
+    expect(root.querySelector('footer .test-result')?.getAttribute('role')).toBe('status')
+    expect(root.querySelector('.ssl-warning')?.getAttribute('role')).toBeNull()
+    form.remove()
+  })
+})

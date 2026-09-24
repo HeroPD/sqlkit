@@ -2455,9 +2455,8 @@ export class TableInspect extends LitElement {
 
       .def .kw {
         font-weight: 600;
-        /* The editor's keyword violet (sql-editor.ts softHighlightStyle), so
-           definitions read as the same language as the editor. */
-        color: #a163b5;
+        /* The editor's keyword colour, so definitions read as the same language. */
+        color: var(--syntax-keyword);
       }
 
       /* Drawn from currentColor so the badge follows the cell through selection

@@ -1,4 +1,4 @@
-import type { ColumnRef, QueryResult } from './electron'
+import type { ColumnRef, QueryResult, QueryResultSet } from './electron'
 
 // Which result columns hold a JSON document, by result column index. Kept out
 // of the results panel so the rule is testable without a grid, and shaped like
@@ -15,12 +15,12 @@ const key = (schema: string | null | undefined, table: string, column: string) =
 // guessing from the value.
 const isJsonType = (dataType: string) => /^jsonb?$/.test(dataType.trim().toLowerCase())
 
-export function jsonColumns(result: QueryResult, columns: ColumnRef[]): Set<number> {
-  const found = new Set<number>()
+/** Each result column's declared table column, where a column source names one. */
+export function sourceColumnMeta(result: QueryResultSet, columns: ColumnRef[]): Array<ColumnRef | undefined> {
   // Without column sources a result column cannot be traced back to a table,
   // so its declared type is unknown.
   const sources = result.columnSources
-  if (!sources) return found
+  if (!sources) return []
 
   // Exact match first, folded as a fallback: quoted identifiers can differ only
   // by case (Postgres "Payload" vs payload), so a folded-only lookup could bind
@@ -32,10 +32,16 @@ export function jsonColumns(result: QueryResult, columns: ColumnRef[]): Set<numb
     folded.set(key(column.schema?.toLowerCase(), column.table.toLowerCase(), column.name.toLowerCase()), column)
   }
 
-  sources.forEach((source, index) => {
-    if (!source.table || !source.column) return
-    const meta = exact.get(key(source.schema, source.table, source.column))
+  return sources.map((source) => {
+    if (!source.table || !source.column) return undefined
+    return exact.get(key(source.schema, source.table, source.column))
       ?? folded.get(key(source.schema?.toLowerCase(), source.table.toLowerCase(), source.column.toLowerCase()))
+  })
+}
+
+export function jsonColumns(result: QueryResult, columns: ColumnRef[]): Set<number> {
+  const found = new Set<number>()
+  sourceColumnMeta(result, columns).forEach((meta, index) => {
     if (meta && isJsonType(meta.dataType)) found.add(index)
   })
   return found

@@ -317,6 +317,10 @@
   --staged-edit-fg: #855f24;
   --staged-add-fg: #337b3e;
   --staged-delete-fg: #ad3745;
+  /* Darker than the dark themes' dots: they double as text colour (test results, timings, errors). */
+  --status-dot-connected: #2a7a3b;
+  --status-dot-warning: #8a5a00;
+  --status-dot-error: #b3261e;
   --transaction-fg: #73539b;
   --scrollbar-thumb: rgba(80, 88, 100, 0.35);
   --scrollbar-thumb-hover: rgba(70, 78, 90, 0.55);

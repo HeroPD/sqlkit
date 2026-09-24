@@ -276,8 +276,9 @@ export class WelcomeScreen extends LitElement {
 
       kbd {
         padding: 2px 5px;
-        color: var(--text-3);
-        background: color-mix(in srgb, var(--bg) 80%, black);
+        /* Tinted toward the text colour, not black, so the chip stays readable on the light theme too. */
+        color: var(--text-2);
+        background: color-mix(in srgb, var(--text) 7%, var(--bg));
         border: 1px solid var(--border);
         border-bottom-color: color-mix(in srgb, var(--border) 80%, var(--text-2));
         border-radius: 3px;
@@ -368,7 +369,7 @@ export class WelcomeScreen extends LitElement {
 
       .badge {
         padding: 2px 5px;
-        color: color-mix(in srgb, var(--accent) 55%, white);
+        color: color-mix(in srgb, var(--accent) 55%, var(--text));
         background: color-mix(in srgb, var(--accent) 13%, var(--editor-bg));
         border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
         border-radius: 3px;

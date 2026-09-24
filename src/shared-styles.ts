@@ -440,18 +440,15 @@ export const popover = css`
 `
 
 // Colours for the static SQL tokenizer in src/sql-preview.ts, shared by every
-// surface that displays (rather than edits) a statement. The editor gets the same
-// palette through CodeMirror's HighlightStyle, which cannot consume plain CSS —
-// these two must stay in step with softHighlightStyle in src/codemirror/highlight.ts.
+// surface that displays (rather than edits) a statement. The same theme tokens
+// the editor's HighlightStyle reads, so both follow the theme together.
 export const sqlHighlight = css`
   .keyword {
-    /* Softened One Dark keyword colour. */
-    color: #a163b5;
+    color: var(--syntax-keyword);
   }
 
   .string {
-    /* Softened One Dark string colour. */
-    color: #7d9f65;
+    color: var(--syntax-string);
   }
 `
 
