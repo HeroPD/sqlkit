@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ConnectionProfile } from '../../src/electron'
-import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildBatchUpdates, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { createMysqlDriver, mysqlVersion } from './mysql'
@@ -359,6 +359,33 @@ describeDb('mysql driver (integration)', () => {
     } finally {
       await admin.query('set global sql_mode = ?', [mode]).catch(() => {})
       await driver.query('drop table if exists nbe_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  // The optimistic guard compares what the grid displayed with what the row holds:
+  // a single-precision FLOAT and a JSON document never matched a plain <=>.
+  it('saves grid edits to FLOAT and JSON cells', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table float_json (id int primary key, ratio float, doc json)')
+      await driver.query(`insert into float_json values (1, 0.1, '{"a": 1, "b": [1, 2]}')`)
+      const shown = (await driver.query('select id, ratio, doc from float_json')).rows[0]!
+      const meta = (name: string, dataType: string) =>
+        ({ schema: null, table: 'float_json', name, dataType, nullable: true, primaryKey: name === 'id', foreignKey: false })
+      const pks = [{ name: 'id', value: shown[0], columnMeta: meta('id', 'int') }]
+      const statements = buildBatchUpdates({
+        table: { schema: null, name: 'float_json', kind: 'table' },
+        engine: 'mysql',
+        edits: [
+          { column: 'ratio', columnMeta: meta('ratio', 'float'), value: '0.25', originalValue: shown[1], pks },
+          { column: 'doc', columnMeta: meta('doc', 'json'), value: '{"a": 2}', originalValue: shown[2], pks },
+        ],
+      })
+      expect(await driver.runBatch!(statements)).toEqual({ success: true })
+      expect((await driver.query('select ratio, doc from float_json')).rows).toEqual([[0.25, '{"a": 2}']])
+    } finally {
+      await driver.query('drop table if exists float_json').catch(() => {})
       await driver.disconnect()
     }
   })

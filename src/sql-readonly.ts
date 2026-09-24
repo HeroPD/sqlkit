@@ -17,9 +17,10 @@ const READ_HEADS = new Set(['select', 'values', 'show', 'pragma', 'table', 'with
 // Scan the whole masked statement for writing/executing words at any depth;
 // quoted names and strings are already blanked, a qualified name's tail
 // (sys.objects' "objects") is skipped via the preceding dot, and multi-part
-// words (create_date, dm_exec_sql_text) never match a bare keyword.
+// words (create_date, dm_exec_sql_text) never match a bare keyword. The OPEN*
+// rowset functions pass their text to a linked server, which may well write.
 const WRITE_WORDS =
-  /(?:^|[^.\w$])(?:insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|exec|execute|call|into|backup|restore|kill|dbcc)(?![\w$])/i
+  /(?:^|[^.\w$])(?:insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|deny|exec|execute|call|into|backup|restore|kill|dbcc|disable|enable|writetext|updatetext|shutdown|reconfigure|openquery|openrowset|opendatasource)(?![\w$])/i
 
 // Outside SQL Server a top-level FOR ends a query in a row lock
 // (FOR UPDATE/SHARE); UPDATE is caught above, but SHARE and friends are not.

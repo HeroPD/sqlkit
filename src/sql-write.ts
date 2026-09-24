@@ -117,6 +117,23 @@ const mysqlDecimalScale = (key: { value: unknown; columnMeta?: ColumnRef }): num
   return match ? Math.min(match[1]?.length ?? 0, 30) : null
 }
 
+// A MySQL FLOAT holds single precision, and the displayed value compares as a double: 0.1 never matches.
+const isMysqlFloat = (column: ColumnRef | undefined) => /^float\b/.test(baseType(column))
+// JSON compared as text never matches the server's own rendering; extracting the root normalizes
+// both sides, and unlike CAST(… AS JSON) MariaDB's LONGTEXT alias accepts it too.
+const isMysqlJson = (column: ColumnRef | undefined) => baseType(column) === 'json'
+
+// SQL Server reads text into datetime/smalldatetime by the session's DATEFORMAT, so a British
+// login takes 2024-01-12 as 1 December. Style 121 reads yyyy-mm-dd hh:mi:ss.mmm in any language;
+// text in another shape keeps the session's reading, which is what its author meant.
+const typedParameter = (engine: Engine, column: ColumnRef | undefined, value: unknown, parameter: string) =>
+  engine === 'sqlserver' && /^(?:small)?datetime$/.test(baseType(column)) && typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)
+    ? `CONVERT(${baseType(column)}, ${parameter}, 121)`
+    : parameter
+
+// Bind parameters a row's predicates take: a NULL key compares with IS NULL and binds nothing.
+const boundKeys = (keys: Array<{ value: unknown }>) => keys.filter((key) => key.value !== null && key.value !== undefined).length
+
 // A null-safe, case-exact equality predicate per engine. Plain `col = ?` misses
 // case-only concurrent changes under case-insensitive collations and never
 // matches NULL, so guards built from displayed values would silently pass or fail.
@@ -134,10 +151,12 @@ const comparisonPredicate = (
       dataType: key.columnMeta?.dataType ?? t('write.unknownType'),
     }))
   }
-  const parameter = bind(exactGuardValue(engine, key))
+  const parameter = typedParameter(engine, key.columnMeta, key.value, bind(exactGuardValue(engine, key)))
   if (engine === 'postgresql') return `${identifier} IS NOT DISTINCT FROM ${parameter}`
   if (engine === 'mysql') {
     if (isTextType(key.columnMeta)) return `BINARY ${identifier} <=> BINARY ${parameter}`
+    if (isMysqlFloat(key.columnMeta)) return `${identifier} <=> CAST(${parameter} AS FLOAT)`
+    if (isMysqlJson(key.columnMeta)) return `JSON_EXTRACT(${identifier}, '$') <=> JSON_EXTRACT(${parameter}, '$')`
     const scale = mysqlDecimalScale(key)
     return scale === null
       ? `${identifier} <=> ${parameter}`
@@ -196,7 +215,10 @@ function buildUpdateStatement(spec: BatchUpdateSpec, rows: RowUpdate[]): { sql: 
     return dialect.placeholder(params.length)
   }
   const set = rows[0]!.assignments
-    .map((entry) => `${dialect.quoteIdent(entry.column)} = ${bind(coerceValue(entry.value, entry.columnMeta, spec.engine))}`)
+    .map((entry) => {
+      const value = coerceValue(entry.value, entry.columnMeta, spec.engine)
+      return `${dialect.quoteIdent(entry.column)} = ${typedParameter(spec.engine, entry.columnMeta, value, bind(value))}`
+    })
     .join(',\n       ')
   const condition = (row: RowUpdate) =>
     [...row.pks, ...row.guards].map((key) => comparisonPredicate(spec.engine, dialect, key, bind)).join(' AND ')
@@ -225,23 +247,29 @@ export function buildBatchUpdates(spec: BatchUpdateSpec): Array<ReturnType<typeo
   const groups = new Map<string, RowUpdate[]>()
   for (const row of consolidateRowUpdates(spec)) {
     const key = assignmentSignature(row)
-    groups.set(key, [...(groups.get(key) ?? []), row])
+    const group = groups.get(key)
+    if (group) group.push(row)
+    else groups.set(key, [row])
   }
+  // Counted rather than built: rebuilding the statement per row to measure it made a
+  // pasted-down column of 20k rows take close to a minute on the UI thread.
+  const limit = parameterLimit(spec.engine)
   const result: Array<ReturnType<typeof buildUpdateStatement>> = []
   for (const group of groups.values()) {
+    // Every assignment binds once per statement; each row adds its key and guard values.
+    const shared = group[0]!.assignments.length
     let pending: RowUpdate[] = []
+    let count = shared
     for (const row of group) {
-      const candidate = buildUpdateStatement(spec, [...pending, row])
-      if (candidate.params.length <= parameterLimit(spec.engine)) {
-        pending.push(row)
-        continue
+      const own = boundKeys([...row.pks, ...row.guards])
+      if (shared + own > limit) throw new Error(t('write.editedRowTooWide'))
+      if (count + own > limit) {
+        result.push(buildUpdateStatement(spec, pending))
+        pending = []
+        count = shared
       }
-      if (!pending.length) throw new Error(t('write.editedRowTooWide'))
-      result.push(buildUpdateStatement(spec, pending))
-      pending = [row]
-      if (buildUpdateStatement(spec, pending).params.length > parameterLimit(spec.engine)) {
-        throw new Error(t('write.editedRowTooWide'))
-      }
+      pending.push(row)
+      count += own
     }
     if (pending.length) result.push(buildUpdateStatement(spec, pending))
   }
@@ -274,8 +302,10 @@ export function buildInsert(spec: InsertSpec): { sql: string; params: unknown[];
   const dialect = dialectFor(spec.engine)
   if (spec.columns.length === 0) return buildInsertDefault(spec.table, dialect)
   const columns = spec.columns.map((column) => dialect.quoteIdent(column.name)).join(', ')
-  const placeholders = spec.columns.map((_, index) => dialect.placeholder(index + 1)).join(', ')
   const params = spec.columns.map((column, index) => coerceValue(spec.values[index] ?? '', column.columnMeta, spec.engine))
+  const placeholders = spec.columns
+    .map((column, index) => typedParameter(spec.engine, column.columnMeta, params[index], dialect.placeholder(index + 1)))
+    .join(', ')
   return { sql: `INSERT INTO ${quoteQualified(spec.table, dialect)} (${columns})\nVALUES (${placeholders})`, params, expectedRows: 1 }
 }
 
@@ -307,8 +337,9 @@ export function buildInsertBatches(spec: BulkInsertSpec): Array<ReturnType<typeo
     const params: unknown[] = []
     const tuples = rows.map((row) => {
       const placeholders = row.map((value, index) => {
-        params.push(coerceValue(value, spec.columns[index]?.columnMeta, spec.engine))
-        return dialect.placeholder(params.length)
+        const coerced = coerceValue(value, spec.columns[index]?.columnMeta, spec.engine)
+        params.push(coerced)
+        return typedParameter(spec.engine, spec.columns[index]?.columnMeta, coerced, dialect.placeholder(params.length))
       })
       return `(${placeholders.join(', ')})`
     })
@@ -784,6 +815,7 @@ const canUseMembership = (engine: Engine, rows: RowKey[]): boolean => {
   const first = rows[0]![0]!
   return rows.every((pks) => pks.length === 1 && pks[0]!.name === first.name && pks[0]!.value != null)
     && supportsOptimisticComparison(engine, first.columnMeta)
+    && !(engine === 'mysql' && (isMysqlFloat(first.columnMeta) || isMysqlJson(first.columnMeta)))
 }
 
 // `col IN (…)` with comparisonPredicate's exactness moved onto the shared left
@@ -792,7 +824,7 @@ const membershipPredicate = (engine: Engine, dialect: Dialect, rows: RowKey[], b
   const first = rows[0]![0]!
   const identifier = dialect.quoteIdent(first.name)
   const values = rows.map((pks) => {
-    const parameter = bind(exactGuardValue(engine, pks[0]!))
+    const parameter = typedParameter(engine, pks[0]!.columnMeta, pks[0]!.value, bind(exactGuardValue(engine, pks[0]!)))
     const scale = engine === 'mysql' ? mysqlDecimalScale(pks[0]!) : null
     return scale === null ? parameter : `CAST(${parameter} AS DECIMAL(65,${scale}))`
   })
@@ -823,20 +855,22 @@ export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: un
 }
 
 export function buildDeleteRowBatches(spec: DeleteRowsSpec): Array<ReturnType<typeof buildDeleteRows>> {
+  // Counted rather than built, as in buildBatchUpdates: an IN list and the per-row
+  // predicates bind the same values, one per non-NULL key.
+  const limit = parameterLimit(spec.engine)
   const result: Array<ReturnType<typeof buildDeleteRows>> = []
   let pending: RowKey[] = []
+  let count = 0
   for (const row of spec.rows) {
-    const candidate = buildDeleteRows({ ...spec, rows: [...pending, row] })
-    if (candidate.params.length <= parameterLimit(spec.engine)) {
-      pending.push(row)
-      continue
+    const own = boundKeys(row)
+    if (own > limit) throw new Error(t('write.deletedRowTooWide'))
+    if (count + own > limit) {
+      result.push(buildDeleteRows({ ...spec, rows: pending }))
+      pending = []
+      count = 0
     }
-    if (!pending.length) throw new Error(t('write.deletedRowTooWide'))
-    result.push(buildDeleteRows({ ...spec, rows: pending }))
-    pending = [row]
-    if (buildDeleteRows({ ...spec, rows: pending }).params.length > parameterLimit(spec.engine)) {
-      throw new Error(t('write.deletedRowTooWide'))
-    }
+    pending.push(row)
+    count += own
   }
   if (pending.length) result.push(buildDeleteRows({ ...spec, rows: pending }))
   return result

@@ -489,6 +489,28 @@ describe('buildDeleteRows', () => {
     expect(deletes.every((statement) => statement.params.length <= 2_000)).toBe(true)
   })
 
+  // The split is counted rather than measured by rebuilding, so it must land exactly
+  // at the ceiling: NULL keys bind nothing, every assignment binds once per statement.
+  it('fills each statement exactly to the parameter ceiling, counting NULL keys as free', () => {
+    const edits = Array.from({ length: 1_000 }, (_, index) => ({
+      column: 'name',
+      columnMeta: col({ name: 'name', dataType: 'text' }),
+      value: 'same',
+      originalValue: index % 2 ? null : `old-${index}`,
+      pks: [{ name: 'id', value: index }],
+    }))
+    const updates = buildBatchUpdates({ table: users, edits, engine: 'sqlite' })
+    expect(updates.map((statement) => statement.params.length)).toEqual([900, 602])
+    expect(updates.reduce((total, statement) => total + statement.expectedRows, 0)).toBe(1_000)
+
+    const deletes = buildDeleteRowBatches({
+      table: users,
+      rows: Array.from({ length: 1_000 }, (_, index) => [{ name: 'id', value: index }, { name: 'deleted_at', value: index % 4 ? null : 'x' }]),
+      engine: 'sqlite',
+    })
+    expect(deletes.map((statement) => statement.params.length)).toEqual([900, 350])
+  })
+
   it('throws without rows or primary keys', () => {
     expect(() => buildDeleteRows({ table: users, rows: [], engine: 'postgresql' })).toThrow()
     expect(() => buildDeleteRows({ table: users, rows: [[]], engine: 'postgresql' })).toThrow()
@@ -723,6 +745,50 @@ describe('engine-aware optimistic predicates', () => {
       engine: 'sqlserver',
     })
     expect(mssqlBuilt.sql).toContain('[name] COLLATE Latin1_General_100_BIN2 = @p2 COLLATE Latin1_General_100_BIN2')
+  })
+
+  // Verified against MySQL 8.4: plain <=> matched no row for either type.
+  it('compares MySQL FLOAT at single precision and JSON as a document', () => {
+    const built = buildDeleteRows({
+      table: users,
+      rows: [[
+        { name: 'id', value: 1 },
+        { name: 'ratio', value: 0.1, columnMeta: col({ name: 'ratio', dataType: 'float' }) },
+        { name: 'doc', value: '{"a": 1}', columnMeta: col({ name: 'doc', dataType: 'json' }) },
+      ]],
+      engine: 'mysql',
+    })
+    expect(built.sql).toContain('`ratio` <=> CAST(? AS FLOAT)')
+    expect(built.sql).toContain("JSON_EXTRACT(`doc`, '$') <=> JSON_EXTRACT(?, '$')")
+
+    const byFloatKey = buildDeleteRows({
+      table: users,
+      rows: [0.1, 0.2].map((value) => [{ name: 'k', value, columnMeta: col({ name: 'k', dataType: 'float' }) }]),
+      engine: 'mysql',
+    })
+    expect(byFloatKey.sql).not.toContain(' IN (')
+    expect(byFloatKey.sql).toContain('`k` <=> CAST(? AS FLOAT)')
+  })
+
+  // Session language decides how SQL Server reads text into datetime; style 121 does not.
+  it('converts ISO datetime text explicitly on SQL Server, and leaves other shapes to the session', () => {
+    const at = col({ name: 'at', dataType: 'datetime' })
+    const [update] = buildBatchUpdates({
+      table: users,
+      engine: 'sqlserver',
+      edits: [{ column: 'at', columnMeta: at, value: '2024-01-13 09:30', originalValue: '2024-01-12 10:00:00.000', pks: [{ name: 'id', value: 1 }] }],
+    })
+    expect(update!.sql).toBe('UPDATE [public].[users]\n   SET [at] = CONVERT(datetime, @p1, 121)\n WHERE [id] = @p2 AND [at] = CONVERT(datetime, @p3, 121)')
+
+    const [insert] = buildInsertBatches({
+      table: users,
+      columns: [{ name: 'at', columnMeta: col({ name: 'at', dataType: 'smalldatetime' }) }],
+      values: [['2024-01-12 10:00'], ['12/01/2024']],
+      engine: 'sqlserver',
+    })
+    expect(insert!.sql).toContain('VALUES (CONVERT(smalldatetime, @p1, 121)),\n       (@p2)')
+    expect(buildDeleteRows({ table: users, rows: [[{ name: 'at', value: '2024-01-12 10:00:00.000', columnMeta: at }]], engine: 'postgresql' }).sql)
+      .not.toContain('CONVERT')
   })
 
   it('refuses guards on types without safe equality', () => {

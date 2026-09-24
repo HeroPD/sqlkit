@@ -19,6 +19,14 @@ describe('isReadOnlyScript', () => {
     expect(isReadOnlyScript('UPDATE t SET a = 1', 'sqlserver')).toBe(false)
     expect(isReadOnlyScript('SELECT 1; DELETE FROM t;', 'sqlserver')).toBe(false)
     expect(isReadOnlyScript('EXEC sp_who2', 'sqlserver')).toBe(false)
+    // T-SQL needs no semicolon, so each of these rides behind a read head as one statement.
+    for (const write of [
+      'DISABLE TRIGGER ALL ON t', 'ENABLE TRIGGER trg ON t', 'DENY SELECT ON t TO u', 'SHUTDOWN WITH NOWAIT',
+      'RECONFIGURE', 'WRITETEXT t.c @ptr N\'x\'', 'UPDATETEXT t.c @ptr 0 NULL N\'x\'',
+    ]) expect(isReadOnlyScript(`SELECT 1 ${write}`, 'sqlserver')).toBe(false)
+    expect(isReadOnlyScript("SELECT * FROM OPENQUERY(remote, 'DELETE FROM t')", 'sqlserver')).toBe(false)
+    expect(isReadOnlyScript("SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'SELECT 1')", 'sqlserver')).toBe(false)
+    expect(isReadOnlyScript('SELECT enabled, is_disabled FROM settings', 'sqlserver')).toBe(true)
     expect(isReadOnlyScript('SELECT * INTO #tmp FROM t', 'sqlserver')).toBe(false)
     expect(isReadOnlyScript('WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d', 'postgresql')).toBe(false)
   })

@@ -1,5 +1,5 @@
 import type { Engine } from './electron'
-import type { SqlModeFlags } from './sql-mask'
+import { maskSqlRegions, type SqlModeFlags } from './sql-mask'
 import { scanGoBatches, splitScript } from './sql-statements'
 
 /** A kind of irreversible statement a run may contain. */
@@ -140,7 +140,7 @@ function explainBody(scan: Word[], engine?: Engine): number {
   return 0
 }
 
-function classify(masked: string, engine?: Engine): DestructiveKind[] {
+function classify(masked: string, engine?: Engine, body = false): DestructiveKind[] {
   const all = words(masked)
   const scan = all.slice(explainBody(all, engine))
   const head = scan[0]
@@ -149,8 +149,9 @@ function classify(masked: string, engine?: Engine): DestructiveKind[] {
   // T-SQL makes semicolons optional and GO is a client-side separator, so one
   // split statement can hold several: every top-level keyword is a candidate
   // there. Elsewhere only the head is a statement — except a CTE's own write
-  // (WITH x AS (DELETE … RETURNING …) …), which runs wherever it sits.
-  const scanAll = engine === 'sqlserver' || head.text === 'with'
+  // (WITH x AS (DELETE … RETURNING …) …), which runs wherever it sits. A
+  // dynamic body is scanned whole too: its statements sit inside BEGIN, IF, LOOP.
+  const scanAll = body || engine === 'sqlserver' || head.text === 'with'
   // The cost of scanning all of a T-SQL statement is routine bodies: the writes
   // in a CREATE PROCEDURE define what it will do later, not what runs now.
   if (scanAll && (head.text === 'create' || head.text === 'alter') && scan.slice(1, 4).some((word) => ROUTINES.has(word.text))) {
@@ -160,11 +161,13 @@ function classify(masked: string, engine?: Engine): DestructiveKind[] {
   const found: DestructiveKind[] = []
   const consumed = new Set<number>()
   const limit = scanAll ? scan.length : 1
+  // A MERGE branch's UPDATE/DELETE is scoped by the merge's ON condition; a
+  // PL/pgSQL IF … THEN DROP … is not, so the rule needs a MERGE to apply.
+  const merges = scan.some((word) => word.text === 'merge')
   for (let index = 0; index < limit; index += 1) {
     if (consumed.has(index)) continue
     const word = scan[index]!
-    // A MERGE branch's UPDATE/DELETE is scoped by the merge's ON condition.
-    if (scan[index - 1]?.text === 'then') continue
+    if (merges && scan[index - 1]?.text === 'then') continue
     if (word.depth > 0 && !(head.text === 'with' && WRITES.has(word.text))) continue
     switch (word.text) {
       case 'drop': {
@@ -196,6 +199,66 @@ function classify(masked: string, engine?: Engine): DestructiveKind[] {
   return found
 }
 
+// A literal's content: prefixes and delimiters off, doubled quotes (and MySQL's backslash escapes) undone.
+function literalText(raw: string, engine?: Engine): string {
+  const dollar = /^(\$[A-Za-z_0-9]*\$)([\s\S]*)\1$/.exec(raw)
+  if (dollar) return dollar[2]!
+  const quoted = /^[NnEe]?(['"])([\s\S]*)\1$/.exec(raw)
+  if (!quoted) return ''
+  const text = quoted[2]!.replaceAll(`${quoted[1]}${quoted[1]}`, quoted[1]!)
+  return engine === 'mysql' ? text.replace(/\\(.)/g, '$1') : text
+}
+
+/**
+ * The SQL a statement hands the server from string literals: a DO block's body,
+ * the strings inside EXEC( … ), sp_executesql's statement, PREPARE … FROM's text.
+ * Only those exact shapes, so a literal passed as a procedure argument is never
+ * mistaken for SQL.
+ */
+function dynamicBodies(raw: string, engine?: Engine, mode?: SqlModeFlags): string[] {
+  const { masked, regions } = maskSqlRegions(raw, engine, mode)
+  const literals = regions.filter((region) => region.kind !== 'comment')
+  const firstAfter = (offset: number) => {
+    const region = literals.find((entry) => entry.from >= offset)
+    return region ? [literalText(raw.slice(region.from, region.to), engine)] : []
+  }
+  if (engine === 'postgresql') {
+    const match = /^\s*do\b/i.exec(masked)
+    return match ? firstAfter(match[0].length) : []
+  }
+  if (engine === 'mysql') {
+    const match = /^\s*prepare\s+\S+\s+from\b/i.exec(masked)
+    return match ? firstAfter(match[0].length) : []
+  }
+  if (engine !== 'sqlserver') return []
+  const bodies: string[] = []
+  for (const match of masked.matchAll(/\bexec(?:ute)?\s*\(/gi)) {
+    // EXEC('a' + 'b') runs the concatenation, so every literal up to the matching paren belongs to it.
+    let depth = 0
+    let close = masked.length
+    for (let index = match.index + match[0].length - 1; index < masked.length; index += 1) {
+      if (masked[index] === '(') depth += 1
+      else if (masked[index] === ')' && --depth === 0) {
+        close = index
+        break
+      }
+    }
+    bodies.push(literals
+      .filter((region) => region.from > match.index && region.to <= close)
+      .map((region) => literalText(raw.slice(region.from, region.to), engine))
+      .join(''))
+  }
+  for (const match of masked.matchAll(/\bsp_executesql\b/gi)) bodies.push(...firstAfter(match.index + match[0].length))
+  return bodies
+}
+
+/** The risks in SQL a statement runs from string literals, each read as a script of its own. */
+function dynamicRisks(raw: string, engine?: Engine, mode?: SqlModeFlags): DestructiveKind[] {
+  return dynamicBodies(raw, engine, mode)
+    .filter((body) => body.trim())
+    .flatMap((body) => splitScript(body, engine, mode).statements.flatMap((statement) => classify(statement.masked, engine, true)))
+}
+
 const SHOWPLAN_MODES = new Set(['showplan_all', 'showplan_xml', 'showplan_text'])
 
 /** The SHOWPLAN switch this statement flips, if any. SQL Server's estimated
@@ -224,6 +287,8 @@ function showplanSwitch(masked: string): 'on' | 'off' | undefined {
  *    splits at its body's semicolons and can raise a *false* warning about a
  *    write that merely gets defined.
  *  - A WHERE spelled as a tautology (WHERE 1=1) reads as a scoped write.
+ *  - Dynamic SQL is read only from literals (DO $$ … $$, EXEC('…'), PREPARE …
+ *    FROM '…'); SQL assembled in a variable, EXEC(@sql), cannot be seen.
  */
 export function analyzeDestructive(sql: string, engine?: Engine, mode?: SqlModeFlags): DestructiveKind[] {
   if (!sql.trim()) return []
@@ -241,7 +306,10 @@ export function analyzeDestructive(sql: string, engine?: Engine, mode?: SqlModeF
     for (const statement of splitScript(batch, engine, mode).statements) {
       const showplan = engine === 'sqlserver' ? showplanSwitch(statement.masked) : undefined
       if (showplan) compiledOnly = showplan === 'on'
-      else if (!compiledOnly) for (const kind of classify(statement.masked, engine)) found.add(kind)
+      else if (!compiledOnly) {
+        for (const kind of classify(statement.masked, engine)) found.add(kind)
+        for (const kind of dynamicRisks(statement.raw, engine, mode)) found.add(kind)
+      }
     }
   }
   return SEVERITY.filter((kind) => found.has(kind))

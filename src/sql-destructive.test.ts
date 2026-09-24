@@ -161,3 +161,30 @@ describe('analyzeDestructive', () => {
     expect(analyzeDestructive('select dropped from t')).toEqual([])
   })
 })
+
+// The statement itself is only a carrier; what it runs sits in a string the mask blanks.
+describe('analyzeDestructive over dynamic SQL', () => {
+  it('reads a DO block body on Postgres', () => {
+    expect(analyzeDestructive('DO $$ BEGIN DELETE FROM users; END $$', 'postgresql')).toEqual(['deleteAll'])
+    expect(analyzeDestructive("DO $body$\nBEGIN\n  IF true THEN\n    DROP TABLE audit;\n  END IF;\nEND\n$body$ LANGUAGE plpgsql", 'postgresql')).toEqual(['drop'])
+    expect(analyzeDestructive('DO $$ BEGIN DELETE FROM users WHERE id = 1; END $$', 'postgresql')).toEqual([])
+  })
+
+  it('reads EXEC( … ) and sp_executesql on SQL Server, concatenations included', () => {
+    expect(analyzeDestructive("EXEC('DROP TABLE t')", 'sqlserver')).toEqual(['drop'])
+    expect(analyzeDestructive("EXECUTE ('TRUNCATE ' + 'TABLE events')", 'sqlserver')).toEqual(['truncate'])
+    expect(analyzeDestructive("EXEC sp_executesql N'DELETE FROM users', N'@id int'", 'sqlserver')).toEqual(['deleteAll'])
+    expect(analyzeDestructive("EXEC sp_executesql N'UPDATE users SET name = ''x'' WHERE id = @id', N'@id int', @id = 1", 'sqlserver')).toEqual([])
+  })
+
+  it('reads PREPARE … FROM on MySQL', () => {
+    expect(analyzeDestructive("PREPARE s FROM 'TRUNCATE TABLE t'", 'mysql')).toEqual(['truncate'])
+    expect(analyzeDestructive('PREPARE s FROM "DELETE FROM t WHERE id = ?"', 'mysql')).toEqual([])
+  })
+
+  it('never reads a procedure argument or plain string as SQL', () => {
+    expect(analyzeDestructive("EXEC log_event 'user update', 'delete requested'", 'sqlserver')).toEqual([])
+    expect(analyzeDestructive("SELECT 'DROP TABLE t'", 'postgresql')).toEqual([])
+    expect(analyzeDestructive("EXEC(@sql)", 'sqlserver')).toEqual([])
+  })
+})
