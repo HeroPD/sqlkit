@@ -55,7 +55,7 @@ export type WorkspaceIpcContext = {
   workspaceFor(contents: WebContents): string | null
   /** Which session file this window owns; windows sharing a workspace differ. */
   sessionSlotFor(contents: WebContents): number
-  setWorkspace(contentsId: number, path: string): void
+  setWorkspace(contentsId: number, path: string, slot?: number): void
   clearWorkspace(contentsId: number): void
   managerFor(contentsId: number): ConnectionManager | undefined
   focusExistingWorkspace(path: string, requesterId: number): boolean
@@ -63,6 +63,10 @@ export type WorkspaceIpcContext = {
   notifySharedChanged(contentsId: number, kind: SharedWorkspaceFile): void
   isAuthorizedRecentWorkspace(path: string): boolean
   createWindow(): void
+  /** Opens a window for each slot a crash left on this workspace. */
+  reopenAbandonedWindows(path: string): void
+  /** The workspace and slot a window was opened to restore, taken once. */
+  takePendingWorkspace(contentsId: number): { path: string; slot: number } | null
   /** A renderer finished its pre-quit session flush; releases main's wait. */
   notifySessionFlushed(contentsId: number): void
   /** Waits for a renderer to persist its open tabs, bounded by main. */
@@ -70,7 +74,7 @@ export type WorkspaceIpcContext = {
 }
 
 export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
-  const watchOpened = async (contents: WebContents, opened: ReturnType<typeof openWorkspace>) => {
+  const watchOpened = async (contents: WebContents, opened: ReturnType<typeof openWorkspace>, slot?: number) => {
     if (!opened.success) return
     // Before this window points at the new workspace: the tabs it still holds
     // belong to the old one, and a write that lands after the swap would file
@@ -79,10 +83,12 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     await context.flushSession(contents)
     markSessionClean(context.workspaceFor(contents), context.sessionSlotFor(contents))
     await context.managerFor(contents.id)?.disconnectAll()
-    context.setWorkspace(contents.id, opened.path)
+    context.setWorkspace(contents.id, opened.path, slot)
     startWorkspaceWatcher(contents.id, opened.path, () => {
       if (!contents.isDestroyed()) contents.send('workspace:files-changed')
     })
+    // The other windows that were open on this workspace when the app went down come back with it.
+    context.reopenAbandonedWindows(opened.path)
   }
 
   ipcMain.handle('workspace:open', async (event) => {
@@ -116,6 +122,18 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (opened.success && window) window.setTitle(`SqlKit Studio — ${opened.name}`)
     await watchOpened(event.sender, opened)
+    return opened
+  })
+
+  // A window opened to restore a crashed one asks for its workspace on startup.
+  // The path came from main, from a workspace another window already opened.
+  ipcMain.handle('workspace:open-pending', async (event) => {
+    const pending = context.takePendingWorkspace(event.sender.id)
+    if (!pending) return null
+    const opened = openWorkspace(pending.path)
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (opened.success && window) window.setTitle(`SqlKit Studio — ${opened.name}`)
+    await watchOpened(event.sender, opened, pending.slot)
     return opened
   })
 

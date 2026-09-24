@@ -276,6 +276,31 @@ export function claimSessionSlot(wsPath: string, slot: number): boolean {
   return false
 }
 
+/** Slots a crash left behind: a session still marked unclean, holding tabs, and
+ * held by no running process. Each was a window open on this workspace when the
+ * app went down, and reopening one restores it. Slots this process's own windows
+ * hold read as abandoned here; the caller leaves those out. */
+export function abandonedSessionSlots(wsPath: string): number[] {
+  let entries: string[]
+  try {
+    entries = fs.readdirSync(internalDir(wsPath))
+  } catch {
+    return []
+  }
+  const slots: number[] = []
+  for (const entry of entries) {
+    const match = /^session(?:\.(\d+))?\.json$/.exec(entry)
+    if (!match) continue
+    const slot = match[1] === undefined ? 0 : Number(match[1])
+    const session = readSession(wsPath, slot)
+    if (!session?.unclean || !session.contexts.some((context) => context.tabs.length)) continue
+    const held = readLock(lockPathFor(wsPath, slot))
+    if (held && lockIsLive(held)) continue
+    slots.push(slot)
+  }
+  return slots.sort((a, b) => a - b)
+}
+
 /** Gives a slot's lock back, if this process is the one holding it. */
 export function releaseSessionSlot(wsPath: string, slot: number) {
   try {

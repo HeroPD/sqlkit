@@ -33,6 +33,22 @@ describe('AppRoot menu actions', () => {
     expect(root._onOpenFolder).toHaveBeenCalledOnce()
   })
 
+  it('opens the workspace a window was created to restore', async () => {
+    const root = new AppRoot() as never as {
+      _screen: string
+      _workspace: { name: string; path: string } | null
+      _loadRecents(): Promise<void>
+      _openPending(): Promise<void>
+    }
+    root._loadRecents = () => Promise.resolve()
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      openPendingWorkspace: () => Promise.resolve({ success: true, path: '/ws', name: 'ws' }),
+    }
+    await root._openPending()
+    expect(root._screen).toBe('workbench')
+    expect(root._workspace).toEqual({ name: 'ws', path: '/ws' })
+  })
+
   it('opens settings from the menu and remembers the screen to return to', () => {
     const root = new AppRoot() as never as {
       _screen: string

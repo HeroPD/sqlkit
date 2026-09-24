@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { SessionTab, WorkspaceSession } from '../src/electron'
-import { applyShutdownFlush, claimSessionSlot, dropBackup, hasBackup, markSessionClean, readBackup, readSession, releaseSessionSlot, writeBackup, writeSession, writeShutdownBackup } from './session'
+import { abandonedSessionSlots, applyShutdownFlush, claimSessionSlot, dropBackup, hasBackup, markSessionClean, readBackup, readSession, releaseSessionSlot, writeBackup, writeSession, writeShutdownBackup } from './session'
 
 const state = vi.hoisted(() => ({ userData: '' }))
 
@@ -441,5 +441,29 @@ describe('session slot locks', () => {
     expect(claimSessionSlot(workspace, 0)).toBe(true)
     fs.writeFileSync(lockFile(1), '{"pid": 12')
     expect(claimSessionSlot(workspace, 1)).toBe(true)
+  })
+})
+
+// A crash with two windows open leaves two unclean sessions; reopening the
+// workspace brings the first back, and these are the others.
+describe('abandonedSessionSlots', () => {
+  const write = (slot: number, over: Partial<WorkspaceSession> & { unclean?: boolean }, tabs = [sqlTab()]) => {
+    fs.mkdirSync(path.join(workspace, '.sqlkit'), { recursive: true })
+    const file = path.join(workspace, '.sqlkit', slot === 0 ? 'session.json' : `session.${slot}.json`)
+    fs.writeFileSync(file, JSON.stringify({ ...session(tabs), ...over }))
+  }
+
+  it('lists crashed sessions with tabs that no running process holds', () => {
+    write(0, { unclean: true })
+    write(1, { unclean: true })
+    write(2, { unclean: false })
+    write(3, { unclean: true }, [])
+    write(4, { unclean: true })
+    fs.writeFileSync(path.join(workspace, '.sqlkit', 'session.4.lock'), JSON.stringify({ pid: process.ppid, boot: Math.round(Date.now() / 1000 - os.uptime()) }))
+    expect(abandonedSessionSlots(workspace)).toEqual([0, 1])
+  })
+
+  it('has none for a workspace without a .sqlkit folder', () => {
+    expect(abandonedSessionSlots(workspace)).toEqual([])
   })
 })

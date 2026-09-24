@@ -39,6 +39,13 @@ export class AppRoot extends LitElement {
     this._applyTitlebarInset(false)
     this._unsubscribeFullScreen = window.sqlkit.onFullScreenChange((full) => this._applyTitlebarInset(full))
     void this._loadRecents()
+    void this._openPending()
+  }
+
+  // A window main opened to bring back one a crash closed: its workspace, restored like any other open.
+  private async _openPending() {
+    const result = await window.sqlkit.openPendingWorkspace()
+    if (result) this._enter(result)
   }
 
   disconnectedCallback() {

@@ -506,6 +506,8 @@ export type SqlkitApi = {
   writeClipboardText: (text: string) => Promise<void>
   openWorkspace: () => Promise<WorkspaceResult>
   openWorkspacePath: (path: string) => Promise<WorkspaceResult>
+  /** For a window main opened to restore one a crash closed: opens its workspace, or null. */
+  openPendingWorkspace: () => Promise<WorkspaceResult | null>
   closeWorkspace: () => Promise<void>
   /** Reveals the open workspace root in the OS file manager (Finder/Explorer). */
   revealWorkspace: () => Promise<void>

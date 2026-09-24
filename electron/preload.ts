@@ -6,6 +6,7 @@ const api: SqlkitApi = {
   writeClipboardText: (text) => ipcRenderer.invoke('clipboard:write-text', text),
   openWorkspace: () => ipcRenderer.invoke('workspace:open'),
   openWorkspacePath: (path) => ipcRenderer.invoke('workspace:open-path', path),
+  openPendingWorkspace: () => ipcRenderer.invoke('workspace:open-pending'),
   closeWorkspace: () => ipcRenderer.invoke('workspace:close'),
   revealWorkspace: () => ipcRenderer.invoke('workspace:reveal'),
   newWindow: () => ipcRenderer.invoke('app:new-window'),

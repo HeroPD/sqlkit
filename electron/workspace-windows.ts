@@ -37,13 +37,16 @@ export class WorkspaceWindows {
   }
 
   /** Points a window at a workspace, claiming the lowest slot free on it — free
-   * in this process and not held by another one. */
-  open(contentsId: number, wsPath: string) {
+   * in this process and not held by another one. `preferred` is the slot of a
+   * window being reopened after a crash, taken when it is still free. */
+  open(contentsId: number, wsPath: string, preferred?: number) {
     this.close(contentsId)
     const target = normalizeWorkspacePath(wsPath)
     const taken = new Set(this.owners(target, contentsId).map((id) => this.slots.get(id) ?? 0))
+    const free = (candidate: number) => !taken.has(candidate) && this.locks.claim(wsPath, candidate)
     let slot = 0
-    while (taken.has(slot) || !this.locks.claim(wsPath, slot)) slot += 1
+    if (preferred !== undefined && free(preferred)) slot = preferred
+    else while (slot === preferred || !free(slot)) slot += 1
     this.paths.set(contentsId, wsPath)
     this.slots.set(contentsId, slot)
   }

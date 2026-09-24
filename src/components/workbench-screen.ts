@@ -688,7 +688,10 @@ export class WorkbenchScreen extends LitElement {
       // without waiting on the IPC, so main's own flush would arrive after this
       // state is gone. A switch is the other way round — main flushes before it
       // repoints the window, and writing here would land in the new workspace.
-      if (!this.workspace) this._session.flushOutgoing()
+      // Only when one was open: a first render also reports the property as
+      // changed, and flushing then filed an empty session under whatever slot
+      // main had just handed this window, pruning the backups it was to restore.
+      if (!this.workspace && changed.get('workspace')) this._session.flushOutgoing()
       this._fileOps.reset()
       this._session.reset()
       this._tabScroll.clear()

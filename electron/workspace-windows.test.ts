@@ -114,3 +114,20 @@ describe('WorkspaceWindows slot locks', () => {
     expect(released).toEqual([`${WS}:1`, `${OTHER}:0`])
   })
 })
+
+describe('WorkspaceWindows preferred slot', () => {
+  it('reopens a crashed window in its own slot, or the lowest free one when that is taken', () => {
+    const windows = new WorkspaceWindows()
+    windows.open(1, WS)
+    windows.open(2, WS, 2)
+    expect(windows.slotFor(2)).toBe(2)
+    windows.open(3, WS, 2)
+    expect(windows.slotFor(3)).toBe(1)
+  })
+
+  it('never hands out a preferred slot another process holds', () => {
+    const windows = new WorkspaceWindows({ claim: (_path, slot) => slot !== 1, release: () => {} })
+    windows.open(1, WS, 1)
+    expect(windows.slotFor(1)).toBe(0)
+  })
+})

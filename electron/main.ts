@@ -21,7 +21,7 @@ import { THEMES, acceleratorFor, effectiveKeymapBindings, type MenuKeymapCommand
 import { THEME_IDS, isThemeId } from '../src/themes'
 import { inspectionSwitch } from './hardening'
 import { registerWorkspaceIpc } from './ipc-workspace'
-import { claimSessionSlot, markSessionClean, releaseSessionSlot } from './session'
+import { abandonedSessionSlots, claimSessionSlot, markSessionClean, releaseSessionSlot } from './session'
 import { normalizeWorkspacePath, WorkspaceWindows } from './workspace-windows'
 import { readAppSettings, readGlobalConfig, readTheme, writeAppSettings, writeTheme } from './workspace'
 import { titleBarOverlay, WINDOW_CHROME } from './window-chrome'
@@ -175,8 +175,25 @@ const pendingShows = new Map<number, () => void>()
 // window; matching the old show-on-first-paint timing, just delayed.
 const SHOW_FALLBACK_MS = 1_000
 
-function createWindow() {
-  if (BrowserWindow.getAllWindows().length >= MAX_WINDOWS) return
+// Windows opened to restore a slot a crash left behind, by webContents id.
+const pendingWorkspaces = new Map<number, { path: string; slot: number }>()
+
+function reopenAbandonedWindows(wsPath: string) {
+  const target = normalizeWorkspacePath(wsPath)
+  const claimed = new Set([
+    ...workspaceWindows.owners(wsPath).map((id) => workspaceWindows.slotFor(id)),
+    ...[...pendingWorkspaces.values()].filter((entry) => normalizeWorkspacePath(entry.path) === target).map((entry) => entry.slot),
+  ])
+  for (const slot of abandonedSessionSlots(wsPath)) {
+    if (claimed.has(slot)) continue
+    const window = createWindow()
+    if (!window) break
+    pendingWorkspaces.set(window.webContents.id, { path: wsPath, slot })
+  }
+}
+
+function createWindow(): BrowserWindow | null {
+  if (BrowserWindow.getAllWindows().length >= MAX_WINDOWS) return null
   const theme = readTheme()
   const window = new BrowserWindow({
     width: 1440,
@@ -199,6 +216,7 @@ function createWindow() {
   const contentsId = window.webContents.id
   window.on('closed', () => {
     pendingShows.delete(contentsId)
+    pendingWorkspaces.delete(contentsId)
     notifySessionFlushed(contentsId)
     // Closing a window is an orderly exit from its workspace, and on macOS the
     // app outlives it — so the crash marker comes off here, not only at quit.
@@ -248,9 +266,10 @@ function createWindow() {
   if (devServerUrl) {
     void window.loadURL(devServerUrl).catch((error) => { if (smokeTest) console.error(error) })
     window.webContents.openDevTools({ mode: 'detach' })
-    return
+    return window
   }
   void window.loadFile(join(__dirname, '../dist/index.html')).catch((error) => { if (smokeTest) console.error(error) })
+  return window
 }
 
 function registerIpc() {
@@ -278,7 +297,7 @@ function registerIpc() {
   })
   registerWorkspaceIpc({
     workspaceFor,
-    setWorkspace: (contentsId, path) => workspaceWindows.open(contentsId, path),
+    setWorkspace: (contentsId, path, slot) => workspaceWindows.open(contentsId, path, slot),
     clearWorkspace: (contentsId) => workspaceWindows.close(contentsId),
     sessionSlotFor: (contents) => workspaceWindows.slotFor(contents.id),
     notifySharedChanged,
@@ -286,6 +305,12 @@ function registerIpc() {
     focusExistingWorkspace,
     isAuthorizedRecentWorkspace,
     createWindow,
+    reopenAbandonedWindows,
+    takePendingWorkspace: (contentsId) => {
+      const pending = pendingWorkspaces.get(contentsId) ?? null
+      pendingWorkspaces.delete(contentsId)
+      return pending
+    },
     notifySessionFlushed,
     flushSession: flushRendererSession,
   })

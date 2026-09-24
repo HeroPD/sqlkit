@@ -1858,6 +1858,15 @@ describe('WorkbenchScreen session flush on leaving a workspace', () => {
     expect(workbench._session.reset).toHaveBeenCalledTimes(1)
   })
 
+  // A window main opens to restore a crashed one is handed its slot before it
+  // first renders; flushing on that render filed an empty session there.
+  it('writes nothing on the first render, when no workspace was ever open', () => {
+    const { workbench } = mount()
+    workbench.workspace = null
+    workbench.willUpdate(new Map([['workspace', undefined]]))
+    expect(workbench._session.flushOutgoing).not.toHaveBeenCalled()
+  })
+
   it('leaves a switch to main, which flushes before it repoints the window', () => {
     const { workbench } = mount()
     workbench.workspace = { name: 'next', path: '/next' }
