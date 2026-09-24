@@ -19,7 +19,8 @@ export { formatPreviewParam, previewSql, sqlPreviewParts }
 // a generated write (UPDATE today; INSERT/DELETE later), or one the user wrote
 // that the destructive preflight stopped. Dispatches `dialog-done` /
 // `dialog-cancel`; closes itself on Escape or backdrop click. Enter runs the
-// statement, unless the Cancel button holds focus (then Enter cancels).
+// statement, unless the Cancel button holds focus (then Enter cancels) or the
+// run cannot be undone — then only a click or a focused Run button confirms.
 @customElement('review-query-dialog')
 export class ReviewQueryDialog extends LitElement {
   @property()
@@ -41,6 +42,10 @@ export class ReviewQueryDialog extends LitElement {
   /** Styles the confirm button as destructive, for a run that cannot be undone. */
   @property({ type: Boolean })
   danger = false
+
+  /** The connection and database the statement runs on, named for a destructive run. */
+  @property()
+  target = ''
 
   // Runs the reviewed statement, resolving to an error message (shown inline) or
   // null on success. The dialog owns the applying/error UI so failures stay in
@@ -107,7 +112,7 @@ export class ReviewQueryDialog extends LitElement {
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <div
           class="panel ${this.danger ? 'danger-review' : 'normal-review'}"
-          role="dialog"
+          role=${this.danger ? 'alertdialog' : 'dialog'}
           aria-modal="true"
           aria-labelledby="review-title"
           aria-describedby="review-description"
@@ -123,6 +128,9 @@ export class ReviewQueryDialog extends LitElement {
             </div>
           </header>
           <div class="content">
+            ${this.target
+              ? html`<p class="target"><i class="icon icon-database" aria-hidden="true"></i>${t('destructive.target', { target: this.target })}</p>`
+              : ''}
             <span class="preview-label">${t('review.preview')}</span>
             <pre class="sql"><code>${sqlPreviewParts(preview).map((part) =>
               part.kind ? html`<span class=${part.kind}>${part.text}</span>` : part.text,
@@ -137,7 +145,7 @@ export class ReviewQueryDialog extends LitElement {
               <button class="primary ${this.danger ? 'danger' : ''}" ?disabled=${this._applying} @click=${this._confirm}>
                 ${this._applying
                   ? html`<i class="icon icon-loader-circle icon-modifier-spin" aria-hidden="true"></i> ${t('common.applying')}`
-                  : html`${this.confirmLabel}<kbd aria-hidden="true">↵</kbd>`}
+                  : html`${this.confirmLabel}${this.danger ? '' : html`<kbd aria-hidden="true">↵</kbd>`}`}
               </button>
             </div>
           </div>
@@ -156,10 +164,12 @@ export class ReviewQueryDialog extends LitElement {
     // A bare Enter runs the statement. A focused button handles its own Enter (so
     // Enter on Cancel still cancels); otherwise we confirm. Chords are not this
     // dialog's: ⌘↵ is the editor's run shortcut, and taking it here would let a
-    // second reflexive press stand in for reading what is about to run.
+    // second reflexive press stand in for reading what is about to run. A
+    // destructive run takes no bare Enter either, for the same reason.
     if (
       event.key === 'Enter' &&
       this._armed &&
+      !this.danger &&
       !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) &&
       !(this.shadowRoot?.activeElement instanceof HTMLButtonElement)
     ) {
@@ -282,6 +292,19 @@ export class ReviewQueryDialog extends LitElement {
         display: flex;
         flex-direction: column;
         padding: 0 22px 18px;
+      }
+
+      .target {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0 0 12px;
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .target .icon {
+        color: var(--text-2);
       }
 
       .preview-label {

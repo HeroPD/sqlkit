@@ -10,6 +10,8 @@ type ConfirmConfig = {
   confirmLabel: string
   action: () => void
   danger?: boolean
+  /** Cannot be undone on the server: only a click (or a focused button) confirms, never a stray Enter. */
+  irreversible?: boolean
   /** null makes an acknowledge-only notice with no secondary action. */
   cancelLabel?: string | null
 }
@@ -49,10 +51,16 @@ export class DialogsController implements ReactiveController {
   }
 
   hostDisconnected() {
+    this.reset()
+  }
+
+  /** Drops every open and queued dialog: their actions belong to a workspace that is gone. */
+  reset() {
     this._confirmQueue = []
     this._promptQueue = []
     this._reviewQueue = []
     this._createDbQueue = []
+    this.host.requestUpdate()
   }
 
   // Setting a config enqueues it; setting null dismisses the current (head) one.

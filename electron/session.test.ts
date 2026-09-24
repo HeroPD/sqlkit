@@ -342,3 +342,32 @@ describe('backups behind a symlink', () => {
     expect(readBackup(workspace, 'tab-1')).toBeNull()
   })
 })
+
+// A session this build couldn't read restored nothing, so every backup beside it
+// looks unclaimed to the first write; those are the buffers the user still wants.
+describe('replacing a session that could not be read', () => {
+  const setAside = () => fs.readdirSync(backupsDir()).filter((entry) => entry.startsWith('unrestored-'))
+
+  it.each([
+    ['is corrupt', '{ not json'],
+    ['comes from a later format', JSON.stringify({ version: 99, contexts: [] })],
+  ])('keeps its backups in a subfolder when it %s', (_, content) => {
+    writeBackup(workspace, 'tab-1', 'unsaved work')
+    fs.writeFileSync(sessionFile(), content)
+
+    expect(writeSession(workspace, session([])).success).toBe(true)
+    expect(readBackup(workspace, 'tab-1')).toBeNull()
+    const [folder] = setAside()
+    expect(folder).toBeDefined()
+    const [kept] = fs.readdirSync(path.join(backupsDir(), folder!))
+    expect(fs.readFileSync(path.join(backupsDir(), folder!, kept!), 'utf8')).toBe('unsaved work')
+  })
+
+  it('sweeps as usual once the file is one it wrote itself', () => {
+    writeSession(workspace, session([]))
+    writeBackup(workspace, 'tab-1', 'closed since')
+    writeSession(workspace, session([]))
+    expect(readBackup(workspace, 'tab-1')).toBeNull()
+    expect(setAside()).toEqual([])
+  })
+})

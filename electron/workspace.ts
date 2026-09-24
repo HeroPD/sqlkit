@@ -31,11 +31,18 @@ import { t } from '../src/i18n'
 // temp+rename so a crash mid-write can't leave a half-written (and for the
 // workspace config, connection-wiping) file behind. The temp name is random and
 // created exclusively: a fixed one could be a symlink shipped in a cloned repo,
-// and the write would land wherever it points.
+// and the write would land wherever it points. Synced before the rename, or a
+// power cut can leave the new name pointing at a file whose data never landed.
 export const writeFileAtomic = (file: string, data: string) => {
   const tmp = `${file}.${randomBytes(6).toString('hex')}.tmp`
   try {
-    fs.writeFileSync(tmp, data, { mode: 0o600, flag: 'wx' })
+    const fd = fs.openSync(tmp, 'wx', 0o600)
+    try {
+      fs.writeFileSync(fd, data)
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
     fs.renameSync(tmp, file)
   } catch (error) {
     try {
@@ -46,6 +53,9 @@ export const writeFileAtomic = (file: string, data: string) => {
     throw error
   }
 }
+
+/** A filesystem-safe moment, for naming what is set aside rather than deleted. */
+export const fileStamp = () => new Date().toISOString().replace(/[:.]/g, '-')
 
 /** `.sqlkit`, or a folder under it, refusing any that is a symlink: a cloned repo
  * could point one elsewhere, and writing or pruning backups through it would
@@ -179,6 +189,8 @@ const GITIGNORE_RULES = [
   'config.json.tmp',
   'history.json',
   'history.json.tmp',
+  // A history file that could not be read, set aside rather than overwritten.
+  'history.*.json',
   'session.json',
   'session.json.tmp',
   // A workspace open in more than one window has a session file per window.
@@ -422,20 +434,27 @@ const MAX_HISTORY_BYTES = 64 * 1024 * 1024
 /** The workspace's persisted query history, newest first. Missing or unreadable
  * files read as empty — history is a convenience, never worth blocking on. */
 export function readWorkspaceHistory(workspacePath: string | null): HistoryItem[] {
-  if (!workspacePath) return []
+  return workspacePath ? loadWorkspaceHistory(workspacePath).items : []
+}
+
+// `unreadable` is a file that exists but can't be used: the next write must not replace it with only the new runs.
+function loadWorkspaceHistory(workspacePath: string): { items: HistoryItem[]; unreadable: boolean } {
   try {
     const file = historyPathFor(workspacePath)
-    if (fs.statSync(file).size > MAX_HISTORY_BYTES) return []
+    if (fs.statSync(file).size > MAX_HISTORY_BYTES) return { items: [], unreadable: true }
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter((entry): entry is HistoryItem =>
-      !!entry && typeof entry === 'object'
-      && typeof (entry as HistoryItem).id === 'string'
-      && typeof (entry as HistoryItem).contextKey === 'string'
-      && typeof (entry as HistoryItem).sql === 'string'
-      && typeof (entry as HistoryItem).success === 'boolean')
-  } catch {
-    return []
+    if (!Array.isArray(parsed)) return { items: [], unreadable: true }
+    return {
+      items: parsed.filter((entry): entry is HistoryItem =>
+        !!entry && typeof entry === 'object'
+        && typeof (entry as HistoryItem).id === 'string'
+        && typeof (entry as HistoryItem).contextKey === 'string'
+        && typeof (entry as HistoryItem).sql === 'string'
+        && typeof (entry as HistoryItem).success === 'boolean'),
+      unreadable: false,
+    }
+  } catch (error) {
+    return { items: [], unreadable: (error as NodeJS.ErrnoException).code !== 'ENOENT' }
   }
 }
 
@@ -464,7 +483,16 @@ function historyLimitsFor(workspacePath: string): HistoryLimits | null {
  * nothing in it is a prune: retention alone, applied to what is there. */
 export function updateWorkspaceHistory(workspacePath: string | null, patch: WorkspaceHistoryPatch): SaveResult {
   if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
-  const current = patch.clearAll ? [] : readWorkspaceHistory(workspacePath)
+  const loaded = patch.clearAll ? { items: [], unreadable: false } : loadWorkspaceHistory(workspacePath)
+  if (loaded.unreadable) {
+    // Kept beside the fresh file, not overwritten by it: it may be one bad byte away from every run.
+    try {
+      fs.renameSync(historyPathFor(workspacePath), path.join(internalDir(workspacePath), `history.unreadable-${fileStamp()}.json`))
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+  const current = loaded.items
   const kept = patch.clearContext === undefined
     ? current
     : current.filter((item) => item.contextKey !== patch.clearContext)

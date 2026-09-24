@@ -29,6 +29,10 @@ export class ConfirmDialog extends LitElement {
   @property({ type: Boolean })
   danger = false
 
+  /** Cannot be undone on the server: Enter alone never confirms, only a click or a focused button. */
+  @property({ type: Boolean })
+  irreversible = false
+
   private _returnFocus: HTMLElement | null = null
   private _armed = false
   private _armTimer: ReturnType<typeof setTimeout> | null = null
@@ -83,7 +87,7 @@ export class ConfirmDialog extends LitElement {
                   `
                 : ''}
               <button class="primary ${this.danger ? 'danger' : ''}" @click=${this._confirm}>
-                ${this.confirmLabel}<kbd aria-hidden="true">↵</kbd>
+                ${this.confirmLabel}${this.irreversible ? '' : html`<kbd aria-hidden="true">↵</kbd>`}
               </button>
             </div>
           </div>
@@ -101,6 +105,7 @@ export class ConfirmDialog extends LitElement {
     if (
       event.key === 'Enter' &&
       this._armed &&
+      !this.irreversible &&
       !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) &&
       !(this.shadowRoot?.activeElement instanceof HTMLButtonElement)
     ) {

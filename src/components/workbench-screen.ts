@@ -299,7 +299,7 @@ export class WorkbenchScreen extends LitElement {
   // user's decision back into the _runSql that is waiting on it.
   @state()
   private _destructivePrompt:
-    | { sql: string; params: unknown[]; risks: DestructiveKind[]; script: boolean; resolve: (run: boolean) => void }
+    | { sql: string; params: unknown[]; risks: DestructiveKind[]; script: boolean; target: string; resolve: (run: boolean) => void }
     | null = null
 
   @state()
@@ -507,6 +507,8 @@ export class WorkbenchScreen extends LitElement {
   // database): builds the DDL and routes it through the dialogs and query path.
   private _schemaOps = new SchemaOpsController({
     activeProfile: () => this._config.activeProfile(),
+    activeChildDb: () => this._ctx.activeChildDb,
+    targetLabel: (profileId, childDb) => this._targetLabel(profileId, childDb),
     dialogs: this._dialogs,
     openPreview: (sql) => this._ctx.openPreview(sql),
     runSql: (sql, options) => this._runSql(sql, undefined, undefined, undefined, undefined, undefined, options?.preconfirmed),
@@ -692,6 +694,12 @@ export class WorkbenchScreen extends LitElement {
       this._queries.reset()
       this._config.reset()
       this._cmdPalette.close()
+      // A confirm left open would otherwise act on the workspace just left: a Run
+      // reconnects the old profile and executes the statement it was showing.
+      this._cancelParameterPrompt()
+      this._cancelDestructivePrompt()
+      this._csvImport = null
+      this._dialogs.reset()
       this._txn.reset()
       clearEditorStateCache()
       clearInspectDraftCache()
@@ -949,6 +957,17 @@ export class WorkbenchScreen extends LitElement {
     )
   }
 
+  // Where a statement lands, named in the confirms for what cannot be undone.
+  private _targetLabel(profileId: string, childDb: string | null): string {
+    const name = this._config.byId(profileId)?.name.trim() || t('config.newDatabase')
+    return childDb ? `${name} › ${childDb}` : name
+  }
+
+  /** A dialog is up; app-root holds ⌘O until it is answered. */
+  hasModal(): boolean {
+    return this._hasModal()
+  }
+
   // State guards also cover repeated commands before the dialog's first render.
   private _hasModal(): boolean {
     return !!(this._dialogs.confirm || this._dialogs.prompt || this._dialogs.review || this._dialogs.createDb
@@ -1131,6 +1150,8 @@ export class WorkbenchScreen extends LitElement {
 
     // Reveal the results panel if it was collapsed, so the run (or its error) shows.
     this._layout.expandPanel()
+    // Checked after each wait below: a workspace switch mid-run leaves this profile disconnected and its tab gone.
+    const workspace = this.workspace
 
     const profile = this._config.activeProfile()
     if (!profile) {
@@ -1182,6 +1203,7 @@ export class WorkbenchScreen extends LitElement {
           params: params ?? [],
           risks,
           script: splitTopLevelStatements(sqlText, profile.engine).length > 1,
+          target: this._targetLabel(profile.id, childDb),
           resolve,
         }
       })
@@ -1189,6 +1211,7 @@ export class WorkbenchScreen extends LitElement {
       // Another run may have started on this tab while the dialog was open.
       if (this._queries.runFor(tabId).phase === 'running') return
     }
+    if (this.workspace !== workspace) return
 
     // Capture the context the run started in. The connect/align below await,
     // and the user may switch child or profile meanwhile; the run must target
@@ -1223,6 +1246,7 @@ export class WorkbenchScreen extends LitElement {
       this._queries.setRun(tabId, { phase: 'error', error: (error as Error).message })
       return
     }
+    if (this.workspace !== workspace) return
 
     const transactionBeforeRun = this._live.transaction(profile.id)
     const runStartedAt = Date.now()
@@ -1872,6 +1896,7 @@ export class WorkbenchScreen extends LitElement {
               .confirmLabel=${this._dialogs.confirm.confirmLabel}
               .cancelLabel=${this._dialogs.confirm.cancelLabel === undefined ? t('common.cancel') : this._dialogs.confirm.cancelLabel}
               .danger=${this._dialogs.confirm.danger ?? false}
+              .irreversible=${this._dialogs.confirm.irreversible ?? false}
               @dialog-cancel=${() => (this._dialogs.confirm = null)}
               @dialog-confirm=${this._dialogs.acceptConfirm}
             ></confirm-dialog>
@@ -1947,6 +1972,7 @@ export class WorkbenchScreen extends LitElement {
               ].join(' ')}
               .danger=${true}
               .confirmLabel=${t('destructive.run')}
+              .target=${this._destructivePrompt.target}
               .sql=${this._destructivePrompt.sql}
               .params=${this._destructivePrompt.params}
               .run=${this._runDestructive}

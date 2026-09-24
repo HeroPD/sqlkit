@@ -32,6 +32,9 @@ export type ColumnAlterSpec = {
 
 type Deps = {
   activeProfile: () => ConnectionProfile | null
+  activeChildDb: () => string | null
+  /** The connection (and database) a statement lands on, as the confirms name it. */
+  targetLabel: (profileId: string, childDb: string | null) => string
   dialogs: DialogsController
   openPreview: (sql: string) => void
   // `preconfirmed` marks a statement the user has already confirmed here, so the
@@ -76,9 +79,10 @@ export class SchemaOpsController {
     const statement = `${DROP_VERBS[table.kind]} ${quoteQualified(table, dialectFor(profile.engine))};`
     this.deps.dialogs.confirm = {
       message: t('schema.dropPrompt', { kind: tableKindLabel(table.kind), name: table.name }),
-      detail: t('schema.dropDetail'),
+      detail: t('schema.dropDetail', { target: this.deps.targetLabel(profile.id, this.deps.activeChildDb()) }),
       confirmLabel: t('schema.dropAction', { kind: tableKindLabel(table.kind) }),
       danger: true,
+      irreversible: true,
       action: () => {
         this.deps.openPreview(statement)
         // The schema changed: re-fetch tables/columns once the drop lands.
@@ -95,9 +99,13 @@ export class SchemaOpsController {
     const statement = profile.engine === 'sqlite' ? `DELETE FROM ${qualified};` : `TRUNCATE TABLE ${qualified};`
     this.deps.dialogs.confirm = {
       message: t('schema.truncatePrompt', { name: table.name }),
-      detail: t('schema.truncateDetail', { statement: statement.replace(/;$/, '') }),
+      detail: t('schema.truncateDetail', {
+        statement: statement.replace(/;$/, ''),
+        target: this.deps.targetLabel(profile.id, this.deps.activeChildDb()),
+      }),
       confirmLabel: t('schema.truncateAction'),
       danger: true,
+      irreversible: true,
       action: () => {
         this.deps.openPreview(statement)
         void this.deps.runSql(statement, { preconfirmed: true })
@@ -187,9 +195,10 @@ export class SchemaOpsController {
   dropDatabase(profileId: string, database: string) {
     this.deps.dialogs.confirm = {
       message: t('schema.dropDatabasePrompt', { database }),
-      detail: t('schema.dropDatabaseDetail'),
+      detail: t('schema.dropDatabaseDetail', { target: this.deps.targetLabel(profileId, null) }),
       confirmLabel: t('schema.dropDatabase'),
       danger: true,
+      irreversible: true,
       action: () => void this._dropDatabase(profileId, database),
     }
   }

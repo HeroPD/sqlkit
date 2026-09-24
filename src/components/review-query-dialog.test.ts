@@ -59,6 +59,7 @@ describe('review-query-dialog presentation', () => {
     dialog.description = 'This DELETE will remove every row and cannot be undone.'
     dialog.danger = true
     dialog.confirmLabel = 'Run anyway'
+    dialog.target = 'Prod › sales'
     document.body.append(dialog)
     await dialog.updateComplete
 
@@ -70,7 +71,10 @@ describe('review-query-dialog presentation', () => {
     expect(root.querySelector('button.primary')?.classList.contains('danger')).toBe(true)
     expect(root.querySelector('.shortcuts')).toBeNull()
     expect(root.querySelector('button.secondary')?.textContent?.replace(/\s/g, '')).toBe('Cancelesc')
-    expect(root.querySelector('button.primary')?.textContent?.replace(/\s/g, '')).toBe('Runanyway↵')
+    // No ↵: a destructive run is confirmed by a click, not a keystroke.
+    expect(root.querySelector('button.primary')?.textContent?.replace(/\s/g, '')).toBe('Runanyway')
+    expect(root.querySelector('.panel')?.getAttribute('role')).toBe('alertdialog')
+    expect(root.querySelector('.target')?.textContent).toBe('Runs on Prod › sales')
 
     dialog.remove()
   })
@@ -151,6 +155,30 @@ describe('review-query-dialog confirm keys', () => {
     expect(ran).toBe(0)
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(ran).toBe(1)
+
+    dialog.remove()
+  })
+})
+
+describe('review-query-dialog destructive confirm', () => {
+  // Enter is the key a reflexive user presses to get past a dialog; for a run
+  // that drops or wipes data that must not be enough.
+  it('takes no bare Enter, only the Run button', async () => {
+    const dialog = document.createElement('review-query-dialog')
+    let ran = 0
+    dialog.danger = true
+    dialog.run = () => {
+      ran += 1
+      return Promise.resolve(null)
+    }
+    document.body.append(dialog)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(ran).toBe(0)
+
+    dialog.shadowRoot!.querySelector<HTMLButtonElement>('button.primary')!.click()
     expect(ran).toBe(1)
 
     dialog.remove()

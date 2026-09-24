@@ -42,6 +42,8 @@ const harness = (active: ConnectionProfile | null = profile()): Harness => {
   const onDatabaseDropped = vi.fn()
   const ops = new SchemaOpsController({
     activeProfile: () => active,
+    activeChildDb: () => 'app',
+    targetLabel: (profileId, childDb) => (childDb ? `${profileId} › ${childDb}` : profileId),
     dialogs,
     openPreview,
     runSql,
@@ -65,6 +67,8 @@ describe('dropTable', () => {
     expect(h.dialogs.confirm?.message).toBe('Drop table "users"?')
     expect(h.dialogs.confirm?.confirmLabel).toBe('Drop table')
     expect(h.dialogs.confirm?.danger).toBe(true)
+    expect(h.dialogs.confirm?.irreversible).toBe(true)
+    expect(h.dialogs.confirm?.detail).toBe('It is permanently deleted from p1 › app. This cannot be undone.')
 
     h.dialogs.acceptConfirm()
     await flush()
@@ -100,9 +104,10 @@ describe('truncateTable', () => {
     expect(h.runSql).not.toHaveBeenCalled()
     expect(h.dialogs.confirm).toMatchObject({
       message: 'Remove all rows from "users"?',
-      detail: 'TRUNCATE TABLE "public"."users" will permanently remove every row. This cannot be undone.',
+      detail: 'TRUNCATE TABLE "public"."users" will permanently remove every row on p1 › app. This cannot be undone.',
       confirmLabel: 'Truncate table',
       danger: true,
+      irreversible: true,
     })
     h.dialogs.acceptConfirm()
     expect(h.runSql).toHaveBeenCalledWith('TRUNCATE TABLE "public"."users";', { preconfirmed: true })
@@ -302,6 +307,7 @@ describe('createDatabase / dropDatabase', () => {
     const h = harness()
     h.ops.dropDatabase('p1', 'analytics')
     expect(sqlkit.dropDatabase).not.toHaveBeenCalled()
+    expect(h.dialogs.confirm).toMatchObject({ detail: 'All data in it is permanently deleted from p1. This cannot be undone.', irreversible: true })
 
     h.dialogs.acceptConfirm()
     await flush()

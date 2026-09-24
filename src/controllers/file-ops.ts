@@ -240,9 +240,13 @@ export class FileOpsController {
   }
 
   requestDelete(path: string, name: string) {
+    const unsaved = this.deps.ctx.dirtyFileTabNamesUnder(path)
+    const keeps = unsaved.length === 1
+      ? t('file.deleteKeepsUnsavedOne', { name: unsaved[0]! })
+      : unsaved.length > 1 ? t('file.deleteKeepsUnsavedMany', { count: unsaved.length }) : ''
     this.deps.dialogs.confirm = {
       message: t('file.deletePrompt', { name }),
-      detail: t('file.deleteTrashDetail'),
+      detail: keeps ? `${t('file.deleteTrashDetail')} ${keeps}` : t('file.deleteTrashDetail'),
       confirmLabel: t('file.moveToTrash'),
       danger: true,
       action: () => void this.performDelete(path),

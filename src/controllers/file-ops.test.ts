@@ -575,6 +575,27 @@ describe('FileOpsController delete', () => {
   })
 })
 
+// The Trash holds what was on disk, never what was only in the editor.
+describe('FileOpsController delete with unsaved edits', () => {
+  it('says so, closes the clean tabs, and keeps the edited one open untitled', async () => {
+    const api = stubSqlkit()
+    const { ctrl, ctx, dialogs } = make()
+    await ctrl.openFile(fileInfo('/ws/ctx/dir/clean.sql'))
+    await ctrl.openFile(fileInfo('/ws/ctx/dir/edited.sql'))
+    ctx.setActiveContent('select 2 -- not saved')
+
+    ctrl.requestDelete('/ws/ctx/dir', 'dir')
+    expect(dialogs.confirm?.detail).toBe(
+      'It will be moved to the Trash. "edited.sql" has unsaved changes the Trash won\'t hold. They stay open in an untitled tab.',
+    )
+
+    dialogs.acceptConfirm()
+    await vi.waitFor(() => expect(api.deleteFile).toHaveBeenCalledWith('/ws/ctx/dir'))
+    await vi.waitFor(() => expect(ctx.tabs).toHaveLength(1))
+    expect(ctx.tabs[0]).toMatchObject({ name: 'edited.sql', path: null, content: 'select 2 -- not saved', savedContent: '' })
+  })
+})
+
 // A tab restored after its file went missing comes back untitled but keeps the
 // id derived from that path. It must not stand in for the file if it returns.
 describe('FileOpsController opening a file a detached tab was restored from', () => {

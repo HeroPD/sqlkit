@@ -56,8 +56,13 @@ export class AppRoot extends LitElement {
   }
 
   private _onMenuAction(action: MenuAction) {
-    if (action === 'open-workspace') void this._onOpenFolder()
+    // Switching under an open dialog would leave it acting on the workspace it came from.
+    if (action === 'open-workspace' && !this._workbench()?.hasModal()) void this._onOpenFolder()
     if (action === 'settings') this._onOpenSettings()
+  }
+
+  private _workbench() {
+    return this.shadowRoot?.querySelector('workbench-screen') ?? null
   }
 
   // Document-level so both title bars (welcome and workbench) inherit it.

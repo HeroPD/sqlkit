@@ -58,6 +58,26 @@ describe('confirm-dialog keys', () => {
     dialog.remove()
   })
 
+  it('takes no bare Enter for an irreversible action, only its button', async () => {
+    const dialog = document.createElement('confirm-dialog')
+    const confirmed = vi.fn()
+    dialog.confirmLabel = 'Drop table'
+    dialog.danger = true
+    dialog.irreversible = true
+    dialog.addEventListener('dialog-confirm', confirmed)
+    document.body.append(dialog)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(confirmed).not.toHaveBeenCalled()
+    expect(dialog.shadowRoot!.querySelector('button.primary')?.textContent?.replace(/\s/g, '')).toBe('Droptable')
+
+    dialog.shadowRoot!.querySelector<HTMLButtonElement>('button.primary')!.click()
+    expect(confirmed).toHaveBeenCalledOnce()
+
+    dialog.remove()
+  })
+
   it('cancels on Escape and returns focus when removed', async () => {
     const outside = document.createElement('button')
     document.body.append(outside)

@@ -231,7 +231,7 @@ describe('WorkbenchScreen destructive preflight', () => {
       _ctx: { switchInstance(profileId: string | null, childDb: string | null): void; newQuery(): void }
       _live: { statuses: unknown; phase(profileId: string): string | null; refresh: ReturnType<typeof vi.fn> }
       _queries: { execute: ReturnType<typeof vi.fn> }
-      _destructivePrompt: { sql: string; risks: string[]; script: boolean } | null
+      _destructivePrompt: { sql: string; risks: string[]; script: boolean; target: string } | null
       _cancelDestructivePrompt(): void
       _runDestructive(): Promise<string | null>
       _runSql(
@@ -260,6 +260,7 @@ describe('WorkbenchScreen destructive preflight', () => {
     const running = workbench._runSql('delete from users')
     expect(workbench._destructivePrompt?.risks).toEqual(['deleteAll'])
     expect(workbench._destructivePrompt?.sql).toBe('delete from users')
+    expect(workbench._destructivePrompt?.target).toBe('Postgres › db_a')
     expect(workbench._queries.execute).not.toHaveBeenCalled()
 
     await workbench._runDestructive()
@@ -279,6 +280,31 @@ describe('WorkbenchScreen destructive preflight', () => {
     await running
 
     expect(workbench._destructivePrompt).toBeNull()
+    expect(workbench._queries.execute).not.toHaveBeenCalled()
+  })
+
+  it('runs nothing when the workspace changes under an open preflight', async () => {
+    const workbench = runningScreen() as ReturnType<typeof runningScreen> & {
+      workspace: { name: string; path: string } | null
+      _dialogs: DialogsController
+      _live: { disconnectAll(): Promise<void> }
+      willUpdate(changed: Map<string, unknown>): void
+    }
+    workbench._live.disconnectAll = () => Promise.resolve()
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      getWorkspaceConfig: () => Promise.resolve({ config: { version: 1, connections: [] } }),
+      readSession: () => Promise.resolve(null),
+      readHistory: () => Promise.resolve([]),
+      listFiles: () => Promise.resolve({ success: true, files: [] }),
+    }
+    const running = workbench._runSql('delete from users')
+    workbench._dialogs.notice('Queued', 'behind the preflight')
+    workbench.workspace = { name: 'next', path: '/next' }
+    workbench.willUpdate(new Map([['workspace', { name: 'ws', path: '/ws' }]]))
+    await running
+
+    expect(workbench._destructivePrompt).toBeNull()
+    expect(workbench._dialogs.confirm).toBeNull()
     expect(workbench._queries.execute).not.toHaveBeenCalled()
   })
 

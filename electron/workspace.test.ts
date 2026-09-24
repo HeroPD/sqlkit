@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import type { ConnectionProfile } from '../src/electron'
+import type { ConnectionProfile, HistoryItem } from '../src/electron'
 import {
   hydrateConnectionProfile,
   openWorkspace,
@@ -612,5 +612,31 @@ describe('workspace data behind a symlink', () => {
     expect(writeWorkspaceHistory(workspaceDir, []).success).toBe(false)
     expect(fs.readdirSync(outside)).toEqual([])
     expect(readWorkspaceConfig(workspaceDir).error).toContain('symbolic link')
+  })
+})
+
+// History is only ever appended to, so a file that no longer parses would be
+// replaced by the one run that happened to finish next.
+describe('history that cannot be read', () => {
+  const internal = () => path.join(workspaceDir, '.sqlkit')
+  const item = (id: string): HistoryItem =>
+    ({ id, contextKey: 'p1:', sql: 'select 1', success: true, durationMs: 1, rowCount: 1, error: '', createdAt: '2026-09-24T00:00:00.000Z' })
+
+  it('is set aside, not overwritten, by the next run', () => {
+    fs.mkdirSync(internal(), { recursive: true })
+    fs.writeFileSync(path.join(internal(), 'history.json'), '[{"id":"old", truncated')
+
+    expect(updateWorkspaceHistory(workspaceDir, { append: [item('new')] }).success).toBe(true)
+    expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['new'])
+    const [aside] = fs.readdirSync(internal()).filter((name) => name.startsWith('history.unreadable-'))
+    expect(fs.readFileSync(path.join(internal(), aside!), 'utf8')).toBe('[{"id":"old", truncated')
+    expect(fs.readFileSync(path.join(internal(), '.gitignore'), 'utf8').split('\n')).toContain('history.*.json')
+  })
+
+  it('is simply replaced when the user clears all history', () => {
+    fs.mkdirSync(internal(), { recursive: true })
+    fs.writeFileSync(path.join(internal(), 'history.json'), 'not json')
+    expect(updateWorkspaceHistory(workspaceDir, { clearAll: true }).success).toBe(true)
+    expect(fs.readdirSync(internal()).filter((name) => name.startsWith('history.unreadable-'))).toEqual([])
   })
 })

@@ -15,6 +15,24 @@ describe('AppRoot menu actions', () => {
     expect(root._onOpenFolder).toHaveBeenCalledOnce()
   })
 
+  it('holds Open Workspace while a workbench dialog is waiting on an answer', () => {
+    const root = new AppRoot() as never as {
+      _onOpenFolder: ReturnType<typeof vi.fn>
+      _workbench(): { hasModal(): boolean } | null
+      _onMenuAction(action: 'open-workspace'): void
+    }
+    root._onOpenFolder = vi.fn()
+    let modal = true
+    root._workbench = () => ({ hasModal: () => modal })
+
+    root._onMenuAction('open-workspace')
+    expect(root._onOpenFolder).not.toHaveBeenCalled()
+
+    modal = false
+    root._onMenuAction('open-workspace')
+    expect(root._onOpenFolder).toHaveBeenCalledOnce()
+  })
+
   it('opens settings from the menu and remembers the screen to return to', () => {
     const root = new AppRoot() as never as {
       _screen: string

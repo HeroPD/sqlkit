@@ -1105,6 +1105,32 @@ describe('results-panel draft rows', () => {
     expect(discard).toHaveBeenCalledOnce()
     el.remove()
   })
+
+  // Esc is a reflex key: the half-pressed discard, and the undo after it, have to be on screen.
+  it('says what is staged, what a second Esc will do, and how to undo it', async () => {
+    const el = await mountGrid(2)
+    el.edits = new Map([['0:0', 'x'], ['1:1', 'y']])
+    el.addEventListener('discard-changes', () => {
+      el.edits = new Map()
+    })
+    await el.updateComplete
+    const note = () => el.shadowRoot!.querySelector('.pending-note')?.textContent
+    expect(note()).toBe('2 pending changes')
+    expect(el.shadowRoot!.querySelector('.pending-note')?.getAttribute('role')).toBe('status')
+
+    key(el, { key: 'Escape' })
+    await el.updateComplete
+    expect(note()).toBe('Press Esc again to discard 2 changes')
+
+    key(el, { key: 'Escape' })
+    await el.updateComplete
+    expect(note()).toMatch(/^Discarded 2 changes · (⌘|Ctrl\+)Z to undo$/)
+
+    key(el, { key: 'ArrowDown' })
+    await el.updateComplete
+    expect(note()).toBeUndefined()
+    el.remove()
+  })
 })
 
 // The pointer half of rectangle selection. Characterized before the selection

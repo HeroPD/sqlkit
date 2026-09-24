@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import type { SaveResult, WorkspaceSession } from '../src/electron'
 import { t } from '../src/i18n'
 import { workspaceSession as validateWorkspaceSession } from './ipc-validation'
-import { ensureInternalGitignore, internalDir, writeFileAtomic } from './workspace'
+import { ensureInternalGitignore, fileStamp, internalDir, writeFileAtomic } from './workspace'
 
 // Hot exit: the workbench's open tabs and their unsaved buffers, so quitting or
 // crashing never costs work in progress. Layout goes in one small JSON file;
@@ -19,6 +19,7 @@ import { ensureInternalGitignore, internalDir, writeFileAtomic } from './workspa
 //                                 workspace; the first window keeps session.json
 //   .sqlkit/backups/<32 hex>.sql  one unsaved buffer, named sha256(tab id)
 //   .sqlkit/backups/<n>/…         the same, for the nth extra window's buffers
+//   …/unrestored-<time>/<hex>.sql buffers set aside, never swept (see below)
 //
 // All are written 0600 and .gitignore'd; query text can carry credentials.
 //
@@ -34,7 +35,9 @@ import { ensureInternalGitignore, internalDir, writeFileAtomic } from './workspa
 //   never fatal, so a file from a later build still restores what this one
 //   understands. An unrecognized `version` restores nothing and leaves the file
 //   untouched on read — so a future format that cannot be read this way belongs
-//   in a filename of its own rather than a bump here.
+//   in a filename of its own rather than a bump here. The next write still
+//   replaces it, but nothing was restored from it, so the backups beside it are
+//   moved into an unrestored-<time>/ subfolder rather than swept as unclaimed.
 // * Invariants the writers keep: buffers are written before the session that
 //   prunes unclaimed ones; the session never describes text no backup holds; a
 //   refused write unclaims a tab only when nothing of it is left on disk.
@@ -91,6 +94,9 @@ function readSessionFile(file: string): WorkspaceSession | null {
   }
 }
 
+// Session files this process has written, which it therefore knows it can read.
+const writtenSessions = new Set<string>()
+
 export function writeSession(workspacePath: string | null, session: WorkspaceSession, slot = 0): SaveResult {
   if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   try {
@@ -98,10 +104,15 @@ export function writeSession(workspacePath: string | null, session: WorkspaceSes
     // and secret-free no matter which caller assembled it.
     const sanitized = validateWorkspaceSession(session)
     ensureInternalGitignore(workspacePath)
+    const file = sessionPathFor(workspacePath, slot)
+    // Replacing a session this build couldn't read (corrupt, or a later format): nothing was
+    // restored from it, so the backups it claims are set aside rather than swept as unclaimed.
+    const setAside = !writtenSessions.has(file) && fs.existsSync(file) && readSessionFile(file) === null
     // `unclean` is set on every save and cleared only by a clean quit, so the
     // next open can tell a crash from an orderly shutdown.
-    writeFileAtomic(sessionPathFor(workspacePath, slot), JSON.stringify({ ...sanitized, unclean: true }, null, 2))
-    pruneBackups(workspacePath, sanitized, slot)
+    writeFileAtomic(file, JSON.stringify({ ...sanitized, unclean: true }, null, 2))
+    writtenSessions.add(file)
+    pruneBackups(workspacePath, sanitized, slot, setAside)
     return { success: true }
   } catch (error) {
     return { success: false, error: (error as Error).message }
@@ -111,8 +122,10 @@ export function writeSession(workspacePath: string | null, session: WorkspaceSes
 // Backups outlive their tab when it is closed in bulk (a removed connection, a
 // deleted folder), so every session write sweeps the ones no tab claims. One
 // slot's session claims one slot's directory: no window can sweep another's.
-function pruneBackups(workspacePath: string, session: WorkspaceSession, slot: number) {
+function pruneBackups(workspacePath: string, session: WorkspaceSession, slot: number, setAside = false) {
   const dir = backupsDirFor(workspacePath, slot)
+  // A subfolder is never swept, so what goes here stays until the user looks.
+  const aside = path.join(dir, `unrestored-${fileStamp()}`)
   let entries: string[]
   try {
     entries = fs.readdirSync(dir)
@@ -132,7 +145,12 @@ function pruneBackups(workspacePath: string, session: WorkspaceSession, slot: nu
   for (const entry of entries) {
     if (!entry.endsWith('.sql') || live.has(entry)) continue
     try {
-      fs.unlinkSync(path.join(dir, entry))
+      if (setAside) {
+        fs.mkdirSync(aside, { recursive: true, mode: 0o700 })
+        fs.renameSync(path.join(dir, entry), path.join(aside, entry))
+      } else {
+        fs.unlinkSync(path.join(dir, entry))
+      }
     } catch {
       // A locked or already-removed file just stays; the next write retries.
     }

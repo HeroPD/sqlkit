@@ -473,7 +473,9 @@ export class ResultsPanel extends LitElement {
   // Result rows to reselect after a mixed delete drops the drafts between them.
   private _pendingSelectResults: { rows: number[]; c0: number; c1: number } | null = null
   // First of a double-Esc: a second consecutive Escape discards staged changes.
-  private _escArmed = false
+  @state() private _escArmed = false
+  // How many changes the last discard threw away, shown with the undo that brings them back.
+  @state() private _discarded: number | null = null
   // Refocus the grid after a toolbar action so keyboard work keeps flowing.
   private _focusGridPending = false
   // An FK follow removes the focused button while its destination query runs.
@@ -534,6 +536,8 @@ export class ResultsPanel extends LitElement {
 
   protected willUpdate(changed: PropertyValues) {
     if (changed.has('engine')) this._planCache = null
+    // A new result, or new staged work, makes the last discard old news.
+    if (changed.has('run') || (this._discarded !== null && this._hasPending())) this._discarded = null
     if (changed.has('filter')) this._filterDraft = this.filter ?? ''
     if (changed.has('drafts')) {
       // Select a just-added draft once it lands in the property.
@@ -1161,6 +1165,16 @@ export class ResultsPanel extends LitElement {
     return { cols, text: probeTextOf(cols.map((col) => this._recordValue({ kind: 'result', row }, col))) }
   }
 
+  // Staged work is otherwise shown only by row tints and a tooltip; this says it in words,
+  // including the half-finished double-Esc and the undo for a discard just made.
+  private _pendingNote(count: number) {
+    const changes = (n: number) => t(n === 1 ? 'results.pendingChange' : 'results.pendingChanges')
+    let text = ''
+    if (count > 0) text = t(this._escArmed ? 'results.escToDiscard' : 'results.pendingNote', { count, changes: changes(count) })
+    else if (this._discarded) text = t('results.discardedNote', { count: this._discarded, changes: changes(this._discarded), shortcut: isMac ? '⌘Z' : 'Ctrl+Z' })
+    return text ? html`<span class="pending-note ${this._escArmed && count > 0 ? 'armed' : ''}" role="status">${text}</span>` : ''
+  }
+
   private _hasPending() {
     return this.drafts.length > 0 || this.edits.size > 0 || this.pendingDeletes.size > 0
   }
@@ -1168,6 +1182,7 @@ export class ResultsPanel extends LitElement {
   // Throws away every staged edit and new row (no DB write to undo).
   private _discardChanges = () => {
     this._escArmed = false
+    const count = this.drafts.length + this.edits.size + this.pendingDeletes.size
     // Revert throws away the unstaged draft too. The staged value is about to
     // go, so the editor resets to the row as stored — read here rather than
     // through _editCellText, which would hand back the edit being discarded.
@@ -1183,6 +1198,7 @@ export class ResultsPanel extends LitElement {
     }
     if (!this._hasPending()) return
     this._editing = null
+    this._discarded = count
     this.dispatchEvent(new CustomEvent('discard-changes', { bubbles: true, composed: true }))
   }
 
@@ -1666,6 +1682,7 @@ export class ResultsPanel extends LitElement {
               ></ui-select>
             `
           : ''}
+        ${this._pendingNote(savableCount)}
         ${showWriteTools
           ? html`
               <div class="toolbar" aria-label=${t('results.editActions')}>
@@ -2398,6 +2415,7 @@ export class ResultsPanel extends LitElement {
   private _onCellPointerDown = (event: PointerEvent) => {
     if (event.button !== 0) return // leave right-click to the context menu
     this._escArmed = false // a click breaks a pending double-Esc
+    this._discarded = null
     // Clicking inside the inline editor must not re-select or steal its focus.
     if ((event.target as HTMLElement).closest('.cell-edit')) return
     const hit = this._cellRefAt(event.target as Element)
@@ -2701,6 +2719,7 @@ export class ResultsPanel extends LitElement {
       return
     }
     this._escArmed = false
+    this._discarded = null
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
       event.preventDefault()
       this._copySelection()
@@ -3662,6 +3681,19 @@ export class ResultsPanel extends LitElement {
       .plan-toggle-button.active {
         color: var(--text);
         background: var(--list-hover);
+      }
+
+      .pending-note {
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: normal;
+        color: var(--text-2);
+        white-space: nowrap;
+      }
+
+      .pending-note.armed {
+        color: var(--text);
+        font-weight: 600;
       }
 
       .status {

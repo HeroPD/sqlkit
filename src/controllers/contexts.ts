@@ -50,6 +50,9 @@ type Deps = {
 /** One context's tabs, already rebuilt into live editor state. */
 export type RestoredContext = ContextInstance
 
+const fileTabUnder = (tab: EditorTabState, targetPath: string): tab is SqlTabState & { path: string } =>
+  tab.kind === 'sql' && !!tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))
+
 /** Whether a tab's text needs a session backup. An untitled tab has no file to
  * fall back on, so anything it holds does — including the SQL of a browse or
  * History tab the user never touched. A saved file needs one only once its
@@ -550,18 +553,28 @@ export class ContextsController {
 
   // A deleted file or folder: close its tab and every tab beneath it, then
   // reassign the active tab if it was one of them.
+  /** Names of the tabs, in any context, holding unsaved edits to a file under this path. */
+  dirtyFileTabNamesUnder(targetPath: string): string[] {
+    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
+    const stashed = [...this._instances].filter(([key]) => key !== liveKey).flatMap(([, instance]) => instance.tabs)
+    return [...this._tabs, ...stashed].flatMap((tab) =>
+      fileTabUnder(tab, targetPath) && tab.content !== tab.savedContent ? [tab.name] : [])
+  }
+
+  // The files under this path were deleted on purpose. Clean tabs close; one with unsaved
+  // edits stays open, untitled: its text is the only copy, and a save must not bring the file back.
   closeFilesUnder(targetPath: string) {
-    this.tabs = this._tabs.filter(
-      (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
-    )
+    const settle = (tabs: EditorTabState[]) => tabs.flatMap((tab): EditorTabState[] => {
+      if (!fileTabUnder(tab, targetPath)) return [tab]
+      return tab.content !== tab.savedContent ? [{ ...tab, path: null, savedContent: '' }] : []
+    })
+    this.tabs = settle(this._tabs)
     if (this._activeTabId && !this._tabs.some((tab) => tab.id === this._activeTabId)) {
       this.activeTabId = this._tabs[this._tabs.length - 1]?.id ?? null
     }
     for (const [key, instance] of this._instances) {
-      const tabs = instance.tabs.filter(
-        (tab) => !(tab.kind === 'sql' && tab.path && (tab.path === targetPath || tab.path.startsWith(`${targetPath}/`))),
-      )
-      if (tabs.length === instance.tabs.length) continue
+      if (!instance.tabs.some((tab) => fileTabUnder(tab, targetPath))) continue
+      const tabs = settle(instance.tabs)
       const activeTabId = instance.activeTabId && tabs.some((tab) => tab.id === instance.activeTabId) ? instance.activeTabId : (tabs.at(-1)?.id ?? null)
       this._instances.set(key, { ...instance, tabs, activeTabId })
     }
