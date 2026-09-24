@@ -57,18 +57,25 @@ function isWorkspaceRoot(workspacePath: string, target: string): boolean {
   return root !== null && real !== null && real === root
 }
 
+// macOS and Windows disks ignore case, and realpath keeps the caller's spelling:
+// `.SQLKIT/config.json` is the config, so names are compared case-folded.
+const isInternalName = (segment: string) => segment.toLowerCase() === '.sqlkit'
+const foldCase = (value: string) => (process.platform === 'darwin' || process.platform === 'win32' ? value.toLowerCase() : value)
+
 function isInternalWorkspacePath(workspacePath: string, target: string): boolean {
   const resolved = path.resolve(target)
-  if (resolved.split(path.sep).includes('.sqlkit')) return true
+  if (resolved.split(path.sep).some(isInternalName)) return true
   const internal = realpathDeep(path.join(workspacePath, '.sqlkit'))
   const real = realpathDeep(resolved)
-  return internal !== null && real !== null && (real === internal || real.startsWith(internal + path.sep))
+  if (internal === null || real === null) return false
+  const [folded, inside] = [foldCase(real), foldCase(internal)]
+  return folded === inside || folded.startsWith(inside + path.sep)
 }
 
 // A context folder is one or two plain path segments inside the workspace:
 // the connection's folder, optionally followed by a child-database folder
 // (all-databases mode) — connection/child/file.sql.
-const isSafeSegment = (segment: string) => /^[\w][\w .-]*$/.test(segment) && segment !== '.sqlkit'
+const isSafeSegment = (segment: string) => /^[\w][\w .-]*$/.test(segment) && !isInternalName(segment)
 
 export function resolveContextRoot(workspacePath: string, folder: string): string | null {
   const segments = folder.split('/').filter(Boolean)
@@ -186,6 +193,8 @@ export async function readWorkspaceFileAsync(workspacePath: string | null, fileP
   if (!workspacePath) return { success: false, error: t('file.noWorkspace') }
   const resolved = path.resolve(filePath)
   if (!isInsideWorkspace(workspacePath, resolved)) return { success: false, error: t('file.pathOutsideWorkspace') }
+  // Session backups are .sql files too; they are read through their own channel, never as workspace files.
+  if (isInternalWorkspacePath(workspacePath, resolved)) return { success: false, error: t('file.internalFolder') }
   if (!isSqlFile(resolved)) return { success: false, error: t('file.openSqlOnly') }
   try {
     if ((await fsp.stat(resolved)).size > MAX_SQL_FILE_BYTES) return { success: false, error: t('file.tooLargeToOpen') }
@@ -420,7 +429,7 @@ export function startWorkspaceWatcher(id: number, workspacePath: string, notify:
       // (.sqlkit) is filtered.
       if (filename) {
         const normalized = String(filename).split(path.sep).join('/')
-        if (normalized.split('/').includes('.sqlkit')) return
+        if (normalized.split('/').some(isInternalName)) return
       }
       schedule()
     })

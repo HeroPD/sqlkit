@@ -284,7 +284,7 @@ export class DbConfigForm extends LitElement {
           <p class="muted small">${t('config.sslHelp')}</p>
         </div>
         ${this._field(
-          t('config.mode'),
+          t('config.sslMode'),
           html`
             <ui-select
               .value=${ssl.mode}
@@ -297,7 +297,8 @@ export class DbConfigForm extends LitElement {
               @change=${(e: CustomEvent<{ value: string }>) => this._patchSsl(ssl, { mode: e.detail.value as SslMode })}
             ></ui-select>
           `,
-          ssl.mode === 'require' ? '' : t('config.verifyFullHelp'),
+          // The selected mode, explained; Require's gap gets the warning below instead.
+          ({ disable: t('config.disableHelp'), require: '', 'verify-ca': t('config.verifyCaHelp'), 'verify-full': t('config.verifyFullHelp') })[ssl.mode],
         )}
         ${ssl.mode === 'require'
           ? html`<p class="ssl-warning">

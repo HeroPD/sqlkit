@@ -8,6 +8,7 @@ import {
   listWorkspaceFiles,
   readWorkspaceFile,
   readWorkspaceFileAsync,
+  renameWorkspaceFile,
   resolveWorkspaceItem,
   saveWorkspaceFile,
   saveWorkspaceFileAsync,
@@ -262,5 +263,26 @@ describe('saving keeps what the file was', () => {
     fs.chmodSync(file, 0o600)
     await saveWorkspaceFileAsync(ws, file, 'select 2')
     expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+  })
+})
+
+// A case-insensitive disk (macOS, Windows) opens .sqlkit under any spelling, so
+// the internal folder is matched case-folded: the config holds credentials.
+describe('the internal folder under another spelling', () => {
+  it('refuses .SQLKIT paths for every file operation', async () => {
+    const { ws } = setup()
+    fs.mkdirSync(path.join(ws, '.sqlkit', 'backups'), { recursive: true })
+    fs.writeFileSync(path.join(ws, '.sqlkit', 'config.json'), '{}')
+    fs.writeFileSync(path.join(ws, '.sqlkit', 'backups', 'abc.sql'), 'unsaved work')
+    const refused = { success: false, error: 'The .sqlkit folder is internal' }
+
+    for (const spelling of ['.SQLKIT', '.SqlKit']) {
+      expect(resolveWorkspaceItem(ws, path.join(ws, spelling, 'config.json'))).toHaveProperty('error', refused.error)
+      expect(renameWorkspaceFile(ws, path.join(ws, spelling, 'backups', 'abc.sql'), 'x.sql')).toEqual(refused)
+      expect(await saveWorkspaceFileAsync(ws, path.join(ws, spelling, 'backups', 'abc.sql'), 'x')).toEqual(refused)
+    }
+    // Backups are .sql files, but they are only ever read through the session channel.
+    expect(await readWorkspaceFileAsync(ws, path.join(ws, '.sqlkit', 'backups', 'abc.sql'))).toEqual(refused)
+    expect(fs.readFileSync(path.join(ws, '.sqlkit', 'backups', 'abc.sql'), 'utf8')).toBe('unsaved work')
   })
 })

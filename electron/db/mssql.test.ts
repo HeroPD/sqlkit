@@ -41,7 +41,7 @@ describe('mssqlTls', () => {
   })
 
   it('rejects verify-ca because tedious cannot disable only hostname verification', () => {
-    expect(() => mssqlTls(profile('verify-ca'))).toThrow(/does not support CA-only/i)
+    expect(() => mssqlTls(profile('verify-ca'))).toThrow(/can’t verify the certificate without the hostname/i)
   })
 })
 

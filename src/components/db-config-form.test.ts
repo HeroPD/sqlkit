@@ -342,6 +342,25 @@ describe('DbConfigForm accessibility', () => {
     form.remove()
   })
 
+  // Labels stay parallel and say what each mode does; the helper describes the one chosen.
+  it('names each SSL mode by what it does and explains the selected one', async () => {
+    const { form } = setup({ ssl: { mode: 'disable', ca: '' } })
+    document.body.appendChild(form)
+    await form.updateComplete
+    const root = form.shadowRoot!
+    const select = [...root.querySelectorAll('ui-select')].find((entry) => entry.label === 'Encryption')!
+    expect(select.options.map((option) => option.label)).toEqual([
+      'Off', 'Encrypt, don’t verify certificate', 'Encrypt, verify certificate', 'Encrypt, verify certificate and hostname',
+    ])
+    const help = () => root.getElementById(`${select.closest('.field')!.getAttribute('data-field')}-help`)?.textContent
+    expect(help()).toBe('Traffic is not encrypted. Fine for a database on this machine or a network you trust.')
+
+    form.profile = { ...form.profile!, ssl: { mode: 'verify-full', ca: '' } }
+    await form.updateComplete
+    expect(help()).toBe('Checks that a trusted authority signed the certificate and that it was issued to this host.')
+    form.remove()
+  })
+
   it('announces a test result, and does not interrupt with the static SSL note', async () => {
     const { form } = setup({ ssl: { mode: 'require', ca: '' } })
     document.body.appendChild(form)
