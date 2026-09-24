@@ -385,6 +385,7 @@ describe('workspace config: credential .gitignore guard', () => {
     writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] })
     const lines = gitignore().split('\n')
     expect(lines).toContain('config.json')
+    expect(lines).toContain('*.tmp')
     expect(lines).toContain('config.json.tmp')
     expect(lines).toContain('history.json')
     expect(lines).toContain('history.json.tmp')
@@ -567,5 +568,49 @@ describe('workspace query history', () => {
 
     // An unreadable config is no licence to apply a policy nobody chose.
     expect(readWorkspaceHistory(workspaceDir).map((entry) => entry.id)).toEqual(['c', 'a', 'b'])
+  })
+})
+
+// A workspace is a folder people clone. Anything under .sqlkit can arrive as a
+// symlink, and a write that follows one lands wherever the repo's author chose.
+describe('workspace data behind a symlink', () => {
+  let outside = ''
+  beforeEach(() => {
+    outside = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlkit-outside-'))
+  })
+  afterEach(() => {
+    fs.rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('does not write through a symlink planted at a temp-file name', () => {
+    const target = path.join(outside, '.zshrc')
+    fs.writeFileSync(target, 'original\n')
+    fs.mkdirSync(path.join(workspaceDir, '.sqlkit'), { recursive: true })
+    for (const name of ['config.json.tmp', 'history.json.tmp']) {
+      fs.symlinkSync(target, path.join(workspaceDir, '.sqlkit', name))
+    }
+    expect(openWorkspace(workspaceDir).success).toBe(true)
+    writeWorkspaceHistory(workspaceDir, [])
+    expect(fs.readFileSync(target, 'utf8')).toBe('original\n')
+    expect(fs.lstatSync(configPath()).isFile()).toBe(true)
+  })
+
+  it('does not append its rules through a symlinked .gitignore', () => {
+    const target = path.join(outside, 'profile')
+    fs.writeFileSync(target, 'original\n')
+    fs.mkdirSync(path.join(workspaceDir, '.sqlkit'), { recursive: true })
+    fs.symlinkSync(target, path.join(workspaceDir, '.sqlkit', '.gitignore'))
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] })
+    expect(fs.readFileSync(target, 'utf8')).toBe('original\n')
+    expect(fs.lstatSync(path.join(workspaceDir, '.sqlkit', '.gitignore')).isFile()).toBe(true)
+  })
+
+  it('refuses a .sqlkit that is itself a symlink, and says why', () => {
+    fs.symlinkSync(outside, path.join(workspaceDir, '.sqlkit'))
+    openWorkspace(workspaceDir)
+    expect(writeWorkspaceConfig(workspaceDir, { version: 1, connections: [] }).success).toBe(false)
+    expect(writeWorkspaceHistory(workspaceDir, []).success).toBe(false)
+    expect(fs.readdirSync(outside)).toEqual([])
+    expect(readWorkspaceConfig(workspaceDir).error).toContain('symbolic link')
   })
 })

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import type { SaveResult, WorkspaceSession } from '../src/electron'
 import { t } from '../src/i18n'
 import { workspaceSession as validateWorkspaceSession } from './ipc-validation'
-import { ensureInternalGitignore, writeFileAtomic } from './workspace'
+import { ensureInternalGitignore, internalDir, writeFileAtomic } from './workspace'
 
 // Hot exit: the workbench's open tabs and their unsaved buffers, so quitting or
 // crashing never costs work in progress. Layout goes in one small JSON file;
@@ -53,12 +53,12 @@ import { ensureInternalGitignore, writeFileAtomic } from './workspace'
 // Windows sharing a workspace each own a numbered slot: the first keeps
 // session.json, so a single-window workspace is the file it has always been.
 const sessionPathFor = (wsPath: string, slot: number) =>
-  path.join(wsPath, '.sqlkit', slot === 0 ? 'session.json' : `session.${slot}.json`)
+  path.join(internalDir(wsPath), slot === 0 ? 'session.json' : `session.${slot}.json`)
 // A window's buffers live under its own slot, because a tab id is not unique
 // across windows: the same file open in two of them is the same id, and one
 // window saving it would otherwise delete the other's unsaved copy.
 const backupsDirFor = (wsPath: string, slot: number) =>
-  slot === 0 ? path.join(wsPath, '.sqlkit', 'backups') : path.join(wsPath, '.sqlkit', 'backups', String(slot))
+  slot === 0 ? internalDir(wsPath, 'backups') : internalDir(wsPath, 'backups', String(slot))
 
 // Tab ids for workspace files are `file:<absolute path>`, which is no filename —
 // so backups are named by a hash of the id, derived identically on every call.
@@ -73,7 +73,13 @@ const MAX_BACKUP_BYTES = 10 * 1024 * 1024
  * missing, oversized, or hand-broken file reads as null and is left in place —
  * re-seeding it would throw away buffers the user may still want. */
 export function readSession(workspacePath: string | null, slot = 0): WorkspaceSession | null {
-  return workspacePath ? readSessionFile(sessionPathFor(workspacePath, slot)) : null
+  if (!workspacePath) return null
+  try {
+    return readSessionFile(sessionPathFor(workspacePath, slot))
+  } catch {
+    // A symlinked .sqlkit: nothing is read through it, or written.
+    return null
+  }
 }
 
 function readSessionFile(file: string): WorkspaceSession | null {

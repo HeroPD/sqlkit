@@ -343,6 +343,26 @@ describeDb('mysql driver (integration)', () => {
     }
   })
 
+  // Bound values are spliced in on the client; a server that treats backslashes
+  // as data would keep mysql2's escapes, and read `\'` as the literal's end.
+  it('stores bound strings exactly under NO_BACKSLASH_ESCAPES', async () => {
+    const [[{ mode }]] = await admin.query('select @@global.sql_mode as mode') as unknown as [[{ mode: string }]]
+    await admin.query("set global sql_mode = concat(@@global.sql_mode, ',NO_BACKSLASH_ESCAPES')")
+    const driver = await connectDriver()
+    const values = ['a\\nb', "it's", 'back\\slash', "x\\'; select 1 as injected; -- ", 'quote"d']
+    try {
+      await driver.query('create table nbe_probe (id int primary key, v text)')
+      const result = await driver.runBatch!(values.map((value, id) => ({ sql: 'insert into nbe_probe values (?, ?)', params: [id, value] })))
+      expect(result).toEqual({ success: true })
+      const [rows] = await admin.query('select v from nbe_probe order by id')
+      expect((rows as Array<{ v: string }>).map((row) => row.v)).toEqual(values)
+    } finally {
+      await admin.query('set global sql_mode = ?', [mode]).catch(() => {})
+      await driver.query('drop table if exists nbe_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('surfaces SQL errors', async () => {
     const driver = await connectDriver()
     try {

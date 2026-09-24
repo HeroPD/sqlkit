@@ -701,7 +701,8 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           const result = await entry.request.query(statement.sql)
           // A write that matched nothing means the row moved or vanished since
           // the user reviewed it — abort the whole batch rather than half-apply.
-          const affected = result.rowsAffected[0] ?? 0
+          // A trigger without SET NOCOUNT ON reports its own counts first; the statement's comes last.
+          const affected = result.rowsAffected.at(-1) ?? 0
           if (statement.expectedRows !== undefined ? affected !== statement.expectedRows : affected === 0) {
             await transaction.rollback()
             return {

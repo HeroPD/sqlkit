@@ -1841,3 +1841,30 @@ describe('WorkbenchScreen session flush on leaving a workspace', () => {
     expect(workbench._session.reset).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('WorkbenchScreen session restore', () => {
+  it('restores the last session on open, not again when a saved connection re-reads the config', async () => {
+    const screen = new WorkbenchScreen()
+    const workbench = screen as never as {
+      _session: { hydrate: ReturnType<typeof vi.fn> }
+      _config: { save(profile: ConnectionProfile): Promise<boolean> }
+      _live: { clearError(id: string): Promise<void> }
+      _loadConfig(options?: { restore?: boolean }): Promise<void>
+      _onConfigSave(event: Event): Promise<void>
+    }
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = {
+      getWorkspaceConfig: () => Promise.resolve({ config: { version: 1, connections: [] } }),
+      readHistory: () => Promise.resolve([]),
+      listFiles: () => Promise.resolve({ success: true, files: [] }),
+    }
+    workbench._session.hydrate = vi.fn(() => Promise.resolve(null))
+    workbench._config.save = () => Promise.resolve(true)
+    workbench._live.clearError = () => Promise.resolve()
+
+    await workbench._loadConfig({ restore: true })
+    expect(workbench._session.hydrate).toHaveBeenCalledTimes(1)
+    // A second restore would swap the live tabs for whatever the last debounced write held.
+    await workbench._onConfigSave(new CustomEvent('config-save', { detail: { profile: { id: 'p1' } } }))
+    expect(workbench._session.hydrate).toHaveBeenCalledTimes(1)
+  })
+})

@@ -53,6 +53,8 @@ export class SessionController implements ReactiveController {
   private layoutTimer: ReturnType<typeof setTimeout> | null = null
   // The last session JSON written, so an unchanged layout costs no IPC.
   private lastWritten: string | null = null
+  // Until hydrate() has read the last session back, a session write would claim none of its backups and main would prune them all.
+  private restorePending = false
 
   private pending = new Map<string, string>()
   private timers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -93,12 +95,13 @@ export class SessionController implements ReactiveController {
     this.clearTimers()
     this.written.clear()
     this.lastWritten = null
+    this.restorePending = true
   }
 
   /** Something about the tab layout may have changed. Cheap to over-call: the
    * snapshot is built once per debounce window and skipped when identical. */
   scheduleLayoutWrite() {
-    if (this.layoutTimer || !this.deps.enabled()) return
+    if (this.layoutTimer || this.restorePending || !this.deps.enabled()) return
     this.layoutTimer = setTimeout(() => void this.writeLayout(), LAYOUT_DEBOUNCE_MS)
   }
 
@@ -142,6 +145,15 @@ export class SessionController implements ReactiveController {
   /** Reads back the last session and every buffer it claims. */
   async hydrate(): Promise<RestoredSession | null> {
     const gen = this.generation
+    try {
+      return await this.readBack(gen)
+    } finally {
+      // The caller applies the result before any timer can fire, so the next write already sees the restored tabs.
+      if (this.generation === gen) this.restorePending = false
+    }
+  }
+
+  private async readBack(gen: number): Promise<RestoredSession | null> {
     const session = await window.sqlkit.readSession().catch(() => null)
     // The workspace changed under us, or there is nothing to restore.
     if (!session || this.generation !== gen || !session.contexts.length) return null
@@ -195,7 +207,7 @@ export class SessionController implements ReactiveController {
 
   private async writeLayout() {
     this.layoutTimer = null
-    if (!this.deps.enabled()) return
+    if (this.restorePending || !this.deps.enabled()) return
     const gen = this.generation
     // Buffers first: writing the session prunes every backup no tab claims, so
     // one this snapshot is about to claim has to be on disk by then.
@@ -280,7 +292,7 @@ export class SessionController implements ReactiveController {
     const backups = hasWorkspace ? this.dueBackups() : []
     // Sent unfiltered: only main learns whether these backups land, so it is
     // main that drops the claims of the ones that don't.
-    const session = hasWorkspace ? { version: 1 as const, contexts: this.deps.snapshot() } : undefined
+    const session = hasWorkspace && !this.restorePending ? { version: 1 as const, contexts: this.deps.snapshot() } : undefined
     this.clearTimers()
     window.sqlkit.flushSession({ session, backups })
   }

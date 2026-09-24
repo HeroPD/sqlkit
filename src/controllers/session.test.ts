@@ -467,3 +467,59 @@ describe('hydrate', () => {
     expect(await make().hydrate()).toBeNull()
   })
 })
+
+// Main prunes every backup the session it is handed doesn't claim, so a session
+// written before the last one was read back would delete all of them.
+describe('writes wait for the restore', () => {
+  const opening = (api: ReturnType<typeof stubSqlkit>) => {
+    const ctrl = make({ snapshot: () => [] })
+    ctrl.reset()
+    return { ctrl, api }
+  }
+
+  it('holds layout writes until the last session has been read back', async () => {
+    let finishRead: (value: null) => void = () => {}
+    const { ctrl, api } = opening(stubSqlkit({ readSession: vi.fn(() => new Promise((resolve) => { finishRead = resolve })) }))
+    const hydrating = ctrl.hydrate()
+    ctrl.scheduleLayoutWrite()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(api.writeSession).not.toHaveBeenCalled()
+
+    finishRead(null)
+    await hydrating
+    ctrl.scheduleLayoutWrite()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(api.writeSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the session out of a flush that lands mid-restore, but still sends the backups', () => {
+    const { ctrl, api } = opening(stubSqlkit())
+    ctrl.noteBufferChange('tab-1', 'typed while loading', true)
+    ctrl.flushOutgoing()
+    const [payload] = api.flushSession.mock.calls[0] as [{ session?: unknown; backups: unknown[] }]
+    expect(payload.session).toBeUndefined()
+    expect(payload.backups).toEqual([{ tabId: 'tab-1', content: 'typed while loading' }])
+  })
+
+  it('keeps holding when the read that finished belonged to a workspace since left', async () => {
+    const ctrl = make({ snapshot: () => [] })
+    const api = stubSqlkit({
+      readSession: vi.fn(() => {
+        ctrl.reset()
+        return Promise.resolve(null)
+      }),
+    })
+    await ctrl.hydrate()
+    ctrl.scheduleLayoutWrite()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(api.writeSession).not.toHaveBeenCalled()
+  })
+
+  it('lifts the hold even when reading the session fails', async () => {
+    const { ctrl, api } = opening(stubSqlkit({ readSession: vi.fn(() => Promise.reject(new Error('gone'))) }))
+    await ctrl.hydrate()
+    ctrl.scheduleLayoutWrite()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(api.writeSession).toHaveBeenCalledTimes(1)
+  })
+})

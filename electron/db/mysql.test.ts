@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { jsonValidColumn, mysqlResultFields, mysqlSessionIdentificationAvailable, mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
+import { jsonValidColumn, mysqlQueryFormat, mysqlResultFields, mysqlSessionIdentificationAvailable, mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
 
 describe('mysqlVersion', () => {
   it('labels plain MySQL versions', () => {
@@ -72,5 +72,21 @@ describe('writeTargetTable', () => {
     expect(writeTargetTable('SELECT * FROM `books`')).toBeNull()
     expect(writeTargetTable('REPLACE INTO `books` VALUES (1)')).toBeNull()
     expect(writeTargetTable('')).toBeNull()
+  })
+})
+
+describe('mysqlQueryFormat', () => {
+  it('escapes the way mysql2 does under the default sql_mode', () => {
+    expect(mysqlQueryFormat('select ?, ?', ["it's", 'a\\b'], false)).toBe("select 'it\\'s', 'a\\\\b'")
+  })
+
+  it('doubles quotes and leaves backslashes alone under NO_BACKSLASH_ESCAPES', () => {
+    expect(mysqlQueryFormat('select ?, ?, ?', ["it's", 'a\\b', "x\\'; drop table t; -- "], true))
+      .toBe("select 'it''s', 'a\\b', 'x\\''; drop table t; -- '")
+  })
+
+  it('keeps non-string values and placeholders inside literals as they were', () => {
+    expect(mysqlQueryFormat("select '?', ?, ?, ?, ?", [1, null, Buffer.from('hi'), ['a', 2]], true))
+      .toBe("select '?', 1, NULL, X'6869', 'a', 2")
   })
 })

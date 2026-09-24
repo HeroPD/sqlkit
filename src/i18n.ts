@@ -863,6 +863,7 @@ const enUS = {
   'file.invalidName': 'Invalid file name',
   'file.databaseFolderOutsideWorkspace': 'Database folder is outside the workspace',
   'file.internalFolder': 'The .sqlkit folder is internal',
+  'workspace.internalLinked': '{path} is a symbolic link. SqlKit Studio keeps workspace data only in a real folder inside the workspace.',
   'file.pathOutsideWorkspace': 'Path is outside the workspace',
   'file.openSqlOnly': 'Only .sql files can be opened',
   'file.filesInsideWorkspace': 'Files must stay inside the workspace',

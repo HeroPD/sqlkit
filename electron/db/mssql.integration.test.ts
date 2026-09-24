@@ -273,6 +273,28 @@ describeDb('mssql driver (integration)', () => {
     }
   })
 
+  // An optimistic guard that matched nothing must fail the save, even when a
+  // trigger's own row count arrives ahead of the statement's.
+  it('gates on the statement, not a trigger that also counts rows', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table guarded (id int primary key, v nvarchar(50))')
+      await driver.query('create table guarded_stats (hits int)')
+      await driver.query('insert into guarded_stats values (0)')
+      await driver.query("insert into guarded values (1, 'old')")
+      await driver.query('create trigger guarded_count on guarded after update as update guarded_stats set hits = hits + 1')
+      const stale = await driver.runBatch!([{ sql: 'update guarded set v = @p1 where id = @p2 and v = @p3', params: ['new', 1, 'stale'], expectedRows: 1 }])
+      expect(stale.success).toBe(false)
+      expect((await driver.query('select v from guarded')).rows).toEqual([['old']])
+      const fresh = await driver.runBatch!([{ sql: 'update guarded set v = @p1 where id = @p2 and v = @p3', params: ['new', 1, 'old'], expectedRows: 1 }])
+      expect(fresh).toEqual({ success: true })
+    } finally {
+      await driver.query('drop table if exists guarded').catch(() => {})
+      await driver.query('drop table if exists guarded_stats').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('does not trip the zero-rows gate on a no-op update', async () => {
     const driver = await connectDriver()
     try {

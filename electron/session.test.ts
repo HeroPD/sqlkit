@@ -313,3 +313,32 @@ describe('shutdown buffer writes', () => {
     expect(hasBackup(null, 'tab-1')).toBe(false)
   })
 })
+
+// Pruning deletes every .sql file the session doesn't claim, so a backups
+// folder that is really a link to someone's queries would be emptied.
+describe('backups behind a symlink', () => {
+  let outside = ''
+  beforeEach(() => {
+    outside = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlkit-outside-'))
+  })
+  afterEach(() => {
+    fs.rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('neither prunes nor writes through a symlinked backups folder', () => {
+    fs.writeFileSync(path.join(outside, 'report.sql'), 'select 1')
+    fs.mkdirSync(path.join(workspace, '.sqlkit'), { recursive: true })
+    fs.symlinkSync(outside, backupsDir())
+    expect(writeSession(workspace, session([])).success).toBe(false)
+    expect(writeBackup(workspace, 'tab-1', 'typed').success).toBe(false)
+    expect(fs.readdirSync(outside)).toEqual(['report.sql'])
+  })
+
+  it('reads nothing back through a symlinked .sqlkit', () => {
+    fs.mkdirSync(path.join(outside, 'backups'), { recursive: true })
+    fs.writeFileSync(path.join(outside, 'session.json'), JSON.stringify(session([sqlTab()])))
+    fs.symlinkSync(outside, path.join(workspace, '.sqlkit'))
+    expect(readSession(workspace)).toBeNull()
+    expect(readBackup(workspace, 'tab-1')).toBeNull()
+  })
+})

@@ -1,5 +1,6 @@
 import { app, safeStorage } from 'electron'
 import fs from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import type {
   ConnectionProfile,
@@ -28,14 +29,40 @@ import type { HistoryLimits } from '../src/electron'
 import { t } from '../src/i18n'
 
 // temp+rename so a crash mid-write can't leave a half-written (and for the
-// workspace config, connection-wiping) file behind. One fixed temp name is safe
-// here only because both calls are synchronous: nothing can interleave between
-// the write and the rename. Anything async needs a unique name per write, as the
-// .sql saves in files.ts do.
+// workspace config, connection-wiping) file behind. The temp name is random and
+// created exclusively: a fixed one could be a symlink shipped in a cloned repo,
+// and the write would land wherever it points.
 export const writeFileAtomic = (file: string, data: string) => {
-  const tmp = `${file}.tmp`
-  fs.writeFileSync(tmp, data, { mode: 0o600 })
-  fs.renameSync(tmp, file)
+  const tmp = `${file}.${randomBytes(6).toString('hex')}.tmp`
+  try {
+    fs.writeFileSync(tmp, data, { mode: 0o600, flag: 'wx' })
+    fs.renameSync(tmp, file)
+  } catch (error) {
+    try {
+      fs.unlinkSync(tmp)
+    } catch {
+      // Never created, or already renamed into place.
+    }
+    throw error
+  }
+}
+
+/** `.sqlkit`, or a folder under it, refusing any that is a symlink: a cloned repo
+ * could point one elsewhere, and writing or pruning backups through it would
+ * reach outside the workspace. */
+export function internalDir(workspacePath: string, ...segments: string[]): string {
+  let dir = workspacePath
+  for (const segment of ['.sqlkit', ...segments]) {
+    dir = path.join(dir, segment)
+    let linked = false
+    try {
+      linked = fs.lstatSync(dir).isSymbolicLink()
+    } catch {
+      // Not created yet.
+    }
+    if (linked) throw new Error(t('workspace.internalLinked', { path: dir }))
+  }
+  return dir
 }
 
 type GlobalConfig = {
@@ -51,7 +78,7 @@ const themeValue = themeOrDefault
 
 const defaultWorkspaceConfig = (): WorkspaceConfig => ({ version: 1, connections: [], preferences: DEFAULT_WORKSPACE_PREFERENCES })
 
-const workspaceConfigPathFor = (wsPath: string) => path.join(wsPath, '.sqlkit', 'config.json')
+const workspaceConfigPathFor = (wsPath: string) => path.join(internalDir(wsPath), 'config.json')
 
 const slugify = (name: string) =>
   name
@@ -146,6 +173,8 @@ const hasWeaklyProtectedSecrets = (connections: ConnectionProfile[]) => {
 // Appends any missing rule to a hand-edited .gitignore rather than skipping, so
 // a pre-existing file can't defeat the guard. Best-effort and idempotent.
 const GITIGNORE_RULES = [
+  // Temp files carry a random suffix; the fixed names cover ones older versions left behind.
+  '*.tmp',
   'config.json',
   'config.json.tmp',
   'history.json',
@@ -159,7 +188,7 @@ const GITIGNORE_RULES = [
 ]
 export const ensureInternalGitignore = (workspacePath: string) => {
   try {
-    const dir = path.join(workspacePath, '.sqlkit')
+    const dir = internalDir(workspacePath)
     fs.mkdirSync(dir, { recursive: true })
     const file = path.join(dir, '.gitignore')
     const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
@@ -167,7 +196,8 @@ export const ensureInternalGitignore = (workspacePath: string) => {
     const missing = GITIGNORE_RULES.filter((rule) => !present.has(rule))
     if (!missing.length) return
     const lead = existing ? (existing.endsWith('\n') ? '' : '\n') : '# SqlKit Studio: connection credentials — never commit.\n'
-    fs.writeFileSync(file, existing + lead + missing.join('\n') + '\n')
+    // Replaced rather than appended to, so a symlinked .gitignore is never written through.
+    writeFileAtomic(file, existing + lead + missing.join('\n') + '\n')
   } catch {
     // A read-only workspace simply doesn't get the guard.
   }
@@ -243,8 +273,9 @@ type ConfigOutcome =
 // silently replaced with defaults).
 function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
   let raw: string
+  let file: string
   try {
-    const file = workspaceConfigPathFor(workspacePath)
+    file = workspaceConfigPathFor(workspacePath)
     if (fs.statSync(file).size > MAX_CONFIG_BYTES) return { status: 'error', error: `${file} exceeds the 5 MB configuration limit.` }
     raw = fs.readFileSync(file, 'utf8')
   } catch (error) {
@@ -255,7 +286,7 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
   try {
     decoded = JSON.parse(raw)
   } catch (error) {
-    return { status: 'error', error: `${workspaceConfigPathFor(workspacePath)} is not valid JSON: ${(error as Error).message}` }
+    return { status: 'error', error: `${file} is not valid JSON: ${(error as Error).message}` }
   }
   try {
     // Version-1 profiles predate `file` and `folder`; migrate only those known
@@ -284,7 +315,7 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
       },
     }
   } catch (error) {
-    return { status: 'error', error: `${workspaceConfigPathFor(workspacePath)} has an invalid configuration: ${(error as Error).message}` }
+    return { status: 'error', error: `${file} has an invalid configuration: ${(error as Error).message}` }
   }
 }
 
@@ -385,7 +416,7 @@ export function writeWorkspaceConfig(workspacePath: string | null, config: Works
 
 // --- Query history ----------------------------------------------------------
 
-const historyPathFor = (wsPath: string) => path.join(wsPath, '.sqlkit', 'history.json')
+const historyPathFor = (wsPath: string) => path.join(internalDir(wsPath), 'history.json')
 const MAX_HISTORY_BYTES = 64 * 1024 * 1024
 
 /** The workspace's persisted query history, newest first. Missing or unreadable

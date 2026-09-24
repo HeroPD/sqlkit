@@ -85,6 +85,21 @@ export function sqlModeFlags(mode: string): SqlModeFlags {
   }
 }
 
+type FormatValues = Parameters<typeof mysql.format>[1]
+
+// Strings under NO_BACKSLASH_ESCAPES: a doubled quote is the only escape, and a backslash is itself.
+const literalWithoutBackslashes = (value: FormatValues): FormatValues =>
+  typeof value === 'string' ? mysql.raw(`'${value.replaceAll("'", "''")}'`)
+    : Array.isArray(value) ? value.map(literalWithoutBackslashes) : value
+
+/** Fills `?` placeholders on the client, as mysql2 does, but in the server's
+ * string syntax: mysql2 always escapes with backslashes, which a server running
+ * NO_BACKSLASH_ESCAPES keeps as data, and whose `\'` it reads as the literal's end. */
+export function mysqlQueryFormat(sql: string, values: FormatValues, noBackslashEscapes: boolean): string {
+  if (!noBackslashEscapes || !Array.isArray(values)) return mysql.format(sql, values)
+  return mysql.format(sql, values.map(literalWithoutBackslashes))
+}
+
 /** Whether connection attributes can identify sessions opened by SqlKit. */
 export function mysqlSessionIdentificationAvailable(enabled: unknown, attrsSize: unknown): boolean {
   return Number(enabled) === 1 && Number(attrsSize) !== 0
@@ -147,6 +162,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // removes SET/session/temp-table state before another tab borrows it.
       resetOnRelease: true,
       multipleStatements: true,
+      // Read per call: the flag is learned from the first query, which binds nothing.
+      queryFormat: (query: string, values: FormatValues) => mysqlQueryFormat(query, values, sqlMode.noBackslashEscapes === true),
       // Lossless values: temporals as strings, BIGINT past 2^53 as strings
       // (safe-range ones stay numbers), DECIMAL as strings (mysql2 default),
       // and JSON as wire text so numeric literals never pass through JSON.parse.

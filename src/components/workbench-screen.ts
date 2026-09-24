@@ -702,7 +702,7 @@ export class WorkbenchScreen extends LitElement {
       this._workspaceFiles.setFolder(null)
       // Connections belong to the workspace they were opened from.
       void this._live.disconnectAll()
-      if (this.workspace) void this._loadConfig()
+      if (this.workspace) void this._loadConfig({ restore: true })
     }
     if (this._ctx.activeTabId !== this._lastActiveTabId) {
       this._hasExplicitRunTarget = false
@@ -736,13 +736,14 @@ export class WorkbenchScreen extends LitElement {
 
   // --- workspace config + context -----------------------------------------
 
-  private async _loadConfig() {
+  private async _loadConfig({ restore = false } = {}) {
     // Restore the in-use context; the config controller defaults to the first
     // profile so the Explorer has a files folder to show right away.
     const { profileId, child } = await this._config.load()
     // Tabs come back before the context switch: switchInstance restores the
     // instance for the context it lands on, which has to be there already.
-    await this._restoreSession()
+    // Only on open: a re-read mid-session would replace the live tabs with their last write.
+    if (restore) await this._restoreSession()
     this._ctx.switchInstance(profileId, child)
     this._workspaceFiles.setFolder(this._contextFolder())
     void this._queries.loadHistory()
