@@ -543,6 +543,20 @@ describe('FileOpsController.create', () => {
   })
 })
 
+describe('FileOpsController.openFile', () => {
+  it('opens one tab for a file clicked twice while its read is in flight', async () => {
+    const read = defer<{ success: true; content: string }>()
+    stubSqlkit({ readFile: vi.fn(() => read.promise) })
+    const { ctrl, ctx } = make()
+    const first = ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+    const second = ctrl.openFile(fileInfo('/ws/ctx/q.sql'))
+    read.resolve({ success: true, content: 'select 1' })
+    await Promise.all([first, second])
+    expect(ctx.tabs).toHaveLength(1)
+    expect(ctx.tabs[0]).toMatchObject({ id: 'file:/ws/ctx/q.sql', path: '/ws/ctx/q.sql' })
+  })
+})
+
 describe('FileOpsController.rename', () => {
   it('renames the file and retargets its tab and query', async () => {
     stubSqlkit({ readFile: vi.fn(() => Promise.resolve({ success: true, content: 'x' })) })

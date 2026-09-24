@@ -248,3 +248,49 @@ describe('ResultEditingController', () => {
     expect(error).toContain('rolled back')
   })
 })
+
+// The workbench asks on every render, and typing re-renders on every keystroke.
+describe('ResultEditingController edit context memo', () => {
+  it('works the context out once per run and metadata, not once per keystroke', () => {
+    let lookups = 0
+    const counted = new Proxy(columns, {
+      get(target, key, receiver) {
+        if (key === 'filter') lookups += 1
+        return Reflect.get(target, key, receiver) as unknown
+      },
+    })
+    let activeTab = tab('tab-a', 'select id, name from accounts')
+    let tables = [accounts]
+    const run = { phase: 'done' as const, result, sql: 'select id, name from accounts' }
+    const dialogs = new DialogsController({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
+    const ctrl = new ResultEditingController({
+      activeTab: () => activeTab,
+      activeDbId: () => profile.id,
+      activeChildDb: () => null,
+      activeProfile: () => profile,
+      run: () => run,
+      tables: () => tables,
+      columns: () => counted,
+      dialogs,
+      refreshResult: () => Promise.resolve(true),
+      refreshNotComing: () => {},
+      drafts: () => [],
+      dropDrafts: () => {},
+      edits: () => [],
+      clearEdits: () => {},
+      deletes: () => [],
+      clearDeletions: () => {},
+    })
+
+    expect(ctrl.rowEditable()).toBe(true)
+    const first = lookups
+    activeTab = { ...activeTab, content: 'select id, name from accounts -- typing' }
+    expect(ctrl.rowEditable()).toBe(true)
+    expect(ctrl.resultTable()).toEqual(accounts)
+    expect(lookups).toBe(first)
+
+    tables = []
+    activeTab = { ...activeTab, table: undefined }
+    expect(ctrl.rowEditable()).toBe(false)
+  })
+})

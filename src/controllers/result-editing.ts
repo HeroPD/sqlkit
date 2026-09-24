@@ -13,6 +13,7 @@ import {
   rowKeysForDelete,
   singleTableEditContext,
   type DraftRow,
+  type SingleTableEditContext,
   type EditIssue,
 } from '../result-editing'
 import { t } from '../i18n'
@@ -58,13 +59,27 @@ export class ResultEditingController {
   }
 
   rowEditable() {
-    return singleTableEditContext(this.input()) !== null
+    return this.shown().context !== null
   }
 
   /** The table the shown rows came from, for naming an INSERT the result is
    * copied/exported as. Null for a join or expression-only query. */
   resultTable() {
-    return resultSourceTable(this.input())
+    return this.shown().table
+  }
+
+  // Render asks on every keystroke, since the tab holds the editor's text; the answer moves only
+  // with the run, the tab's table and the metadata — and with the text only for a run without SQL.
+  private shownMemo: { key: unknown[]; context: SingleTableEditContext | null; table: TableRef | null } | null = null
+
+  private shown() {
+    const input = this.input()
+    const sql = input.run.phase === 'done' ? input.run.sql : undefined
+    const key = [input.run, input.tab?.id, input.tab?.table, sql === undefined ? input.tab?.content : null, input.profileId, input.engine, input.tables, input.columns]
+    const memo = this.shownMemo
+    if (memo && memo.key.length === key.length && memo.key.every((part, index) => part === key[index])) return memo
+    this.shownMemo = { key, context: singleTableEditContext(input), table: resultSourceTable(input) }
+    return this.shownMemo
   }
 
   /** Result columns carrying the primary key of the shown rows. The panel uses

@@ -140,6 +140,12 @@ export class FileOpsController {
       this.deps.dialogs.notice(t('file.openFailed'), result.error ?? t('common.unknownError'))
       return
     }
+    // A second click while the read was in flight has opened it since; one tab per file.
+    const opened = this.deps.ctx.fileTabInContext(context.profileId, context.childDb, file.path)
+    if (opened) {
+      this.deps.ctx.activateTabInContext(context.profileId, context.childDb, opened)
+      return
+    }
     this.deps.ctx.addTabToContext(context.profileId, context.childDb, {
       id: this.freeTabId(file.path),
       kind: 'sql',

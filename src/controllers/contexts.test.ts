@@ -262,6 +262,20 @@ describe('ContextsController.tabExists', () => {
     expect(ctrl.tabExists(live)).toBe(true) // still belongs to a stashed context
     expect(ctrl.tabExists('nope')).toBe(false)
   })
+
+  // A result landing for a tab closed since would otherwise be stored, and its
+  // main-process row buffer never freed.
+  it('forgets a tab closed after switching away and back', () => {
+    const { ctrl } = make()
+    ctrl.newQuery()
+    const tab = ctrl.activeTabId!
+    ctrl.switchInstance('p1', null)
+    ctrl.switchInstance(null, null)
+    ctrl.closeTab(tab)
+    expect(ctrl.tabExists(tab)).toBe(false)
+    expect(ctrl.tabName(tab)).toBeNull()
+    expect(ctrl.toSession()).toEqual([])
+  })
 })
 
 // Browse tabs and object-DDL tabs are also unsaved with content === savedContent,

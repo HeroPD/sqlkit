@@ -114,6 +114,9 @@ export class ContextsController {
   private _activeDbId: string | null = null
   private _activeChildDb: string | null = null
   private _selectedTable: string | null = null
+  // Every context but the live one, whose state is the fields above. The live
+  // context is never also kept here: a second, older copy of its tabs made
+  // closed tabs look open to anything that searched the stash.
   private _instances = new Map<string, ContextInstance>()
 
   private host: ReactiveControllerHost
@@ -200,6 +203,7 @@ export class ContextsController {
     this._activeDbId = profileId
     this._activeChildDb = childDb
     const incoming = this._instances.get(toKey)
+    this._instances.delete(toKey)
     this._tabs = incoming?.tabs ?? []
     this._activeTabId = incoming?.activeTabId ?? null
     this._selectedTable = incoming?.selectedTable ?? null
@@ -209,8 +213,7 @@ export class ContextsController {
   // Every context's tabs, live one included, for the session file. Contexts with
   // nothing open are left out — they restore identically to a missing one.
   toSession(): SessionContext[] {
-    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
-    const instances = [...this._instances].filter(([key]) => key !== liveKey).map(([, instance]) => instance)
+    const instances = [...this._instances.values()]
     instances.push({
       profileId: this._activeDbId,
       childDb: this._activeChildDb,
@@ -233,14 +236,11 @@ export class ContextsController {
   // hold. Editor events only ever report the tab being typed in, so this is the
   // only thing that offers up a programmatically opened tab's SQL.
   sessionBuffers(): Map<string, string> {
-    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
     const buffers = new Map<string, string>()
     const collect = (tabs: EditorTabState[]) => {
       for (const tab of tabs) if (tab.kind === 'sql' && needsSessionBackup(tab)) buffers.set(tab.id, tab.content)
     }
-    // Switching away leaves the stash's entry for the live key in place, so it
-    // holds a stale copy of these very tabs; the live strip wins.
-    for (const [key, instance] of this._instances) if (key !== liveKey) collect(instance.tabs)
+    for (const instance of this._instances.values()) collect(instance.tabs)
     collect(this._tabs)
     return buffers
   }
@@ -260,7 +260,9 @@ export class ContextsController {
   // and invisible.
   hydrate(contexts: RestoredContext[]) {
     this._instances = new Map(contexts.map((instance) => [this.deps.contextKey(instance.profileId, instance.childDb), instance]))
-    const live = this._instances.get(this.deps.contextKey(this._activeDbId, this._activeChildDb))
+    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
+    const live = this._instances.get(liveKey)
+    this._instances.delete(liveKey)
     this._tabs = live?.tabs ?? []
     this._activeTabId = live?.activeTabId ?? null
     this._selectedTable = live?.selectedTable ?? null
@@ -322,13 +324,12 @@ export class ContextsController {
   /** Every file currently represented by an editor tab, including tabs stashed
    * under inactive database contexts. */
   openFilePaths(): string[] {
-    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
     const paths = new Set<string>()
     const collect = (tabs: EditorTabState[]) => {
       for (const tab of tabs) if (tab.kind === 'sql' && tab.path) paths.add(tab.path)
     }
     collect(this._tabs)
-    for (const [key, instance] of this._instances) if (key !== liveKey) collect(instance.tabs)
+    for (const instance of this._instances.values()) collect(instance.tabs)
     return [...paths]
   }
 
@@ -398,9 +399,6 @@ export class ContextsController {
 
     this._tabs = update(this._tabs, liveKey)
     for (const [key, instance] of this._instances) {
-      // The live key can hold an older array left from the last context switch;
-      // the live fields are authoritative until they are stashed again.
-      if (key === liveKey) continue
       const tabs = update(instance.tabs, key)
       if (tabs !== instance.tabs) this._instances.set(key, { ...instance, tabs })
     }
@@ -555,8 +553,7 @@ export class ContextsController {
   // reassign the active tab if it was one of them.
   /** Names of the tabs, in any context, holding unsaved edits to a file under this path. */
   dirtyFileTabNamesUnder(targetPath: string): string[] {
-    const liveKey = this.deps.contextKey(this._activeDbId, this._activeChildDb)
-    const stashed = [...this._instances].filter(([key]) => key !== liveKey).flatMap(([, instance]) => instance.tabs)
+    const stashed = [...this._instances.values()].flatMap((instance) => instance.tabs)
     return [...this._tabs, ...stashed].flatMap((tab) =>
       fileTabUnder(tab, targetPath) && tab.content !== tab.savedContent ? [tab.name] : [])
   }

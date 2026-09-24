@@ -589,6 +589,20 @@ describe('QueriesController result retention', () => {
     expect(controller.editsFor('t1').size).toBe(1)
     expect(controller.runFor('t2').phase).toBe('error')
   })
+
+  // Pages are measured once as they arrive, so they must still count toward the cap.
+  it('counts fetched pages toward the cap', async () => {
+    const page = [['x'.repeat(15 * 1024 * 1024)]]
+    stubSqlkit({ fetchRows: vi.fn(() => Promise.resolve({ success: true, rows: page })) })
+    const controller = new QueriesController(host(), () => true)
+    controller.setRun('t2', { phase: 'done', result: { columns: ['p'], rows: [['y'.repeat(20 * 1024 * 1024)]], rowCount: 1, durationMs: 1 } })
+    await controller.execute(runArgs)
+    expect(controller.runFor('t2').phase).toBe('done')
+
+    await controller.loadMore('t1')
+    expect(controller.runFor('t1')).toMatchObject({ phase: 'done', result: { rows: [[0], [1], page[0]] } })
+    expect(controller.runFor('t2').phase).toBe('error')
+  })
 })
 
 describe('QueriesController column widths', () => {

@@ -100,6 +100,19 @@ describe('TableInspect object sizes', () => {
   })
 })
 
+describe('TableInspect failed load', () => {
+  it('shows the error when the call itself is refused, instead of loading forever', async () => {
+    const inspectTable = vi.fn(() => Promise.reject(new Error('Table reference is invalid')))
+    ;(window as never as { sqlkit: { inspectTable: typeof inspectTable } }).sqlkit = { inspectTable }
+    const view = new TableInspect()
+    view.profileId = 'p1'
+    view.engine = 'postgresql'
+    view.table = { schema: 'public', name: 'users', kind: 'table' }
+    await internals(view)._load()
+    expect(internals(view)._state).toEqual({ phase: 'error', error: 'Table reference is invalid' })
+  })
+})
+
 describe('TableInspect stale-load guard', () => {
   it('ignores a result for a child the user already switched away from', async () => {
     const table: TableRef = { schema: 'public', name: 't', kind: 'table' }

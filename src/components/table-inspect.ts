@@ -372,10 +372,11 @@ export class TableInspect extends LitElement {
       return
     }
     this._state = { phase: 'loading' }
-    const result =
-      object && objectKind
-        ? await window.sqlkit.inspectObject(profileId, childDb, object, objectKind)
-        : await window.sqlkit.inspectTable(profileId, childDb, table!)
+    // A rejected call (the main process refusing its arguments) must end in the error state, not a spinner forever.
+    const result = await (object && objectKind
+      ? window.sqlkit.inspectObject(profileId, childDb, object, objectKind)
+      : window.sqlkit.inspectTable(profileId, childDb, table!)
+    ).catch((error: unknown) => ({ success: false as const, error: error instanceof Error ? error.message : String(error) }))
     // Stale guard: the tab may have been retargeted (profile, child, or target)
     // while this was in flight.
     if (

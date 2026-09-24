@@ -28,13 +28,33 @@ const retainedValueBytes = (value: unknown): number => {
   try { return (JSON.stringify(value)?.length ?? 0) * 2 } catch { return 64 }
 }
 
+// Measured once per rows array: every stored run re-totals every retained result,
+// and re-walking them all on each fetched page made paging slow down as it went.
+const measuredRows = new WeakMap<unknown[][], number>()
+
+const rowsBytes = (rows: unknown[][]): number => {
+  let bytes = measuredRows.get(rows)
+  if (bytes !== undefined) return bytes
+  bytes = 0
+  for (const row of rows) for (const value of row) bytes += retainedValueBytes(value)
+  measuredRows.set(rows, bytes)
+  return bytes
+}
+
+/** A page appended to loaded rows, measured by the page alone. */
+const appendRows = (rows: unknown[][], page: unknown[][]): unknown[][] => {
+  const next = rows.concat(page)
+  measuredRows.set(next, rowsBytes(rows) + rowsBytes(page))
+  return next
+}
+
 const retainedResultBytes = (result: QueryResult): number => {
   const seen = new Set<unknown[][]>()
   let bytes = 0
   for (const rows of [result.rows, ...(result.resultSets?.map((set) => set.rows) ?? [])]) {
     if (seen.has(rows)) continue
     seen.add(rows)
-    for (const row of rows) for (const value of row) bytes += retainedValueBytes(value)
+    bytes += rowsBytes(rows)
   }
   return bytes
 }
@@ -873,7 +893,7 @@ export class QueriesController implements ReactiveController {
       }
       this.setRun(tabId, {
         phase: 'done',
-        result: replaceResult({ ...currentResult, rows: [...currentResult.rows, ...response.rows] }),
+        result: replaceResult({ ...currentResult, rows: appendRows(currentResult.rows, response.rows) }),
         sql: current.sql,
         params: current.params,
         ...(current.table ? { table: current.table } : {}),
