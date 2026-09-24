@@ -18,22 +18,40 @@ export function normalizeWorkspacePath(wsPath: string): string {
 // session.json, the next window session.1.json. The first window on a workspace
 // always takes slot 0, so a workspace only ever opened once is the single file
 // it has always been.
+/** Slots held across processes (see claimSessionSlot in session.ts). */
+export type SlotLocks = {
+  claim(wsPath: string, slot: number): boolean
+  release(wsPath: string, slot: number): void
+}
+
+const NO_LOCKS: SlotLocks = { claim: () => true, release: () => {} }
+
 export class WorkspaceWindows {
   private paths = new Map<number, string>()
   private slots = new Map<number, number>()
 
-  /** Points a window at a workspace, claiming the lowest slot free on it. */
+  private locks: SlotLocks
+
+  constructor(locks: SlotLocks = NO_LOCKS) {
+    this.locks = locks
+  }
+
+  /** Points a window at a workspace, claiming the lowest slot free on it — free
+   * in this process and not held by another one. */
   open(contentsId: number, wsPath: string) {
+    this.close(contentsId)
     const target = normalizeWorkspacePath(wsPath)
     const taken = new Set(this.owners(target, contentsId).map((id) => this.slots.get(id) ?? 0))
     let slot = 0
-    while (taken.has(slot)) slot += 1
+    while (taken.has(slot) || !this.locks.claim(wsPath, slot)) slot += 1
     this.paths.set(contentsId, wsPath)
     this.slots.set(contentsId, slot)
   }
 
   /** The window left its workspace (closed, or moved to another one). */
   close(contentsId: number) {
+    const wsPath = this.paths.get(contentsId)
+    if (wsPath !== undefined) this.locks.release(wsPath, this.slots.get(contentsId) ?? 0)
     this.paths.delete(contentsId)
     this.slots.delete(contentsId)
   }

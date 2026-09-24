@@ -97,3 +97,20 @@ describe('WorkspaceWindows.raiseInstead', () => {
     expect(windows.raiseInstead(WS, 2)).toEqual([])
   })
 })
+
+describe('WorkspaceWindows slot locks', () => {
+  it('skips a slot another process holds, and gives back what it held on close and repoint', () => {
+    const held = new Set(['/tmp/sqlkit-ws:0'])
+    const released: string[] = []
+    const windows = new WorkspaceWindows({
+      claim: (path, slot) => !held.has(`${path}:${slot}`),
+      release: (path, slot) => released.push(`${path}:${slot}`),
+    })
+    windows.open(1, WS)
+    expect(windows.slotFor(1)).toBe(1)
+    windows.open(1, OTHER)
+    expect(released).toEqual([`${WS}:1`])
+    windows.close(1)
+    expect(released).toEqual([`${WS}:1`, `${OTHER}:0`])
+  })
+})

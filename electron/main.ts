@@ -21,7 +21,7 @@ import { THEMES, acceleratorFor, effectiveKeymapBindings, type MenuKeymapCommand
 import { THEME_IDS, isThemeId } from '../src/themes'
 import { inspectionSwitch } from './hardening'
 import { registerWorkspaceIpc } from './ipc-workspace'
-import { markSessionClean } from './session'
+import { claimSessionSlot, markSessionClean, releaseSessionSlot } from './session'
 import { normalizeWorkspacePath, WorkspaceWindows } from './workspace-windows'
 import { readAppSettings, readGlobalConfig, readTheme, writeAppSettings, writeTheme } from './workspace'
 import { titleBarOverlay, WINDOW_CHROME } from './window-chrome'
@@ -59,7 +59,7 @@ if (devServerUrl && Number.isInteger(devParentPid) && devParentPid > 0) {
 }
 if (smokeTest) app.commandLine.appendSwitch('no-sandbox')
 const appFileUrl = pathToFileURL(join(__dirname, '../dist/index.html')).href
-const workspaceWindows = new WorkspaceWindows()
+const workspaceWindows = new WorkspaceWindows({ claim: claimSessionSlot, release: releaseSessionSlot })
 const dbManagers = new Map<number, ConnectionManager>()
 const pendingDisconnects = new Set<Promise<void>>()
 let quitting = false

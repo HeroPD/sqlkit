@@ -221,6 +221,12 @@ export type EditorCommandDetail = { command: 'command-palette' }
 // via setState() instead of tearing the view down and re-parsing, which also
 // preserves each tab's undo history, selection, and scroll position. States
 // are cached here (module level, so remounts restore too), LRU-capped.
+// A file whose every line break is CRLF keeps them: the editor reads text back
+// LF-only, which rewrote every line of the file on its first edit and left an
+// undone change still dirty. A mixed file stays on the default, where a lone LF
+// is still a line break rather than a stray character.
+const crlfDocument = (text: string) => text.includes('\r\n') && !/(?:^|[^\r])\n|\r(?!\n)/.test(text)
+
 const stateCache = new Map<string, EditorState>()
 const MAX_CACHED_STATES = 20
 
@@ -389,7 +395,7 @@ export class SqlEditor extends LitElement {
     this._emitRunTarget(update.view)
     if (!update.docChanged) return
 
-    const nextValue = update.state.doc.toString()
+    const nextValue = update.state.sliceDoc()
     this._lastEmittedValue = nextValue
     // Loading the host's own value into the view is not a user edit. Reporting
     // it as one makes the host treat a programmatic load like typing — which
@@ -490,7 +496,8 @@ export class SqlEditor extends LitElement {
   }
 
   private _makeState(doc: string) {
-    return EditorState.create({ doc, extensions: this._stateExtensions() })
+    const extensions = this._stateExtensions()
+    return EditorState.create({ doc, extensions: crlfDocument(doc) ? [...extensions, EditorState.lineSeparator.of('\r\n')] : extensions })
   }
 
   // The cached state of the tab, but only when its document still matches
@@ -498,7 +505,7 @@ export class SqlEditor extends LitElement {
   // doc with a misleading undo history must not resurface.
   private _restoredState() {
     const cached = this.tabId ? stateCache.get(this.tabId) : undefined
-    if (cached && cached.doc.toString() === this.value) {
+    if (cached && cached.sliceDoc() === this.value) {
       stateCache.delete(this.tabId)
       return cached
     }
@@ -540,17 +547,23 @@ export class SqlEditor extends LitElement {
       changed.has('value') &&
       !this._syncingFromEditor &&
       this.value !== this._lastEmittedValue &&
-      this.value !== view.state.doc.toString()
+      this.value !== view.state.sliceDoc()
     ) {
       this._applyingHostValue = true
       try {
-        view.dispatch({
-          changes: {
-            from: 0,
-            to: view.state.doc.length,
-            insert: this.value,
-          },
-        })
+        // A file reloaded with the other line ending needs a state that splits lines its way.
+        if (crlfDocument(this.value) !== (view.state.lineBreak === '\r\n')) {
+          view.setState(this._makeState(this.value))
+          this._rebindState(view)
+        } else {
+          view.dispatch({
+            changes: {
+              from: 0,
+              to: view.state.doc.length,
+              insert: this.value,
+            },
+          })
+        }
       } finally {
         this._applyingHostValue = false
       }

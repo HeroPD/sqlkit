@@ -484,7 +484,8 @@ const selectedRange = (state: EditorState, from: number, to: number): [number, n
 const selectedQuery = (state: EditorState, from: number, to: number): QueryBlock | null => {
   if (from >= to) return null
   const [runFrom, runTo] = selectedRange(state, from, to)
-  const raw = state.sliceDoc(runFrom, runTo)
+  // Document text, not sliceDoc: a CRLF file's breaks would count twice in the offset below.
+  const raw = state.doc.sliceString(runFrom, runTo)
   const selected = raw.trim()
   return selected ? { sql: selected, from: runFrom + raw.length - raw.trimStart().length } : null
 }

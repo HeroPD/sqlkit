@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { SessionTab, WorkspaceSession } from '../src/electron'
-import { applyShutdownFlush, dropBackup, hasBackup, markSessionClean, readBackup, readSession, writeBackup, writeSession, writeShutdownBackup } from './session'
+import { applyShutdownFlush, claimSessionSlot, dropBackup, hasBackup, markSessionClean, readBackup, readSession, releaseSessionSlot, writeBackup, writeSession, writeShutdownBackup } from './session'
 
 const state = vi.hoisted(() => ({ userData: '' }))
 
@@ -398,5 +398,48 @@ describe('applyShutdownFlush', () => {
     }, limits)
     expect(readBackup(workspace, 'big')).toBe('version A')
     expect(readSession(workspace)?.contexts[0]?.tabs.map((tab) => tab.id)).toEqual(['big'])
+  })
+})
+
+// Two processes on one workspace (dev build beside the installed app, or a shared
+// folder) must not both take slot 0; a crash must not keep a slot taken forever.
+describe('session slot locks', () => {
+  const lockFile = (slot = 0) => path.join(workspace, '.sqlkit', slot === 0 ? 'session.lock' : `session.${slot}.lock`)
+  const boot = () => Math.round(Date.now() / 1000 - os.uptime())
+  const plant = (lock: object, slot = 0) => {
+    fs.mkdirSync(path.join(workspace, '.sqlkit'), { recursive: true })
+    fs.writeFileSync(lockFile(slot), JSON.stringify(lock))
+  }
+
+  it('takes a free slot and gives it back', () => {
+    expect(claimSessionSlot(workspace, 0)).toBe(true)
+    expect(JSON.parse(fs.readFileSync(lockFile(), 'utf8'))).toMatchObject({ pid: process.pid })
+    expect(fs.readFileSync(path.join(workspace, '.sqlkit', '.gitignore'), 'utf8').split('\n')).toContain('session.lock')
+    releaseSessionSlot(workspace, 0)
+    expect(fs.existsSync(lockFile())).toBe(false)
+  })
+
+  it('leaves a slot to the running process that holds it', () => {
+    plant({ pid: process.ppid, boot: boot() })
+    expect(claimSessionSlot(workspace, 0)).toBe(false)
+    releaseSessionSlot(workspace, 0)
+    expect(fs.existsSync(lockFile())).toBe(true)
+  })
+
+  it('takes over a lock whose process is gone, or from before a reboot', () => {
+    plant({ pid: 2 ** 22 + 12_345, boot: boot() })
+    expect(claimSessionSlot(workspace, 0)).toBe(true)
+    plant({ pid: process.ppid, boot: boot() - 86_400 }, 1)
+    expect(claimSessionSlot(workspace, 1)).toBe(true)
+    expect(JSON.parse(fs.readFileSync(lockFile(1), 'utf8')).pid).toBe(process.pid)
+  })
+
+  // A crash, then a network change: macOS reports the hostname as the network
+  // address, so a lock that named it would hold the slot forever.
+  it('ignores the hostname, and takes a garbled lock as stale', () => {
+    plant({ pid: 2 ** 22 + 12_345, host: 'an-address-no-longer-ours', boot: boot() })
+    expect(claimSessionSlot(workspace, 0)).toBe(true)
+    fs.writeFileSync(lockFile(1), '{"pid": 12')
+    expect(claimSessionSlot(workspace, 1)).toBe(true)
   })
 })

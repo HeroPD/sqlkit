@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import type { SaveResult, WorkspaceSession } from '../src/electron'
@@ -21,6 +22,7 @@ import { ensureInternalGitignore, fileStamp, internalDir, writeFileAtomic } from
 //   .sqlkit/backups/<32 hex>.sql  one unsaved buffer, named sha256(tab id)
 //   .sqlkit/backups/<n>/…         the same, for the nth extra window's buffers
 //   …/unrestored-<time>/<hex>.sql buffers set aside, never swept (see below)
+//   .sqlkit/session[.<n>].lock    which process holds that slot (see claimSessionSlot)
 //
 // All are written 0600 and .gitignore'd; query text can carry credentials.
 //
@@ -201,6 +203,88 @@ export function hasBackup(workspacePath: string | null, tabId: string, slot = 0)
 export function writeShutdownBackup(workspacePath: string | null, tabId: string, content: string, slot = 0): { unbacked: boolean } {
   if (writeBackup(workspacePath, tabId, content, slot).success) return { unbacked: false }
   return { unbacked: !hasBackup(workspacePath, tabId, slot) }
+}
+
+// --- slot locks ---------------------------------------------------------------
+// A slot's session file and backups belong to one window at a time. Windows in
+// one process keep apart through WorkspaceWindows; these locks keep processes on
+// one machine apart too — `npm run dev` beside the installed app would otherwise
+// both write slot 0 and prune each other's buffers. A lock names its process by
+// pid and boot time only: macOS reports the hostname as the current network
+// address, so a lock keyed on it would outlive a crash forever after a network
+// change. Two machines sharing a folder over a network drive are not kept apart.
+
+type SlotLock = { pid: number; boot: number }
+
+const lockPathFor = (wsPath: string, slot: number) =>
+  path.join(internalDir(wsPath), slot === 0 ? 'session.lock' : `session.${slot}.lock`)
+
+// Seconds since the epoch the machine booted: a pid from before a reboot names some other process now.
+const bootTime = () => Math.round(Date.now() / 1000 - os.uptime())
+
+const readLock = (file: string): SlotLock | null => {
+  try {
+    const lock = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<SlotLock>
+    return typeof lock.pid === 'number' && typeof lock.boot === 'number' ? lock as SlotLock : null
+  } catch {
+    return null
+  }
+}
+
+// Whether the process named by a lock may still be running. This process's own
+// locks are never live here: WorkspaceWindows already knows which of its windows hold what.
+function lockIsLive(lock: SlotLock): boolean {
+  if (Math.abs(lock.boot - bootTime()) > 60) return false
+  if (lock.pid === process.pid) return false
+  try {
+    process.kill(lock.pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/** Takes a slot's lock for this process. False when a running process holds it;
+ * a lock left by a crash is taken over. With no lock possible (a read-only or
+ * refused .sqlkit) the slot is granted: nothing can be written there anyway. */
+export function claimSessionSlot(wsPath: string, slot: number): boolean {
+  let file: string
+  try {
+    file = lockPathFor(wsPath, slot)
+    ensureInternalGitignore(wsPath)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+  } catch {
+    return true
+  }
+  const mine = JSON.stringify({ pid: process.pid, boot: bootTime() })
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.writeFileSync(file, mine, { flag: 'wx', mode: 0o600 })
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return true
+    }
+    const held = readLock(file)
+    if (held && lockIsLive(held)) return false
+    // Stale: removed and re-created exclusively, so of two processes taking it over at once only one wins.
+    try {
+      fs.unlinkSync(file)
+    } catch {
+      // Already gone; the retry decides.
+    }
+  }
+  return false
+}
+
+/** Gives a slot's lock back, if this process is the one holding it. */
+export function releaseSessionSlot(wsPath: string, slot: number) {
+  try {
+    const file = lockPathFor(wsPath, slot)
+    const held = readLock(file)
+    if (held?.pid === process.pid) fs.unlinkSync(file)
+  } catch {
+    // Nothing to give back.
+  }
 }
 
 /** The synchronous shutdown flush: every buffer it can write, then the session,

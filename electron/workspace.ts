@@ -195,6 +195,9 @@ const GITIGNORE_RULES = [
   'session.json.tmp',
   // A workspace open in more than one window has a session file per window.
   'session.*.json',
+  // Which process holds each window's slot.
+  'session.lock',
+  'session.*.lock',
   'session.*.json.tmp',
   'backups/',
 ]

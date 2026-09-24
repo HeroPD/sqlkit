@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeAll, expect, test, vi } from 'vitest'
 import { startCompletion, completionStatus, acceptCompletion, moveCompletionSelection } from '@codemirror/autocomplete'
+import { undo } from '@codemirror/commands'
 import { EditorSelection } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
 import type { ColumnRef } from '../electron'
@@ -1135,4 +1136,27 @@ test('a host value swap does not report an editor-change', async () => {
   expect(changes).toHaveLength(1)
   expect(changes[0]).toContain('-- typed')
   el.remove()
+})
+
+// Git on Windows, and plenty of editors, write CRLF. The editor must hand back
+// what it was given, or the first keystroke rewrites every line of the file.
+test('keeps a CRLF file CRLF through an edit, and an undone edit restores it exactly', async () => {
+  const { el, view } = await mountWithMeta('select 1\r\nfrom t\r\n')
+  const emitted: string[] = []
+  el.addEventListener('editor-change', (event) => emitted.push((event as CustomEvent<{ value: string }>).detail.value))
+
+  view.dispatch({ changes: { from: view.state.doc.length, insert: 'where x = 1' } })
+  expect(emitted.at(-1)).toBe('select 1\r\nfrom t\r\nwhere x = 1')
+  undo(view)
+  expect(emitted.at(-1)).toBe('select 1\r\nfrom t\r\n')
+  el.remove()
+})
+
+test('leaves a mixed or LF file on plain line breaks', async () => {
+  for (const doc of ['select 1\nfrom t', 'select 1\r\nfrom t\nwhere 1']) {
+    const { el, view } = await mountWithMeta(doc)
+    expect(view.state.lineBreak).toBe('\n')
+    expect(view.state.doc.lines).toBe(doc.split(/\r?\n/).length)
+    el.remove()
+  }
 })
