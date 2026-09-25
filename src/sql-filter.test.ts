@@ -39,6 +39,20 @@ describe('applyFilterCondition', () => {
   })
 })
 
+// Verified against SQL Server: `1=1) DELETE FROM t WHERE (1=1` closed the WHERE
+// group and ran the DELETE as its own statement, past the read-only guard.
+describe('applyFilterCondition parentheses', () => {
+  it('refuses a condition that closes the group it is wrapped in', () => {
+    expect(() => applyFilterCondition('SELECT * FROM t', '1=1) DELETE FROM t WHERE (1=1', 'sqlserver')).toThrow(/unbalanced/i)
+    expect(() => applyFilterCondition('SELECT * FROM t', 'id IN (1, 2', 'postgresql')).toThrow(/unbalanced/i)
+  })
+
+  it('keeps nested groups and parentheses inside strings', () => {
+    expect(applyFilterCondition('SELECT * FROM t', "(a = 1 OR b IN (2, 3)) AND c = ')'", 'postgresql'))
+      .toContain("WHERE ((a = 1 OR b IN (2, 3)) AND c = ')')")
+  })
+})
+
 describe('isFilterableQuery', () => {
   it('accepts one SELECT and rejects unsafe statement shapes', () => {
     expect(isFilterableQuery('SELECT 1')).toBe(true)

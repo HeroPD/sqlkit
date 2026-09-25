@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { errorMessage } from './error-message'
+import { connectionErrorMessage, errorMessage } from './error-message'
 
 describe('errorMessage', () => {
   it('passes an ordinary error message through untouched', () => {
@@ -67,5 +67,37 @@ describe('errorMessage', () => {
     const error = new AggregateError([], '')
     ;(error as { errors: unknown[] }).errors = [error, new Error('reachable')]
     expect(errorMessage(error)).toBe('reachable')
+  })
+})
+
+// A raw errno says what failed, not what to do about it.
+describe('connectionErrorMessage', () => {
+  const target = { host: 'localhost', port: '5432' }
+  const coded = (message: string, code: string) => Object.assign(new Error(message), { code })
+
+  it('leads a dual-stack refusal with what to check, keeping the driver text', () => {
+    const refused = Object.assign(new AggregateError([
+      coded('connect ECONNREFUSED ::1:5432', 'ECONNREFUSED'),
+      coded('connect ECONNREFUSED 127.0.0.1:5432', 'ECONNREFUSED'),
+    ], ''), { code: 'ECONNREFUSED' })
+    expect(connectionErrorMessage(refused, target)).toBe(
+      'Nothing is accepting connections at localhost:5432. Is the server running, and is the port right?\n'
+      + 'connect ECONNREFUSED ::1:5432; connect ECONNREFUSED 127.0.0.1:5432',
+    )
+  })
+
+  it('names unknown hosts, refused logins, missing databases and certificate failures', () => {
+    expect(connectionErrorMessage(coded('getaddrinfo ENOTFOUND db.intranet', 'ENOTFOUND'), { host: 'db.intranet', port: '' }))
+      .toMatch(/^The host “db\.intranet” could not be found/)
+    expect(connectionErrorMessage(coded('password authentication failed for user "app"', '28P01'), target))
+      .toMatch(/^The server refused this user name or password\.\npassword authentication failed/)
+    expect(connectionErrorMessage(Object.assign(new Error("Access denied for user 'app'"), { errno: 1045 }), target))
+      .toMatch(/^The server refused this user name or password/)
+    expect(connectionErrorMessage(coded('database "nope" does not exist', '3D000'), target)).toMatch(/^The server has no database by that name/)
+    expect(connectionErrorMessage(coded('self-signed certificate', 'DEPTH_ZERO_SELF_SIGNED_CERT'), target)).toMatch(/^The server’s certificate could not be verified/)
+  })
+
+  it('passes anything it does not recognise through unchanged', () => {
+    expect(connectionErrorMessage(new Error('something odd'), target)).toBe('something odd')
   })
 })

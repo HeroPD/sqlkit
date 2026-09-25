@@ -35,7 +35,7 @@ import { isReadOnlyQuery } from '../../src/sql-order'
 import { isReadOnlyScript } from '../../src/sql-readonly'
 import { t } from '../../src/i18n'
 import { createDriver, type Driver } from './driver'
-import { errorMessage } from './error-message'
+import { connectionErrorMessage, errorMessage } from './error-message'
 import { queryErrorLine } from './error-line'
 import { ResultSessionStore } from './result-sessions'
 import { resolveEndpoint, type Endpoint, type Tunnel } from './transport'
@@ -238,7 +238,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       })
       return { success: true, serverVersion }
     } catch (error) {
-      const message = errorMessage(error)
+      const message = connectionErrorMessage(error, profile)
       if (isCurrent()) register({ phase: 'error', profileId: profile.id, error: message, ...resources })
       // A failed connect must not leak the pool or the tunnel under it.
       await teardown()
@@ -276,7 +276,9 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     // SQL Server sessions can't be opened read-only the way the other engines'
     // can, so free-form SQL is vetted here instead: read statements only.
     // Elsewhere the session guard lets the server do the refusing.
-    if (active.phase === 'connected' && active.readOnly && active.engine === 'sqlserver' && !isReadOnlyScript(sql, active.engine)) {
+    // The grid's filter is spliced in engine-side, after this point, so it is vetted too.
+    const readOnlyGuarded = active.phase === 'connected' && active.readOnly && active.engine === 'sqlserver'
+    if (readOnlyGuarded && (!isReadOnlyScript(sql, active.engine) || (filter && !isReadOnlyScript(`SELECT 1 WHERE ${filter}`, active.engine)))) {
       return { success: false, error: t('query.readOnlyBlocked') }
     }
     try {
@@ -639,7 +641,7 @@ export async function testConnection(profile: ConnectionProfile): Promise<TestCo
     const serverVersion = await driver.connect()
     return { success: true, serverVersion, tookMs: tookMs() }
   } catch (error) {
-    return { success: false, error: errorMessage(error), tookMs: tookMs() }
+    return { success: false, error: connectionErrorMessage(error, profile), tookMs: tookMs() }
   } finally {
     await driver?.disconnect().catch(() => {})
     await endpoint?.tunnel?.close().catch(() => {})

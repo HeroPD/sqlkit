@@ -38,6 +38,9 @@ export class ConnectionsController implements ReactiveController {
   /** Tables of connected databases, keyed by profile id. */
   tables: Record<string, TableRef[]> = {}
 
+  /** Why the last table list for a profile could not be read; cleared by the next one that is. */
+  metaErrors: Record<string, string> = {}
+
   /** Columns of every table, keyed by profile id (loaded with the tables). */
   columns: Record<string, ColumnRef[]> = {}
 
@@ -248,6 +251,14 @@ export class ConnectionsController implements ReactiveController {
     }
   }
 
+  private setMetaError(profileId: string, error: string | null) {
+    const next = { ...this.metaErrors }
+    if (error === null) delete next[profileId]
+    else next[profileId] = error
+    this.metaErrors = next
+    this.host.requestUpdate()
+  }
+
   private async loadTables(profileId: string) {
     // Tag this load; a newer one (child switch, refresh, reconnect) for the
     // same profile supersedes it, so a slower earlier response can't overwrite
@@ -266,11 +277,14 @@ export class ConnectionsController implements ReactiveController {
       tables = await window.sqlkit.listTables(profileId, childDb)
       columns = await window.sqlkit.listColumns(profileId, childDb)
       objects = await window.sqlkit.listObjects(profileId, childDb)
-    } catch {
+    } catch (error) {
+      // Recorded, not swallowed: the explorer would otherwise read an unread list as an empty one.
+      if (this.metaGen[profileId] === gen) this.setMetaError(profileId, (error as Error).message)
       return
     }
     if (this.metaGen[profileId] !== gen) return
     if (this.statuses[profileId]?.phase !== 'connected') return
+    this.setMetaError(profileId, tables.success ? null : tables.error)
     this.metaChild[profileId] = childDb
     if (tables.success) this.tables = { ...this.tables, [profileId]: tables.tables }
     if (columns.success) this.columns = { ...this.columns, [profileId]: columns.columns }

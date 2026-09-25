@@ -55,7 +55,7 @@ export class DbListItem extends LitElement {
       </span>
       <span class="meta">
         <span class="name">${this.name}</span>
-        <span class="detail">${this.detail}</span>
+        <span class="detail" title=${this.detail}>${this.detail}</span>
       </span>
       <button
         class="action"

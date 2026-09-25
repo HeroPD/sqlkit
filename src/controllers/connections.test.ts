@@ -94,8 +94,13 @@ function stubSqlkit() {
     await Promise.resolve()
   }
   const settleStats = (index: number, result: TableStatsResult) => settle(statCalls, index, result)
+  const failTables = async (index: number, error: string) => {
+    await settle(tableCalls, index, { success: false, error })
+    await settle(columnCalls, index, { success: true, columns: [] })
+    await settle(objectCalls, index, { success: true, objects: objectsWith('none') })
+  }
 
-  return { api, emit, resolveMetadata, settleStats }
+  return { api, emit, resolveMetadata, settleStats, failTables }
 }
 
 afterEach(() => {
@@ -156,6 +161,25 @@ describe('ConnectionsController.connect coalescing', () => {
 
     queue[1]!.resolve({ success: true, serverVersion: 'PG' })
     await Promise.all([second, third])
+  })
+})
+
+// An unread table list must not look like an empty one.
+describe('ConnectionsController metadata errors', () => {
+  it('records why the table list failed, and clears it once a read succeeds', async () => {
+    const { emit, failTables, resolveMetadata } = stubSqlkit()
+    const controller = new ConnectionsController(host())
+    controller.hostConnected()
+
+    emit([status('db_a')])
+    await failTables(0, 'permission denied for schema public')
+    expect(controller.metaErrors.p1).toBe('permission denied for schema public')
+    expect(controller.tables.p1).toBeUndefined()
+
+    controller.refresh('p1')
+    await resolveMetadata(1, 'fn', null)
+    expect(controller.metaErrors.p1).toBeUndefined()
+    expect(controller.tables.p1).toEqual([])
   })
 })
 

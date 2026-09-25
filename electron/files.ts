@@ -267,7 +267,8 @@ export async function saveWorkspaceFileAsync(
   const existing = await fsp.stat(target).catch(() => null)
   if (expected !== undefined && existing) {
     const current = await fsp.readFile(target, 'utf8').catch(() => null)
-    if (current !== null && current !== expected) return { success: false, conflict: true }
+    // Already holding exactly this text is no conflict: that is a second ⌘S landing before the first one's reply.
+    if (current !== null && current !== expected && current !== content) return { success: false, conflict: true }
   }
   const temp = tempSavePath(target)
   try {

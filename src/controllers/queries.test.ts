@@ -800,6 +800,46 @@ describe('QueriesController staged undo/redo', () => {
   })
 })
 
+// A run belongs to its execution, not to whatever tab id it started under.
+describe('QueriesController landing a finished run', () => {
+  const deferredRun = () => {
+    let settle!: (response: unknown) => void
+    const api = stubSqlkit({ runQuery: vi.fn(() => new Promise((resolve) => (settle = resolve))) })
+    return { api, settle: (response: unknown) => settle(response) }
+  }
+
+  it('follows a tab renamed while its query ran', async () => {
+    const { settle } = deferredRun()
+    const controller = new QueriesController(host(), () => true)
+    const done = controller.execute(runArgs)
+    controller.renameTab('t1', 't2')
+    settle({ success: true, result })
+    await done
+    expect(controller.runFor('t2')).toMatchObject({ phase: 'done', result })
+    expect(controller.history).toHaveLength(1)
+  })
+
+  it('does not land on a run that superseded it', async () => {
+    const { api, settle } = deferredRun()
+    const controller = new QueriesController(host(), () => true)
+    const done = controller.execute({ ...runArgs, executionId: 'first' })
+    controller.beginRun('t1', 'second', 'p1')
+    settle({ success: true, result: paged })
+    await done
+    expect(controller.runFor('t1')).toMatchObject({ phase: 'running', executionId: 'second' })
+    expect(api.closeSession).toHaveBeenCalledWith('sess1')
+  })
+
+  it('lands an early failure where the run now is', () => {
+    stubSqlkit()
+    const controller = new QueriesController(host(), () => true)
+    controller.beginRun('t1', 'exec', 'p1')
+    controller.renameTab('t1', 't2')
+    controller.failRun('exec', 'no route to host')
+    expect(controller.runFor('t2')).toEqual({ phase: 'error', error: 'no route to host' })
+  })
+})
+
 describe('QueriesController paging', () => {
   it('appends a fetched page on loadMore', async () => {
     const api = stubSqlkit({ fetchRows: vi.fn(() => Promise.resolve({ success: true, rows: [[2], [3]] })) })

@@ -284,3 +284,39 @@ describe('ExplorerView context menu', () => {
     expect((onImport.mock.calls[0]![0] as CustomEvent).detail).toEqual({ table: target })
   })
 })
+
+// "No tables." for a list still being read, or one that failed, reads as an empty database.
+describe('ExplorerView table list states', () => {
+  const mount = async (over: Partial<ExplorerView>) => {
+    const view = new ExplorerView()
+    Object.assign(view, { profileId: 'p1', ...over })
+    document.body.append(view)
+    await view.updateComplete
+    return view
+  }
+  const text = (view: ExplorerView) => view.shadowRoot!.textContent?.replace(/\s+/g, ' ') ?? ''
+
+  it('says it is loading rather than empty', async () => {
+    const view = await mount({ tablesState: 'loading' })
+    expect(text(view)).toContain('Loading tables…')
+    expect(text(view)).not.toContain('No tables.')
+    view.remove()
+  })
+
+  it('shows why the list failed, with a retry that refreshes', async () => {
+    const view = await mount({ tablesState: 'error', tablesError: 'permission denied for schema public' })
+    const refresh = vi.fn()
+    view.addEventListener('tables-refresh', refresh)
+    expect(text(view)).toContain('Couldn’t read the table list.')
+    expect(text(view)).toContain('permission denied for schema public')
+    view.shadowRoot!.querySelector<HTMLButtonElement>('.tables-error button')!.click()
+    expect(refresh).toHaveBeenCalledOnce()
+    view.remove()
+  })
+
+  it('still says no tables for a list that was read and is empty', async () => {
+    const view = await mount({ tables: [] })
+    expect(text(view)).toContain('No tables.')
+    view.remove()
+  })
+})

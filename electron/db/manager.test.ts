@@ -590,7 +590,10 @@ describe('connection manager: read-only profiles', () => {
     expect((await manager.query('p1', null, 'SELECT * FROM t')).success).toBe(true)
     expect((await manager.query('p1', null, 'SELECT * FROM c FOR JSON PATH')).success).toBe(true)
     expect((await manager.query('p1', null, 'SELECT 1; SELECT 2;')).success).toBe(true)
-    expect(query).toHaveBeenCalledTimes(3)
+    // The grid filter is spliced in after this check, engine-side, so it is vetted on its own.
+    expect((await manager.query('p1', null, 'SELECT * FROM t', [], null, 'id = 1 DELETE FROM t')).success).toBe(false)
+    expect((await manager.query('p1', null, 'SELECT * FROM t', [], null, "name LIKE 'a%'")).success).toBe(true)
+    expect(query).toHaveBeenCalledTimes(4)
   })
 
   it('reports the enforced guardrail in statuses', async () => {

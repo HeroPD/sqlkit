@@ -80,3 +80,44 @@ export function errorMessage(error: unknown): string {
   }
   return parts.join('; ')
 }
+
+// Every code a failure carries, nested dual-stack legs and one level of cause included:
+// Node errnos (ECONNREFUSED), SQLSTATEs (28P01), mysql2 codes, tedious codes.
+function failureCodes(error: unknown): Set<string> {
+  const codes = new Set<string>()
+  const seen = new Set<object>()
+  const visit = (value: unknown, depth: number) => {
+    if (!value || typeof value !== 'object' || seen.has(value) || depth > 3) return
+    seen.add(value)
+    const { code, errno, errors, cause } = value as { code?: unknown; errno?: unknown; errors?: unknown; cause?: unknown }
+    if (typeof code === 'string' && code) codes.add(code)
+    if (typeof errno === 'number') codes.add(String(errno))
+    if (Array.isArray(errors)) for (const nested of errors) visit(nested, depth + 1)
+    visit(cause, depth + 1)
+  }
+  visit(error, 0)
+  return codes
+}
+
+const CERTIFICATE_CODES = new Set([
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID',
+])
+
+/** A failed connect, led by what it means and what to try; the driver's own text
+ * follows on the next line, so nothing it said is lost. `target` is the host the
+ * user typed, not a tunnel's local end. */
+export function connectionErrorMessage(error: unknown, target: { host: string; port: string }): string {
+  const raw = errorMessage(error)
+  const codes = failureCodes(error)
+  const has = (...wanted: string[]) => wanted.some((code) => codes.has(code))
+  const where = target.port ? `${target.host}:${target.port}` : target.host
+  let hint: string | null = null
+  if (has('ECONNREFUSED')) hint = t('connection.hintRefused', { where })
+  else if (has('ENOTFOUND', 'EAI_AGAIN')) hint = t('connection.hintNotFound', { host: target.host })
+  else if (has('ETIMEDOUT', 'ESOCKETTIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEOUT')) hint = t('connection.hintTimeout', { where })
+  else if (has('28P01', '28000', 'ER_ACCESS_DENIED_ERROR', '1045', 'ELOGIN')) hint = t('connection.hintAuth')
+  else if (has('3D000', 'ER_BAD_DB_ERROR', '1049')) hint = t('connection.hintNoDatabase')
+  else if ([...codes].some((code) => CERTIFICATE_CODES.has(code))) hint = t('connection.hintCertificate')
+  return hint ? `${hint}\n${raw}` : raw
+}

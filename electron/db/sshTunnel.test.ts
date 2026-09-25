@@ -84,6 +84,33 @@ describe('openSshTunnel: forwarding', () => {
     }
   }, 15000)
 
+  // The driver end of a tunnel can vanish mid-stream (a cancel, a destroyed
+  // connection); the write that follows must not become an uncaught exception.
+  it('survives a local socket reset while the remote is still streaming', async () => {
+    const uncaught: unknown[] = []
+    const record = (error: unknown) => uncaught.push(error)
+    process.on('uncaughtException', record)
+    const tunnel = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined, () => true)
+    try {
+      await new Promise<void>((resolve) => {
+        const socket = net.connect(tunnel.localPort, '127.0.0.1', () => {
+          const chunk = Buffer.alloc(256 * 1024, 120)
+          for (let i = 0; i < 16; i += 1) socket.write(chunk)
+          socket.once('data', () => {
+            socket.resetAndDestroy()
+            setTimeout(resolve, 300)
+          })
+        })
+        socket.on('error', () => undefined)
+      })
+      expect(uncaught).toEqual([])
+      expect(await echo(tunnel.localPort, 'still up')).toBe('still up')
+    } finally {
+      process.off('uncaughtException', record)
+      await tunnel.close()
+    }
+  }, 15000)
+
   it('stops accepting connections on the local port after close', async () => {
     const tunnel = await openSshTunnel(sshConfig(), 'example.invalid', 5432, () => undefined, () => true)
     await tunnel.close()

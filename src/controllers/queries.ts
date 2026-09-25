@@ -605,6 +605,22 @@ export class QueriesController implements ReactiveController {
   }
 
   /** Marks a tab as running before connection/child alignment awaits. */
+  // The tab whose visible entry is still this run: its own, or wherever a rename
+  // moved it. Null once the tab closed or the run was superseded.
+  private tabRunning(executionId: string): string | null {
+    for (const [tabId, history] of this.runs) {
+      const run = history.stack[history.index]
+      if (run?.phase === 'running' && run.executionId === executionId) return tabId
+    }
+    return null
+  }
+
+  /** A run that failed before it reached the server lands where it now is, as a result would. */
+  failRun(executionId: string, error: string) {
+    const tabId = this.tabRunning(executionId)
+    if (tabId) this.setRun(tabId, { phase: 'error', error })
+  }
+
   beginRun(tabId: string, executionId: string, profileId: string, note?: string, push = false) {
     const run: QueryRun = note
       ? { phase: 'running', executionId, profileId, note }
@@ -682,20 +698,23 @@ export class QueriesController implements ReactiveController {
       return null
     }
 
-    if (!this.tabExists(tabId)) {
+    // Landed by run, not by tab id: a rename moved the run to another id, and a
+    // tab closed and reopened under the same id is showing something else now.
+    const landing = this.tabRunning(executionId)
+    if (!landing) {
       if (response.success) this.closeResultSessions(response.result)
       this.finishTask(task.id, response, task.startedAt)
       this.host.requestUpdate()
       return response
     }
 
-    this.realignStaged(tabId, response.success ? response.result.columns.length : null)
+    this.realignStaged(landing, response.success ? response.result.columns.length : null)
     const errorLine =
       !response.success && response.errorLine !== undefined && args.baseLine !== undefined
         ? args.baseLine + response.errorLine - 1
         : undefined
     this.setRun(
-      tabId,
+      landing,
       response.success
         ? { phase: 'done', result: response.result, sql, params, ...(args.table ? { table: args.table } : {}) }
         : { phase: 'error', error: response.error, sql, params, ...(errorLine !== undefined ? { errorLine } : {}), ...(args.table ? { table: args.table } : {}) },

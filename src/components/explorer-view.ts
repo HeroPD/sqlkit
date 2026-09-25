@@ -92,6 +92,13 @@ export class ExplorerView extends LitElement {
   @property({ attribute: false })
   tables: TableRef[] | null = null
 
+  /** Where the table list stands while `tables` is still null: read, being read, or failed. */
+  @property({ attribute: false })
+  tablesState: 'ready' | 'loading' | 'error' = 'ready'
+
+  @property({ attribute: false })
+  tablesError = ''
+
   /** Refreshable allocated sizes; null while unavailable or loading. */
   @property({ attribute: false })
   tableStats: TableStat[] | null = null
@@ -495,6 +502,16 @@ export class ExplorerView extends LitElement {
     }
     // Stating the fact, not pointing anywhere: the titlebar's connection
     // button is the verb, and it is visible from every view.
+    if (this.profileId && this.tablesState === 'loading') return html`<p class="muted hint">${t('explorer.loadingTables')}</p>`
+    if (this.profileId && this.tablesState === 'error') {
+      return html`
+        <div class="hint tables-error" role="alert">
+          <p>${t('explorer.tablesFailed')}</p>
+          <p class="muted">${this.tablesError}</p>
+          <button class="secondary" @click=${this._refresh}>${t('common.retry')}</button>
+        </div>
+      `
+    }
     if (this.tables === null || !this.profileId) {
       return html`<p class="muted hint">${t('explorer.notConnected')}</p>`
     }
@@ -852,6 +869,34 @@ export class ExplorerView extends LitElement {
       :host(:has(.x-resize.active)) {
         cursor: row-resize;
         user-select: none;
+      }
+
+      .tables-error {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+      }
+
+      .tables-error p {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+
+      /* The shared secondary button, without pulling in controls' input rules. */
+      .tables-error button {
+        height: var(--control-h);
+        padding: 0 10px;
+        color: var(--text);
+        background: color-mix(in srgb, var(--text) 5%, transparent);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--control-radius);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .tables-error button:hover {
+        background: color-mix(in srgb, var(--text) 9%, transparent);
       }
 
       .hint {

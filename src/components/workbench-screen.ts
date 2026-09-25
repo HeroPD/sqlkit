@@ -968,6 +968,14 @@ export class WorkbenchScreen extends LitElement {
     return childDb ? `${name} › ${childDb}` : name
   }
 
+  // Connected but without a list yet: the first read, or a switch to another
+  // child database, is still under way — or it failed, which says so.
+  private _tablesState(profileId: string | null, matchesContext: boolean, awaitingChild: boolean): 'ready' | 'loading' | 'error' {
+    if (!profileId || awaitingChild) return 'ready'
+    if (matchesContext && this._live.tables[profileId]) return 'ready'
+    return matchesContext && this._live.metaErrors[profileId] ? 'error' : 'loading'
+  }
+
   /** A dialog is up; app-root holds ⌘O until it is answered. */
   hasModal(): boolean {
     return this._hasModal()
@@ -1143,6 +1151,7 @@ export class WorkbenchScreen extends LitElement {
     baseLine?: number,
     trail?: { push?: boolean; table?: TableRef },
     preconfirmed?: boolean,
+    stagedAnswered = false,
   ) {
     // The run belongs to the tab it started from, even if the user switches
     // tabs or contexts before it finishes.
@@ -1152,6 +1161,12 @@ export class WorkbenchScreen extends LitElement {
     const sourceTabName = sourceTab ? tabTitle(sourceTab).replace(/ •$/, '') : t('action.newQuery')
     // One run per tab: ignore re-triggers while this tab's query is in flight.
     if (this._queries.runFor(tabId).phase === 'running') return
+    // A new result replaces the rows staged edits are aligned to, so ⌘R, ⌘↵ and a
+    // re-browse ask first, as leaving the result does, instead of dropping them.
+    if (!stagedAnswered && this._hasStagedWork(tabId)) {
+      this._guardStagedLeave(tabId, 'rerun', () => void this._runSql(sqlText, sort, suppliedParams, filter, baseLine, trail, preconfirmed, true))
+      return
+    }
 
     // Reveal the results panel if it was collapsed, so the run (or its error) shows.
     this._layout.expandPanel()
@@ -1237,18 +1252,18 @@ export class WorkbenchScreen extends LitElement {
       if (phase !== 'connected') {
         const connected = await this._live.connect(profile)
         if (!connected.success) {
-          this._queries.setRun(tabId, { phase: 'error', error: connected.error })
+          this._queries.failRun(executionId, connected.error)
           return
         }
       }
       // The driver may be targeting the discovery database; point it at the
       // captured child before running.
       if ((await this._alignActiveChild(profile.id, childDb)) === 'unavailable') {
-        this._queries.setRun(tabId, { phase: 'error', error: t('workbench.databaseUnavailable', { database: childDb ?? '' }) })
+        this._queries.failRun(executionId, t('workbench.databaseUnavailable', { database: childDb ?? '' }))
         return
       }
     } catch (error) {
-      this._queries.setRun(tabId, { phase: 'error', error: (error as Error).message })
+      this._queries.failRun(executionId, (error as Error).message)
       return
     }
     if (this.workspace !== workspace) return
@@ -2095,7 +2110,9 @@ export class WorkbenchScreen extends LitElement {
           .contextName=${context ? this._contextLabel() : null}
           .profileId=${context?.id ?? null}
           .engine=${context?.engine ?? null}
-          .tables=${metadataMatchesContext ? (this._live.tables[live.id] ?? []) : null}
+          .tables=${metadataMatchesContext ? (this._live.tables[live.id] ?? null) : null}
+          .tablesState=${this._tablesState(live?.id ?? null, metadataMatchesContext, hasChildSelection && selectedChild === null)}
+          .tablesError=${live ? (this._live.metaErrors[live.id] ?? '') : ''}
           .tableStats=${metadataMatchesContext ? (this._live.tableStats[live.id] ?? null) : null}
           .columns=${metadataMatchesContext ? (this._live.columns[live.id] ?? null) : null}
           .objects=${metadataMatchesContext ? (this._live.objects[live.id] ?? null) : null}
@@ -2407,9 +2424,15 @@ export class WorkbenchScreen extends LitElement {
     // defaultChild() prefers whichever child the driver happened to open, which
     // would silently discard the one this workspace was left in.
     const wanted = this._ctx.activeDbId === id ? this._ctx.activeChildDb : this._config.defaultChild(connection)
-    // Failures surface through the status push (error dot + message).
+    // The Databases list shows a failure on the connection's row; from anywhere
+    // else (the titlebar, ⌘K) a red dot alone would be all there is to see.
     const result = await this._live.connect(connection)
-    if (!result.success) return
+    if (!result.success) {
+      if (this._activeView !== 'databases' && result.error !== t('connection.superseded')) {
+        this._dialogs.notice(t('connection.failedTitle', { name: connection.name.trim() || t('config.newDatabase') }), result.error)
+      }
+      return
+    }
     const outcome = await this._alignActiveChild(id, wanted, { followMissing: true })
     // A successful connect becomes the in-use context, but stays on the
     // Databases view — no jumping to the Explorer uninvited. 'redirected'
@@ -2774,18 +2797,27 @@ export class WorkbenchScreen extends LitElement {
   // Staged edits, new rows and deletions are aligned to the visible result by row
   // index, so they cannot follow the user to another result. Leaving with unsaved
   // work therefore has to be a decision rather than a silent discard.
-  private _guardStagedLeave(tabId: string, intent: 'result' | 'foreignKey', leave: () => void) {
-    // The results panel can hold JSON editor text that never staged (invalid,
-    // or reachable only through Forward) — same unsaved work, same guard.
-    const unstagedJson = this.renderRoot?.querySelector('results-panel')?.hasUnstagedJson() ?? false
-    if (!this._queries.hasStaged(tabId) && !unstagedJson) {
+  // The results panel can hold JSON editor text that never staged (invalid,
+  // or reachable only through Forward) — same unsaved work, same guard.
+  private _hasStagedWork(tabId: string): boolean {
+    return this._queries.hasStaged(tabId) || (this.renderRoot?.querySelector('results-panel')?.hasUnstagedJson() ?? false)
+  }
+
+  private _guardStagedLeave(tabId: string, intent: 'result' | 'foreignKey' | 'rerun', leave: () => void) {
+    if (!this._hasStagedWork(tabId)) {
       leave()
       return
     }
+    const copy = {
+      result: ['results.leaveStagedPrompt', 'results.leaveStagedDetail', 'results.discardAndLeave'],
+      foreignKey: ['results.followStagedPrompt', 'results.followStagedDetail', 'results.discardAndOpen'],
+      rerun: ['results.rerunStagedPrompt', 'results.rerunStagedDetail', 'results.discardAndRun'],
+    } as const
+    const [message, detail, confirmLabel] = copy[intent]
     this._dialogs.confirm = {
-      message: t(intent === 'foreignKey' ? 'results.followStagedPrompt' : 'results.leaveStagedPrompt'),
-      detail: t(intent === 'foreignKey' ? 'results.followStagedDetail' : 'results.leaveStagedDetail'),
-      confirmLabel: t(intent === 'foreignKey' ? 'results.discardAndOpen' : 'results.discardAndLeave'),
+      message: t(message),
+      detail: t(detail),
+      confirmLabel: t(confirmLabel),
       danger: true,
       // Discard for real before leaving: nothing on the navigation path realigns
       // staged state, and stale row-indexed edits would arm writes against

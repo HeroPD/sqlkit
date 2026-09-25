@@ -1152,11 +1152,23 @@ test('keeps a CRLF file CRLF through an edit, and an undone edit restores it exa
   el.remove()
 })
 
-test('leaves a mixed or LF file on plain line breaks', async () => {
-  for (const doc of ['select 1\nfrom t', 'select 1\r\nfrom t\nwhere 1']) {
-    const { el, view } = await mountWithMeta(doc)
-    expect(view.state.lineBreak).toBe('\n')
-    expect(view.state.doc.lines).toBe(doc.split(/\r?\n/).length)
-    el.remove()
-  }
+test('splits pasted or formatted text into lines in a CRLF file, and hands it back CRLF', async () => {
+  const { el, view } = await mountWithMeta('select 1\r\nfrom t')
+  const emitted: string[] = []
+  el.addEventListener('editor-change', (event) => emitted.push((event as CustomEvent<{ value: string }>).detail.value))
+  view.dispatch({ selection: { anchor: view.state.doc.length } })
+  view.dispatch(view.state.replaceSelection('\nselect 3;\nselect 4;'))
+  expect(view.state.doc.lines).toBe(4)
+  expect(emitted.at(-1)).toBe('select 1\r\nfrom t\r\nselect 3;\r\nselect 4;')
+  el.remove()
+})
+
+test('hands a mixed file back LF, as it always did', async () => {
+  const { el, view } = await mountWithMeta('select 1\r\nfrom t\nwhere 1')
+  const emitted: string[] = []
+  el.addEventListener('editor-change', (event) => emitted.push((event as CustomEvent<{ value: string }>).detail.value))
+  expect(view.state.doc.lines).toBe(3)
+  view.dispatch({ changes: { from: view.state.doc.length, insert: ' = 1' } })
+  expect(emitted.at(-1)).toBe('select 1\nfrom t\nwhere 1 = 1')
+  el.remove()
 })

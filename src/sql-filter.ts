@@ -74,6 +74,14 @@ export function applyFilterCondition(sql: string, condition: string, engine?: En
   const maskedCondition = maskSql(trimmed, engine, mode)
   if (!maskedCondition.trim()) throw new Error(t('filter.commentsOnly'))
   if (maskedCondition.includes(';')) throw new Error(t('filter.noSemicolon'))
+  // The condition lands inside WHERE ( … ); a stray `)` would close that group and let
+  // the rest run as a statement of its own, which T-SQL needs no semicolon for.
+  let depth = 0
+  for (const char of maskedCondition) {
+    if (char === '(') depth += 1
+    else if (char === ')' && --depth < 0) break
+  }
+  if (depth !== 0) throw new Error(t('filter.unbalanced'))
   if (/^\s*where\b/i.test(maskedCondition)) throw new Error(t('filter.withoutWhere'))
 
   const scanned = scanFilter(sql, engine, mode)

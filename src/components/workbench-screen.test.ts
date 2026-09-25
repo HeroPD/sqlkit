@@ -308,6 +308,26 @@ describe('WorkbenchScreen destructive preflight', () => {
     expect(workbench._queries.execute).not.toHaveBeenCalled()
   })
 
+  // ⌘R, ⌘↵ and a re-browse replace the rows staged edits are aligned to.
+  it('asks before a re-run throws staged edits away, and runs once discarded', async () => {
+    const workbench = runningScreen() as ReturnType<typeof runningScreen> & {
+      _ctx: { activeTabId: string | null }
+      _dialogs: DialogsController
+      _queries: { execute: ReturnType<typeof vi.fn>; setEdit(tabId: string, row: number, col: number, value: string): void; hasStaged(tabId: string): boolean }
+    }
+    const tabId = workbench._ctx.activeTabId!
+    workbench._queries.setEdit(tabId, 0, 0, 'staged')
+
+    await workbench._runSql('select 1')
+    expect(workbench._dialogs.confirm?.message).toBe('Discard changes and run again?')
+    expect(workbench._queries.execute).not.toHaveBeenCalled()
+    expect(workbench._queries.hasStaged(tabId)).toBe(true)
+
+    workbench._dialogs.acceptConfirm()
+    await vi.waitFor(() => expect(workbench._queries.execute).toHaveBeenCalledWith(expect.objectContaining({ sql: 'select 1' })))
+    expect(workbench._queries.hasStaged(tabId)).toBe(false)
+  })
+
   it('names every risk in a script, worst first', async () => {
     const workbench = runningScreen()
 

@@ -234,6 +234,15 @@ describe('saving over a file that changed on disk', () => {
     expect(fs.readFileSync(file, 'utf8')).toBe('select 3')
   })
 
+  it('takes a repeated save of the same text as no conflict', async () => {
+    const { ws } = setup()
+    const file = path.join(ws, 'q.sql')
+    fs.writeFileSync(file, 'old')
+    // Both carry the baseline the tab had before either reply came back.
+    expect(await saveWorkspaceFileAsync(ws, file, 'new', 'old')).toMatchObject({ success: true })
+    expect(await saveWorkspaceFileAsync(ws, file, 'new', 'old')).toMatchObject({ success: true })
+  })
+
   it('writes a deleted file back rather than calling it a conflict', async () => {
     const { ws } = setup()
     const file = path.join(ws, 'gone.sql')

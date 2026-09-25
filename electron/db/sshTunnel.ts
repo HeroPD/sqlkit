@@ -155,11 +155,16 @@ export async function openSshTunnel(
       server = net.createServer((socket) => {
         sockets.add(socket)
         socket.on('close', () => sockets.delete(socket))
+        // A driver dropping its socket while the server still streams makes the
+        // pipe below write into a closed socket (EPIPE); unhandled, that error
+        // throws in the main process. The socket is done either way.
+        socket.on('error', () => socket.destroy())
         client.forwardOut('127.0.0.1', 0, remoteHost, remotePort, (error, stream) => {
           if (error) {
             socket.destroy()
             return
           }
+          socket.on('error', () => stream.destroy())
           socket.pipe(stream).pipe(socket)
           stream.on('close', () => socket.destroy())
           stream.on('error', () => socket.destroy())

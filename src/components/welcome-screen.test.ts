@@ -36,7 +36,7 @@ describe('WelcomeScreen', () => {
     const recent = screen.shadowRoot?.querySelector<HTMLButtonElement>('.recent')
     expect(recent?.textContent).toContain('analytics')
     expect(recent?.textContent).toContain('/work/analytics')
-    expect(recent?.textContent).toContain('3 profiles · 2h')
+    expect(recent?.textContent).toContain('3 connections · 2h')
     recent?.click()
     expect(opened).toEqual(['/work/analytics'])
   })

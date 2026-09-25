@@ -4,7 +4,7 @@ import { icons, scrollbars } from '../shared-styles'
 import './context-menu'
 import type { MenuItem, MenuPickDetail } from './context-menu'
 
-import { Compartment, EditorState, Prec, type Extension } from '@codemirror/state'
+import { Compartment, EditorState, Prec, StateField, type Extension } from '@codemirror/state'
 import {
   EditorView,
   keymap,
@@ -223,9 +223,15 @@ export type EditorCommandDetail = { command: 'command-palette' }
 // are cached here (module level, so remounts restore too), LRU-capped.
 // A file whose every line break is CRLF keeps them: the editor reads text back
 // LF-only, which rewrote every line of the file on its first edit and left an
-// undone change still dirty. A mixed file stays on the default, where a lone LF
-// is still a line break rather than a stray character.
+// undone change still dirty. The document itself stays LF, so pasted and
+// formatted text splits into lines as usual; the ending is re-applied when the
+// text is handed back. A mixed file stays on LF, as before.
 const crlfDocument = (text: string) => text.includes('\r\n') && !/(?:^|[^\r])\n|\r(?!\n)/.test(text)
+
+// The line ending a tab's text is handed back with, fixed when its state is made.
+const lineEnding = StateField.define<string>({ create: () => '\n', update: (value) => value })
+
+const docText = (state: EditorState) => state.doc.sliceString(0, state.doc.length, state.field(lineEnding, false) ?? '\n')
 
 const stateCache = new Map<string, EditorState>()
 const MAX_CACHED_STATES = 20
@@ -395,7 +401,7 @@ export class SqlEditor extends LitElement {
     this._emitRunTarget(update.view)
     if (!update.docChanged) return
 
-    const nextValue = update.state.sliceDoc()
+    const nextValue = docText(update.state)
     this._lastEmittedValue = nextValue
     // Loading the host's own value into the view is not a user edit. Reporting
     // it as one makes the host treat a programmatic load like typing — which
@@ -497,7 +503,7 @@ export class SqlEditor extends LitElement {
 
   private _makeState(doc: string) {
     const extensions = this._stateExtensions()
-    return EditorState.create({ doc, extensions: crlfDocument(doc) ? [...extensions, EditorState.lineSeparator.of('\r\n')] : extensions })
+    return EditorState.create({ doc, extensions: [...extensions, lineEnding.init(() => (crlfDocument(doc) ? '\r\n' : '\n'))] })
   }
 
   // The cached state of the tab, but only when its document still matches
@@ -505,7 +511,7 @@ export class SqlEditor extends LitElement {
   // doc with a misleading undo history must not resurface.
   private _restoredState() {
     const cached = this.tabId ? stateCache.get(this.tabId) : undefined
-    if (cached && cached.sliceDoc() === this.value) {
+    if (cached && docText(cached) === this.value) {
       stateCache.delete(this.tabId)
       return cached
     }
@@ -547,12 +553,12 @@ export class SqlEditor extends LitElement {
       changed.has('value') &&
       !this._syncingFromEditor &&
       this.value !== this._lastEmittedValue &&
-      this.value !== view.state.sliceDoc()
+      this.value !== docText(view.state)
     ) {
       this._applyingHostValue = true
       try {
         // A file reloaded with the other line ending needs a state that splits lines its way.
-        if (crlfDocument(this.value) !== (view.state.lineBreak === '\r\n')) {
+        if (crlfDocument(this.value) !== (view.state.field(lineEnding, false) === '\r\n')) {
           view.setState(this._makeState(this.value))
           this._rebindState(view)
         } else {
