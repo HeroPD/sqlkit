@@ -89,9 +89,11 @@ function failureCodes(error: unknown): Set<string> {
   const visit = (value: unknown, depth: number) => {
     if (!value || typeof value !== 'object' || seen.has(value) || depth > 3) return
     seen.add(value)
-    const { code, errno, errors, cause } = value as { code?: unknown; errno?: unknown; errors?: unknown; cause?: unknown }
+    const { code, errno, number, errors, cause } = value as { code?: unknown; errno?: unknown; number?: unknown; errors?: unknown; cause?: unknown }
     if (typeof code === 'string' && code) codes.add(code)
     if (typeof errno === 'number') codes.add(String(errno))
+    // SQL Server's own error number: tedious files every login refusal under one code, ELOGIN.
+    if (typeof number === 'number') codes.add(`mssql:${number}`)
     if (Array.isArray(errors)) for (const nested of errors) visit(nested, depth + 1)
     visit(cause, depth + 1)
   }
@@ -116,8 +118,9 @@ export function connectionErrorMessage(error: unknown, target: { host: string; p
   if (has('ECONNREFUSED')) hint = t('connection.hintRefused', { where })
   else if (has('ENOTFOUND', 'EAI_AGAIN')) hint = t('connection.hintNotFound', { host: target.host })
   else if (has('ETIMEDOUT', 'ESOCKETTIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEOUT')) hint = t('connection.hintTimeout', { where })
-  else if (has('28P01', '28000', 'ER_ACCESS_DENIED_ERROR', '1045', 'ELOGIN')) hint = t('connection.hintAuth')
-  else if (has('3D000', 'ER_BAD_DB_ERROR', '1049')) hint = t('connection.hintNoDatabase')
+  // Only codes that mean the credentials: Postgres 28000 is also a pg_hba refusal, and tedious ELOGIN also a missing database.
+  else if (has('28P01', 'ER_ACCESS_DENIED_ERROR', '1045', 'mssql:18456')) hint = t('connection.hintAuth')
+  else if (has('3D000', 'ER_BAD_DB_ERROR', '1049', 'mssql:4060')) hint = t('connection.hintNoDatabase')
   else if ([...codes].some((code) => CERTIFICATE_CODES.has(code))) hint = t('connection.hintCertificate')
   return hint ? `${hint}\n${raw}` : raw
 }

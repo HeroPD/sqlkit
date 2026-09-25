@@ -131,7 +131,7 @@ export class DbConfigForm extends LitElement {
           <button class="secondary" @click=${this._onCancel}>${t('common.cancel')}</button>
           <span class="spacer"></span>
           <span class="test-result ${this._test.phase}" role="status" title=${'message' in this._test ? this._test.message : ''}>
-            ${'message' in this._test ? this._test.message : ''}
+            ${this._testMessage(this._test)}
           </span>
           <button class="secondary" @click=${this._onTest} ?disabled=${this._test.phase === 'testing'}>
             ${this._test.phase === 'testing' ? t('config.testing') : t('config.testConnection')}
@@ -411,7 +411,7 @@ export class DbConfigForm extends LitElement {
               ${this._sshTest.phase === 'testing' ? t('config.testing') : t('config.testSsh')}
             </button>
             <span class="test-result ${this._sshTest.phase}" role="status" title=${'message' in this._sshTest ? this._sshTest.message : ''}>
-              ${'message' in this._sshTest ? this._sshTest.message : ''}
+              ${this._testMessage(this._sshTest)}
             </span>
           </div>
         `,
@@ -482,6 +482,13 @@ export class DbConfigForm extends LitElement {
         spellcheck="false"
       />
     `
+  }
+
+  // A failed connect leads with what to try; the driver's own words follow, quieter.
+  private _testMessage(test: { phase: string; message?: string }) {
+    if (!('message' in test) || !test.message) return ''
+    const [headline, ...rest] = test.message.split('\n')
+    return rest.length ? html`${headline}<span class="test-detail">${rest.join(' ')}</span>` : headline
   }
 
   private _field(label: string, control: TemplateResult, helper = '') {
@@ -770,6 +777,11 @@ export class DbConfigForm extends LitElement {
         line-height: 1.35;
         overflow-wrap: anywhere;
         white-space: normal;
+      }
+
+      .test-detail {
+        display: block;
+        color: var(--text-3);
       }
 
       .test-result.ok {

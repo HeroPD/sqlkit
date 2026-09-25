@@ -372,3 +372,20 @@ describe('DbConfigForm accessibility', () => {
     form.remove()
   })
 })
+
+describe('DbConfigForm test result', () => {
+  // A connect failure arrives as "hint\nraw": the hint leads, the driver's words follow, quieter.
+  it('shows the hint first and the driver text underneath', async () => {
+    const { form } = setup()
+    document.body.appendChild(form)
+    // The first update resets the test state for the profile it loads; the result comes after.
+    await form.updateComplete
+    internals(form)._test = { phase: 'error', message: 'Nothing is accepting connections at localhost:5432.\nconnect ECONNREFUSED ::1:5432' }
+    form.requestUpdate()
+    await form.updateComplete
+    const result = form.shadowRoot!.querySelector('footer .test-result')!
+    expect(result.textContent?.replace(/\s+/g, ' ').trim()).toBe('Nothing is accepting connections at localhost:5432.connect ECONNREFUSED ::1:5432')
+    expect(result.querySelector('.test-detail')?.textContent).toBe('connect ECONNREFUSED ::1:5432')
+    form.remove()
+  })
+})

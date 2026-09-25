@@ -289,7 +289,7 @@ describe('CommandPaletteController entries', () => {
         status: 'connected',
         statusLabel: 'Connected',
         inUse: true,
-        action: { id: 'disconnect', label: 'Disconnect Database', icon: 'icon-unplug' },
+        action: { id: 'disconnect', label: 'Disconnect', icon: 'icon-unplug' },
       }),
     ])
   })
@@ -317,7 +317,7 @@ describe('CommandPaletteController entries', () => {
         accentColor: '#c45b18',
         status: 'connected',
         statusLabel: 'Connected',
-        action: { id: 'disconnect', label: 'Disconnect Database', icon: 'icon-unplug' },
+        action: { id: 'disconnect', label: 'Disconnect', icon: 'icon-unplug' },
       }),
       expect.objectContaining({ id: 'child:p1:app', inUse: false }),
       expect.objectContaining({ id: 'child:p1:analytics', inUse: true }),

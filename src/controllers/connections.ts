@@ -264,6 +264,8 @@ export class ConnectionsController implements ReactiveController {
     // same profile supersedes it, so a slower earlier response can't overwrite
     // the newer child's metadata.
     const gen = (this.metaGen[profileId] = (this.metaGen[profileId] ?? 0) + 1)
+    // A new read (Retry, a reconnect, another child) is answered afresh: the explorer shows it loading, not the old failure.
+    if (this.metaErrors[profileId] !== undefined) this.setMetaError(profileId, null)
     // Pin the fetch to the child we believe is active, so a concurrent child
     // switch can't make the main process answer for a different database.
     const childDb = activeChildName(this.statuses[profileId])

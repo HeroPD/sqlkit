@@ -88,13 +88,22 @@ describe('connectionErrorMessage', () => {
 
   it('names unknown hosts, refused logins, missing databases and certificate failures', () => {
     expect(connectionErrorMessage(coded('getaddrinfo ENOTFOUND db.intranet', 'ENOTFOUND'), { host: 'db.intranet', port: '' }))
-      .toMatch(/^The host “db\.intranet” could not be found/)
+      .toMatch(/^The host "db\.intranet" could not be found/)
     expect(connectionErrorMessage(coded('password authentication failed for user "app"', '28P01'), target))
       .toMatch(/^The server refused this user name or password\.\npassword authentication failed/)
     expect(connectionErrorMessage(Object.assign(new Error("Access denied for user 'app'"), { errno: 1045 }), target))
       .toMatch(/^The server refused this user name or password/)
     expect(connectionErrorMessage(coded('database "nope" does not exist', '3D000'), target)).toMatch(/^The server has no database by that name/)
-    expect(connectionErrorMessage(coded('self-signed certificate', 'DEPTH_ZERO_SELF_SIGNED_CERT'), target)).toMatch(/^The server’s certificate could not be verified/)
+    expect(connectionErrorMessage(coded('self-signed certificate', 'DEPTH_ZERO_SELF_SIGNED_CERT'), target)).toMatch(/^The server certificate could not be verified/)
+  })
+
+  it('keeps the password hint to codes that mean the credentials', () => {
+    // pg_hba refusals share 28000; tedious files a missing database under ELOGIN too.
+    expect(connectionErrorMessage(coded('no pg_hba.conf entry for host', '28000'), target)).toBe('no pg_hba.conf entry for host')
+    expect(connectionErrorMessage(Object.assign(new Error('Login failed for user'), { code: 'ELOGIN', number: 18456 }), target))
+      .toMatch(/^The server refused this user name or password/)
+    expect(connectionErrorMessage(Object.assign(new Error('Cannot open database "x"'), { code: 'ELOGIN', number: 4060 }), target))
+      .toMatch(/^The server has no database by that name/)
   })
 
   it('passes anything it does not recognise through unchanged', () => {

@@ -267,7 +267,7 @@ export class CommandPalette extends LitElement {
         ? html`<span class="in-use"><i class="icon icon-check" aria-hidden="true"></i>${t('palette.inUse')}</span>`
         : ''}
       ${entry.keybind ? html`<span class="keybind">${entry.keybind}</span>` : ''}
-      ${entry.statusError ? html`<span class="status-error">${entry.statusError}</span>` : ''}
+      ${entry.statusError ? html`<span class="status-error" title=${entry.statusError}>${entry.statusError.split('\n')[0]}</span>` : ''}
       ${entry.action
         ? html`
             <button

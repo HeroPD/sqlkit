@@ -73,7 +73,8 @@ async function ensureHostKeyApproved(
   if (!approveFirstUse || hasPinnedHostKey(knownHostsPath(), hostId)) return false
   const key = await probeHostKey(config)
   if (!(await approveFirstUse(hostId, hostKeyFingerprint(key)))) {
-    throw new Error(unknownHostKeyMessage(hostId, hostKeyFingerprint(key)))
+    // Tagged: the user said no, which is not a failure to report back to them.
+    throw Object.assign(new Error(unknownHostKeyMessage(hostId, hostKeyFingerprint(key))), { code: 'EHOSTKEYDECLINED' })
   }
   try {
     trustHostKey(knownHostsPath(), hostId, key)

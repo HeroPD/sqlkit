@@ -649,6 +649,8 @@ describe('WorkbenchScreen leaving a result with staged work', () => {
       configurable: true,
       value: { querySelector: () => ({ hasUnstagedJson: () => true }) },
     })
+    // …and showing tab-a: its draft is only this tab's when the panel last rendered it.
+    ;(workbench as never as { _lastActiveTabId: string })._lastActiveTabId = 'tab-a'
 
     workbench._guardStagedLeave('tab-a', 'result', leave)
     expect(leave).not.toHaveBeenCalled()
@@ -1921,5 +1923,55 @@ describe('WorkbenchScreen session restore', () => {
     // A second restore would swap the live tabs for whatever the last debounced write held.
     await workbench._onConfigSave(new CustomEvent('config-save', { detail: { profile: { id: 'p1' } } }))
     expect(workbench._session.hydrate).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('WorkbenchScreen guards after a tab switch or a stopped connect', () => {
+  const screen = () => new WorkbenchScreen() as never as {
+    renderRoot: unknown
+    _lastActiveTabId: string | null
+    _queries: { hasStaged(tabId: string): boolean }
+    _hasStagedWork(tabId: string): boolean
+    _live: { statuses: Record<string, { phase: string }>; tables: Record<string, unknown[]>; metaErrors: Record<string, string>; connect(profile: ConnectionProfile): Promise<unknown> }
+    _config: { byId(id: string): ConnectionProfile | undefined; defaultChild(profile: ConnectionProfile): string | null }
+    _dialogs: DialogsController
+    _activeView: string | null
+    workspace: { name: string; path: string } | null
+    _connectProfile(id: string): Promise<void>
+    _tablesView(contextId: string | null, liveId: string | null, matches: boolean, child: { awaiting: boolean; missing: string | null }): { state: string; error: string }
+  }
+
+  // A browse or DROP preview switches tabs before it runs; the panel still shows the old tab's draft.
+  it('counts the panel JSON draft only for the tab the panel is showing', () => {
+    const workbench = screen()
+    workbench.renderRoot = { querySelector: () => ({ hasUnstagedJson: () => true }) }
+    workbench._lastActiveTabId = 'tab-a'
+    expect(workbench._hasStagedWork('tab-a')).toBe(true)
+    expect(workbench._hasStagedWork('tab-b')).toBe(false)
+  })
+
+  it('shows loading while connecting, and says so when the selected database is gone', () => {
+    const workbench = screen()
+    workbench._live.statuses = { p1: { phase: 'connecting' } }
+    expect(workbench._tablesView('p1', null, false, { awaiting: false, missing: null }).state).toBe('loading')
+    expect(workbench._tablesView('p1', 'p1', false, { awaiting: false, missing: 'sales' }))
+      .toEqual({ state: 'error', error: 'Database "sales" is not available on this connection' })
+    workbench._live.tables = { p1: [] }
+    expect(workbench._tablesView('p1', 'p1', true, { awaiting: false, missing: null }).state).toBe('ready')
+  })
+
+  it('raises no notice for a connect the user stopped', async () => {
+    const workbench = screen()
+    workbench.workspace = { name: 'ws', path: '/ws' }
+    workbench._activeView = null
+    workbench._config.byId = () => ({ ...profile, name: '', host: 'localhost' })
+    workbench._config.defaultChild = () => null
+    workbench._live.connect = () => Promise.resolve({ success: false, error: 'Host key not trusted', cancelled: true })
+    await workbench._connectProfile('p1')
+    expect(workbench._dialogs.confirm).toBeNull()
+
+    workbench._live.connect = () => Promise.resolve({ success: false, error: 'hint\nraw' })
+    await workbench._connectProfile('p1')
+    expect(workbench._dialogs.confirm?.message).toBe('Could not connect to localhost')
   })
 })

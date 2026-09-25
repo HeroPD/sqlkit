@@ -307,7 +307,7 @@ describe('ExplorerView table list states', () => {
     const view = await mount({ tablesState: 'error', tablesError: 'permission denied for schema public' })
     const refresh = vi.fn()
     view.addEventListener('tables-refresh', refresh)
-    expect(text(view)).toContain('Couldn’t read the table list.')
+    expect(text(view)).toContain('Could not read the table list.')
     expect(text(view)).toContain('permission denied for schema public')
     view.shadowRoot!.querySelector<HTMLButtonElement>('.tables-error button')!.click()
     expect(refresh).toHaveBeenCalledOnce()

@@ -182,10 +182,23 @@ describe('connection manager: connect lifecycle', () => {
     const firstResult = await firstPromise
 
     expect(secondResult).toEqual({ success: true, serverVersion: 'PG second' })
-    expect(firstResult).toEqual({ success: false, error: 'Connection superseded' })
+    expect(firstResult).toEqual({ success: false, error: 'Connection superseded', cancelled: true })
     expect(firstClose).toHaveBeenCalled()
     expect(secondClose).not.toHaveBeenCalled()
     expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'connected', serverVersion: 'PG second' })])
+  })
+
+  // Neither is a failure to put in front of the user: they said no, or the tunnel leg is to blame.
+  it('reports a declined SSH host key as cancelled, and names the SSH host for tunnel failures', async () => {
+    hoisted.resolveImpl = () => Promise.reject(Object.assign(new Error('Host key not trusted'), { code: 'EHOSTKEYDECLINED' }))
+    const manager = createConnectionManager(vi.fn())
+    expect(await manager.connect(profile())).toMatchObject({ success: false, cancelled: true })
+
+    hoisted.resolveImpl = () => Promise.reject(Object.assign(new Error('getaddrinfo ENOTFOUND bastion.corp'), { code: 'ENOTFOUND' }))
+    const viaTunnel = profile({ ssh: { enabled: true, host: 'bastion.corp', port: '22', username: 'u', authType: 'password', password: 'x', keyPath: '', passphrase: '' } })
+    const result = await manager.connect(viaTunnel)
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toMatch(/^The host "bastion\.corp" could not be found/)
   })
 
   it('does not let an older reconnect overtake a newer one while teardown is pending', async () => {
@@ -208,7 +221,7 @@ describe('connection manager: connect lifecycle', () => {
     expect(newerResult).toEqual({ success: true, serverVersion: 'PG newer' })
 
     releaseOld()
-    expect(await olderPromise).toEqual({ success: false, error: 'Connection superseded' })
+    expect(await olderPromise).toEqual({ success: false, error: 'Connection superseded', cancelled: true })
     expect(manager.statuses()).toEqual([expect.objectContaining({ phase: 'connected', serverVersion: 'PG newer' })])
 
     await manager.disconnect('p1')

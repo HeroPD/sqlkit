@@ -99,6 +99,10 @@ const VIEWS = [
 
 type ViewId = (typeof VIEWS)[number]['id']
 
+// What to call a connection with no name: where it points, before a placeholder.
+const connectionLabel = (profile: ConnectionProfile) =>
+  profile.name.trim() || (profile.engine === 'sqlite' ? profile.file.split(/[\\/]/).pop() : profile.host.trim()) || t('config.untitled')
+
 const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'config') return tab.profile.name.trim() || t('config.newDatabase')
   if (tab.kind === 'inspect') return tab.createTable ? t('workbench.newTableTab') : t('workbench.infoTab', { name: tab.table.name })
@@ -641,13 +645,13 @@ export class WorkbenchScreen extends LitElement {
 
   // ⌘R: re-run the active tab's current result query, keeping its filter and sort.
   // No-op until a query has produced a result.
-  private async _refreshResults() {
+  private async _refreshResults(stagedAnswered = false) {
     const tabId = this._ctx.activeTabId
     const run = this._queries.runFor(tabId)
     if (run.phase !== 'done' || !run.sql) return
     // Carry the run's own table: a followed result re-run without it would fall
     // back to the tab's table and retarget (or disarm) grid editing.
-    await this._runSql(run.sql, this._queries.sortFor(tabId), run.params, this._queries.filterFor(tabId), undefined, run.table ? { table: run.table } : undefined)
+    await this._runSql(run.sql, this._queries.sortFor(tabId), run.params, this._queries.filterFor(tabId), undefined, run.table ? { table: run.table } : undefined, false, stagedAnswered)
   }
 
   /** The refresh a committed save triggers: the same re-run as ⌘R, reporting
@@ -658,7 +662,8 @@ export class WorkbenchScreen extends LitElement {
   private async _refreshSavedResult(): Promise<boolean> {
     const tabId = this._ctx.activeTabId
     const before = this._queries.runFor(tabId)
-    await this._refreshResults()
+    // The save just committed what was staged; whatever the panel still holds is not a question for it.
+    await this._refreshResults(true)
     return this._queries.runFor(tabId) !== before
   }
 
@@ -964,16 +969,26 @@ export class WorkbenchScreen extends LitElement {
 
   // Where a statement lands, named in the confirms for what cannot be undone.
   private _targetLabel(profileId: string, childDb: string | null): string {
-    const name = this._config.byId(profileId)?.name.trim() || t('config.newDatabase')
+    const profile = this._config.byId(profileId)
+    const name = profile ? connectionLabel(profile) : t('config.untitled')
     return childDb ? `${name} › ${childDb}` : name
   }
 
   // Connected but without a list yet: the first read, or a switch to another
   // child database, is still under way — or it failed, which says so.
-  private _tablesState(profileId: string | null, matchesContext: boolean, awaitingChild: boolean): 'ready' | 'loading' | 'error' {
-    if (!profileId || awaitingChild) return 'ready'
-    if (matchesContext && this._live.tables[profileId]) return 'ready'
-    return matchesContext && this._live.metaErrors[profileId] ? 'error' : 'loading'
+  private _tablesView(
+    contextId: string | null,
+    liveId: string | null,
+    matchesContext: boolean,
+    child: { awaiting: boolean; missing: string | null },
+  ): { state: 'ready' | 'loading' | 'error'; error: string } {
+    const ready = { state: 'ready' as const, error: '' }
+    if (!liveId) return contextId && this._live.statuses[contextId]?.phase === 'connecting' ? { state: 'loading', error: '' } : ready
+    if (child.awaiting) return ready
+    if (child.missing !== null) return { state: 'error', error: t('workbench.databaseUnavailable', { database: child.missing }) }
+    if (matchesContext && this._live.tables[liveId]) return ready
+    const error = matchesContext ? this._live.metaErrors[liveId] : undefined
+    return error ? { state: 'error', error } : { state: 'loading', error: '' }
   }
 
   /** A dialog is up; app-root holds ⌘O until it is answered. */
@@ -1163,7 +1178,8 @@ export class WorkbenchScreen extends LitElement {
     if (this._queries.runFor(tabId).phase === 'running') return
     // A new result replaces the rows staged edits are aligned to, so ⌘R, ⌘↵ and a
     // re-browse ask first, as leaving the result does, instead of dropping them.
-    if (!stagedAnswered && this._hasStagedWork(tabId)) {
+    // A statement confirmed in its own dialog (an Explorer drop) is not asked about twice.
+    if (!stagedAnswered && !preconfirmed && this._hasStagedWork(tabId)) {
       this._guardStagedLeave(tabId, 'rerun', () => void this._runSql(sqlText, sort, suppliedParams, filter, baseLine, trail, preconfirmed, true))
       return
     }
@@ -2103,6 +2119,10 @@ export class WorkbenchScreen extends LitElement {
       const activeChild = hasChildSelection ? (children.find((child) => child.inUse)?.name ?? null) : null
       const selectedChild = this._ctx.activeChildDb
       const metadataMatchesContext = !!live && (!hasChildSelection || (selectedChild !== null && selectedChild === activeChild))
+      const tablesView = this._tablesView(context?.id ?? null, live?.id ?? null, metadataMatchesContext, {
+        awaiting: hasChildSelection && selectedChild === null,
+        missing: hasChildSelection && selectedChild !== null && !children.some((entry) => entry.name === selectedChild) ? selectedChild : null,
+      })
       return html`
         <explorer-view
           .files=${this._workspaceFiles.files}
@@ -2111,8 +2131,8 @@ export class WorkbenchScreen extends LitElement {
           .profileId=${context?.id ?? null}
           .engine=${context?.engine ?? null}
           .tables=${metadataMatchesContext ? (this._live.tables[live.id] ?? null) : null}
-          .tablesState=${this._tablesState(live?.id ?? null, metadataMatchesContext, hasChildSelection && selectedChild === null)}
-          .tablesError=${live ? (this._live.metaErrors[live.id] ?? '') : ''}
+          .tablesState=${tablesView.state}
+          .tablesError=${tablesView.error}
           .tableStats=${metadataMatchesContext ? (this._live.tableStats[live.id] ?? null) : null}
           .columns=${metadataMatchesContext ? (this._live.columns[live.id] ?? null) : null}
           .objects=${metadataMatchesContext ? (this._live.objects[live.id] ?? null) : null}
@@ -2426,10 +2446,12 @@ export class WorkbenchScreen extends LitElement {
     const wanted = this._ctx.activeDbId === id ? this._ctx.activeChildDb : this._config.defaultChild(connection)
     // The Databases list shows a failure on the connection's row; from anywhere
     // else (the titlebar, ⌘K) a red dot alone would be all there is to see.
+    const workspace = this.workspace
     const result = await this._live.connect(connection)
     if (!result.success) {
-      if (this._activeView !== 'databases' && result.error !== t('connection.superseded')) {
-        this._dialogs.notice(t('connection.failedTitle', { name: connection.name.trim() || t('config.newDatabase') }), result.error)
+      // Not for an attempt the user stopped or replaced, nor one from a workspace since left.
+      if (this._activeView !== 'databases' && !result.cancelled && this.workspace === workspace) {
+        this._dialogs.notice(t('connection.failedTitle', { name: connectionLabel(connection) }), result.error)
       }
       return
     }
@@ -2485,7 +2507,7 @@ export class WorkbenchScreen extends LitElement {
     const profile = this._config.byId(id)
     if (!profile) return
     this._dialogs.confirm = {
-      message: t('workbench.removeDatabasePrompt', { name: profile.name.trim() || t('config.newDatabase') }),
+      message: t('workbench.removeDatabasePrompt', { name: connectionLabel(profile) }),
       detail: t('workbench.removeDatabaseDetail'),
       confirmLabel: t('common.remove'),
       danger: true,
@@ -2799,8 +2821,12 @@ export class WorkbenchScreen extends LitElement {
   // work therefore has to be a decision rather than a silent discard.
   // The results panel can hold JSON editor text that never staged (invalid,
   // or reachable only through Forward) — same unsaved work, same guard.
+  // The panel's JSON draft counts only when the panel is showing this tab: a run
+  // that switched tabs first (a browse, History explain, a DROP preview) reaches
+  // here before the re-render, while the panel still holds the previous tab's.
   private _hasStagedWork(tabId: string): boolean {
-    return this._queries.hasStaged(tabId) || (this.renderRoot?.querySelector('results-panel')?.hasUnstagedJson() ?? false)
+    if (this._queries.hasStaged(tabId)) return true
+    return this._lastActiveTabId === tabId && (this.renderRoot?.querySelector('results-panel')?.hasUnstagedJson() ?? false)
   }
 
   private _guardStagedLeave(tabId: string, intent: 'result' | 'foreignKey' | 'rerun', leave: () => void) {
@@ -2963,7 +2989,8 @@ export class WorkbenchScreen extends LitElement {
       BROWSE_ROW_LIMIT,
     )
     this._guardStagedLeave(tabId, 'foreignKey', () => {
-      void this._runSql(sql, null, [value], null, undefined, { push: true, table }).then(() => {
+      // Already answered by the follow guard above.
+      void this._runSql(sql, null, [value], null, undefined, { push: true, table }, false, true).then(() => {
         if (this._ctx.activeTabId === tabId) this.renderRoot.querySelector('results-panel')?.focusLandedResult()
       })
     })

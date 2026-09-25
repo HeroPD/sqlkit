@@ -211,7 +211,8 @@ export type ConnectionStatus = {
   error?: string
 }
 
-export type ConnectResult = { success: true; serverVersion: string } | { success: false; error: string }
+/** `cancelled`: the user stopped it (declined an SSH host key), so there is nothing to report. */
+export type ConnectResult = { success: true; serverVersion: string } | { success: false; error: string; cancelled?: boolean }
 
 export type TestConnectionResult =
   | { success: true; serverVersion: string; tookMs: number }

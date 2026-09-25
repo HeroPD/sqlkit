@@ -151,7 +151,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     await disconnectActive(profile.id)
     // A newer connect may have completed while this call awaited the previous
     // session's teardown. Never let the older call register over it.
-    if (connectAttempts.get(profile.id) !== attempt) return { success: false, error: t('connection.superseded') }
+    if (connectAttempts.get(profile.id) !== attempt) return { success: false, error: t('connection.superseded'), cancelled: true }
 
     const resources: ConnectionResources = { driver: null, tunnel: null }
     const attempts = new WeakMap<Active, symbol>()
@@ -202,15 +202,18 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     // surfaces as the next query's error.
     const onDriverError = (_message: string) => {}
 
+    // Which leg a failure came from decides the host its hint names: the SSH host until the tunnel is up.
+    let target = sshTarget(profile)
     try {
       const endpoint = await resolveEndpoint(profile, onTransportError)
+      target = profile
       resources.tunnel = endpoint.tunnel
       if (isCurrent()) register({ phase: 'connecting', profileId: profile.id, ...resources })
       // Superseded while the tunnel was opening: own the tunnel we just got so
       // teardown can close it, then bail without overwriting the newer entry.
       if (!isCurrent()) {
         await teardown()
-        return { success: false, error: t('connection.superseded') }
+        return { success: false, error: t('connection.superseded'), cancelled: true }
       }
       resources.driver = createDriver(profile, endpoint, {
         onError: onDriverError,
@@ -224,7 +227,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       const serverVersion = await resources.driver.connect()
       if (!isCurrent()) {
         await teardown()
-        return { success: false, error: t('connection.superseded') }
+        return { success: false, error: t('connection.superseded'), cancelled: true }
       }
       register({
         profileId: profile.id,
@@ -238,11 +241,14 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       })
       return { success: true, serverVersion }
     } catch (error) {
-      const message = connectionErrorMessage(error, profile)
-      if (isCurrent()) register({ phase: 'error', profileId: profile.id, error: message, ...resources })
+      const message = connectionErrorMessage(error, target)
+      const current = isCurrent()
+      if (current) register({ phase: 'error', profileId: profile.id, error: message, ...resources })
       // A failed connect must not leak the pool or the tunnel under it.
       await teardown()
-      return { success: false, error: message }
+      // An attempt something newer replaced (a disconnect, another connect) failed for nobody.
+      if (!current) return { success: false, error: t('connection.superseded'), cancelled: true }
+      return { success: false, error: message, ...(isDeclined(error) ? { cancelled: true } : {}) }
     }
   }
 
@@ -629,19 +635,27 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
  * Connects with a throwaway driver (and tunnel, if configured) and tears
  * everything down: the form's Test Connection button. Touches no state.
  */
+// The host a connect failure is about before the tunnel is up: the SSH host when there is one.
+const sshTarget = (profile: ConnectionProfile) =>
+  profile.ssh?.enabled ? { host: profile.ssh.host, port: profile.ssh.port } : profile
+
+const isDeclined = (error: unknown) => (error as { code?: unknown } | null)?.code === 'EHOSTKEYDECLINED'
+
 export async function testConnection(profile: ConnectionProfile): Promise<TestConnectionResult> {
   const started = performance.now()
   const tookMs = () => Math.round(performance.now() - started)
 
   let endpoint: Endpoint | null = null
   let driver: Driver | null = null
+  let target = sshTarget(profile)
   try {
     endpoint = await resolveEndpoint(profile, () => {})
+    target = profile
     driver = createDriver(profile, endpoint, { onError: () => {} })
     const serverVersion = await driver.connect()
     return { success: true, serverVersion, tookMs: tookMs() }
   } catch (error) {
-    return { success: false, error: connectionErrorMessage(error, profile), tookMs: tookMs() }
+    return { success: false, error: connectionErrorMessage(error, target), tookMs: tookMs() }
   } finally {
     await driver?.disconnect().catch(() => {})
     await endpoint?.tunnel?.close().catch(() => {})
