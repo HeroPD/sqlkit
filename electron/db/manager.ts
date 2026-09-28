@@ -29,12 +29,12 @@ import type {
   TablesResult,
   TestConnectionResult,
 } from '../../src/electron'
-import { unlink } from 'node:fs/promises'
 import type { ExportFormat } from '../../src/result-export'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { isReadOnlyScript } from '../../src/sql-readonly'
 import { t } from '../../src/i18n'
 import { createDriver, type Driver } from './driver'
+import { writeExportAtomically } from './export'
 import { connectionErrorMessage, errorMessage } from './error-message'
 import { queryErrorLine } from './error-line'
 import { ResultSessionStore } from './result-sessions'
@@ -354,7 +354,8 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   // Streams a full read-only result straight to a file, past the display buffer's
   // row cap. Enforces read-only here too (IPC input is untrusted) so a re-run can
-  // never re-execute a write. A failed export leaves no half-written file.
+  // never re-execute a write. A failed export leaves no half-written file and
+  // the file it would have replaced untouched.
   async function exportQuery(
     profileId: string,
     childDb: string | null,
@@ -371,6 +372,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     if (active?.phase !== 'connected') return { success: false, error: t('connection.notConnected') }
     const driver = active.driver
     if (!driver.exportQuery) return { success: false, error: t('connection.exportUnsupported') }
+    const exportTo = driver.exportQuery.bind(driver)
     // An export streams on its own connection: it would silently miss the
     // open transaction's uncommitted rows (or block on its locks on mssql).
     if (driver.openTransaction?.()) return { success: false, error: t('query.transactionExportBlocked') }
@@ -379,10 +381,10 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     // literals are always spelled for the database they were read from.
     const sqlTarget = format === 'sql' ? { engine: active.engine, table: sqlTable } : undefined
     try {
-      const { rowCount } = await driver.exportQuery({ sql, params: params ?? [], childDb, sort, filter, filePath, format, sqlTarget, executionId })
+      const { rowCount } = await writeExportAtomically(filePath, (tempPath) =>
+        exportTo({ sql, params: params ?? [], childDb, sort, filter, filePath: tempPath, format, sqlTarget, executionId }))
       return { success: true, rowCount }
     } catch (error) {
-      await unlink(filePath).catch(() => {})
       const message = errorMessage(error)
       return { success: false, error: message, ...(message === t('query.cancelled') ? { cancelled: true } : {}) }
     }

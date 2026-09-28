@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { openExportWriter } from './export'
+import { dirname, join } from 'node:path'
+import { openExportWriter, writeExportAtomically } from './export'
 
 const tmpFile = (name: string) => join(mkdtempSync(join(tmpdir(), 'sqlkit-export-')), name)
 
@@ -66,8 +67,59 @@ describe('openExportWriter', () => {
     )
   })
 
+  it('never truncates an existing file: it only fills a fresh one', async () => {
+    const file = tmpFile('taken.csv')
+    writeFileSync(file, 'keep me')
+    const writer = openExportWriter(file, 'csv')
+    writer.columns(['a'])
+    await expect(writer.close()).rejects.toThrow(/EEXIST/)
+    expect(readFileSync(file, 'utf8')).toBe('keep me')
+  })
+
   it('rejects rows() when columns were never provided', async () => {
     const writer = openExportWriter(tmpFile('bad.csv'), 'csv')
     await expect(writer.rows([[1]])).rejects.toThrow(/columns/i)
+  })
+})
+
+describe('writeExportAtomically', () => {
+  it('keeps the original and leaves no temp file when the write fails partway', async () => {
+    const file = tmpFile('results.csv')
+    writeFileSync(file, 'keep me')
+    await expect(writeExportAtomically(file, async (temp) => {
+      await writeFile(temp, 'half a result', { flag: 'wx' })
+      throw new Error('disk full')
+    })).rejects.toThrow('disk full')
+    expect(readFileSync(file, 'utf8')).toBe('keep me')
+    expect(readdirSync(dirname(file))).toEqual(['results.csv'])
+  })
+
+  it('renames the finished temp file over the target', async () => {
+    const file = tmpFile('results.json')
+    writeFileSync(file, 'old')
+    const result = await writeExportAtomically(file, async (temp) => {
+      expect(dirname(temp)).toBe(realpathSync(dirname(file)))
+      await writeFile(temp, '[]', { flag: 'wx' })
+      return 7
+    })
+    expect(result).toBe(7)
+    expect(readFileSync(file, 'utf8')).toBe('[]')
+    expect(readdirSync(dirname(file))).toEqual(['results.json'])
+  })
+
+  it('writes a new file when none exists yet', async () => {
+    const file = tmpFile('fresh.tsv')
+    await writeExportAtomically(file, (temp) => writeFile(temp, 'a\n', { flag: 'wx' }))
+    expect(readFileSync(file, 'utf8')).toBe('a\n')
+  })
+
+  it('replaces a symlinked target at its destination, keeping the link', async () => {
+    const real = tmpFile('real.csv')
+    writeFileSync(real, 'old')
+    const link = join(dirname(real), 'link.csv')
+    symlinkSync(real, link)
+    await writeExportAtomically(link, (temp) => writeFile(temp, 'new', { flag: 'wx' }))
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(readFileSync(real, 'utf8')).toBe('new')
   })
 })

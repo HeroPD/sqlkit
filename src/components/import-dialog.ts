@@ -1,7 +1,7 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import type { ColumnRef, InspectColumn, TableRef } from '../electron'
-import { csvShapeError, parseCsv } from '../csv-import'
+import { csvShapeError, decodeCsvBytes, parseCsv } from '../csv-import'
 import { SQL_NULL, type CellInput } from '../sql-write'
 import { controls, overlay, scrollbars, typography } from '../shared-styles'
 import { formatInteger, rowWord, t } from '../i18n'
@@ -164,8 +164,9 @@ export class ImportDialog extends LitElement {
     this._loading = true
     this._error = ''
     try {
-      this._source = await file.text()
       this._fileName = file.name
+      this._source = ''
+      this._source = decodeCsvBytes(new Uint8Array(await file.arrayBuffer()))
       this._parseAndMap()
     } catch (error) {
       this._rows = []

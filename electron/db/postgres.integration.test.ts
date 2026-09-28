@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ConnectionProfile, InspectColumn } from '../../src/electron'
-import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildColumnAlter, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildBatchUpdates, buildColumnAlter, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import { parseExecutionPlan } from '../../src/execution-plan'
 import { explainStatement } from '../../src/sql-explain'
 
@@ -193,6 +193,64 @@ describeDb('postgres driver (integration)', () => {
     }
   })
 
+  // Arrays and geometric values stay the server's literal text and bytea reads as hex, so every
+  // format writes exactly what the server holds and the sql format loads back byte for byte.
+  it('exports bytea, arrays, jsonb[] and point exactly in every format', async () => {
+    const driver = await connectDriver()
+    const dir = mkdtempSync(join(tmpdir(), 'sqlkit-pg-export-'))
+    const docs = String.raw`{"{\"big\": 12345678901234567890}"}`
+    try {
+      await admin.query('drop table if exists sqlkit_it.lit_src, sqlkit_it.lit_dst')
+      await admin.query('create table sqlkit_it.lit_src (id int, b bytea, ints int[], docs jsonb[], p point, nums numeric[])')
+      await admin.query(String.raw`insert into sqlkit_it.lit_src values
+        (1, '\xdead00beef', '{1,2,3}', array['{"big": 12345678901234567890}'::jsonb], '(1.5,-2)', '{12345678901234567890.1234}')`)
+      await admin.query('create table sqlkit_it.lit_dst (like sqlkit_it.lit_src)')
+      const sql = 'select * from sqlkit_it.lit_src order by id'
+      const run = (format: 'csv' | 'json' | 'sql', table?: string) => driver.exportQuery!({
+        sql,
+        params: [],
+        childDb: null,
+        sort: null,
+        filePath: join(dir, `out.${format}`),
+        format,
+        ...(table ? { sqlTarget: { engine: 'postgresql' as const, table: { schema: 'sqlkit_it', name: table, kind: 'table' as const } } } : {}),
+      })
+
+      const shown = await driver.query(sql)
+      expect(shown.rows[0]).toEqual([1, Buffer.from('dead00beef', 'hex'), '{1,2,3}', docs, '(1.5,-2)', '{12345678901234567890.1234}'])
+
+      await run('csv')
+      expect(readFileSync(join(dir, 'out.csv'), 'utf8')).toBe(
+        'id,b,ints,docs,p,nums\n' +
+          String.raw`1,0xdead00beef,"{1,2,3}","{""{\""big\"": 12345678901234567890}""}","(1.5,-2)",{12345678901234567890.1234}` + '\n',
+      )
+
+      await run('json')
+      const json = readFileSync(join(dir, 'out.json'), 'utf8')
+      expect(json).not.toContain('"type":"Buffer"')
+      expect(JSON.parse(json)).toEqual([
+        { id: 1, b: '0xdead00beef', ints: '{1,2,3}', docs, p: '(1.5,-2)', nums: '{12345678901234567890.1234}' },
+      ])
+
+      await run('sql', 'lit_dst')
+      const statements = readFileSync(join(dir, 'out.sql'), 'utf8')
+      expect(statements).toBe(
+        'INSERT INTO "sqlkit_it"."lit_dst" ("id", "b", "ints", "docs", "p", "nums")\n' +
+          String.raw`VALUES (1, '\xdead00beef'::bytea, '{1,2,3}', '{"{\"big\": 12345678901234567890}"}', '(1.5,-2)', '{12345678901234567890.1234}');` + '\n',
+      )
+      await admin.query(statements)
+      // point has no = operator, so the copies are compared as their text.
+      const asText = (table: string) =>
+        `select id, b::text, ints::text, docs::text, p::text, nums::text from sqlkit_it.${table}`
+      const diff = await admin.query(`select count(*)::int as n from (
+        (${asText('lit_src')} except ${asText('lit_dst')}) union all (${asText('lit_dst')} except ${asText('lit_src')})) d`)
+      expect(diff.rows[0].n).toBe(0)
+    } finally {
+      await admin.query('drop table if exists sqlkit_it.lit_src, sqlkit_it.lit_dst').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
   it('exports past the in-memory row cap', async () => {
     const driver = await connectDriver()
     const file = exportFile('series.csv')
@@ -300,6 +358,39 @@ describeDb('postgres driver (integration)', () => {
       expect((await driver.query('select count(*)::int from sqlkit_it.batch')).rows).toEqual([[2]])
     } finally {
       await driver.query('drop table if exists sqlkit_it.batch').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  // Arrays and geometric cells display as literal text; the guard compares that text, since point,
+  // polygon and json[] have no = and box's = compares areas.
+  it('saves grid edits to array and geometric cells, guarded by their text', async () => {
+    const driver = await connectDriver()
+    try {
+      await driver.query('create table sqlkit_it.shapes (id integer primary key, ints int[], p point, docs json[], bx box)')
+      await driver.query(`insert into sqlkit_it.shapes values (1, '{1,2}', '(1,2)', array['{"n": 12345678901234567890}'::json], '(2,2),(0,0)')`)
+      const shown = (await driver.query('select id, ints, p, docs, bx from sqlkit_it.shapes')).rows[0]!
+      expect(shown).toEqual([1, '{1,2}', '(1,2)', String.raw`{"{\"n\": 12345678901234567890}"}`, '(2,2),(0,0)'])
+      const types: Record<string, string> = { id: 'integer', ints: 'integer[]', p: 'point', docs: 'json[]', bx: 'box' }
+      const meta = (name: string) =>
+        ({ schema: 'sqlkit_it', table: 'shapes', name, dataType: types[name]!, nullable: true, primaryKey: name === 'id', foreignKey: false })
+      const pks = [{ name: 'id', value: shown[0], columnMeta: meta('id') }]
+      const edit = (column: string, value: string, originalValue: unknown) => ({ column, columnMeta: meta(column), value, originalValue, pks })
+      const table = { schema: 'sqlkit_it', name: 'shapes', kind: 'table' as const }
+      const statements = buildBatchUpdates({
+        table,
+        engine: 'postgresql',
+        edits: [edit('ints', '{3,4}', shown[1]), edit('p', '(5,6)', shown[2]), edit('docs', '{}', shown[3]), edit('bx', '(1,4),(0,0)', shown[4])],
+      })
+      expect(await driver.runBatch!(statements)).toEqual({ success: true })
+      expect((await driver.query('select ints, p, docs, bx from sqlkit_it.shapes')).rows).toEqual([['{3,4}', '(5,6)', '{}', '(1,4),(0,0)']])
+
+      // A box of the same area but another shape is a concurrent change the guard must catch.
+      const stale = buildBatchUpdates({ table, engine: 'postgresql', edits: [edit('bx', '(9,9),(0,0)', '(2,2),(0,0)')] })
+      expect((await driver.runBatch!(stale)).success).toBe(false)
+      expect((await driver.query('select bx from sqlkit_it.shapes')).rows).toEqual([['(1,4),(0,0)']])
+    } finally {
+      await driver.query('drop table if exists sqlkit_it.shapes').catch(() => {})
       await driver.disconnect()
     }
   })

@@ -1,6 +1,7 @@
 import type { ColumnRef, Engine, InspectColumn, TableRef } from './electron'
 import { dialectFor, type Dialect } from './dialect'
 import { t } from './i18n'
+import { mysqlDefaultOperand } from './mysql-default'
 
 // A single-quoted SQL string literal (doubling embedded quotes). Column DDL runs
 // param-free, so the review preview is exactly what executes.
@@ -72,11 +73,18 @@ export type DeleteRowsSpec = {
 
 const baseType = (column: ColumnRef | undefined) => column?.dataType.toLowerCase().match(/^[\w ]+/)?.[0]?.trim() ?? ''
 
+const PG_GEOMETRIC_TYPES = new Set(['point', 'line', 'lseg', 'box', 'path', 'polygon', 'circle'])
+
+// Postgres arrays and geometric types arrive as the server's own literal text, so they compare as
+// that text: exact, where `=` is missing (point, polygon, json[]) or loose (box and circle compare areas).
+const isPgTextCompared = (column: ColumnRef | undefined) =>
+  /\[\]$/.test(column?.dataType.trim() ?? '') || PG_GEOMETRIC_TYPES.has(baseType(column))
+
 // Types an optimistic guard can't compare with equality on this engine —
 // rejected before the save preview rather than failing inside the transaction.
 export function supportsOptimisticComparison(engine: Engine, column: ColumnRef | undefined): boolean {
   const type = baseType(column)
-  if (engine === 'postgresql') return type !== 'json' && type !== 'xml'
+  if (engine === 'postgresql') return isPgTextCompared(column) || (type !== 'json' && type !== 'xml')
   if (engine === 'sqlserver') return !['text', 'ntext', 'image', 'xml', 'geography', 'geometry', 'hierarchyid'].includes(type)
   return true
 }
@@ -152,7 +160,11 @@ const comparisonPredicate = (
     }))
   }
   const parameter = typedParameter(engine, key.columnMeta, key.value, bind(exactGuardValue(engine, key)))
-  if (engine === 'postgresql') return `${identifier} IS NOT DISTINCT FROM ${parameter}`
+  if (engine === 'postgresql') {
+    return isPgTextCompared(key.columnMeta)
+      ? `${identifier}::text IS NOT DISTINCT FROM ${parameter}::text`
+      : `${identifier} IS NOT DISTINCT FROM ${parameter}`
+  }
   if (engine === 'mysql') {
     if (isTextType(key.columnMeta)) return `BINARY ${identifier} <=> BINARY ${parameter}`
     if (isMysqlFloat(key.columnMeta)) return `${identifier} <=> CAST(${parameter} AS FLOAT)`
@@ -419,6 +431,10 @@ export const autoIncrementClause = (engine: Engine): string =>
 export const autoIncrementLabel = (engine: Engine): string =>
   engine === 'mysql' ? 'AUTO_INCREMENT' : engine === 'sqlite' ? 'AUTOINCREMENT' : 'IDENTITY'
 
+// Other engines take the typed default verbatim; MySQL needs literals quoted and expressions parenthesized.
+const defaultOperand = (value: string, engine: Engine, form: 'column' | 'alter'): string =>
+  engine === 'mysql' ? mysqlDefaultOperand(value, form) : value
+
 // Builds the ADD statements for staged new columns (T-SQL has no COLUMN keyword).
 // Comments ride inline on MySQL, as COMMENT ON on Postgres. A column with a
 // blank name or type is skipped — the row is still a placeholder.
@@ -430,7 +446,7 @@ export function buildColumnAdd(table: TableRef, additions: ColumnAdd[], engine: 
     if (!add.name.trim() || !add.dataType.trim()) continue
     const col = dialect.quoteIdent(add.name.trim())
     let sql = `ALTER TABLE ${qualified} ADD${engine === 'sqlserver' ? '' : ' COLUMN'} ${col} ${add.dataType.trim()}`
-    if (add.default !== null && add.default !== '') sql += ` DEFAULT ${add.default}`
+    if (add.default !== null && add.default !== '') sql += ` DEFAULT ${defaultOperand(add.default, engine, 'column')}`
     if (!add.nullable) sql += ' NOT NULL'
     const comment = add.comment !== null && add.comment !== '' && dialect.supportsColumnComments ? add.comment : null
     if (comment !== null && engine === 'mysql') sql += ` COMMENT ${quoteLiteral(comment)}`
@@ -654,7 +670,7 @@ const createColumnDefinition = (column: ColumnAdd, engine: Engine, inlinePrimary
     return `${dialect.quoteIdent(name)} ${dataType}${autoIncrementClause(engine)}${inlinePrimaryKey ? ' PRIMARY KEY' : ''}`
   }
   let sql = `${dialect.quoteIdent(name)} ${dataType}`
-  if (column.default !== null && column.default !== '') sql += ` DEFAULT ${column.default}`
+  if (column.default !== null && column.default !== '') sql += ` DEFAULT ${defaultOperand(column.default, engine, 'column')}`
   if (!column.nullable) sql += ' NOT NULL'
   if (engine === 'mysql' && column.comment) sql += ` COMMENT ${quoteLiteral(column.comment)}`
   return sql
@@ -751,7 +767,7 @@ export function buildColumnAlter(table: TableRef, edits: ColumnAlter[], engine: 
         alters.push(
           next === ''
             ? `ALTER TABLE ${qualified} ALTER COLUMN ${col} DROP DEFAULT`
-            : `ALTER TABLE ${qualified} ALTER COLUMN ${col} SET DEFAULT ${next}`,
+            : `ALTER TABLE ${qualified} ALTER COLUMN ${col} SET DEFAULT ${defaultOperand(next, engine, 'alter')}`,
         )
       }
     }
@@ -829,6 +845,7 @@ const membershipPredicate = (engine: Engine, dialect: Dialect, rows: RowKey[], b
     return scale === null ? parameter : `CAST(${parameter} AS DECIMAL(65,${scale}))`
   })
   let lhs = identifier
+  if (engine === 'postgresql' && isPgTextCompared(first.columnMeta)) lhs = `${identifier}::text`
   if (engine === 'mysql' && isTextType(first.columnMeta)) lhs = `BINARY ${identifier}`
   if (engine === 'sqlite') lhs = `${identifier} COLLATE BINARY`
   if (engine === 'sqlserver' && isTextType(first.columnMeta)) lhs = mssqlBinaryText(identifier, first.columnMeta)

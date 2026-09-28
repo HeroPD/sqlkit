@@ -22,6 +22,7 @@ export type ColumnAlterSpec = {
   childDb: string | null
   table: TableRef
   engine: Engine
+  mariadb?: boolean
   edits: ColumnAlter[]
   additions: ColumnAdd[]
   drops: string[]
@@ -118,13 +119,14 @@ export class SchemaOpsController {
   // so autocomplete/column lists pick up renames.
   alterColumns(spec: ColumnAlterSpec) {
     const operations = spec.operations ?? []
+    const options = { mariadb: spec.mariadb }
     if (spec.createTable) {
       const constraints = operations.filter((operation) => operation.kind === 'constraint').map((operation) => operation.spec)
       const foreignKeys = operations.filter((operation) => operation.kind === 'foreignKey').map((operation) => operation.spec)
       const postCreate = operations.filter((operation) => operation.kind === 'index' || operation.kind === 'trigger')
       const statements = [
         ...buildCreateTable(spec.table, spec.additions, constraints, foreignKeys, spec.engine),
-        ...postCreate.map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
+        ...postCreate.map((operation) => buildInspectOperation(spec.table, operation, spec.engine, false, options)),
       ]
       this._reviewAlter(spec, statements)
       return
@@ -132,11 +134,11 @@ export class SchemaOpsController {
     // Dependent objects are removed before columns; new objects are created
     // after the columns they may reference exist.
     const statements = [
-      ...operations.filter((operation) => operation.kind === 'drop').map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
+      ...operations.filter((operation) => operation.kind === 'drop').map((operation) => buildInspectOperation(spec.table, operation, spec.engine, false, options)),
       ...buildColumnDrop(spec.table, spec.drops, spec.engine),
       ...buildColumnAlter(spec.table, spec.edits, spec.engine),
       ...buildColumnAdd(spec.table, spec.additions, spec.engine),
-      ...operations.filter((operation) => operation.kind !== 'drop').map((operation) => buildInspectOperation(spec.table, operation, spec.engine)),
+      ...operations.filter((operation) => operation.kind !== 'drop').map((operation) => buildInspectOperation(spec.table, operation, spec.engine, false, options)),
     ]
     this._reviewAlter(spec, statements)
   }

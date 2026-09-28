@@ -210,7 +210,7 @@ export async function readWorkspaceFileAsync(workspacePath: string | null, fileP
 // random suffix: two saves racing on one path (⌘S held down, or ⌘S while a
 // save-as is in flight) would otherwise share a temp, and the first rename would
 // leave the second failing on a file that is no longer there.
-const tempSavePath = (target: string) =>
+export const tempSavePath = (target: string) =>
   path.join(path.dirname(target), `.${path.basename(target)}.${randomBytes(6).toString('hex')}.tmp`)
 
 // Writes a .sql file under the workspace root, with the same hardening as

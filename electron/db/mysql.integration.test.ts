@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ConnectionProfile } from '../../src/electron'
-import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildBatchUpdates, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
+import { buildAddConstraint, buildAddForeignKey, buildAddPartition, buildBatchUpdates, buildColumnAdd, buildColumnAlter, buildCreateIndex, buildCreateTrigger } from '../../src/sql-write'
 import type { Driver } from './driver'
 import { MAX_BUFFERED_ROWS } from './driver'
 import { createMysqlDriver, mysqlVersion } from './mysql'
@@ -68,6 +68,39 @@ describeDb('mysql driver (integration)', () => {
       expect(byName.get('a')?.generated).toBe(false)
     } finally {
       await admin.query('drop table if exists gen_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  it('applies column default edits built from an inspection and reads them back', async () => {
+    const driver = await connectDriver()
+    const table = { schema: null, name: 'default_probe', kind: 'table' as const }
+    const columns = async () => new Map((await driver.inspectTable(table)).columns.map((column) => [column.name, column]))
+    try {
+      await admin.query('drop table if exists default_probe')
+      await admin.query("create table default_probe (id int primary key, status varchar(20) default 'pending', at timestamp null, day date null)")
+      const before = await columns()
+      expect(before.get('status')?.default).toBe("'pending'")
+      const statements = [
+        ...buildColumnAlter(table, [
+          { original: before.get('at')!, default: 'CURRENT_TIMESTAMP' },
+          { original: before.get('day')!, default: 'CURRENT_DATE' },
+          { original: before.get('status')!, default: 'done' },
+        ], 'mysql'),
+        // A read-back default re-emitted as is must still be a string literal.
+        ...buildColumnAdd(table, [{ name: 'copy', dataType: 'varchar(20)', nullable: true, default: before.get('status')!.default, comment: null }], 'mysql'),
+      ]
+      for (const statement of statements) await admin.query(statement)
+      const after = await columns()
+      expect(after.get('at')?.default).toMatch(/^(?:CURRENT_TIMESTAMP|now\(\))$/)
+      expect(after.get('day')?.default).toBe('(curdate())')
+      expect(after.get('status')?.default).toBe("'done'")
+      expect(after.get('copy')?.default).toBe("'pending'")
+      await admin.query('insert into default_probe (id) values (1)')
+      const [rows] = await admin.query<mysql.RowDataPacket[]>('select status, copy, at is not null as stamped, day = curdate() as today from default_probe')
+      expect(rows[0]).toMatchObject({ status: 'done', copy: 'pending', stamped: 1, today: 1 })
+    } finally {
+      await admin.query('drop table if exists default_probe').catch(() => {})
       await driver.disconnect()
     }
   })

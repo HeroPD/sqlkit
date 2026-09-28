@@ -47,6 +47,7 @@ import type { StatusConnection } from './status-bar'
 import { tableKey } from './explorer-view'
 import type { EmptyAction } from './editor-empty'
 import { clearInspectDraftCache, dropInspectDraft, exportInspectDraft, importInspectDraft, sweepInspectDrafts, type ColumnAlterEventDetail } from './table-inspect'
+import { connectionLabel } from '../connection-label'
 import { connectionLabelColorValue } from '../connection-label-colors'
 import { clearEditorStateCache, type EditorCommandDetail, type RunQueryDetail } from './sql-editor'
 import type { SelectionCommandId } from '../codemirror/selection-commands'
@@ -98,10 +99,6 @@ const VIEWS = [
 
 
 type ViewId = (typeof VIEWS)[number]['id']
-
-// What to call a connection with no name: where it points, before a placeholder.
-const connectionLabel = (profile: ConnectionProfile) =>
-  profile.name.trim() || (profile.engine === 'sqlite' ? profile.file.split(/[\\/]/).pop() : profile.host.trim()) || t('config.untitled')
 
 const tabTitle = (tab: EditorTabState) => {
   if (tab.kind === 'config') return tab.profile.name.trim() || t('config.newDatabase')
@@ -2191,6 +2188,13 @@ export class WorkbenchScreen extends LitElement {
   // row on every workbench update.
   private _flavorCache: { engine: Engine; version: string | null; flavors: ExplainFlavor[] } | null = null
 
+  // The profile's flavor is only what the user picked; the server banner is what actually answered.
+  private _isMariaDb(profileId: string): boolean {
+    const profile = this._config.byId(profileId)
+    if (profile?.engine !== 'mysql') return false
+    return profile.flavor === 'mariadb' || /mariadb/i.test(this._live.statuses[profileId]?.serverVersion ?? '')
+  }
+
   private _explainFlavors(): ExplainFlavor[] {
     const profile = this._config.activeProfile()
     if (!profile) return NO_FLAVORS
@@ -2259,6 +2263,7 @@ export class WorkbenchScreen extends LitElement {
             .table=${activeTab.table}
             .createTable=${activeTab.createTable ?? false}
             .engine=${this._config.byId(activeTab.profileId)?.engine ?? null}
+            .mariadb=${this._isMariaDb(activeTab.profileId)}
             .tables=${this._live.tables[activeTab.profileId] ?? []}
             .referenceColumns=${this._live.columns[activeTab.profileId] ?? []}
             .functions=${this._live.objects[activeTab.profileId]?.functions ?? []}

@@ -282,10 +282,8 @@ function showplanSwitch(masked: string): 'on' | 'off' | undefined {
  *    other rules than the default masking here, and `mode` is not available in
  *    the renderer (the driver reads sql_mode at connect). A crafted literal can
  *    therefore hide a second statement that the connection would run.
- *  - MySQL DELIMITER scripts are not preprocessed here, and the splitter tracks
- *    compound BEGIN … END bodies for PostgreSQL only, so a routine definition
- *    splits at its body's semicolons and can raise a *false* warning about a
- *    write that merely gets defined.
+ *  - MySQL DELIMITER scripts are not preprocessed here, so statements that
+ *    only a custom delimiter separates are judged by the first one's head.
  *  - A WHERE spelled as a tautology (WHERE 1=1) reads as a scoped write.
  *  - Dynamic SQL is read only from literals (DO $$ … $$, EXEC('…'), PREPARE …
  *    FROM '…'); SQL assembled in a variable, EXEC(@sql), cannot be seen.

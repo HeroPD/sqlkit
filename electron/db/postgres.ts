@@ -97,6 +97,15 @@ const userRelations = (relkinds: string) =>
            and n.nspname !~ '^pg_'
            and n.nspname <> 'information_schema'`
 
+// bool/bytea/int2/int4/int8/oid/float4/float8/numeric/bpchar/varchar/regproc/text/
+// cidr/macaddr/inet/timestamp/date/timestamptz/interval/time/timetz/uuid/money/json/jsonb/numrange/point arrays.
+const LITERAL_ARRAY_OIDS = [
+  1000, 1001, 1005, 1007, 1016, 1028, 1021, 1022, 1231, 1014, 1015, 1008, 1009,
+  651, 1040, 1041, 1115, 1182, 1185, 1187, 1183, 1270, 2951, 791, 199, 3807, 3907, 1017,
+]
+// point (600) and circle (718) are the geometric types pg-types turns into objects.
+export const LITERAL_TEXT_OIDS: readonly number[] = [...LITERAL_ARRAY_OIDS, 600, 718]
+
 export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpoint, events: DriverEvents): Driver {
   let pools: Map<string, pg.Pool> | null = null
   let childNames: string[] = []
@@ -112,15 +121,14 @@ export function createPostgresDriver(profile: ConnectionProfile, endpoint: Endpo
   // node-postgres otherwise turns timestamp/date values into JavaScript Date
   // objects, losing the original timezone/precision (and interpreting a
   // timestamp-without-zone in the workstation timezone). Keep temporal wire
-  // values as text. Array forms remain PostgreSQL array literals for the same
-  // reason; callers can inspect them without a lossy intermediate conversion.
-  // numeric[] (1231) is included: pg-types runs its elements through parseFloat,
-  // silently rounding past 2^53, while scalar numeric already arrives as text.
-  // JSON/JSONB (114/3802) must also stay text: JSON.parse would round numeric
-  // literals before the result-cell editor has a chance to preserve them.
-  for (const oid of [1082, 1083, 1114, 1184, 1186, 1266, 1115, 1182, 1183, 1185, 1187, 1270, 1231, 114, 3802]) {
+  // values as text. JSON/JSONB (114/3802) must also stay text: JSON.parse would
+  // round numeric literals before the result-cell editor has a chance to preserve them.
+  for (const oid of [1082, 1083, 1114, 1184, 1186, 1266, 114, 3802]) {
     losslessTypes.setTypeParser(oid, (value) => value)
   }
+  // Arrays and point/circle stay the server's literal text: parsed, json[] loses big numbers to
+  // JSON.parse, numeric[] to parseFloat, and a JS array or {x, y} is no literal Postgres re-reads.
+  for (const oid of LITERAL_TEXT_OIDS) losslessTypes.setTypeParser(oid, (value) => value)
 
   const makePool = (database: string) => {
     const pool = new pg.Pool({

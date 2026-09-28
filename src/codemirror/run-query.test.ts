@@ -638,6 +638,13 @@ describe('queryToRun', () => {
       ['postgres', 'UPDATE t\nSET x = 1\nFROM u\nWHERE u.id = t.id;'],
       ['postgres', 'REVOKE SELECT\nON t\nFROM r;'],
       ['postgres', 'MERGE INTO t USING s ON s.id = t.id\nWHEN NOT MATCHED THEN\nINSERT VALUES (1);'],
+      ['postgres', 'CREATE MATERIALIZED VIEW v AS\nSELECT 1\nWITH NO DATA;'],
+      ['postgres', 'CREATE VIEW v AS\nSELECT 1\nWITH LOCAL CHECK OPTION;'],
+      ['postgres', 'INSERT INTO t (a) VALUES (1)\nON CONFLICT (a) DO UPDATE\nSET a = 2;'],
+      ['postgres', 'MERGE INTO t USING s ON s.id = t.id\nWHEN MATCHED THEN UPDATE\nSET x = 1;'],
+      ['mysql', 'CREATE PROCEDURE p()\nBEGIN\nDELETE FROM t;\nIF 1 THEN\nSELECT 1;\nEND IF;\nEND;'],
+      ['sqlite', 'CREATE TRIGGER trg AFTER INSERT ON t\nBEGIN\nDELETE FROM t;\nSELECT 1;\nEND;'],
+      ['mssql', 'CREATE PROCEDURE p AS\nBEGIN\nDELETE FROM t;\nSELECT 1;\nEND'],
       ['mssql', "IF @x = 1\nPRINT 'a';"],
       ['mssql', 'BEGIN\nSELECT 1\nEND'],
       ['mssql', 'IF @x = 1\nBEGIN\nUPDATE t SET y = 2\nEND'],
@@ -659,6 +666,106 @@ describe('queryToRun', () => {
     it.each(whole)('%s keeps %j whole from every line in it', (name, doc) => {
       const dialect = name === 'mssql' ? MSSQL : name === 'mysql' ? MySQL : name === 'sqlite' ? SQLite : SQL_DIALECTS.postgres.dialect
       expect(wholeFrom(doc, dialect, name)).toEqual([doc])
+    })
+  })
+
+  describe('routine bodies', () => {
+    // Reported: the parser splits on `;` alone, so the caret on a statement
+    // inside a routine body ran that statement — a DELETE against live data —
+    // instead of the CREATE that defines it.
+    const at = (doc: string, marker: string, dialect: SQLDialect, name: SqlDialectName, allowNeighbor = true) => {
+      const state = stateAt(doc, doc.indexOf(marker) + 1, { dialect })
+      return (allowNeighbor ? queryToRun(state, name) : explicitQueryToRun(state, name))?.sql ?? ''
+    }
+
+    it('runs a MySQL procedure whole from every statement in its body', () => {
+      const proc = [
+        'CREATE PROCEDURE purge(IN n INT)',
+        'BEGIN',
+        '  DECLARE done INT DEFAULT 0;',
+        '  DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END;',
+        '  DROP TEMPORARY TABLE IF EXISTS tmp;',
+        '  DELETE FROM t WHERE a = 1;',
+        '  IF (SELECT COUNT(*) FROM t) > n THEN',
+        '    UPDATE t SET b = IF(b > 1, 0, 1);',
+        '  ELSEIF n = 0 THEN',
+        '    UPDATE t SET b = 2;',
+        '  END IF;',
+        '  CASE n WHEN 1 THEN SELECT CASE WHEN n > 0 THEN 1 END; ELSE SELECT 2; END CASE;',
+        '  lp: LOOP',
+        '    LEAVE lp;',
+        '  END LOOP lp;',
+        '  WHILE done < 3 DO',
+        '    SET done = done + 1;',
+        '  END WHILE;',
+        '  REPEAT',
+        "    SET done = done - 1, @s = REPEAT('a', 2);",
+        '  UNTIL done = 0 END REPEAT;',
+        'END;',
+      ].join('\n')
+      const doc = `${proc}\nSELECT 1;\nDELETE FROM t WHERE a = 2;`
+      for (const marker of ['CREATE', 'DECLARE done', 'ROLLBACK', 'DELETE FROM t WHERE a = 1', 'UPDATE t SET b = 2', 'END IF', 'LEAVE', 'SET done = done + 1', 'UNTIL', 'END;\nSELECT']) {
+        expect(at(doc, marker, MySQL, 'mysql')).toBe(proc)
+        expect(at(doc, marker, MySQL, 'mysql', false)).toBe(proc)
+      }
+      expect(at(doc, 'SELECT 1', MySQL, 'mysql')).toBe('SELECT 1;')
+      expect(at(doc, 'DELETE FROM t WHERE a = 2', MySQL, 'mysql')).toBe('DELETE FROM t WHERE a = 2;')
+    })
+
+    it('runs a routine in a MySQL DELIMITER script to its custom delimiter, without it', () => {
+      const proc = 'CREATE DEFINER=`root`@`localhost` PROCEDURE purge()\nBEGIN\n  DELETE FROM t WHERE a = 1;\n  SELECT \'$$\';\nEND'
+      const trigger = 'CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW\nBEGIN\n  SET NEW.a = 1;\nEND'
+      const doc = `DELIMITER $$\n${proc}$$\n\n${trigger} $$\nDELIMITER ;\nSELECT 1;`
+      expect(at(doc, 'DELETE', MySQL, 'mysql')).toBe(proc)
+      expect(at(doc, 'CREATE DEFINER', MySQL, 'mysql')).toBe(proc)
+      expect(at(doc, 'SET NEW', MySQL, 'mysql')).toBe(trigger)
+      expect(at(doc, 'SELECT 1', MySQL, 'mysql')).toBe('SELECT 1;')
+    })
+
+    it('runs a MySQL event body and a labeled block whole', () => {
+      const event = 'CREATE EVENT prune ON SCHEDULE EVERY 1 DAY DO\nmain: BEGIN\n  DELETE FROM log WHERE ts < NOW();\nEND main;'
+      expect(at(`${event}\nSELECT 1;`, 'DELETE', MySQL, 'mysql')).toBe(event)
+    })
+
+    it('runs a SQLite trigger whole, CASE expressions in its body included', () => {
+      const trigger =
+        'CREATE TEMP TRIGGER IF NOT EXISTS trg AFTER INSERT ON t\nBEGIN\n  UPDATE t SET x = CASE WHEN x > 1 THEN 0 ELSE 1 END;\n  DELETE FROM log;\nEND;'
+      const doc = `${trigger}\nSELECT 1;`
+      expect(at(doc, 'UPDATE', SQLite, 'sqlite')).toBe(trigger)
+      expect(at(doc, 'DELETE', SQLite, 'sqlite')).toBe(trigger)
+      expect(at(doc, 'SELECT', SQLite, 'sqlite')).toBe('SELECT 1;')
+    })
+
+    it('runs a T-SQL routine to the end of its GO batch', () => {
+      const proc = 'CREATE OR ALTER PROCEDURE dbo.purge AS\nBEGIN\n  DELETE FROM t WHERE a = 1;\n\n  SELECT 2;\nEND'
+      const doc = `${proc}\nGO\nSELECT 3;`
+      expect(at(doc, 'DELETE', MSSQL, 'mssql')).toBe(proc)
+      expect(at(doc, 'SELECT 2', MSSQL, 'mssql')).toBe(proc)
+      expect(at(doc, 'SELECT 3', MSSQL, 'mssql')).toBe('SELECT 3;')
+
+      const bare = 'CREATE PROC purge AS\nSET NOCOUNT ON;\nDELETE FROM t WHERE a = 1;\nSELECT 2;'
+      expect(at(bare, 'DELETE', MSSQL, 'mssql')).toBe(bare)
+      expect(at(`SELECT 0;\nGO\n${bare}`, 'SELECT 2', MSSQL, 'mssql')).toBe(bare)
+
+      const fn = 'ALTER FUNCTION f(@x int) RETURNS int AS\nBEGIN\n  RETURN @x + 1;\nEND;'
+      expect(at(`${fn}\ngo\nSELECT 1;`, 'RETURN', MSSQL, 'mssql')).toBe(fn)
+      const trigger = 'CREATE TRIGGER trg ON t AFTER INSERT AS\nUPDATE t SET x = 1;\nDELETE FROM log;'
+      expect(at(trigger, 'DELETE', MSSQL, 'mssql')).toBe(trigger)
+    })
+
+    it('stands a body fragment next to the caret for its whole routine', () => {
+      const proc = 'CREATE PROCEDURE p()\nBEGIN\n  DELETE FROM t;\nEND;'
+      expect(at(`${proc}\n\n\n`, '\n\n\n', MySQL, 'mysql')).toBe(proc)
+    })
+
+    it('leaves single-statement routines and transaction blocks alone', () => {
+      const trigger = 'CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW SET NEW.a = IF(NEW.a, 1, 0);'
+      expect(at(`${trigger}\nDELETE FROM t;`, 'DELETE', MySQL, 'mysql')).toBe('DELETE FROM t;')
+      expect(at(`${trigger}\nDELETE FROM t;`, 'SET NEW', MySQL, 'mysql')).toBe(trigger)
+      expect(at('BEGIN;\nDELETE FROM t;\nCOMMIT;', 'DELETE', MySQL, 'mysql')).toBe('DELETE FROM t;')
+      expect(at('BEGIN;\nDELETE FROM t;\nEND;', 'DELETE', SQLite, 'sqlite')).toBe('DELETE FROM t;')
+      expect(at('CREATE TABLE log (event TEXT, trigger TEXT);\nDELETE FROM t;', 'DELETE', SQLite, 'sqlite')).toBe('DELETE FROM t;')
+      expect(at('BEGIN TRAN;\nDELETE FROM t;\nCOMMIT;', 'DELETE', MSSQL, 'mssql')).toBe('DELETE FROM t;')
     })
   })
 
@@ -696,7 +803,7 @@ describe('queryToRun', () => {
     it('keeps a SQLite trigger body under its unterminated header', () => {
       const doc = 'CREATE TRIGGER trg AFTER INSERT ON t\nBEGIN\n  UPDATE t SET x = 1;|\nEND;'
       expect(queryAtCaret(doc, SQLite, 'sqlite')).toBe(
-        'CREATE TRIGGER trg AFTER INSERT ON t\nBEGIN\n  UPDATE t SET x = 1;',
+        'CREATE TRIGGER trg AFTER INSERT ON t\nBEGIN\n  UPDATE t SET x = 1;\nEND;',
       )
     })
 

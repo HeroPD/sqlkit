@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  dialog,
   ipcMain,
   Menu,
   session,
@@ -21,9 +22,10 @@ import { THEMES, acceleratorFor, effectiveKeymapBindings, type MenuKeymapCommand
 import { THEME_IDS, isThemeId } from '../src/themes'
 import { inspectionSwitch } from './hardening'
 import { registerWorkspaceIpc } from './ipc-workspace'
+import { hasOpenTransaction, openTransactionTargets, rollbackPrompt, ROLLBACK_CONFIRMED, type GuardIntent } from './quit-guard'
 import { abandonedSessionSlots, claimSessionSlot, markSessionClean, releaseSessionSlot } from './session'
 import { normalizeWorkspacePath, WorkspaceWindows } from './workspace-windows'
-import { readAppSettings, readGlobalConfig, readTheme, writeAppSettings, writeTheme } from './workspace'
+import { readAppSettings, readGlobalConfig, readTheme, readWorkspaceConfig, writeAppSettings, writeTheme } from './workspace'
 import { titleBarOverlay, WINDOW_CHROME } from './window-chrome'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -54,7 +56,8 @@ if (devServerUrl && Number.isInteger(devParentPid) && devParentPid > 0) {
   const parentMonitor = setInterval(() => {
     if (process.ppid === devParentPid) return
     clearInterval(parentMonitor)
-    app.quit()
+    // The dev server went away: nobody is at the window to answer the open-transaction prompt.
+    beginQuit()
   }, 250)
 }
 if (smokeTest) app.commandLine.appendSwitch('no-sandbox')
@@ -156,6 +159,16 @@ function cleanupWindow(contentsId: number) {
   void closing.finally(() => pendingDisconnects.delete(closing))
 }
 
+// Null when closing these windows rolls nothing back; the config is only read to name what would be.
+function rollbackPromptFor(contentsIds: readonly number[], intent: GuardIntent) {
+  const windows = contentsIds.flatMap((id) => {
+    const statuses = dbManagers.get(id)?.statuses() ?? []
+    if (!hasOpenTransaction(statuses)) return []
+    return [{ statuses, profiles: readWorkspaceConfig(workspaceWindows.pathFor(id)).config.connections }]
+  })
+  return rollbackPrompt(intent, openTransactionTargets(windows))
+}
+
 function dbManagerFor(contents: WebContents) {
   let manager = dbManagers.get(contents.id)
   if (!manager) {
@@ -214,6 +227,27 @@ function createWindow(): BrowserWindow | null {
   })
 
   const contentsId = window.webContents.id
+  // Closing disconnects this window's connections, rolling back an open transaction, so
+  // that asks first. A quit has already asked about every window before it closes them.
+  let closeConfirmed = false
+  let closePrompting = false
+  window.on('close', (event) => {
+    if (quitting || closeConfirmed) return
+    if (closePrompting) {
+      event.preventDefault()
+      return
+    }
+    const prompt = rollbackPromptFor([contentsId], 'close')
+    if (!prompt) return
+    event.preventDefault()
+    closePrompting = true
+    void dialog.showMessageBox(window, prompt).then(({ response }) => {
+      closePrompting = false
+      if (response !== ROLLBACK_CONFIRMED || window.isDestroyed()) return
+      closeConfirmed = true
+      window.close()
+    })
+  })
   window.on('closed', () => {
     pendingShows.delete(contentsId)
     pendingWorkspaces.delete(contentsId)
@@ -370,20 +404,36 @@ function flushRendererSessions(): Promise<unknown> {
   return Promise.all(BrowserWindow.getAllWindows().map((window) => flushRendererSession(window.webContents)))
 }
 
+function beginQuit() {
+  quitting = true
+  stopWorkspaceWatcher()
+  quittingWorkspaces = workspaceWindows.all()
+  const closed = Promise.all([
+    flushRendererSessions(),
+    ...[...dbManagers.values()].map((active) => active.disconnectAll().catch(() => {})),
+    ...pendingDisconnects,
+  ])
+  const deadline = new Promise<void>((resolve) => setTimeout(resolve, 3000))
+  void Promise.race([closed, deadline]).finally(() => app.quit())
+}
+
 function installQuitHandler() {
+  let quitPrompting = false
   app.on('before-quit', (event) => {
     if (quitting) return
-    quitting = true
     event.preventDefault()
-    stopWorkspaceWatcher()
-    quittingWorkspaces = workspaceWindows.all()
-    const closed = Promise.all([
-      flushRendererSessions(),
-      ...[...dbManagers.values()].map((active) => active.disconnectAll().catch(() => {})),
-      ...pendingDisconnects,
-    ])
-    const deadline = new Promise<void>((resolve) => setTimeout(resolve, 3000))
-    void Promise.race([closed, deadline]).finally(() => app.quit())
+    if (quitPrompting) return
+    // Asked once for every window here, so the closes the quit goes on to make don't ask again.
+    const prompt = rollbackPromptFor([...dbManagers.keys()], 'quit')
+    if (!prompt) {
+      beginQuit()
+      return
+    }
+    quitPrompting = true
+    void dialog.showMessageBox(prompt).then(({ response }) => {
+      quitPrompting = false
+      if (response === ROLLBACK_CONFIRMED) beginQuit()
+    })
   })
 
   // After every window is gone, so the flush each one fires as it tears down

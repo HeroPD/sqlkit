@@ -1,5 +1,7 @@
 import { createWriteStream, type WriteStream } from 'node:fs'
+import { chmod, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { once } from 'node:events'
+import { tempSavePath } from '../files'
 import { createExportSerializer, type ExportFormat, type ExportSerializer, type SqlExportTarget } from '../../src/result-export'
 import { t } from '../../src/i18n'
 
@@ -16,8 +18,28 @@ export type ExportWriter = {
   close(): Promise<{ rowCount: number }>
 }
 
+// Writes an export to a fresh temp file beside `target` and renames it over the
+// target only once `write` succeeds, so a failed or cancelled export leaves the file it would replace untouched.
+export async function writeExportAtomically<T>(target: string, write: (tempPath: string) => Promise<T>): Promise<T> {
+  // A symlink is replaced at its destination, not swapped for a regular file.
+  const resolved = await realpath(target).catch(() => target)
+  const existing = await stat(resolved).catch(() => null)
+  const temp = tempSavePath(resolved)
+  try {
+    const result = await write(temp)
+    // A fresh temp file takes the umask's mode; the file it replaces keeps its own.
+    if (existing) await chmod(temp, existing.mode & 0o7777)
+    await rename(temp, resolved)
+    return result
+  } catch (error) {
+    await unlink(temp).catch(() => {})
+    throw error
+  }
+}
+
+// `filePath` is created exclusively ('wx'): writers only ever fill the temp file of writeExportAtomically.
 export function openExportWriter(filePath: string, format: ExportFormat, sqlTarget?: SqlExportTarget): ExportWriter {
-  const stream: WriteStream = createWriteStream(filePath, { encoding: 'utf8' })
+  const stream: WriteStream = createWriteStream(filePath, { encoding: 'utf8', flags: 'wx' })
   // A stream 'error' (disk full, permission) may arrive between writes; capture
   // it so the next call throws instead of hanging on a drain that never comes.
   let failure: Error | null = null

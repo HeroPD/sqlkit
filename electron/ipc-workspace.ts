@@ -4,6 +4,7 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { SharedWorkspaceFile } from '../src/electron'
 import type { ConnectionManager } from './db/manager'
+import { writeExportAtomically } from './db/export'
 import { t } from '../src/i18n'
 import {
   createWorkspaceFile,
@@ -261,7 +262,7 @@ export function registerWorkspaceIpc(context: WorkspaceIpcContext) {
     })
     if (result.canceled || !result.filePath) return { success: false, canceled: true }
     try {
-      await writeFile(result.filePath, content, 'utf8')
+      await writeExportAtomically(result.filePath, (tempPath) => writeFile(tempPath, content, { encoding: 'utf8', flag: 'wx' }))
       return { success: true }
     } catch (error) {
       return { success: false, error: (error as Error).message }

@@ -5,7 +5,7 @@ import { isMac } from '../platform'
 import type { ColumnReference, Engine, QueryResult, QuerySort, TableRef } from '../electron'
 import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { aggregateCells } from '../result-aggregate'
-import { cellToTsv, cellsToTsv, parseClipboardTsv, type ExportFormat, type SqlExportTarget } from '../result-export'
+import { binaryText, cellToTsv, cellsToTsv, parseClipboardTsv, type ExportFormat, type SqlExportTarget } from '../result-export'
 import { toInsertStatements } from '../result-sql'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
 import { uuidv4, uuidv7 } from '../uuid'
@@ -102,6 +102,7 @@ const RECORD_FIELD_MAX_H = 6 * 18 + 6
 const bigintReplacer = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value
 
 const formatCell = (value: unknown): string => {
+  if (value instanceof Uint8Array) return binaryText(value)
   if (typeof value === 'object' && value !== null) {
     try {
       return JSON.stringify(value, bigintReplacer) ?? '[unserializable value]'

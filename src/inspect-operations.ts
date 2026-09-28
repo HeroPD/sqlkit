@@ -92,7 +92,7 @@ export const canRenameInspectObject = (target: InspectDropTarget, engine: Engine
   return false
 }
 
-function buildDropInspectObject(table: TableRef, target: InspectDropTarget, name: string, engine: Engine): string {
+function buildDropInspectObject(table: TableRef, target: InspectDropTarget, name: string, engine: Engine, mariadb: boolean): string {
   if (!canDropInspectObject(target, engine)) throw new Error(t('inspect.sqliteDropUnsupported', { target }))
   const dialect = dialectFor(engine)
   const tableName = quoteQualified(table, dialect)
@@ -108,7 +108,8 @@ function buildDropInspectObject(table: TableRef, target: InspectDropTarget, name
     return `DROP TRIGGER ${objectName}`
   }
   if (engine === 'mysql') {
-    const keyword = target === 'foreignKey' ? 'FOREIGN KEY' : 'CHECK'
+    // MariaDB has no DROP CHECK; its CHECK constraints drop through DROP CONSTRAINT.
+    const keyword = target === 'foreignKey' ? 'FOREIGN KEY' : mariadb ? 'CONSTRAINT' : 'CHECK'
     return `ALTER TABLE ${tableName} DROP ${keyword} ${dialect.quoteIdent(name)}`
   }
   return `ALTER TABLE ${tableName} DROP CONSTRAINT ${dialect.quoteIdent(name)}`
@@ -143,9 +144,17 @@ function buildRenameInspectObject(
   return `EXEC sp_rename N${quoteLiteral(oldName)}, N${quoteLiteral(to)}, N${quoteLiteral(objectType)}`
 }
 
-export function buildInspectOperation(table: TableRef, operation: InspectOperation, engine: Engine, creating = false): string {
+export type InspectOperationOptions = { mariadb?: boolean }
+
+export function buildInspectOperation(
+  table: TableRef,
+  operation: InspectOperation,
+  engine: Engine,
+  creating = false,
+  options: InspectOperationOptions = {},
+): string {
   switch (operation.kind) {
-    case 'drop': return buildDropInspectObject(table, operation.target, operation.name.trim(), engine)
+    case 'drop': return buildDropInspectObject(table, operation.target, operation.name.trim(), engine, options.mariadb === true)
     case 'rename': return buildRenameInspectObject(table, operation.target, operation.from.trim(), operation.to.trim(), engine)
     case 'index': return buildCreateIndex(table, operation.spec, engine)
     case 'trigger': return buildCreateTrigger(table, operation.spec, engine)

@@ -113,7 +113,8 @@ export function exportQuery(
   if (!columns.length) throw new Error(t('export.resultOnly'))
   const serializer = createExportSerializer(columns, format, sqlTarget)
   statement.setReturnArrays(true)
-  const fd = openSync(filePath, 'w')
+  // Exclusive: the manager hands a fresh temp file (see writeExportAtomically).
+  const fd = openSync(filePath, 'wx')
   let rowCount = 0
   try {
     // Buffer to ~64 KB before each syncronous write to keep syscall count low.

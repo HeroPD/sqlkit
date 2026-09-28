@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ConnectionProfile, QueryResult } from '../../src/electron'
+import type { ExportFormat } from '../../src/result-export'
 import type { Driver } from './driver'
 import type { Endpoint } from './transport'
 
@@ -40,6 +44,7 @@ vi.mock('./driver', async (importOriginal) => {
 })
 
 import { createConnectionManager } from './manager'
+import { openExportWriter } from './export'
 import { PAGE_SIZE } from './result-sessions'
 import { resolveEndpoint } from './transport'
 
@@ -777,5 +782,59 @@ describe('connection manager: manual transactions', () => {
     openState.value = null
     onTransactionChange?.()
     expect(manager.statuses()[0]).not.toHaveProperty('transaction')
+  })
+})
+
+describe('exportQuery file replacement', () => {
+  // A driver that streams one chunk through the real writer, then fails the way a Stop or a dropped connection does.
+  const exportingDriver = (fail: Error | null) => fakeDriver({
+    exportQuery: vi.fn(async ({ filePath, format }: { filePath: string; format: ExportFormat }) => {
+      const writer = openExportWriter(filePath, format)
+      writer.columns(['a'])
+      await writer.rows([[1], [2]])
+      if (fail) {
+        await writer.close()
+        throw fail
+      }
+      return writer.close()
+    }),
+  })
+
+  const existingFile = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sqlkit-manager-export-'))
+    const file = join(dir, 'results.csv')
+    writeFileSync(file, 'keep me\n')
+    return { dir, file }
+  }
+
+  it('leaves the file it would replace untouched when the export is cancelled or fails', async () => {
+    for (const failure of [new Error('Query cancelled.'), new Error('connection lost')]) {
+      hoisted.driver = exportingDriver(failure)
+      const manager = createConnectionManager(vi.fn())
+      await manager.connect(profile())
+      const { dir, file } = existingFile()
+      const outcome = await manager.exportQuery('p1', null, 'select 1', [], null, null, file, 'csv', null)
+      expect(outcome.success).toBe(false)
+      expect(readFileSync(file, 'utf8')).toBe('keep me\n')
+      // The temp file is gone too: nothing but the original is left beside it.
+      expect(readdirSync(dir)).toEqual(['results.csv'])
+    }
+  })
+
+  it('replaces the file only once the export completes, keeping its mode', async () => {
+    hoisted.driver = exportingDriver(null)
+    const manager = createConnectionManager(vi.fn())
+    await manager.connect(profile())
+    const { dir, file } = existingFile()
+    chmodSync(file, 0o600)
+    const outcome = await manager.exportQuery('p1', null, 'select 1', [], null, null, file, 'csv', null)
+    expect(outcome).toEqual({ success: true, rowCount: 2 })
+    expect(readFileSync(file, 'utf8')).toBe('a\n1\n2\n')
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+    expect(readdirSync(dir)).toEqual(['results.csv'])
+    // The driver wrote a temp file beside the target, never the target itself.
+    const [{ filePath }] = vi.mocked(hoisted.driver.exportQuery!).mock.calls[0]!
+    expect(filePath).not.toBe(file)
+    expect(filePath.startsWith(join(realpathSync(dir), '.results.csv.'))).toBe(true)
   })
 })

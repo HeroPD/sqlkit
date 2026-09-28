@@ -4,7 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ConnectionOptions } from 'node:tls'
 import type { ConnectionProfile, SslConfig } from '../../src/electron'
-import { columnSourcesForFields, shortVersion, sslOptions } from './postgres'
+import pg from 'pg'
+import { LITERAL_TEXT_OIDS, columnSourcesForFields, shortVersion, sslOptions } from './postgres'
 
 // Only the ssl field matters here; the rest is filler so the type compiles.
 const profileWithSsl = (ssl?: SslConfig): ConnectionProfile => ({
@@ -135,5 +136,19 @@ describe('columnSourcesForFields', () => {
     const { client, calls } = clientReturning([])
     expect(await columnSourcesForFields(client, [field('expr', 0, 0)], cache)).toBeUndefined()
     expect(calls).toHaveLength(0)
+  })
+})
+
+describe('LITERAL_TEXT_OIDS', () => {
+  // Scalars pg-types may keep parsing: exact as JS values, or overridden separately (temporal, json).
+  const PARSED_SCALARS = new Set([16, 17, 20, 21, 23, 26, 700, 701, 1082, 1114, 1184, 1186, 114, 3802])
+
+  it('covers every other type pg-types would turn into a JS value', () => {
+    const parserFor = pg.types.getTypeParser as (oid: number, format: 'text') => unknown
+    const noParse = parserFor(0, 'text')
+    const parsed = Array.from({ length: 10_000 }, (_, oid) => oid)
+      .filter((oid) => parserFor(oid, 'text') !== noParse && !PARSED_SCALARS.has(oid))
+    expect(parsed.filter((oid) => !LITERAL_TEXT_OIDS.includes(oid))).toEqual([])
+    expect(parsed).toEqual(expect.arrayContaining([600, 718, 1007, 1017, 199, 3807]))
   })
 })

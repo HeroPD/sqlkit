@@ -91,6 +91,7 @@ export type ColumnAlterEventDetail = {
   childDb: string | null
   table: TableRef
   engine: Engine
+  mariadb?: boolean
   edits: ColumnAlter[]
   additions: ColumnAdd[]
   operations: InspectOperation[]
@@ -175,6 +176,10 @@ export class TableInspect extends LitElement {
 
   @property()
   engine: Engine | null = null
+
+  /** A MariaDB server behind the mysql engine, whose DDL differs in places. */
+  @property({ type: Boolean })
+  mariadb = false
 
   @property({ attribute: false })
   tables: TableRef[] = []
@@ -785,7 +790,7 @@ export class TableInspect extends LitElement {
       }
       const stagedRow = {
         name: operationName(operation),
-        definition: buildInspectOperation(table, operation, this.engine, this.createTable),
+        definition: buildInspectOperation(table, operation, this.engine, this.createTable, { mariadb: this.mariadb }),
       }
       const changedRow = operation.kind === 'drop' || operation.kind === 'rename'
         ? section.rows.findIndex((row) => row.name === operationSourceName(operation))
@@ -1512,7 +1517,7 @@ export class TableInspect extends LitElement {
         const missing = localColumns.find((column) => !effectiveColumns.has(column))
         if (missing) throw new Error(t('inspect.stagedMissingColumn', { kind: operation.kind, column: missing }))
         if (!this.createTable || (operation.kind !== 'constraint' && operation.kind !== 'foreignKey')) {
-          buildInspectOperation(table, operation, this.engine)
+          buildInspectOperation(table, operation, this.engine, false, { mariadb: this.mariadb })
         }
       }
       if (this.createTable) {
@@ -1544,6 +1549,7 @@ export class TableInspect extends LitElement {
           childDb: this.childDb,
           table,
           engine: this.engine,
+          mariadb: this.mariadb,
           edits,
           additions,
           drops,

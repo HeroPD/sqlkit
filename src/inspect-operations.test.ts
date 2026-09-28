@@ -25,6 +25,14 @@ describe('inspect object drops', () => {
     expect(drop('mysql', 'trigger', 'audit_users')).toBe('DROP TRIGGER `app`.`audit_users`')
   })
 
+  it('drops a MariaDB CHECK through DROP CONSTRAINT, since MariaDB has no DROP CHECK', () => {
+    const mariadbDrop = (target: InspectDropTarget, name: string) =>
+      buildInspectOperation(users, { kind: 'drop', target, name }, 'mysql', false, { mariadb: true })
+    expect(mariadbDrop('constraint', 'users_age_check')).toBe('ALTER TABLE `app`.`users` DROP CONSTRAINT `users_age_check`')
+    expect(mariadbDrop('foreignKey', 'users_team_fk')).toBe('ALTER TABLE `app`.`users` DROP FOREIGN KEY `users_team_fk`')
+    expect(mariadbDrop('index', 'users_email_idx')).toBe('ALTER TABLE `app`.`users` DROP INDEX `users_email_idx`')
+  })
+
   it('uses SQL Server index and schema-object forms', () => {
     expect(drop('sqlserver', 'index', 'users_email_idx')).toBe('DROP INDEX [users_email_idx] ON [app].[users]')
     expect(drop('sqlserver', 'trigger', 'audit_users')).toBe('DROP TRIGGER [app].[audit_users]')

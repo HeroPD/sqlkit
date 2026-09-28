@@ -3,7 +3,7 @@
 // IPC boundary), never a re-run of the query.
 
 import type { Engine, TableRef } from './electron'
-import { insertStatementForRow, toInsertStatements } from './result-sql'
+import { insertStatementForRow, toHex, toInsertStatements } from './result-sql'
 import { jsonError } from './json-text'
 import { t } from './i18n'
 
@@ -22,9 +22,16 @@ const rawJsonDocument = (value: unknown): string | null => {
   return text && !jsonError(text) ? text : null
 }
 
+// Binary cells (a Buffer in main, a Uint8Array past IPC) read as 0x-prefixed hex in every text format and in the grid.
+export const binaryText = (bytes: Uint8Array): string => `0x${toHex(bytes)}`
+
+// A cell as JSON encodes it: binary as its hex text, never a Buffer's {type, data} or a byte-indexed object.
+const jsonCell = (value: unknown): unknown => (value instanceof Uint8Array ? binaryText(value) : value ?? null)
+
 const cellText = (value: unknown): string => {
   if (value === null || value === undefined) return ''
   if (typeof value === 'string') return value
+  if (value instanceof Uint8Array) return binaryText(value)
   if (typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean') return String(value)
   try {
     return JSON.stringify(value, bigintReplacer) ?? '[unserializable value]'
@@ -130,13 +137,21 @@ export function parseClipboardTsv(text: string): string[][] {
 }
 
 // Numbered suffixes for duplicate column names (select a.id, b.id) so no value
-// is silently dropped when a row becomes an object.
+// is silently dropped when a row becomes an object. A suffix skips every name
+// already taken, including a later column's own (id, id, id_2 → id, id_3, id_2).
 const jsonKeys = (columns: string[]): string[] => {
-  const seen = new Map<string, number>()
+  const taken = new Set(columns)
+  const seen = new Set<string>()
   return columns.map((name) => {
-    const count = seen.get(name) ?? 0
-    seen.set(name, count + 1)
-    return count === 0 ? name : `${name}_${count + 1}`
+    if (!seen.has(name)) {
+      seen.add(name)
+      return name
+    }
+    let suffix = 2
+    while (taken.has(`${name}_${suffix}`)) suffix += 1
+    const key = `${name}_${suffix}`
+    taken.add(key)
+    return key
   })
 }
 
@@ -146,7 +161,7 @@ export function toJson(columns: string[], rows: unknown[][], jsonColumns: Readon
   const keys = jsonKeys(columns)
   if (!jsonColumns.size) {
     return JSON.stringify(
-      rows.map((row) => Object.fromEntries(keys.map((key, index) => [key, row[index] ?? null]))),
+      rows.map((row) => Object.fromEntries(keys.map((key, index) => [key, jsonCell(row[index])]))),
       bigintReplacer,
       2,
     )
@@ -157,7 +172,7 @@ export function toJson(columns: string[], rows: unknown[][], jsonColumns: Readon
   const encoded = rows.map((row) => {
     const fields = keys.map((key, index) => {
       const raw = jsonColumns.has(index) ? rawJsonDocument(row[index]) : null
-      return `    ${JSON.stringify(key)}: ${raw ?? JSON.stringify(row[index] ?? null, bigintReplacer)}`
+      return `    ${JSON.stringify(key)}: ${raw ?? JSON.stringify(jsonCell(row[index]), bigintReplacer)}`
     })
     return `  {\n${fields.join(',\n')}\n  }`
   })
@@ -227,7 +242,7 @@ export function createExportSerializer(
       row: (cells) => {
         const fields = keys.map((key, index) => {
           const raw = jsonColumns.has(index) ? rawJsonDocument(cells[index]) : null
-          return `${JSON.stringify(key)}:${raw ?? JSON.stringify(cells[index] ?? null, bigintReplacer)}`
+          return `${JSON.stringify(key)}:${raw ?? JSON.stringify(jsonCell(cells[index]), bigintReplacer)}`
         })
         const text = `${first ? '' : ',\n'}{${fields.join(',')}}`
         first = false

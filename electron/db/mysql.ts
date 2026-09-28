@@ -14,6 +14,7 @@ import { prepareSqlRun } from './sql-script'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import type { SqlModeFlags } from '../../src/sql-mask'
 import { t } from '../../src/i18n'
+import { mysqlCatalogDefault } from '../../src/mysql-default'
 
 // Schemas MySQL ships with; never listed as children or browsable databases.
 const SYSTEM_SCHEMAS = ['mysql', 'information_schema', 'performance_schema', 'sys']
@@ -1122,7 +1123,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           dataType: row.data_type,
           nullable: !!row.nullable,
           // auto_increment lives in `extra`, but it plays the role of a default.
-          default: row.default_expr ?? (row.extra.includes('auto_increment') ? 'auto_increment' : null),
+          default: mysqlCatalogDefault(row.default_expr, row.extra, row.data_type, { mariadb: isMariaDb, noBackslashEscapes: sqlMode.noBackslashEscapes })
+            ?? (row.extra.includes('auto_increment') ? 'auto_increment' : null),
           primaryKey: !!row.pk,
           foreignKey: !!row.fk,
           // extra reads "STORED GENERATED" / "VIRTUAL GENERATED" for a generated column.

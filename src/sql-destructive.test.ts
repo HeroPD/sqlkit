@@ -85,6 +85,10 @@ describe('analyzeDestructive', () => {
     const trigger = 'create trigger prune after insert on t begin delete from log; end'
     expect(analyzeDestructive(trigger, 'sqlite')).toEqual([])
     expect(analyzeDestructive('create procedure p as begin delete from t end', 'sqlserver')).toEqual([])
+    expect(analyzeDestructive('create trigger prune after insert on t begin select 1; delete from log; end', 'sqlite')).toEqual([])
+    expect(analyzeDestructive('create procedure p() begin select 1; delete from t; end', 'mysql')).toEqual([])
+    expect(analyzeDestructive('create procedure p as begin select 1; delete from t; end', 'sqlserver')).toEqual([])
+    expect(analyzeDestructive('create procedure p() begin select 1; end; delete from t', 'mysql')).toEqual(['deleteAll'])
   })
 
   // Regression: suppressing a routine body dropped the whole analyzed statement,

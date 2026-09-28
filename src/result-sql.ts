@@ -28,7 +28,7 @@ export function sqlStringLiteral(text: string, engine: Engine): string {
   return `'${escaped.replaceAll("'", "''")}'`
 }
 
-const toHex = (bytes: Uint8Array): string => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+export const toHex = (bytes: Uint8Array): string => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 
 // Binary literals: Postgres hex bytea, the X'' form on MySQL/SQLite, and T-SQL's
 // bare 0x. An empty SQL Server value can't be written as `0x`, so it casts an

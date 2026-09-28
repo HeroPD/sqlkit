@@ -148,6 +148,47 @@ describe('toJson', () => {
   it('maps missing and undefined cells to null', () => {
     expect(JSON.parse(toJson(['a', 'b'], [[1]]))).toEqual([{ a: 1, b: null }])
   })
+
+  it('never lets a suffix collide with a later column of that name', () => {
+    const columns = ['id', 'id', 'id_2', 'id']
+    const buffered = JSON.parse(toJson(columns, [[1, 2, 3, 4]])) as Array<Record<string, number>>
+    expect(buffered).toEqual([{ id: 1, id_3: 2, id_2: 3, id_4: 4 }])
+    const jsonDoc = JSON.parse(toJson(columns, [[1, 2, 3, 4]], new Set([0]))) as Array<Record<string, number>>
+    expect(jsonDoc).toEqual(buffered)
+    const serializer = createExportSerializer(columns, 'json')
+    expect(JSON.parse(serializer.header() + serializer.row([1, 2, 3, 4]) + serializer.footer())).toEqual(buffered)
+  })
+})
+
+describe('binary cells', () => {
+  // A Buffer in the main process (whose toJSON gave {type, data}), a plain Uint8Array once it has crossed IPC.
+  class NodeBuffer extends Uint8Array {
+    toJSON() {
+      return { type: 'Buffer', data: Array.from(this) }
+    }
+  }
+  const buffer = new NodeBuffer([0xde, 0xad, 0x00, 0xbe, 0xef])
+  const bytes = new Uint8Array([0xde, 0xad, 0x00, 0xbe, 0xef])
+
+  it('export as 0x hex in CSV, TSV and clipboard copies', () => {
+    expect(toDelimited(['b'], [[buffer], [bytes], [new Uint8Array()]], ',')).toBe('b\n0xdead00beef\n0xdead00beef\n0x')
+    expect(rowToTsv([bytes, 1])).toBe('0xdead00beef\t1')
+    expect(cellToTsv(buffer)).toBe('0xdead00beef')
+    const serializer = createExportSerializer(['b'], 'tsv')
+    expect(serializer.row([buffer])).toBe('0xdead00beef\n')
+  })
+
+  it('export as the same hex string in JSON, buffered and streamed', () => {
+    expect(JSON.parse(toJson(['b'], [[buffer], [bytes]]))).toEqual([{ b: '0xdead00beef' }, { b: '0xdead00beef' }])
+    expect(JSON.parse(toJson(['b', 'doc'], [[buffer, '{}']], new Set([1])))).toEqual([{ b: '0xdead00beef', doc: {} }])
+    const serializer = createExportSerializer(['b'], 'json')
+    expect(JSON.parse(serializer.header() + serializer.row([buffer]) + serializer.footer())).toEqual([{ b: '0xdead00beef' }])
+  })
+
+  it('keep the dialect binary literal in the SQL format', () => {
+    const serializer = createExportSerializer(['b'], 'sql', { engine: 'postgresql', table: null })
+    expect(serializer.row([buffer])).toContain("'\\xdead00beef'::bytea")
+  })
 })
 
 describe('JSON columns export as raw documents', () => {

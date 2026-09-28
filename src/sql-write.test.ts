@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ColumnRef, InspectColumn, TableRef } from './electron'
+import type { ColumnRef, Engine, InspectColumn, TableRef } from './electron'
 import { dialectFor } from './dialect'
 import {
   SQL_NULL,
@@ -175,6 +175,31 @@ describe('buildBatchUpdates', () => {
     expect(statements[0]?.sql).toContain('AND "name" IS NOT DISTINCT FROM $3')
     expect(statements[1]?.sql).toContain('"name" IS NULL')
     expect(statements.every((statement) => statement.expectedRows === 1)).toBe(true)
+  })
+
+  it('guards Postgres arrays and geometric types by their literal text', () => {
+    const pks = [{ name: 'id', value: 1 }]
+    const statements = buildBatchUpdates({
+      table: users,
+      edits: [
+        { column: 'tags', columnMeta: col({ name: 'tags', dataType: 'character varying(20)[]' }), value: '{a}', originalValue: '{b}', pks },
+        { column: 'docs', columnMeta: col({ name: 'docs', dataType: 'json[]' }), value: '{}', originalValue: '{"{}"}', pks },
+        { column: 'at', columnMeta: col({ name: 'at', dataType: 'point' }), value: '(1,2)', originalValue: '(0,0)', pks },
+        { column: 'area', columnMeta: col({ name: 'area', dataType: 'box' }), value: '(1,1),(0,0)', originalValue: '(2,2),(0,0)', pks },
+      ],
+      engine: 'postgresql',
+    })
+    expect(statements[0]?.sql).toContain(
+      'WHERE "id" IS NOT DISTINCT FROM $5 AND "tags"::text IS NOT DISTINCT FROM $6::text AND "docs"::text IS NOT DISTINCT FROM $7::text'
+        + ' AND "at"::text IS NOT DISTINCT FROM $8::text AND "area"::text IS NOT DISTINCT FROM $9::text',
+    )
+    expect(statements[0]?.params).toEqual(['{a}', '{}', '(1,2)', '(1,1),(0,0)', 1, '{b}', '{"{}"}', '(0,0)', '(2,2),(0,0)'])
+    // Plain json and xml still have no exact comparison.
+    expect(() => buildBatchUpdates({
+      table: users,
+      edits: [{ column: 'doc', columnMeta: col({ name: 'doc', dataType: 'json' }), value: '{}', originalValue: '[]', pks }],
+      engine: 'postgresql',
+    })).toThrow()
   })
 
   it('throws without edits or primary keys', () => {
@@ -415,6 +440,13 @@ describe('buildDeleteRows', () => {
       engine: 'sqlserver',
     })
     expect(unicode.sql).not.toContain('CONVERT(')
+  })
+
+  it('matches Postgres array keys by their literal text in an IN list', () => {
+    const key = (value: string) => [{ name: 'path', value, columnMeta: col({ name: 'path', dataType: 'integer[]', primaryKey: true }) }]
+    const { sql, params } = buildDeleteRows({ table: users, rows: [key('{1,2}'), key('{3}')], engine: 'postgresql' })
+    expect(sql).toBe('DELETE FROM "public"."users"\n WHERE "path"::text IN ($1, $2)')
+    expect(params).toEqual(['{1,2}', '{3}'])
   })
 
   it('falls back to null-safe predicates when a key value is NULL', () => {
@@ -716,6 +748,56 @@ describe('buildColumnAdd', () => {
     expect(buildColumnAdd(users, [{ name: 'score', dataType: 'int', nullable: true, default: null, comment: null }], 'sqlserver')).toEqual([
       'ALTER TABLE [public].[users] ADD [score] int',
     ])
+  })
+})
+
+describe('column default spelling', () => {
+  const stamp = inspectCol({ name: 'at', dataType: 'timestamp', default: null })
+  const status = inspectCol({ name: 'status', dataType: 'varchar(20)', default: "'pending'" })
+  const setDefault = (original: InspectColumn, value: string, engine: Engine) =>
+    buildColumnAlter(users, [{ original, default: value }], engine)[0]
+  const addDefault = (dataType: string, value: string, engine: Engine) =>
+    buildColumnAdd(users, [{ name: 'c', dataType, nullable: true, default: value, comment: null }], engine)[0]
+  const createDefault = (dataType: string, value: string, engine: Engine) =>
+    buildCreateTable(users, [{ name: 'c', dataType, nullable: true, default: value, comment: null }], [], [], engine)[0]
+
+  it('parenthesizes MySQL expression defaults in ALTER … SET DEFAULT, CURRENT_TIMESTAMP included', () => {
+    expect(setDefault(stamp, 'CURRENT_TIMESTAMP', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT (CURRENT_TIMESTAMP)')
+    expect(setDefault(stamp, 'now()', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT (now())')
+    expect(setDefault(stamp, 'CURRENT_DATE', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT (CURRENT_DATE)')
+    expect(setDefault(stamp, 'uuid()', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT (uuid())')
+    // Already parenthesized stays single-wrapped; two groups side by side are one expression.
+    expect(setDefault(stamp, '(1 + 2)', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT (1 + 2)')
+    expect(setDefault(stamp, '(1) + (2)', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT ((1) + (2))')
+  })
+
+  it('leaves MySQL literals alone and quotes a bare word as the string it names', () => {
+    expect(setDefault(stamp, "'done'", 'mysql')).toBe("ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT 'done'")
+    expect(setDefault(stamp, '-1.5', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT -1.5')
+    expect(setDefault(stamp, 'NULL', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT NULL')
+    expect(setDefault(stamp, "b'1'", 'mysql')).toBe("ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT b'1'")
+    expect(setDefault(stamp, '0x6162', 'mysql')).toBe('ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT 0x6162')
+    expect(setDefault(stamp, "_utf8mb4'x'", 'mysql')).toBe("ALTER TABLE `public`.`users` ALTER COLUMN `at` SET DEFAULT _utf8mb4'x'")
+    expect(setDefault(status, 'pending2', 'mysql')).toBe("ALTER TABLE `public`.`users` ALTER COLUMN `status` SET DEFAULT 'pending2'")
+  })
+
+  it('keeps bare CURRENT_TIMESTAMP in MySQL column definitions and parenthesizes other expressions', () => {
+    expect(addDefault('timestamp(3)', 'CURRENT_TIMESTAMP(3)', 'mysql')).toBe('ALTER TABLE `public`.`users` ADD COLUMN `c` timestamp(3) DEFAULT CURRENT_TIMESTAMP(3)')
+    expect(addDefault('date', 'CURRENT_DATE', 'mysql')).toBe('ALTER TABLE `public`.`users` ADD COLUMN `c` date DEFAULT (CURRENT_DATE)')
+    expect(addDefault('varchar(20)', 'pending', 'mysql')).toBe("ALTER TABLE `public`.`users` ADD COLUMN `c` varchar(20) DEFAULT 'pending'")
+    expect(createDefault('datetime', 'now()', 'mysql')).toContain('`c` datetime DEFAULT now()')
+    expect(createDefault('varchar(36)', 'uuid()', 'mysql')).toContain('`c` varchar(36) DEFAULT (uuid())')
+  })
+
+  it('emits other engines\' defaults verbatim', () => {
+    for (const engine of ['postgresql', 'sqlite'] as const) {
+      expect(addDefault('text', 'pending', engine)).toMatch(/ DEFAULT pending$/)
+      expect(createDefault('timestamp', 'CURRENT_TIMESTAMP', engine)).toContain(' DEFAULT CURRENT_TIMESTAMP')
+    }
+    expect(addDefault('int', 'GETDATE()', 'sqlserver')).toBe('ALTER TABLE [public].[users] ADD [c] int DEFAULT GETDATE()')
+    expect(setDefault(stamp, 'now()', 'postgresql')).toBe('ALTER TABLE "public"."users" ALTER COLUMN "at" SET DEFAULT now()')
+    expect(setDefault(status, "'x'::character varying", 'postgresql'))
+      .toBe(`ALTER TABLE "public"."users" ALTER COLUMN "status" SET DEFAULT 'x'::character varying`)
   })
 })
 

@@ -3,8 +3,8 @@ import type { Command, EditorView } from '@codemirror/view'
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
 import { sql } from '@codemirror/lang-sql'
 import type { SyntaxNode, Tree } from '@lezer/common'
-import { maskSqlRegions } from '../sql-mask'
-import { atomicBodySpans, type SqlSpan } from '../sql-statements'
+import { maskSql, maskSqlRegions } from '../sql-mask'
+import { atomicBodySpans, compoundBodySpans, type SqlSpan } from '../sql-statements'
 import { engineForDialect, SQL_DIALECTS, type SqlDialectName } from './dialects'
 
 /**
@@ -28,6 +28,75 @@ const unparsedSpans = (text: string, dialect: SqlDialectName | undefined): SqlSp
   for (const region of regions) if (region.kind === 'dollar') spans.push([region.from, region.to])
   if (!engine || engine === 'postgresql') spans.push(...atomicBodySpans(masked))
   return spans.sort((a, b) => a[0] - b[0])
+}
+
+/** A statement that only runs whole: [from, to) is the SQL to send, and `end` also covers the terminator a custom DELIMITER strips. */
+type RoutineBlock = { from: number; to: number; end: number }
+
+// A MySQL DELIMITER region's statements, read as `preprocessMysqlDelimiters` reads them; the SQL sent leaves out the
+// directive and the custom delimiter, which never travel with it.
+const delimiterBlocks = (text: string, masked: string) => {
+  const blocks: RoutineBlock[] = []
+  const regions: SqlSpan[] = []
+  let delimiter = ';'
+  let start = 0
+  let offset = 0
+  const close = (to: number, end: number) => {
+    if (/\S/.test(masked.slice(start, to))) blocks.push({ from: start, to, end })
+  }
+  for (const line of text.split('\n')) {
+    const from = offset
+    offset += line.length + 1
+    const directive = /^[ \t]*delimiter[ \t]+(\S+)[ \t]*\r?$/i.exec(line)
+    if (directive && /^[ \t]*delimiter\b/i.test(masked.slice(from, offset))) {
+      if (delimiter !== ';') {
+        close(from, from)
+        regions.push([regions.pop()![0], from])
+      }
+      delimiter = directive[1]!
+      start = Math.min(offset, text.length)
+      if (delimiter !== ';') regions.push([start, text.length])
+      continue
+    }
+    if (delimiter === ';') continue
+    const masking = masked.slice(from, from + line.length)
+    for (let at = masking.indexOf(delimiter); at >= 0; at = masking.indexOf(delimiter, at + delimiter.length)) {
+      close(from + at, from + at + delimiter.length)
+      start = from + at + delimiter.length
+    }
+  }
+  if (delimiter !== ';') close(text.length, text.length)
+  return { blocks, regions }
+}
+
+// A routine's `END [label];` — the terminator runs with it, like any statement's.
+const ROUTINE_TAIL = /[ \t]*(?:[A-Za-z_]\w*[ \t]*)?;/y
+
+// Statements the syntax tree splits at every `;` of their bodies, which run whole (as the executor's splitter reads them):
+// routine definitions, and each statement of a MySQL DELIMITER region.
+const routineBlocks = (text: string, dialect: SqlDialectName | undefined): RoutineBlock[] => {
+  const engine = dialect ? engineForDialect[dialect] : undefined
+  if (engine !== 'mysql' && engine !== 'sqlite' && engine !== 'sqlserver') return []
+  if (!/\b(?:proc(?:edure)?|function|trigger|event|begin|delimiter)\b/i.test(text)) return []
+  const masked = maskSql(text, engine)
+  const custom = engine === 'mysql' ? delimiterBlocks(text, masked) : { blocks: [], regions: [] }
+  const blocks = [...custom.blocks]
+  for (const [from, spanTo] of compoundBodySpans(masked, engine)) {
+    if (custom.regions.some(([regionFrom, regionTo]) => from >= regionFrom && from < regionTo)) continue
+    // A routine left unclosed before a DELIMITER region ends where that region starts.
+    const region = custom.regions.find(([regionFrom]) => regionFrom > from && regionFrom < spanTo)
+    let to = region ? from + text.slice(from, region[0]).trimEnd().length : spanTo
+    ROUTINE_TAIL.lastIndex = to
+    if (engine !== 'sqlserver' && ROUTINE_TAIL.exec(masked)) to = ROUTINE_TAIL.lastIndex
+    blocks.push({ from, to, end: to })
+  }
+  return blocks.sort((a, b) => a.from - b.from)
+}
+
+const routineQuery = (doc: Text, block: RoutineBlock): QueryBlock | null => {
+  const raw = doc.sliceString(block.from, block.to)
+  const sql = raw.trim()
+  return sql ? { sql, from: block.from + raw.length - raw.trimStart().length } : null
 }
 
 /** The span strictly containing `pos`; span edges count as outside. */
@@ -173,6 +242,8 @@ const continuesPreviousLine = (dialect: SqlDialectName | undefined, doc: Text, l
   if (line.number === 1) return false
   const prev = doc.line(line.number - 1)
   if (/^\s*(?:if|while|else)\b/i.test(prev.text) || /\bthen\s*$/i.test(prev.text)) return true
+  // An upsert's or MERGE branch's `DO UPDATE` / `THEN UPDATE` takes its SET on the next line.
+  if (/^set\b/i.test(line.text) && /\b(?:do|then)\s+update\s*$/i.test(codeTail(prev.text))) return true
   return /^\s*begin\s*$/i.test(prev.text) && !bareTransactionBegin(dialect, doc, prev)
 }
 
@@ -193,6 +264,9 @@ const transactionBeginLine = (dialect: SqlDialectName | undefined, tree: Tree, s
   bareTransactionBegin(dialect, doc, line) && topLevelKeywordLine(tree, spans, line)
 
 const isCommentLine = (text: string) => /^\s*--/.test(text)
+
+// Clauses that end a statement on a line of their own, however they begin: `WITH NO DATA`, `WITH CHECK OPTION`.
+const TRAILING_CLAUSE = /^with\s+(?:no\s+data|data|(?:(?:local|cascaded)\s+)?check\s+option)\s*;?\s*$/i
 
 // A trailing line comment is no part of the statement's tail. A `--` with a
 // quote after it sits inside a string literal and starts no comment.
@@ -234,7 +308,7 @@ const statementStarts = (
       head = line.text
       continue
     }
-    if (!OPENER.test(line.text) || !topLevelKeywordLine(tree, spans, line)) continue
+    if (!OPENER.test(line.text) || TRAILING_CLAUSE.test(codeTail(line.text)) || !topLevelKeywordLine(tree, spans, line)) continue
     const rule = continuation(head, line.text)
     if (rule || continuesPreviousLine(dialect, doc, line) || afterSetOperator(doc, line)) {
       // A clause that is a statement in its own right becomes the head, so a
@@ -412,9 +486,15 @@ const expandOverSpans = (tree: Tree, spans: SqlSpan[], doc: Text, node: SyntaxNo
 
 const closestQueryBlock = (state: EditorState, cursor: number, allowNeighbor = true, dialect?: SqlDialectName) => {
   const doc = state.doc
+  const text = doc.toString()
+  // A body statement under the caret runs as the routine that defines it.
+  const routines = routineBlocks(text, dialect)
+  const routine = routines.find((block) => block.from <= cursor && cursor <= block.end)
+  if (routine) return routineQuery(doc, routine)
+
   const tree = treeForQuery(state, cursor)
   // One full-text scan per run; the tree can't provide these (see unparsedSpans).
-  const spans = unparsedSpans(doc.toString(), dialect)
+  const spans = unparsedSpans(text, dialect)
   const { covering, prev, next } = statementsAround(tree, doc, cursor)
 
   if (!covering && !allowNeighbor) return null
@@ -430,6 +510,10 @@ const closestQueryBlock = (state: EditorState, cursor: number, allowNeighbor = t
           ? next
           : prev
 
+  // A neighbor that is a fragment of a routine body stands for the whole routine.
+  const near = covering ? undefined : routines.find((block) => chosen.from < block.end && chosen.to > block.from)
+  if (near) return routineQuery(doc, near)
+
   // Partial parse: anything at or past the frontier may be a truncated
   // statement. The line-based block needs no tree, but accept it only when
   // it does not visibly span multiple statements; running nothing is safer
@@ -441,7 +525,12 @@ const closestQueryBlock = (state: EditorState, cursor: number, allowNeighbor = t
     return body.includes(';') ? null : block
   }
 
-  const [from, to] = expandOverSpans(tree, spans, doc, chosen)
+  let [from, to] = expandOverSpans(tree, spans, doc, chosen)
+  // The parser merges a routine with the query written against it; the query runs without it.
+  for (const block of routines) {
+    if (block.end < cursor && block.end > from) from = Math.min(block.end, to)
+    if (block.from > cursor && block.from < to) to = Math.max(block.from, from)
+  }
 
   // Clip to the blank-line block at the cursor, so an unterminated query
   // that the parser merged into the next statement still runs alone.

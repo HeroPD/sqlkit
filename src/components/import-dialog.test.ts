@@ -17,8 +17,11 @@ type Internals = {
   _source: string
   _mapping: Array<number | null>
   _emptyAsNull: boolean
+  _rows: string[][]
+  _error: string
   _parseAndMap(): void
   _confirm(): Promise<void>
+  _onFileChange(event: Event): Promise<void>
 }
 
 const mount = async () => {
@@ -85,6 +88,25 @@ describe('import-dialog', () => {
     expect(selects[1]?.disabled).toBe(false)
     expect(selects[2]?.disabled).toBe(true)
     expect(selects[3]?.disabled).toBe(false)
+    dialog.remove()
+  })
+
+  it('reads a chosen file by its byte order mark and names an unsupported encoding', async () => {
+    const dialog = await mount()
+    const inner = dialog as never as Internals
+    const choose = (bytes: number[]) => {
+      // jsdom's File has no arrayBuffer(), so the one the dialog reads is supplied directly.
+      const file = { name: 'people.csv', size: bytes.length, arrayBuffer: () => Promise.resolve(new Uint8Array(bytes).buffer) }
+      return inner._onFileChange({ target: { files: [file] } } as never)
+    }
+    const text = 'id,name\r\n1,Zoë\r\n\r\n'
+    await choose([0xff, 0xfe, ...[...text].flatMap((char) => [char.charCodeAt(0), 0])])
+    expect(inner._error).toBe('')
+    expect(inner._rows).toEqual([['id', 'name'], ['1', 'Zoë']])
+
+    await choose([0x69, 0x64, 0x0a, 0x63, 0x61, 0x66, 0xe9])
+    expect(inner._rows).toEqual([])
+    expect(inner._error).toBe('This file isn’t UTF-8 or UTF-16. Save it as UTF-8 and try again.')
     dialog.remove()
   })
 })

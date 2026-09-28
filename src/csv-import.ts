@@ -4,6 +4,20 @@ const BYTE_ORDER_MARK = '\uFEFF'
 
 export type ParsedCsv = { rows: string[][] }
 
+// Honors a UTF-8/UTF-16 byte order mark (Excel's "Unicode Text" is UTF-16LE), else demands valid UTF-8.
+export function decodeCsvBytes(bytes: Uint8Array): string {
+  const encoding = bytes[0] === 0xff && bytes[1] === 0xfe
+    ? 'utf-16le'
+    : bytes[0] === 0xfe && bytes[1] === 0xff
+      ? 'utf-16be'
+      : 'utf-8'
+  try {
+    return new TextDecoder(encoding, { fatal: true }).decode(bytes)
+  } catch {
+    throw new Error(t('csv.unsupportedEncoding'))
+  }
+}
+
 // Small RFC-4180 parser kept in the renderer so a selected file never needs to
 // cross IPC. Quoted delimiters, escaped quotes, and embedded newlines survive.
 export function parseCsv(text: string, delimiter = ','): ParsedCsv {
@@ -16,6 +30,7 @@ export function parseCsv(text: string, delimiter = ','): ParsedCsv {
   let field = ''
   let quoted = false
   let fieldStarted = false
+  let trailingBlankRows = 0
 
   const finishField = () => {
     row.push(field)
@@ -23,6 +38,8 @@ export function parseCsv(text: string, delimiter = ','): ParsedCsv {
     fieldStarted = false
   }
   const finishRow = () => {
+    // A line with nothing on it, not even "", is blank; only a trailing run of them is dropped.
+    trailingBlankRows = row.length === 0 && !fieldStarted && field === '' ? trailingBlankRows + 1 : 0
     finishField()
     rows.push(row)
     row = []
@@ -63,6 +80,7 @@ export function parseCsv(text: string, delimiter = ','): ParsedCsv {
 
   if (quoted) throw new Error(t('csv.unterminatedQuote'))
   if (fieldStarted || field !== '' || row.length > 0) finishRow()
+  rows.length -= trailingBlankRows
   return { rows }
 }
 

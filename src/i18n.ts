@@ -7,6 +7,10 @@ export const DEFAULT_LOCALE: AppLocale = 'en-US'
 const enUS = {
   'app.name': 'SqlKit Studio',
   'app.tagline': 'SQL Database Explorer',
+  'app.closeWindowPrompt': 'Close window?',
+  'app.quitPrompt': 'Quit {name}?',
+  'app.rollBackAndClose': 'Roll Back and Close',
+  'app.rollBackAndQuit': 'Roll Back and Quit',
   'common.retry': 'Retry',
   'common.cancel': 'Cancel',
   'common.save': 'Save',
@@ -741,6 +745,7 @@ const enUS = {
   'csv.unterminatedQuote': 'CSV contains an unterminated quoted field',
   'csv.noColumns': 'The file does not contain any columns.',
   'csv.rowWidth': 'CSV row {row} has {actual} fields; expected {expected}.',
+  'csv.unsupportedEncoding': 'This file isn’t UTF-8 or UTF-16. Save it as UTF-8 and try again.',
   'config.invalidUrl': 'Enter a valid database URL.',
   'config.supportedUrlSchemes': 'Supported URL schemes: postgresql, postgres, mysql, mariadb, sqlserver, and mssql.',
   'config.urlNeedsHost': 'The database URL must include a host.',
