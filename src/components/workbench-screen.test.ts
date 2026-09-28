@@ -1975,3 +1975,50 @@ describe('WorkbenchScreen guards after a tab switch or a stopped connect', () =>
     expect(workbench._dialogs.confirm?.message).toBe('Could not connect to localhost')
   })
 })
+
+// ⌘O, the palette and the status bar switch workspaces; closing does too. Either drops
+// staged edits and closes every connection, rolling back an open transaction.
+describe('WorkbenchScreen leaving a workspace', () => {
+  const leaving = () => {
+    const workbench = new WorkbenchScreen() as never as {
+      _dialogs: DialogsController
+      _queries: { hasAnyStaged(): boolean; tasks: Array<{ status: string }> }
+      _config: { connections: ConnectionProfile[]; byId(id: string): ConnectionProfile | undefined }
+      _live: { transaction(id: string): { childDb: string } | undefined }
+      guardLeaveWorkspace(intent: 'close' | 'switch', proceed: () => void): void
+    }
+    workbench._queries.hasAnyStaged = () => false
+    workbench._queries.tasks = []
+    workbench._config.connections = [profile]
+    workbench._config.byId = () => profile
+    workbench._live.transaction = () => undefined
+    return workbench
+  }
+
+  it('goes straight on when nothing would be lost', () => {
+    const workbench = leaving()
+    const proceed = vi.fn()
+    workbench.guardLeaveWorkspace('switch', proceed)
+    expect(proceed).toHaveBeenCalledOnce()
+    expect(workbench._dialogs.confirm).toBeNull()
+  })
+
+  it('names the staged edits, the transaction it would roll back, and the runs it would stop', () => {
+    const workbench = leaving()
+    workbench._queries.hasAnyStaged = () => true
+    workbench._queries.tasks = [{ status: 'running' }, { status: 'done' }]
+    workbench._live.transaction = () => ({ childDb: 'sales' })
+    const proceed = vi.fn()
+
+    workbench.guardLeaveWorkspace('switch', proceed)
+    expect(proceed).not.toHaveBeenCalled()
+    expect(workbench._dialogs.confirm).toMatchObject({ message: 'Leave workspace?', confirmLabel: 'Discard and Continue', danger: true })
+    expect(workbench._dialogs.confirm?.detail.split('\n')).toEqual([
+      'Staged grid edits, new rows and deletions in open tabs will be discarded.',
+      'The open transaction on Postgres › sales will be rolled back.',
+      'A running query will be stopped.',
+    ])
+    workbench._dialogs.acceptConfirm()
+    expect(proceed).toHaveBeenCalledOnce()
+  })
+})

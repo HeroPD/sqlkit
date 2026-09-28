@@ -509,8 +509,9 @@ function buildAppMenu() {
           })),
         },
         { type: 'separator' },
-        { role: 'forceReload' },
-        ...(inspectable ? [{ role: 'toggleDevTools' } as MenuItemConstructorOptions] : []),
+        // Development only, like the devtools: ⇧⌘R sits one key from Refresh Results, and a
+        // reload drops staged edits while main keeps the connections, open transactions included.
+        ...(inspectable ? [{ role: 'forceReload' } as MenuItemConstructorOptions, { role: 'toggleDevTools' } as MenuItemConstructorOptions] : []),
         { type: 'separator' },
         { role: 'resetZoom' },
         { role: 'zoomIn' },

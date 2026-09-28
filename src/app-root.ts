@@ -122,8 +122,13 @@ export class AppRoot extends LitElement {
     void this._loadRecents()
   }
 
-  private async _onOpenFolder() {
-    this._enter(await window.sqlkit.openWorkspace())
+  // From an open workspace (⌘O, the palette, the status bar), the switch drops its
+  // staged edits and connections, so the workbench gets to ask before the picker opens.
+  private _onOpenFolder() {
+    const pick = () => void window.sqlkit.openWorkspace().then((result) => this._enter(result))
+    const workbench = this._workbench()
+    if (this._workspace && workbench) workbench.guardLeaveWorkspace('switch', pick)
+    else pick()
   }
 
   private async _onOpenRecent(event: Event) {

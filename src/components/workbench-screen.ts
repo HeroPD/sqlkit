@@ -3264,17 +3264,38 @@ export class WorkbenchScreen extends LitElement {
 
   private _onCloseWorkspace() {
     if (this._hasModal()) return
-    if (this._queries.hasAnyStaged()) {
-      this._dialogs.confirm = {
-        message: t('workbench.closeWorkspacePrompt'),
-        detail: t('workbench.closeWorkspaceDetail'),
-        confirmLabel: t('workbench.discardAndClose'),
-        danger: true,
-        action: () => this._closeWorkspaceNow(),
-      }
+    this.guardLeaveWorkspace('close', () => this._closeWorkspaceNow())
+  }
+
+  /** Runs `proceed` straight away when leaving this workspace loses nothing,
+   * otherwise once the user agrees to lose what is listed. Close and switch both
+   * come through here: either one drops staged grid edits, closes every
+   * connection (rolling back an open transaction), and stops running queries. */
+  guardLeaveWorkspace(intent: 'close' | 'switch', proceed: () => void) {
+    const losses = this._leaveLosses()
+    if (!losses.length) {
+      proceed()
       return
     }
-    this._closeWorkspaceNow()
+    this._dialogs.confirm = {
+      message: t(intent === 'close' ? 'workbench.closeWorkspacePrompt' : 'workbench.switchWorkspacePrompt'),
+      detail: losses.join('\n'),
+      confirmLabel: t(intent === 'close' ? 'workbench.discardAndClose' : 'workbench.discardAndSwitch'),
+      danger: true,
+      action: proceed,
+    }
+  }
+
+  private _leaveLosses(): string[] {
+    const losses: string[] = []
+    if (this._queries.hasAnyStaged()) losses.push(t('workbench.leaveStaged'))
+    for (const connection of this._config.connections) {
+      const transaction = this._live.transaction(connection.id)
+      if (transaction) losses.push(t('workbench.leaveTransaction', { target: this._targetLabel(connection.id, transaction.childDb || null) }))
+    }
+    const running = this._queries.tasks.filter((task) => task.status === 'running').length
+    if (running) losses.push(t(running === 1 ? 'workbench.leaveRunningOne' : 'workbench.leaveRunningMany', { count: running }))
+    return losses
   }
 
   private _closeWorkspaceNow() {

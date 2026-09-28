@@ -49,6 +49,25 @@ describe('AppRoot menu actions', () => {
     expect(root._workspace).toEqual({ name: 'ws', path: '/ws' })
   })
 
+  it('asks the workbench before switching away from an open workspace', () => {
+    const root = new AppRoot() as never as {
+      _workspace: { name: string; path: string } | null
+      _workbench(): { guardLeaveWorkspace(intent: string, proceed: () => void): void } | null
+      _onOpenFolder(): void
+    }
+    const openWorkspace = vi.fn(() => Promise.resolve({ success: false, canceled: true }))
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { openWorkspace }
+    const guard = vi.fn()
+    root._workspace = { name: 'ws', path: '/ws' }
+    root._workbench = () => ({ guardLeaveWorkspace: guard })
+
+    root._onOpenFolder()
+    expect(guard).toHaveBeenCalledWith('switch', expect.any(Function))
+    expect(openWorkspace).not.toHaveBeenCalled()
+    ;(guard.mock.calls[0]![1] as () => void)()
+    expect(openWorkspace).toHaveBeenCalledOnce()
+  })
+
   it('opens settings from the menu and remembers the screen to return to', () => {
     const root = new AppRoot() as never as {
       _screen: string
