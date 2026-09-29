@@ -34,6 +34,10 @@ export class ExportDialog extends LitElement {
   @property({ type: Boolean })
   streamable = false
 
+  /** Some buffered values were shortened to fit the grid, so only a streamed re-run exports faithfully. */
+  @property({ type: Boolean })
+  shortened = false
+
   @state()
   private _format: ExportFormat = 'csv'
 
@@ -53,8 +57,10 @@ export class ExportDialog extends LitElement {
   }
 
   render() {
-    const offerStream = this.streamable && this.truncated
-    const streaming = offerStream && this._streamFull
+    const offerStream = this.streamable && (this.truncated || this.shortened)
+    const forced = offerStream && this.shortened
+    const streaming = forced || (offerStream && this._streamFull)
+    const blocked = this.shortened && !this.streamable
     return html`
       <div class="backdrop" @mousedown=${this._onBackdropDown}>
         <div class="panel" role="dialog" aria-label=${t('export.title')}>
@@ -66,6 +72,7 @@ export class ExportDialog extends LitElement {
               capped: this.truncated ? t('export.capped') : '',
             })}
           </p>
+          ${this.shortened ? html`<p class="muted small shortened">${t(blocked ? 'export.shortenedBlocked' : 'export.shortened')}</p>` : ''}
           <div class="field">
             <span class="label">${t('export.format')}</span>
             <div class="formats" role="radiogroup" aria-label=${t('export.format')}>
@@ -83,7 +90,7 @@ export class ExportDialog extends LitElement {
               )}
             </div>
           </div>
-          ${offerStream
+          ${offerStream && !forced
             ? html`
                 <label class="field stream-toggle">
                   <input type="checkbox" .checked=${this._streamFull} @change=${this._onStreamToggle} />
@@ -98,7 +105,7 @@ export class ExportDialog extends LitElement {
           </div>
           <div class="actions">
             <button class="secondary" @click=${this._cancel}>${t('common.cancel')}</button>
-            <button class="primary" @click=${this._confirm}>${t('common.export')}</button>
+            <button class="primary" ?disabled=${blocked} @click=${this._confirm}>${t('common.export')}</button>
           </div>
         </div>
       </div>
@@ -129,7 +136,8 @@ export class ExportDialog extends LitElement {
   }
 
   private _confirm() {
-    const stream = this.streamable && this.truncated && this._streamFull
+    if (this.shortened && !this.streamable) return
+    const stream = this.streamable && (this.shortened || (this.truncated && this._streamFull))
     const input = this.shadowRoot?.querySelector<HTMLInputElement>('#rows')
     const requested = Number(input?.value)
     const rows = stream

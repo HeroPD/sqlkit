@@ -13,19 +13,25 @@ const eventKeyName = (event: KeyboardEvent) => {
   return event.key.toLowerCase()
 }
 
+// Mod is ⌘ alone on macOS, where ⌃ is a modifier no binding names: ⌃P, ⌃N and ⌃B
+// move the caret in any text field there. Elsewhere Mod is Ctrl.
+const macControl = (event: KeyboardEvent) => isMac && event.ctrlKey
+const modPressed = (event: KeyboardEvent) => (isMac ? event.metaKey : event.metaKey || event.ctrlKey)
+
 export const eventMatchesBinding = (event: KeyboardEvent, binding: string) => {
   const parsed = parseKeyBinding(binding)
-  if (!parsed) return false
+  if (!parsed || macControl(event)) return false
   return eventKeyName(event) === parsed.key.toLowerCase()
-    && (event.metaKey || event.ctrlKey) === parsed.modifiers.includes('Mod')
+    && modPressed(event) === parsed.modifiers.includes('Mod')
     && event.altKey === parsed.modifiers.includes('Alt')
     && event.shiftKey === parsed.modifiers.includes('Shift')
 }
 
 export const keybindingFromEvent = (event: KeyboardEvent): string | null => {
   if (event.key === 'Meta' || event.key === 'Control' || event.key === 'Alt' || event.key === 'Shift') return null
+  if (macControl(event)) return null
   const modifiers = [
-    event.metaKey || event.ctrlKey ? 'Mod' : '',
+    modPressed(event) ? 'Mod' : '',
     event.altKey ? 'Alt' : '',
     event.shiftKey ? 'Shift' : '',
   ].filter(Boolean)
@@ -33,6 +39,16 @@ export const keybindingFromEvent = (event: KeyboardEvent): string | null => {
   const named = key === 'space' ? 'Space' : key.length === 1 ? key : event.key
   const binding = [...modifiers, named].join('-')
   return parseKeyBinding(binding) ? binding : null
+}
+
+const MODIFIER_ORDER = ['Mod', 'Alt', 'Shift']
+
+/** One spelling per chord, so `Shift-Alt-f` and `Alt-Shift-F` compare equal. */
+export const normalizeKeyBinding = (binding: string) => {
+  const parsed = parseKeyBinding(binding)
+  if (!parsed) return binding
+  const modifiers = MODIFIER_ORDER.filter((modifier) => parsed.modifiers.includes(modifier))
+  return [...modifiers, parsed.key.length === 1 ? parsed.key.toLowerCase() : parsed.key].join('-')
 }
 
 /** Bindings need a modifier: a bare key would swallow ordinary typing. */

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { displayKeybinding, eventMatchesBinding, isBindable, keybindingFromEvent } from './keybindings'
 import { KEYMAP_DEFAULTS } from './settings'
 
@@ -37,6 +37,28 @@ describe('key bindings', () => {
   it('requires a modifier so a bare key cannot swallow typing', () => {
     expect(isBindable('Mod-Shift-e')).toBe(true)
     expect(isBindable('f')).toBe(false)
+  })
+
+  it('treats Ctrl as Mod off macOS', () => {
+    expect(eventMatchesBinding(press({ key: 'p', code: 'KeyP', ctrlKey: true, shiftKey: true }), 'Mod-Shift-p')).toBe(true)
+  })
+
+  // ⌃P, ⌃N and ⌃B move the caret in every macOS text field; only ⌘ is Mod there.
+  it('leaves Control to the text field on macOS', async () => {
+    vi.resetModules()
+    vi.doMock('./platform', () => ({ isMac: true, mod: (key: string) => `⌘${key}` }))
+    try {
+      const mac = await import('./keybindings')
+      const controlP = press({ key: 'p', code: 'KeyP', ctrlKey: true })
+      expect(mac.eventMatchesBinding(controlP, 'Mod-p')).toBe(false)
+      expect(mac.keybindingFromEvent(controlP)).toBeNull()
+      expect(mac.eventMatchesBinding(press({ key: 'p', code: 'KeyP', ctrlKey: true, metaKey: true }), 'Mod-p')).toBe(false)
+      expect(mac.eventMatchesBinding(press({ key: 'p', code: 'KeyP', metaKey: true }), 'Mod-p')).toBe(true)
+      expect(mac.keybindingFromEvent(press({ key: 'p', code: 'KeyP', metaKey: true }))).toBe('Mod-p')
+    } finally {
+      vi.doUnmock('./platform')
+      vi.resetModules()
+    }
   })
 
   // jsdom reports a non-mac platform, so these are the Ctrl spellings.

@@ -52,7 +52,9 @@ export class ServerView extends LitElement {
       return
     }
     this._state = { phase: 'loading' }
+    // A rejected call (the IPC itself failing) must end the spinner too.
     const result = await window.sqlkit.inspectServer(profileId, childDb)
+      .catch((error: unknown) => ({ success: false as const, error: error instanceof Error ? error.message : String(error) }))
     // Stale guard: profile or child may have changed while this was in flight.
     if (this.profileId !== profileId || this.childDb !== childDb) return
     this._state = result.success ? { phase: 'done', sections: result.sections } : { phase: 'error', error: result.error }

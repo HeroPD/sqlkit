@@ -77,6 +77,7 @@ function setup(opts: Opts = {}) {
     addDatabase: vi.fn(),
     connectProfile: vi.fn(),
     disconnectProfile: vi.fn(),
+    disconnectAll: vi.fn(),
     showView: vi.fn(),
     refreshFiles: vi.fn(),
     toggleSidebar: vi.fn(),
@@ -433,6 +434,14 @@ describe('CommandPaletteController pick dispatch', () => {
     const connected = setup({ activeProfile: profile, connections: [profile], phase: 'connected' })
     connected.ctrl.onPick(pick('commands', 'disconnect-database'))
     expect(connected.actions.disconnectProfile).toHaveBeenCalledWith('p1')
+  })
+
+  // The workbench asks before an open transaction is rolled back; the palette must not go around it.
+  it('routes Disconnect All through the workbench rather than dropping connections itself', () => {
+    const { ctrl, actions, live } = setup()
+    ctrl.onPick(pick('commands', 'disconnect-all'))
+    expect(actions.disconnectAll).toHaveBeenCalledOnce()
+    expect(live.disconnectAll).not.toHaveBeenCalled()
   })
 
   it('opens the picked file', () => {

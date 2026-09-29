@@ -287,6 +287,7 @@ function sessionTab(value: unknown): SessionTab | null {
       ...(tab.history === undefined ? {} : { history: booleanValue(tab.history, 'Session tab history') }),
       ...(tab.table === undefined ? {} : { table: tableReference(tab.table) }),
       ...(tab.dirty === undefined ? {} : { dirty: booleanValue(tab.dirty, 'Session tab dirty') }),
+      ...(tab.baseline === undefined ? {} : { baseline: stringValue(tab.baseline, 'Session tab baseline', 200) }),
     }
   }
   if (tab.kind === 'config') {

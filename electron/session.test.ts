@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
+import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import type { SessionTab, WorkspaceSession } from '../src/electron'
-import { abandonedSessionSlots, applyShutdownFlush, claimSessionSlot, dropBackup, hasBackup, markSessionClean, readBackup, readSession, releaseSessionSlot, writeBackup, writeSession, writeShutdownBackup } from './session'
+import { abandonedSessionSlots, applyShutdownFlush, claimSessionSlot, dropBackup, hasBackup, markSessionClean, processStartTime, readBackup, readSession, releaseSessionSlot, writeBackup, writeSession, writeShutdownBackup } from './session'
 
 const state = vi.hoisted(() => ({ userData: '' }))
 
@@ -334,6 +335,19 @@ describe('backups behind a symlink', () => {
     expect(fs.readdirSync(outside)).toEqual(['report.sql'])
   })
 
+  // A cloned repo can commit `.sqlkit/backups/<hash>.sql -> ~/.ssh/id_rsa`; restoring it would open the key in a tab.
+  it('reads no backup or session file that is itself a symlink', () => {
+    fs.writeFileSync(path.join(outside, 'id_rsa'), 'PRIVATE KEY')
+    fs.writeFileSync(path.join(outside, 'session.json'), JSON.stringify(session([sqlTab()])))
+    fs.mkdirSync(backupsDir(), { recursive: true })
+    const name = `${createHash('sha256').update('tab-1').digest('hex').slice(0, 32)}.sql`
+    fs.symlinkSync(path.join(outside, 'id_rsa'), path.join(backupsDir(), name))
+    fs.symlinkSync(path.join(outside, 'session.json'), sessionFile())
+    expect(readBackup(workspace, 'tab-1')).toBeNull()
+    expect(hasBackup(workspace, 'tab-1')).toBe(false)
+    expect(readSession(workspace)).toBeNull()
+  })
+
   it('reads nothing back through a symlinked .sqlkit', () => {
     fs.mkdirSync(path.join(outside, 'backups'), { recursive: true })
     fs.writeFileSync(path.join(outside, 'session.json'), JSON.stringify(session([sqlTab()])))
@@ -432,6 +446,17 @@ describe('session slot locks', () => {
     plant({ pid: process.ppid, boot: boot() - 86_400 }, 1)
     expect(claimSessionSlot(workspace, 1)).toBe(true)
     expect(JSON.parse(fs.readFileSync(lockFile(1), 'utf8')).pid).toBe(process.pid)
+  })
+
+  // A crash, then an unrelated process given the same pid: its start time says it is not the holder.
+  it.skipIf(process.platform === 'win32')('takes over a lock whose pid now belongs to a process started later', () => {
+    const parentStart = processStartTime(process.ppid)
+    expect(parentStart).not.toBeNull()
+    plant({ pid: process.ppid, boot: boot(), start: parentStart! - 3_600 })
+    expect(claimSessionSlot(workspace, 0)).toBe(true)
+    expect(JSON.parse(fs.readFileSync(lockFile(), 'utf8'))).toMatchObject({ pid: process.pid, start: processStartTime(process.pid) })
+    plant({ pid: process.ppid, boot: boot(), start: parentStart! }, 1)
+    expect(claimSessionSlot(workspace, 1)).toBe(false)
   })
 
   // A crash, then a network change: macOS reports the hostname as the network

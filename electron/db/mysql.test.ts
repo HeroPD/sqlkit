@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { jsonValidColumn, mysqlQueryFormat, mysqlResultFields, mysqlSessionIdentificationAvailable, mysqlVersion, sqlModeFlags, writeTargetTable } from './mysql'
+import { jsonValidColumn, mysqlQueryFormat, mysqlResultFields, mysqlSessionIdentificationAvailable, mysqlVersion, sessionBindMode, sqlModeFlags, writeTargetTable } from './mysql'
 
 describe('mysqlVersion', () => {
   it('labels plain MySQL versions', () => {
@@ -88,5 +88,14 @@ describe('mysqlQueryFormat', () => {
   it('keeps non-string values and placeholders inside literals as they were', () => {
     expect(mysqlQueryFormat("select '?', ?, ?, ?, ?", [1, null, Buffer.from('hi'), ['a', 2]], true))
       .toBe("select '?', 1, NULL, X'6869', 'a', 2")
+  })
+})
+
+describe('sessionBindMode', () => {
+  it('binds by the connection session mode, and refuses a string when that mode is unknown', () => {
+    expect(sessionBindMode({ noBackslashEscapes: true }, ['a'])).toBe(true)
+    expect(sessionBindMode({}, ['a'])).toBe(false)
+    expect(sessionBindMode(undefined, [1, null])).toBe(false)
+    expect(() => sessionBindMode(undefined, [1, ['nested']])).toThrow(/sql_mode/)
   })
 })

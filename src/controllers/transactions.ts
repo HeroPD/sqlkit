@@ -28,7 +28,6 @@ const MAX_RUNS = 100
 type Deps = {
   connections: () => ConnectionProfile[]
   activeProfile: () => ConnectionProfile | null
-  profileById: (profileId: string) => ConnectionProfile | null
   /** The open manual transaction on a connection, from its live status. */
   openOn: (profileId: string) => OpenTransaction | undefined
   endTransaction: (profileId: string, mode: 'commit' | 'rollback') => Promise<{ success: boolean; transaction?: unknown; error?: string }>
@@ -74,13 +73,13 @@ export class TransactionsController implements ReactiveController {
   }
 
   /** The connection a keyboard commit/rollback means: the active one when it
-   * holds a transaction, else the only one that does. */
+   * holds a transaction, else the only one that does. Read from the live
+   * status, not the session history, which can outlive a dropped connection. */
   openProfile(): ConnectionProfile | null {
     const active = this.deps.activeProfile()
-    if (active && this._sessions.has(active.id)) return active
-    const open = [...this._sessions.keys()]
-    const only = open.length === 1 ? open[0] : undefined
-    return only ? this.deps.profileById(only) : null
+    if (active && this.deps.openOn(active.id)) return active
+    const owners = this.owners()
+    return owners.length === 1 ? owners[0]!.profile : null
   }
 
   sessionFor(profileId: string): TransactionSession | undefined {

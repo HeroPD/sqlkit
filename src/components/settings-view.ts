@@ -21,7 +21,7 @@ import {
   type WorkspacePreferences,
 } from '../settings'
 import type { ThemeId } from '../electron'
-import { displayKeybinding, isBindable, keybindingFromEvent } from '../keybindings'
+import { displayKeybinding, isBindable, keybindingFromEvent, normalizeKeyBinding } from '../keybindings'
 import { t } from '../i18n'
 
 type Row = { scope: SettingScope; key: string; field: SettingField }
@@ -226,7 +226,8 @@ export class SettingsView extends LitElement {
 
   /** The fixed workbench chord a binding would shadow, if any. */
   private _reserved(binding: string) {
-    return this.reservedBindings.find((entry) => entry.binding === binding)
+    const chord = normalizeKeyBinding(binding)
+    return this.reservedBindings.find((entry) => normalizeKeyBinding(entry.binding) === chord)
   }
 
   private _renderKeymap(field: SettingField) {
@@ -234,12 +235,16 @@ export class SettingsView extends LitElement {
     const overrides = (this.settings.keymapOverrides ?? {}) as Record<string, string>
     const bindings: Record<string, string> = { ...field.defaults, ...overrides }
     const uses = new Map<string, number>()
-    for (const binding of Object.values(bindings)) uses.set(binding, (uses.get(binding) ?? 0) + 1)
+    // Counted by chord, not spelling: a hand-edited override may order its modifiers differently.
+    for (const binding of Object.values(bindings)) {
+      const chord = normalizeKeyBinding(binding)
+      uses.set(chord, (uses.get(chord) ?? 0) + 1)
+    }
     // A filter naming a command narrows the list; one that matched the row
     // itself ("hotkey") leaves every command in place.
     const named = field.commands.filter((command) => this._hit(command.label, command.description ?? ''))
     const visible = named.length ? named : field.commands
-    const conflicting = field.commands.filter((command) => (uses.get(bindings[command.id] ?? '') ?? 0) > 1)
+    const conflicting = field.commands.filter((command) => (uses.get(normalizeKeyBinding(bindings[command.id] ?? '')) ?? 0) > 1)
     const shadowing = field.commands
       .map((command) => ({ command, reserved: this._reserved(bindings[command.id] ?? '') }))
       .filter((entry) => entry.reserved)

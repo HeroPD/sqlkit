@@ -376,6 +376,22 @@ describe('ConnectionsController.clearError', () => {
   })
 })
 
+describe('ConnectionsController session facts', () => {
+  it('reports the live sql_mode flags and server version, only while connected', () => {
+    stubSqlkit()
+    const controller = new ConnectionsController(host())
+    controller.statuses = {
+      nbe: { profileId: 'nbe', phase: 'connected', serverVersion: 'MySQL 5.7.44', sqlMode: { noBackslashEscapes: true } },
+      err: { profileId: 'err', phase: 'error', error: 'boom' },
+    }
+
+    expect(controller.sqlMode('nbe')).toEqual({ noBackslashEscapes: true })
+    expect(controller.serverVersion('nbe')).toBe('MySQL 5.7.44')
+    expect(controller.sqlMode('err')).toBeUndefined()
+    expect(controller.serverVersion('missing')).toBeUndefined()
+  })
+})
+
 describe('ConnectionsController.readOnly', () => {
   it('reports the live session guardrail, only while connected', () => {
     stubSqlkit()

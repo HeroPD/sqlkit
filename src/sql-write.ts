@@ -61,6 +61,8 @@ export type BatchUpdateSpec = {
   table: TableRef
   edits: BatchUpdateEdit[]
   engine: Engine
+  /** The live connection's version banner ("MySQL 8.0.36"); gates syntax older servers lack. */
+  serverVersion?: string
 }
 
 export type RowKey = { name: string; value: unknown; columnMeta?: ColumnRef }[]
@@ -69,6 +71,8 @@ export type DeleteRowsSpec = {
   table: TableRef
   rows: RowKey[]
   engine: Engine
+  /** As on BatchUpdateSpec. */
+  serverVersion?: string
 }
 
 const baseType = (column: ColumnRef | undefined) => column?.dataType.toLowerCase().match(/^[\w ]+/)?.[0]?.trim() ?? ''
@@ -127,6 +131,21 @@ const mysqlDecimalScale = (key: { value: unknown; columnMeta?: ColumnRef }): num
 
 // A MySQL FLOAT holds single precision, and the displayed value compares as a double: 0.1 never matches.
 const isMysqlFloat = (column: ColumnRef | undefined) => /^float\b/.test(baseType(column))
+
+/** Whether the server parses CAST(… AS FLOAT): MySQL 8.0.17+ and MariaDB 10.4.5+. An unknown
+ * banner assumes a current server; older ones keep the plain comparison, which misses inexact floats. */
+export function mysqlCastsToFloat(serverVersion: string | undefined): boolean {
+  if (!serverVersion) return true
+  const maria = /^MariaDB\s+(?:\d+\.\d+\.\d+-)?(\d+)\.(\d+)\.(\d+)/i.exec(serverVersion)
+  const mysql = maria ? null : /^MySQL\s+(\d+)\.(\d+)\.(\d+)/i.exec(serverVersion)
+  const match = maria ?? mysql
+  if (!match) return true
+  const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])]
+  const [needMajor, needMinor, needPatch] = maria ? [10, 4, 5] : [8, 0, 17]
+  if (major !== needMajor) return major > needMajor
+  if (minor !== needMinor) return minor > needMinor
+  return patch >= needPatch
+}
 // JSON compared as text never matches the server's own rendering; extracting the root normalizes
 // both sides, and unlike CAST(… AS JSON) MariaDB's LONGTEXT alias accepts it too.
 const isMysqlJson = (column: ColumnRef | undefined) => baseType(column) === 'json'
@@ -150,6 +169,7 @@ const comparisonPredicate = (
   dialect: Dialect,
   key: { name: string; value: unknown; columnMeta?: ColumnRef },
   bind: (value: unknown) => string,
+  serverVersion?: string,
 ) => {
   const identifier = dialect.quoteIdent(key.name)
   if (key.value === null || key.value === undefined) return `${identifier} IS NULL`
@@ -167,7 +187,7 @@ const comparisonPredicate = (
   }
   if (engine === 'mysql') {
     if (isTextType(key.columnMeta)) return `BINARY ${identifier} <=> BINARY ${parameter}`
-    if (isMysqlFloat(key.columnMeta)) return `${identifier} <=> CAST(${parameter} AS FLOAT)`
+    if (isMysqlFloat(key.columnMeta) && mysqlCastsToFloat(serverVersion)) return `${identifier} <=> CAST(${parameter} AS FLOAT)`
     if (isMysqlJson(key.columnMeta)) return `JSON_EXTRACT(${identifier}, '$') <=> JSON_EXTRACT(${parameter}, '$')`
     const scale = mysqlDecimalScale(key)
     return scale === null
@@ -233,7 +253,7 @@ function buildUpdateStatement(spec: BatchUpdateSpec, rows: RowUpdate[]): { sql: 
     })
     .join(',\n       ')
   const condition = (row: RowUpdate) =>
-    [...row.pks, ...row.guards].map((key) => comparisonPredicate(spec.engine, dialect, key, bind)).join(' AND ')
+    [...row.pks, ...row.guards].map((key) => comparisonPredicate(spec.engine, dialect, key, bind, spec.serverVersion)).join(' AND ')
   const where = rows.length === 1 ? condition(rows[0]!) : rows.map((row) => `(${condition(row)})`).join('\n    OR ')
   return { sql: `UPDATE ${quoteQualified(spec.table, dialect)}\n   SET ${set}\n WHERE ${where}`, params, expectedRows: rows.length }
 }
@@ -862,7 +882,7 @@ export function buildDeleteRows(spec: DeleteRowsSpec): { sql: string; params: un
     return dialect.placeholder(params.length)
   }
   const condition = (pks: RowKey) =>
-    pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind)).join(' AND ')
+    pks.map((pk) => comparisonPredicate(spec.engine, dialect, pk, bind, spec.serverVersion)).join(' AND ')
   const where = canUseMembership(spec.engine, spec.rows)
     ? membershipPredicate(spec.engine, dialect, spec.rows, bind)
     : spec.rows.length === 1

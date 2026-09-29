@@ -623,6 +623,25 @@ describe('connection manager: read-only profiles', () => {
     expect(manager.statuses().find((s) => s.profileId === 'p2')).not.toHaveProperty('readOnly')
   })
 
+  it('reports the session sql_mode flags and rebroadcasts when a checkout finds them changed', async () => {
+    let mode: { noBackslashEscapes?: boolean } = {}
+    let events: { onSqlModeChange?: () => void } = {}
+    hoisted.createImpl = (...args: unknown[]) => {
+      events = args[2] as typeof events
+      return fakeDriver({ sqlMode: () => mode })
+    }
+    const broadcast = vi.fn()
+    const manager = createConnectionManager(broadcast)
+    await manager.connect(profile({ engine: 'mysql' }))
+    expect(manager.statuses()[0]).not.toHaveProperty('sqlMode')
+    mode = { noBackslashEscapes: true }
+    broadcast.mockClear()
+    events.onSqlModeChange?.()
+    expect(broadcast).toHaveBeenCalledTimes(1)
+    expect(manager.statuses()[0]).toMatchObject({ phase: 'connected', sqlMode: { noBackslashEscapes: true } })
+    hoisted.createImpl = null
+  })
+
   it('leaves free-form SQL to the session guard on the other engines', async () => {
     const query = vi.fn(() => Promise.resolve(rowsResult(1)))
     hoisted.driver = fakeDriver({ query })

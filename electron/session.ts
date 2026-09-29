@@ -2,11 +2,12 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import type { SaveResult, WorkspaceSession } from '../src/electron'
 import { t } from '../src/i18n'
 import { stringValue, workspaceSession as validateWorkspaceSession } from './ipc-validation'
 import { recoverableContexts } from '../src/session-recovery'
-import { ensureInternalGitignore, fileStamp, internalDir, writeFileAtomic } from './workspace'
+import { ensureInternalGitignore, fileStamp, internalDir, readInternalFile, writeFileAtomic } from './workspace'
 
 // Hot exit: the workbench's open tabs and their unsaved buffers, so quitting or
 // crashing never costs work in progress. Layout goes in one small JSON file;
@@ -22,7 +23,9 @@ import { ensureInternalGitignore, fileStamp, internalDir, writeFileAtomic } from
 //   .sqlkit/backups/<32 hex>.sql  one unsaved buffer, named sha256(tab id)
 //   .sqlkit/backups/<n>/…         the same, for the nth extra window's buffers
 //   …/unrestored-<time>/<hex>.sql buffers set aside, never swept (see below)
-//   .sqlkit/session[.<n>].lock    which process holds that slot (see claimSessionSlot)
+//   .sqlkit/session[.<n>].lock    which process holds that slot (see claimSessionSlot):
+//                                 { pid, boot, start? }; `start` (optional, added
+//                                 later) is the holder's start time in epoch seconds
 //
 // All are written 0600 and .gitignore'd; query text can carry credentials.
 //
@@ -41,6 +44,13 @@ import { ensureInternalGitignore, fileStamp, internalDir, writeFileAtomic } from
 //   in a filename of its own rather than a bump here. The next write still
 //   replaces it, but nothing was restored from it, so the backups beside it are
 //   moved into an unrestored-<time>/ subfolder rather than swept as unclaimed.
+// * Optional fields added since release, each ignored by a build that predates it:
+//   a dirty file tab's `baseline` is a digest (src/text-digest.ts, prefixed with
+//   its algorithm) of the file text its buffer was based on, so a restore can tell
+//   the file changed on disk meanwhile and have the next save report a conflict.
+//   Missing or of an unknown algorithm, the file on disk is taken as the baseline.
+// * Every internal file is read without following a final symlink (the folders
+//   are checked by internalDir): a cloned repo could plant one pointing anywhere.
 // * Invariants the writers keep: buffers are written before the session that
 //   prunes unclaimed ones; the session never describes text no backup holds; a
 //   refused write unclaims a tab only when nothing of it is left on disk.
@@ -90,8 +100,8 @@ export function readSession(workspacePath: string | null, slot = 0): WorkspaceSe
 
 function readSessionFile(file: string): WorkspaceSession | null {
   try {
-    if (fs.statSync(file).size > MAX_SESSION_BYTES) return null
-    return validateWorkspaceSession(JSON.parse(fs.readFileSync(file, 'utf8')))
+    const text = readInternalFile(file, MAX_SESSION_BYTES)
+    return text === null ? null : validateWorkspaceSession(JSON.parse(text))
   } catch {
     return null
   }
@@ -163,9 +173,7 @@ function pruneBackups(workspacePath: string, session: WorkspaceSession, slot: nu
 export function readBackup(workspacePath: string | null, tabId: string, slot = 0): string | null {
   if (!workspacePath) return null
   try {
-    const file = backupPathFor(workspacePath, tabId, slot)
-    if (fs.statSync(file).size > MAX_BACKUP_BYTES) return null
-    return fs.readFileSync(file, 'utf8')
+    return readInternalFile(backupPathFor(workspacePath, tabId, slot), MAX_BACKUP_BYTES)
   } catch {
     return null
   }
@@ -190,7 +198,7 @@ export function writeBackup(workspacePath: string | null, tabId: string, content
 export function hasBackup(workspacePath: string | null, tabId: string, slot = 0): boolean {
   if (!workspacePath) return false
   try {
-    return fs.statSync(backupPathFor(workspacePath, tabId, slot)).isFile()
+    return fs.lstatSync(backupPathFor(workspacePath, tabId, slot)).isFile()
   } catch {
     return false
   }
@@ -210,11 +218,13 @@ export function writeShutdownBackup(workspacePath: string | null, tabId: string,
 // one process keep apart through WorkspaceWindows; these locks keep processes on
 // one machine apart too — `npm run dev` beside the installed app would otherwise
 // both write slot 0 and prune each other's buffers. A lock names its process by
-// pid and boot time only: macOS reports the hostname as the current network
-// address, so a lock keyed on it would outlive a crash forever after a network
-// change. Two machines sharing a folder over a network drive are not kept apart.
+// pid, boot time and, where `ps` can tell, the process's start time — a crashed
+// holder's pid can be reused by an unrelated process. Never the hostname: macOS
+// reports it as the current network address, so a lock keyed on it would outlive
+// a crash forever after a network change. Two machines sharing a folder over a
+// network drive are not kept apart.
 
-type SlotLock = { pid: number; boot: number }
+type SlotLock = { pid: number; boot: number; start?: number }
 
 const lockPathFor = (wsPath: string, slot: number) =>
   path.join(internalDir(wsPath), slot === 0 ? 'session.lock' : `session.${slot}.lock`)
@@ -222,10 +232,31 @@ const lockPathFor = (wsPath: string, slot: number) =>
 // Seconds since the epoch the machine booted: a pid from before a reboot names some other process now.
 const bootTime = () => Math.round(Date.now() / 1000 - os.uptime())
 
+// A process's start time in epoch seconds, from `ps`; null when it can't tell (no such pid, no ps, Windows).
+export function processStartTime(pid: number): number | null {
+  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 0) return null
+  try {
+    const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 1_000,
+      env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+    })
+    const stamp = result.status === 0 ? Date.parse(`${result.stdout.trim()} UTC`) : NaN
+    return Number.isFinite(stamp) ? Math.round(stamp / 1000) : null
+  } catch {
+    return null
+  }
+}
+
+// Read through ps as well, so it compares like for like with another process's.
+let ownStart: number | null | undefined
+const ownStartTime = () => (ownStart === undefined ? (ownStart = processStartTime(process.pid)) : ownStart)
+
 const readLock = (file: string): SlotLock | null => {
   try {
-    const lock = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<SlotLock>
-    return typeof lock.pid === 'number' && typeof lock.boot === 'number' ? lock as SlotLock : null
+    const lock = JSON.parse(readInternalFile(file, 4_096) ?? '') as Partial<SlotLock>
+    if (typeof lock.pid !== 'number' || typeof lock.boot !== 'number') return null
+    return { pid: lock.pid, boot: lock.boot, ...(typeof lock.start === 'number' ? { start: lock.start } : {}) }
   } catch {
     return null
   }
@@ -238,10 +269,13 @@ function lockIsLive(lock: SlotLock): boolean {
   if (lock.pid === process.pid) return false
   try {
     process.kill(lock.pid, 0)
-    return true
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') return false
   }
+  if (lock.start === undefined) return true
+  // A pid that started at another time is some other process; one ps can't place is assumed to be the holder.
+  const start = processStartTime(lock.pid)
+  return start === null || Math.abs(start - lock.start) <= 2
 }
 
 /** Takes a slot's lock for this process. False when a running process holds it;
@@ -256,7 +290,8 @@ export function claimSessionSlot(wsPath: string, slot: number): boolean {
   } catch {
     return true
   }
-  const mine = JSON.stringify({ pid: process.pid, boot: bootTime() })
+  const start = ownStartTime()
+  const mine = JSON.stringify({ pid: process.pid, boot: bootTime(), ...(start === null ? {} : { start }) })
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       fs.writeFileSync(file, mine, { flag: 'wx', mode: 0o600 })

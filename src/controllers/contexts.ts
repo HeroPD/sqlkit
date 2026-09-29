@@ -1,5 +1,6 @@
 import type { ReactiveControllerHost } from 'lit'
 import type { ConnectionProfile, DbObject, DbObjectKind, FileSaveResult, SessionContext, SessionTab, TableRef } from '../electron'
+import { textDigest } from '../text-digest'
 
 // An editor tab: a connection-config form (the tab owns the unsaved draft, so
 // edits survive switching tabs) or a SQL editor over a workspace file —
@@ -45,6 +46,8 @@ type ContextInstance = {
 type Deps = {
   contextKey: (profileId: string | null, childDb: string | null) => string
   dropQuery: (tabId: string) => void
+  // A tab whose query is still in flight: a pick that would run must not land in it.
+  isRunning?: (tabId: string) => boolean
 }
 
 /** One context's tabs, already rebuilt into live editor state. */
@@ -82,6 +85,8 @@ const sessionTabFrom = (tab: EditorTabState): SessionTab => {
       ...(tab.history ? { history: true } : {}),
       ...(tab.table ? { table: tab.table } : {}),
       ...(tab.content === tab.savedContent ? {} : { dirty: true }),
+      // What the buffer was based on, so a restore can tell the file moved on without it.
+      ...(tab.path !== null && tab.content !== tab.savedContent ? { baseline: textDigest(tab.savedContent) } : {}),
     }
   }
   if (tab.kind === 'config') return { kind: 'config', id: tab.id, profileId: tab.profile.id, draft: withoutSecrets(tab.profile) }
@@ -462,25 +467,30 @@ export class ContextsController {
   // The History tab already holding exactly this SQL, untouched since it opened.
   // Requiring content === savedContent keeps a tab the user has since typed in
   // from being reused.
-  private _historyTabFor(sql: string) {
+  private _historyTabFor(sql: string, idle = false) {
     return this._tabs.find((tab) =>
-      tab.kind === 'sql' && tab.history && tab.content === sql && tab.savedContent === sql)
+      tab.kind === 'sql' && tab.history && tab.content === sql && tab.savedContent === sql && !(idle && this._running(tab.id)))
+  }
+
+  private _running(tabId: string) {
+    return this.deps.isRunning?.(tabId) ?? false
   }
 
   // The recyclable History tab: a pick replaces its contents rather than opening
   // another tab. Pinned or edited History tabs are excluded — they are tabs the
   // user chose to keep.
-  private _historyPreviewTab() {
-    return this._tabs.find((tab) => tab.kind === 'sql' && tab.history && tab.preview)
+  private _historyPreviewTab(idle = false) {
+    return this._tabs.find((tab) => tab.kind === 'sql' && tab.history && tab.preview && !(idle && this._running(tab.id)))
   }
 
   // History double-click: pin the SQL. A preceding single-click recycles the
   // preview tab to this SQL, so if that preview is still open just clear its
   // flag; otherwise reuse an already-pinned tab for the same SQL, and only open
   // a fresh one when there is none — re-picking an entry must not stack copies.
+  // A run can leave more than one preview open, so the match is by SQL.
   openPermanent(sql: string) {
-    const preview = this._historyPreviewTab()
-    if (preview?.kind === 'sql' && preview.content === sql) {
+    const preview = this._tabs.find((tab) => tab.kind === 'sql' && tab.history && tab.preview && tab.content === sql)
+    if (preview) {
       this.tabs = this._tabs.map((tab) => (tab.id === preview.id ? { ...tab, preview: false } : tab))
       this.activeTabId = preview.id
       return
@@ -632,16 +642,17 @@ export class ContextsController {
   }
 
   // History single-click: recycle the open preview tab to this SQL, else open
-  // a fresh preview tab.
+  // a fresh preview tab. A tab still running is left alone, since the run that
+  // follows a pick (Explain, an Explorer drop) would be refused there.
   openPreview(sql: string) {
     // Already open from an earlier pick (including the pinned tab a double-click
     // left behind): focus it rather than opening the same SQL a second time.
-    const open = this._historyTabFor(sql)
+    const open = this._historyTabFor(sql, true)
     if (open) {
       this.activeTabId = open.id
       return
     }
-    const preview = this._historyPreviewTab()
+    const preview = this._historyPreviewTab(true)
     if (preview) {
       this.tabs = this._tabs.map((tab) =>
         tab.id === preview.id && tab.kind === 'sql' ? { ...tab, content: sql, savedContent: sql } : tab,

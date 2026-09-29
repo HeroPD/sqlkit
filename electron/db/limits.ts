@@ -32,74 +32,96 @@ export const MAX_BUFFERED_ROW_BYTES = 1536 * 1024
 const utf8Bytes = (value: string) => Buffer.byteLength(value, 'utf8')
 const bigintReplacer = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value
 
-export function boundedRow(row: unknown[], usedBytes: number): { row: unknown[]; bytes: number; truncated: boolean } | null {
-  let bytes = 0
-  let truncated = false
-  const overhead = 16 * (row.length + 1)
-  const valueBudget = Math.max(0, Math.min(MAX_CELL_BYTES, Math.floor((MAX_BUFFERED_ROW_BYTES - overhead) / Math.max(1, row.length))))
-  const truncateText = (value: string, label: string) => {
-    const suffix = `\n… [${label} truncated by SqlKit Studio]`
-    if (valueBudget <= utf8Bytes(suffix)) return ''
-    let low = 0
-    let high = Math.min(value.length, valueBudget)
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2)
-      if (utf8Bytes(value.slice(0, middle)) + utf8Bytes(suffix) <= valueBudget) low = middle
-      else high = middle - 1
+// A cell's cost in the buffer, plus what a shortened one is cut from (objects as their JSON).
+type Measured = { size: number; text?: string; binary?: Uint8Array }
+
+const measure = (value: unknown): Measured => {
+  if (typeof value === 'string') return { size: utf8Bytes(value), text: value }
+  if (value instanceof Uint8Array) return { size: value.byteLength, binary: value }
+  if (value && typeof value === 'object') {
+    let encoded: string
+    try {
+      encoded = JSON.stringify(value, bigintReplacer) ?? '[unserializable value]'
+    } catch {
+      encoded = '[unserializable value]'
     }
-    return value.slice(0, low) + suffix
+    return { size: utf8Bytes(encoded), text: encoded }
   }
-  const bounded = row.map((value) => {
-    if (typeof value === 'bigint') {
-      bytes += 16
+  return { size: 16 }
+}
+
+// The per-cell ceiling that fits `sizes` in `budget` cutting only the largest:
+// a cell within its fair share of what the smaller ones leave keeps every byte.
+export function fairShareCap(sizes: readonly number[], budget: number): number {
+  const sorted = [...sizes].sort((a, b) => a - b)
+  let remaining = Math.max(0, budget)
+  for (let index = 0; index < sorted.length; index += 1) {
+    const share = Math.floor(remaining / (sorted.length - index))
+    if (sorted[index]! > share) return share
+    remaining -= sorted[index]!
+  }
+  return Infinity
+}
+
+const truncateText = (value: string, label: string, budget: number) => {
+  const suffix = `\n… [${label} truncated by SqlKit Studio]`
+  const suffixBytes = utf8Bytes(suffix)
+  if (budget <= suffixBytes) return ''
+  let low = 0
+  let high = Math.min(value.length, budget)
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (utf8Bytes(value.slice(0, middle)) + suffixBytes <= budget) low = middle
+    else high = middle - 1
+  }
+  // Never end on half a surrogate pair.
+  const code = value.charCodeAt(low - 1)
+  if (low > 0 && code >= 0xd800 && code <= 0xdbff) low -= 1
+  return value.slice(0, low) + suffix
+}
+
+// A row as the buffer keeps it. Only a row over its budget is cut, and then only
+// its largest cells (named by `truncatedColumns`); null means the buffer is full.
+export function boundedRow(
+  row: unknown[],
+  usedBytes: number,
+): { row: unknown[]; bytes: number; truncated: boolean; truncatedColumns: number[] } | null {
+  const overhead = 16 * (row.length + 1)
+  const measured = row.map(measure)
+  const cuttable = (cell: Measured) => cell.text !== undefined || cell.binary !== undefined
+  const fixed = measured.reduce((total, cell) => total + (cuttable(cell) ? 0 : cell.size), 0)
+  const sizes = measured.filter(cuttable).map((cell) => cell.size)
+  const cap = Math.min(MAX_CELL_BYTES, fairShareCap(sizes, MAX_BUFFERED_ROW_BYTES - overhead - fixed))
+  const truncatedColumns: number[] = []
+  let bytes = overhead
+  const bounded = row.map((value, index) => {
+    const cell = measured[index]!
+    if (!cuttable(cell) || cell.size <= cap) {
+      bytes += cell.size
+      if (typeof value !== 'bigint') return value
       return value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value
     }
-    if (typeof value === 'string') {
-      const size = utf8Bytes(value)
-      if (size <= valueBudget) {
-        bytes += size
-        return value
-      }
-      truncated = true
-      const limited = truncateText(value, 'cell')
-      bytes += utf8Bytes(limited)
-      return limited
-    }
-    if (value instanceof Uint8Array) {
-      const size = value.byteLength
-      if (size <= valueBudget) {
-        bytes += size
-        return value
-      }
-      truncated = true
-      const limited = value.slice(0, valueBudget)
+    truncatedColumns.push(index)
+    if (cell.binary) {
+      const limited = cell.binary.slice(0, cap)
       bytes += limited.byteLength
       return limited
     }
-    if (value && typeof value === 'object') {
-      let encoded: string
-      try {
-        encoded = JSON.stringify(value, bigintReplacer) ?? '[unserializable value]'
-      } catch {
-        encoded = '[unserializable value]'
-      }
-      const size = utf8Bytes(encoded)
-      if (size <= valueBudget) {
-        bytes += size
-        return value
-      }
-      truncated = true
-      const limited = truncateText(encoded, 'value')
-      bytes += utf8Bytes(limited)
-      return limited
-    }
-    bytes += 16
-    return value
+    const limited = truncateText(cell.text!, typeof value === 'string' ? 'cell' : 'value', cap)
+    bytes += utf8Bytes(limited)
+    return limited
   })
-  bytes += overhead
   if (usedBytes + bytes > MAX_BUFFERED_BYTES) return null
-  return { row: bounded, bytes, truncated }
+  return { row: bounded, bytes, truncated: truncatedColumns.length > 0, truncatedColumns }
 }
+
+// Records the shortened cells of the row about to be buffered at `rowIndex`.
+export function noteTruncatedCells(cells: Array<[number, number]>, rowIndex: number, columns: readonly number[]) {
+  for (const col of columns) cells.push([rowIndex, col])
+}
+
+// The result-set field for those cells, absent when none were shortened.
+export const truncatedCellsField = (cells: Array<[number, number]>) => (cells.length ? { truncatedCells: cells } : {})
 
 // Shared rows-affected-gate message for runBatch implementations.
 export const BATCH_ZERO_ROWS = t('editing.noRowsAffected')

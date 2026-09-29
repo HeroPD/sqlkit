@@ -41,7 +41,6 @@ const build = (overrides: Overrides = {}) => {
   const controller = new TransactionsController(fakeHost(), {
     connections: () => connections,
     activeProfile: () => overrides.activeProfile ?? connections[0] ?? null,
-    profileById: (id) => connections.find((entry) => entry.id === id) ?? null,
     openOn: (id) => open[id],
     endTransaction,
     notice,
@@ -173,5 +172,31 @@ describe('TransactionsController popovers', () => {
     controller.switchTo('p2', 'analytics')
     expect(setActiveDb).toHaveBeenCalledWith('p2', 'analytics')
     expect(controller.managerOpen).toBe(false)
+  })
+})
+
+describe('TransactionsController keyboard target', () => {
+  const record = (controller: TransactionsController, profileId: string) => controller.recordRun({
+    profileId, childDb: 'db_a', sourceTabName: 'q.sql', sql: 'BEGIN', response: ok,
+    runStartedAt: Date.now(), wasOpen: false, isOpen: true, restarted: false,
+  })
+
+  // A dropped connection takes its transaction with it, while the session history stays behind.
+  it('never targets a transaction the live connection no longer holds', () => {
+    const p1 = profile('p1', 'Postgres')
+    const p2 = profile('p2', 'Replica')
+    const { controller } = build({ connections: [p1, p2], activeProfile: p1, open: { p2: { childDb: 'db_a' } } })
+    record(controller, 'p1')
+
+    expect(controller.openProfile()?.id).toBe('p2')
+  })
+
+  it('takes the active connection with two open, and neither when the active holds none', () => {
+    const p1 = profile('p1', 'Postgres')
+    const p2 = profile('p2', 'Replica')
+    const p3 = profile('p3', 'Idle')
+    const open = { p1: { childDb: 'db_a' }, p2: { childDb: 'db_a' } }
+    expect(build({ connections: [p1, p2, p3], activeProfile: p2, open }).controller.openProfile()?.id).toBe('p2')
+    expect(build({ connections: [p1, p2, p3], activeProfile: p3, open }).controller.openProfile()).toBeNull()
   })
 })

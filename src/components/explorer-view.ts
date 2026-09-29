@@ -271,7 +271,9 @@ export class ExplorerView extends LitElement {
     this._filterMenu = this._filterMenu ? null : { right: window.innerWidth - rect.right, top: rect.bottom + 4 }
   }
 
+  // A window listener: an Escape the focused control already claimed is not also ours.
   private _onFilterKeydown = (event: KeyboardEvent) => {
+    if (event.defaultPrevented) return
     if (event.key === 'Escape' && this._filterMenu) {
       event.preventDefault()
       this._filterMenu = null

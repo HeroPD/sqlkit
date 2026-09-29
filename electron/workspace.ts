@@ -75,6 +75,62 @@ export function internalDir(workspacePath: string, ...segments: string[]): strin
   return dir
 }
 
+/** An internal file's text, never read through a symlink: a cloned repo could
+ * point `backups/<hash>.sql` at ~/.ssh/id_rsa and restore it into a tab. Null when
+ * it is over `maxBytes`; a missing file throws ENOENT as usual. */
+export function readInternalFile(file: string, maxBytes: number): string | null {
+  const noFollow = fs.constants.O_NOFOLLOW as number | undefined
+  // Where the flag is missing (Windows), a check before the open is the best on offer.
+  if (noFollow === undefined && fs.lstatSync(file).isSymbolicLink()) throw new Error(t('workspace.internalLinked', { path: file }))
+  let fd: number
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (noFollow ?? 0))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw new Error(t('workspace.internalLinked', { path: file }), { cause: error })
+    throw error
+  }
+  try {
+    const stat = fs.fstatSync(fd)
+    if (!stat.isFile()) throw new Error(`${file} is not a file.`)
+    return stat.size > maxBytes ? null : fs.readFileSync(fd, 'utf8')
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+// A crash between creating a temp file and renaming it leaves the temp behind for good.
+const STALE_TEMP_MS = 10 * 60 * 1000
+
+/** Removes atomic-write temp files older than a few minutes from .sqlkit and the
+ * folders under it, never following a symlink. Best-effort. */
+export function sweepInternalTempFiles(workspacePath: string, now = Date.now()) {
+  const sweep = (dir: string, depth: number) => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      // Dirent reports a symlink as neither a file nor a directory, so neither branch goes through one.
+      if (entry.isDirectory() && depth < 3) sweep(full, depth + 1)
+      else if (entry.isFile() && entry.name.endsWith('.tmp')) {
+        try {
+          if (now - fs.lstatSync(full).mtimeMs > STALE_TEMP_MS) fs.unlinkSync(full)
+        } catch {
+          // Already gone, or not ours to remove.
+        }
+      }
+    }
+  }
+  try {
+    sweep(internalDir(workspacePath), 0)
+  } catch {
+    // A symlinked .sqlkit is never swept.
+  }
+}
+
 type GlobalConfig = {
   recentWorkspaces: RecentWorkspace[]
   lastWorkspace: string | null
@@ -206,7 +262,13 @@ export const ensureInternalGitignore = (workspacePath: string) => {
     const dir = internalDir(workspacePath)
     fs.mkdirSync(dir, { recursive: true })
     const file = path.join(dir, '.gitignore')
-    const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
+    // A symlinked .gitignore reads as none: its target's text must not be copied into the workspace.
+    let existing = ''
+    try {
+      existing = readInternalFile(file, MAX_CONFIG_BYTES) ?? ''
+    } catch {
+      // Missing, or refused.
+    }
     const present = new Set(existing.split(/\r?\n/).map((line) => line.trim()))
     const missing = GITIGNORE_RULES.filter((rule) => !present.has(rule))
     if (!missing.length) return
@@ -250,9 +312,15 @@ const stripSecretMarkers = (connection: ConnectionProfile): ConnectionProfile =>
   return { ...profile, ssh }
 }
 
+// Where the password travels, not just to whom: a tunnel moved or dropped, or TLS turned down, must not take it along.
+const transportOf = (connection: ConnectionProfile) => JSON.stringify([
+  connection.ssl?.mode ?? 'disable',
+  connection.ssh?.enabled ? [connection.ssh.host, connection.ssh.port] : null,
+])
+
 const sameDatabaseCredentialTarget = (incoming: ConnectionProfile, saved: ConnectionProfile | undefined) =>
   !!saved && incoming.engine === saved.engine && incoming.host === saved.host && incoming.port === saved.port
-  && incoming.username === saved.username
+  && incoming.username === saved.username && transportOf(incoming) === transportOf(saved)
 
 const sameSshCredentialTarget = (incoming: ConnectionProfile, saved: ConnectionProfile | undefined) =>
   !!incoming.ssh && !!saved?.ssh && incoming.ssh.host === saved.ssh.host && incoming.ssh.port === saved.ssh.port
@@ -291,8 +359,9 @@ function loadWorkspaceConfig(workspacePath: string): ConfigOutcome {
   let file: string
   try {
     file = workspaceConfigPathFor(workspacePath)
-    if (fs.statSync(file).size > MAX_CONFIG_BYTES) return { status: 'error', error: `${file} exceeds the 5 MB configuration limit.` }
-    raw = fs.readFileSync(file, 'utf8')
+    const text = readInternalFile(file, MAX_CONFIG_BYTES)
+    if (text === null) return { status: 'error', error: `${file} exceeds the 5 MB configuration limit.` }
+    raw = text
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'missing' }
     return { status: 'error', error: (error as Error).message }
@@ -443,9 +512,9 @@ export function readWorkspaceHistory(workspacePath: string | null): HistoryItem[
 // `unreadable` is a file that exists but can't be used: the next write must not replace it with only the new runs.
 function loadWorkspaceHistory(workspacePath: string): { items: HistoryItem[]; unreadable: boolean } {
   try {
-    const file = historyPathFor(workspacePath)
-    if (fs.statSync(file).size > MAX_HISTORY_BYTES) return { items: [], unreadable: true }
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
+    const text = readInternalFile(historyPathFor(workspacePath), MAX_HISTORY_BYTES)
+    if (text === null) return { items: [], unreadable: true }
+    const parsed = JSON.parse(text) as unknown
     if (!Array.isArray(parsed)) return { items: [], unreadable: true }
     return {
       items: parsed.filter((entry): entry is HistoryItem =>
@@ -466,13 +535,14 @@ function loadWorkspaceHistory(workspacePath: string): { items: HistoryItem[]; un
  * those would delete entries the workspace is now meant to keep. Null when the
  * config exists but cannot be read — then nothing is pruned at all. */
 function historyLimitsFor(workspacePath: string): HistoryLimits | null {
-  let raw: string
+  let raw: string | null
   try {
-    raw = fs.readFileSync(workspaceConfigPathFor(workspacePath), 'utf8')
-  } catch {
+    raw = readInternalFile(workspaceConfigPathFor(workspacePath), MAX_CONFIG_BYTES)
+  } catch (error) {
     // No config yet is a new workspace, which has the defaults.
-    return DEFAULT_WORKSPACE_PREFERENCES
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? DEFAULT_WORKSPACE_PREFERENCES : null
   }
+  if (raw === null) return null
   try {
     return normalizeWorkspacePreferences((JSON.parse(raw) as { preferences?: unknown }).preferences)
   } catch {
@@ -602,6 +672,7 @@ export function openWorkspace(wsPath: string): WorkspaceResult {
   }
 
   const workspacePath = path.resolve(wsPath)
+  sweepInternalTempFiles(workspacePath)
   // Seed a config only when none exists, and bring a readable one up to date
   // (per-connection folders, re-encrypted secrets). A config that exists but
   // won't parse is left untouched — re-seeding it would wipe every saved

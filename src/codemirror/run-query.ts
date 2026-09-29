@@ -484,17 +484,30 @@ const expandOverSpans = (tree: Tree, spans: SqlSpan[], doc: Text, node: SyntaxNo
   return [from, to]
 }
 
+// The full-text scans, kept per document (a `Text` is immutable) and dialect: completion looks up the
+// query under the caret on every keystroke, and on a multi-megabyte dump each scan costs tens of ms.
+type DocScans = { routines?: RoutineBlock[]; spans?: SqlSpan[] }
+const scansByDoc = new WeakMap<Text, Map<string, DocScans>>()
+
+const docScans = (doc: Text, dialect: SqlDialectName | undefined): DocScans => {
+  let byDialect = scansByDoc.get(doc)
+  if (!byDialect) scansByDoc.set(doc, (byDialect = new Map<string, DocScans>()))
+  let scans = byDialect.get(dialect ?? '')
+  if (!scans) byDialect.set(dialect ?? '', (scans = {}))
+  return scans
+}
+
 const closestQueryBlock = (state: EditorState, cursor: number, allowNeighbor = true, dialect?: SqlDialectName) => {
   const doc = state.doc
-  const text = doc.toString()
+  const scans = docScans(doc, dialect)
   // A body statement under the caret runs as the routine that defines it.
-  const routines = routineBlocks(text, dialect)
+  const routines = (scans.routines ??= routineBlocks(doc.toString(), dialect))
   const routine = routines.find((block) => block.from <= cursor && cursor <= block.end)
   if (routine) return routineQuery(doc, routine)
 
   const tree = treeForQuery(state, cursor)
-  // One full-text scan per run; the tree can't provide these (see unparsedSpans).
-  const spans = unparsedSpans(text, dialect)
+  // One full-text scan per document; the tree can't provide these (see unparsedSpans).
+  const spans = (scans.spans ??= unparsedSpans(doc.toString(), dialect))
   const { covering, prev, next } = statementsAround(tree, doc, cursor)
 
   if (!covering && !allowNeighbor) return null

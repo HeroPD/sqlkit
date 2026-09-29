@@ -3,6 +3,7 @@ import type { QueryResult } from '../electron'
 import { bufferedExport, type ExportFormat, type SqlExportTarget } from '../result-export'
 import { MAX_FETCH_ROWS } from '../result-limits'
 import { formatInteger, t } from '../i18n'
+import { hasTruncatedCells, truncatedWithinRows } from '../result-truncation'
 
 type Deps = {
   /** The result on screen, whose buffer the rows are drained from. */
@@ -107,6 +108,11 @@ export class ResultExportController implements ReactiveController {
   async copyAll(format: ExportFormat): Promise<string | null> {
     const snapshot = this.snapshot()
     if (!snapshot) return null
+    // The full values are not in the buffer, and a paste of the marker text reads as data.
+    if (hasTruncatedCells(snapshot.result)) {
+      this.deps.notice(t('results.valuesShortened'), t('results.copyShortenedDetail'))
+      return null
+    }
     const drained = await this.drain(snapshot.result)
     if (!drained.complete) {
       this.reportShort(t('results.copyExpiredDetail', this.counts(drained)))
@@ -123,6 +129,8 @@ export class ResultExportController implements ReactiveController {
     if (stream) return this.deps.streamExport(format)
     const snapshot = this.snapshot()
     if (!snapshot) return
+    // Only the streamed re-run can write a shortened value in full.
+    if (truncatedWithinRows(snapshot.result, rows)) return this.deps.notice(t('results.valuesShortened'), t('results.exportShortenedDetail'))
     const drained = await this.drain(snapshot.result, rows)
     // A file outlives the message about it: a short CSV named for the query would
     // read as the whole result long after the truncation is forgotten.

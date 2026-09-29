@@ -320,3 +320,25 @@ describe('ExplorerView table list states', () => {
     view.remove()
   })
 })
+
+describe('ExplorerView filter menu Escape', () => {
+  // One Escape is one action: when the focused grid or editor claimed it, the menu stays.
+  it('closes only on an Escape nothing else handled', () => {
+    const view = new ExplorerView()
+    const grid = document.createElement('div')
+    document.body.append(view, grid)
+    const inner = view as never as { _filterMenu: { right: number; top: number } | null }
+    inner._filterMenu = { right: 0, top: 0 }
+    const claim = (event: Event) => event.preventDefault()
+
+    grid.addEventListener('keydown', claim)
+    grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    expect(inner._filterMenu).not.toBeNull()
+
+    grid.removeEventListener('keydown', claim)
+    grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    expect(inner._filterMenu).toBeNull()
+    view.remove()
+    grid.remove()
+  })
+})

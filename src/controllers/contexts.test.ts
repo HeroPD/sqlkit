@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ReactiveControllerHost } from 'lit'
 import { ContextsController } from './contexts'
+import { textDigest } from '../text-digest'
 
 const host = (): ReactiveControllerHost =>
   ({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
@@ -161,6 +162,32 @@ describe('ContextsController preview tabs', () => {
 
     ctrl.setActiveContent('select 2 edited') // editing promotes to permanent
     ctrl.openPreview('select 3') // no preview to recycle → a new tab
+    expect(ctrl.tabs).toHaveLength(2)
+  })
+
+  // The run that follows a pick (Explain, an Explorer drop) is refused in a tab
+  // already running, so recycling that tab would show SQL that never ran.
+  it('opens a fresh preview instead of recycling one whose query is still running', () => {
+    const running = new Set<string>()
+    const ctrl = new ContextsController(host(), { contextKey, dropQuery: vi.fn(), isRunning: (id) => running.has(id) })
+    ctrl.openPreview('explain analyze select 1')
+    const slow = ctrl.activeTabId!
+    running.add(slow)
+
+    ctrl.openPreview('DROP TABLE "users";')
+
+    expect(ctrl.tabs).toHaveLength(2)
+    expect(ctrl.activeTabId).not.toBe(slow)
+    expect(ctrl.activeSqlTab()?.content).toBe('DROP TABLE "users";')
+    expect(ctrl.tabs.find((tab) => tab.id === slow)).toMatchObject({ content: 'explain analyze select 1' })
+
+    // Nor is the same SQL refocused into the running tab.
+    ctrl.openPreview('explain analyze select 1')
+    expect(ctrl.activeTabId).not.toBe(slow)
+
+    // Once it finishes, it is recyclable again.
+    running.clear()
+    ctrl.openPreview('select 9')
     expect(ctrl.tabs).toHaveLength(2)
   })
 })
@@ -349,6 +376,17 @@ describe('ContextsController history picks keep to their own tab', () => {
 })
 
 describe('ContextsController session round trip', () => {
+  it('records what a dirty file buffer was based on, and nothing for a clean or untitled one', () => {
+    const { ctrl } = make()
+    ctrl.addTab({ id: 'file:/ws/a.sql', kind: 'sql', name: 'a.sql', path: '/ws/a.sql', content: 'edited', savedContent: 'on disk' })
+    ctrl.addTab({ id: 'file:/ws/b.sql', kind: 'sql', name: 'b.sql', path: '/ws/b.sql', content: 'same', savedContent: 'same' })
+    ctrl.addTab({ id: 'u1', kind: 'sql', name: 'Untitled-1', path: null, content: 'typed', savedContent: '' })
+    const tabs = ctrl.toSession()[0]!.tabs
+    expect(tabs.find((tab) => tab.id === 'file:/ws/a.sql')).toMatchObject({ dirty: true, baseline: textDigest('on disk') })
+    expect(tabs.find((tab) => tab.id === 'file:/ws/b.sql')).not.toHaveProperty('baseline')
+    expect(tabs.find((tab) => tab.id === 'u1')).not.toHaveProperty('baseline')
+  })
+
   it('carries every context, the active tab, and the dirty marker', () => {
     const { ctrl } = make()
     ctrl.switchInstance('p1', null)

@@ -3,7 +3,7 @@ import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResul
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { errorMessage } from './error-message'
 import { columnReference } from './column-reference'
-import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, noteTruncatedCells, POOL_IDLE_MS, truncatedCellsField } from './limits'
 import { byteCount, sizedRow } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
@@ -88,10 +88,24 @@ export function sqlModeFlags(mode: string): SqlModeFlags {
 
 type FormatValues = Parameters<typeof mysql.format>[1]
 
+const sameFlags = (a: SqlModeFlags, b: SqlModeFlags | undefined) =>
+  (a.noBackslashEscapes === true) === (b?.noBackslashEscapes === true) && (a.ansiQuotes === true) === (b?.ansiQuotes === true)
+
 // Strings under NO_BACKSLASH_ESCAPES: a doubled quote is the only escape, and a backslash is itself.
 const literalWithoutBackslashes = (value: FormatValues): FormatValues =>
   typeof value === 'string' ? mysql.raw(`'${value.replaceAll("'", "''")}'`)
     : Array.isArray(value) ? value.map(literalWithoutBackslashes) : value
+
+const hasString = (value: FormatValues): boolean =>
+  typeof value === 'string' || (Array.isArray(value) && value.some(hasString))
+
+/** The NO_BACKSLASH_ESCAPES flag to bind with on a connection whose session mode
+ * is `flags`; binding a string without knowing the mode fails closed. */
+export function sessionBindMode(flags: SqlModeFlags | undefined, values: FormatValues): boolean {
+  if (flags) return flags.noBackslashEscapes === true
+  if (hasString(values)) throw new Error('The session sql_mode is unknown, so a string parameter cannot be bound safely.')
+  return false
+}
 
 /** Fills `?` placeholders on the client, as mysql2 does, but in the server's
  * string syntax: mysql2 always escapes with backslashes, which a server running
@@ -131,9 +145,18 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   let pools: Map<string, mysql.Pool> | null = null
   let childNames: string[] = []
   let active = ''
-  // sql_mode flags that change how scripts must be masked (NO_BACKSLASH_ESCAPES,
-  // ANSI_QUOTES); read once at connect — pooled sessions inherit the same value.
+  // sql_mode flags that change how scripts must be masked and strings bound
+  // (NO_BACKSLASH_ESCAPES, ANSI_QUOTES), as the latest checkout reported them.
   let sqlMode: SqlModeFlags = {}
+  // Per connection, read at checkout: RESET CONNECTION copies the global mode as
+  // it is then, so a mid-session SET GLOBAL reaches pooled sessions one by one.
+  const sessionModes = new WeakMap<object, SqlModeFlags>()
+  const noteSqlMode = (flags: SqlModeFlags) => {
+    const changed = (flags.noBackslashEscapes === true) !== (sqlMode.noBackslashEscapes === true)
+      || (flags.ansiQuotes === true) !== (sqlMode.ansiQuotes === true)
+    sqlMode = flags
+    if (changed) events.onSqlModeChange?.()
+  }
   let isMariaDb = false
   // Thread ids of in-flight user statements, so cancel() can KILL QUERY them.
   const running = new Set<RunningEntry>()
@@ -163,8 +186,10 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       // removes SET/session/temp-table state before another tab borrows it.
       resetOnRelease: true,
       multipleStatements: true,
-      // Read per call: the flag is learned from the first query, which binds nothing.
-      queryFormat: (query: string, values: FormatValues) => mysqlQueryFormat(query, values, sqlMode.noBackslashEscapes === true),
+      // `this` is the connection: strings bind in the syntax its own session reads.
+      queryFormat(this: object, query: string, values: FormatValues) {
+        return mysqlQueryFormat(query, values, sessionBindMode(sessionModes.get(this), values))
+      },
       // Lossless values: temporals as strings, BIGINT past 2^53 as strings
       // (safe-range ones stay numbers), DECIMAL as strings (mysql2 default),
       // and JSON as wire text so numeric literals never pass through JSON.parse.
@@ -269,8 +294,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
    * connection is checked out, end() drains it rather than severing it.
    */
   let poolGate: Promise<unknown> = Promise.resolve()
-  const checkoutFor = (childDb?: string | null): Promise<mysql.PoolConnection> => {
-    const next = poolGate.then(() => acquire(poolForQuery(childDb)))
+  const checkoutFor = (childDb?: string | null, readMode = true): Promise<mysql.PoolConnection> => {
+    const next = poolGate.then(() => acquire(poolForQuery(childDb), readMode))
     poolGate = next.then(() => undefined, () => undefined)
     return next
   }
@@ -304,15 +329,27 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       )
     })
 
-  const acquire = async (pool: mysql.Pool): Promise<mysql.PoolConnection> => {
+  // Reads the session's sql_mode into the connection's binding flags.
+  const readSessionMode = async (conn: mysql.PoolConnection): Promise<SqlModeFlags> => {
+    const [rows] = await conn.query('select @@session.sql_mode as mode')
+    const flags = sqlModeFlags((rows as Array<{ mode?: string }>)[0]?.mode ?? '')
+    sessionModes.set(rawOf(conn), flags)
+    noteSqlMode(flags)
+    return flags
+  }
+
+  // `readMode` is skipped only by metadata reads that bind nothing, saving their round trip.
+  const acquire = async (pool: mysql.Pool, readMode = true): Promise<mysql.PoolConnection> => {
     const conn = await checkout(pool)
-    if (!profile.readOnly) return conn
-    // Read-only guardrail, in the standard syntax MySQL and MariaDB share.
-    // RESET CONNECTION on release restores global defaults, so it has to be
-    // re-applied per checkout rather than once per socket; fail closed when
-    // the server refuses it.
+    // A previous checkout's flags describe a session RESET CONNECTION has since replaced.
+    sessionModes.delete(rawOf(conn))
     try {
-      await conn.query('set session transaction read only')
+      // Read-only guardrail, in the standard syntax MySQL and MariaDB share.
+      // RESET CONNECTION on release restores global defaults, so it has to be
+      // re-applied per checkout rather than once per socket; fail closed when
+      // the server refuses it.
+      if (profile.readOnly) await conn.query('set session transaction read only')
+      if (readMode) await readSessionMode(conn)
     } catch (error) {
       conn.release()
       throw error instanceof Error ? error : new Error(String(error))
@@ -323,7 +360,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
   // Metadata helper: object rows, cast to the query's concrete shape. Checked out
   // explicitly (not pool.query) so the bounded acquire above applies.
   const metaRows = async <T>(sql: string, params: unknown[] = [], childDb?: string | null): Promise<T[]> => {
-    const conn = await checkoutFor(childDb)
+    const conn = await checkoutFor(childDb, params.length > 0)
     try {
       const [rows] = await conn.query(sql, params)
       return rows as unknown as T[]
@@ -403,7 +440,10 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
 
     async query(sql, params = [], childDb = null, sort = null, filter = null, executionId) {
       const started = performance.now()
-      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode })
+      // Validated up front with the latest mode; re-read under the mode of the session that runs it.
+      const plannedMode = sqlMode
+      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode: plannedMode })
+      const planFor = (mode: SqlModeFlags) => sameFlags(mode, plannedMode) ? plan : prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode: mode })
       // Database-mismatch guard, before the entry joins `running` so a
       // refusal can't leak a phantom cancel target. Validated without resolving
       // a pool: the switch happens at checkout, so nothing is retired for a run
@@ -430,7 +470,9 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           if (entry.cancelRequested) throw new Error(t('query.cancelled'))
           const sessionState = { inTransaction: null as boolean | null }
           try {
-            const result = await streamQuery(rawOf(pinned.conn), plan.batches[0]!, plan.params, started, childDb ?? active, sessionState)
+            // The transaction's own SET sql_mode may have moved it since the last run.
+            const run = planFor(await readSessionMode(pinned.conn))
+            const result = await streamQuery(rawOf(pinned.conn), run.batches[0]!, run.params, started, childDb ?? active, sessionState)
             // The last OK packet is the wire truth; a pure-SELECT run reports
             // nothing and cannot have changed transaction state.
             if (pin === pinned && sessionState.inTransaction === false) dropPin(true)
@@ -467,6 +509,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       }
 
       let conn: mysql.PoolConnection | null = null
+      const sessionState = { inTransaction: null as boolean | null }
       // Leaves `running` before the connection re-enters the pool, so a late
       // KILL QUERY can never target this thread once another query has it.
       const releaseToPool = () => {
@@ -482,8 +525,8 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           releaseToPool()
           throw new Error(t('query.cancelled'))
         }
-        const sessionState = { inTransaction: null as boolean | null }
-        const result = await streamQuery(raw, plan.batches[0]!, plan.params, started, childDb ?? active, sessionState)
+        const run = planFor(sessionModes.get(raw) ?? {})
+        const result = await streamQuery(raw, run.batches[0]!, run.params, started, childDb ?? active, sessionState)
         // The run left a transaction open — the OK packet's word, which also
         // catches a transaction opened inside CALL. Pin the connection for
         // later runs instead of releasing it (resetOnRelease would roll it
@@ -503,7 +546,15 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         releaseToPool()
         return result
       } catch (error) {
-        // The connection may hold half-read results; drop it rather than reuse.
+        // A statement error leaves an opened transaction usable, so it stays
+        // pinned for COMMIT/ROLLBACK; a dead connection, a deadlock victim
+        // (1213 rolled it all back) or an unknown state is dropped.
+        const failure = error as { fatal?: boolean; errno?: number }
+        if (conn && sessionState.inTransaction === true && !failure.fatal && failure.errno !== 1213 && !pin) {
+          running.delete(entry)
+          adoptPin(conn, childDb ?? active)
+          conn = null
+        }
         conn?.destroy()
         throw mapCancelled(error)
       } finally {
@@ -690,11 +741,15 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
     },
 
     async exportQuery({ sql, params, childDb, sort, filter, filePath, format, sqlTarget, executionId }) {
-      const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode })
-      // The manager's read-only gate masks with default flags; recheck with the
-      // session's real sql_mode — NO_BACKSLASH_ESCAPES can hide a second
-      // statement that this multipleStatements connection would execute.
-      if (!isReadOnlyQuery(plan.batches[0]!, 'mysql', sqlMode)) throw new Error(t('export.readOnlyOnly'))
+      const planFor = (mode: SqlModeFlags) => {
+        const plan = prepareSqlRun({ engine: 'mysql', sql, params, sort, filter, sqlMode: mode })
+        // The manager's read-only gate masks with the last-seen flags; recheck
+        // with the session's real sql_mode — NO_BACKSLASH_ESCAPES can hide a
+        // second statement that this multipleStatements connection would execute.
+        if (!isReadOnlyQuery(plan.batches[0]!, 'mysql', mode)) throw new Error(t('export.readOnlyOnly'))
+        return plan
+      }
+      planFor(sqlMode)
       // Registered like query() so Stop (and disconnect) can KILL QUERY a
       // runaway export instead of it streaming to completion unstoppably.
       const entry = { executionId, threadId: null as number | null, cancelRequested: false }
@@ -705,6 +760,7 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
         conn = await checkoutFor(childDb)
         entry.threadId = rawOf(conn).threadId ?? null
         if (entry.cancelRequested) throw new Error(t('query.cancelled'))
+        const plan = planFor(sessionModes.get(rawOf(conn)) ?? {})
         await streamMysqlExport(rawOf(conn), plan.batches[0]!, plan.params, writer)
         const result = await writer.close()
         // Leaves `running` before the connection re-enters the pool (see query()).
@@ -1146,6 +1202,10 @@ export function createMysqlDriver(profile: ConnectionProfile, endpoint: Endpoint
       return true
     },
 
+    sqlMode() {
+      return sqlMode
+    },
+
     openTransaction() {
       return pin ? { childDb: pin.database } : null
     },
@@ -1195,6 +1255,7 @@ function streamQuery(
     let total = 0
     let bufferedBytes = 0
     let limited = false
+    let cells: Array<[number, number]> = []
     let active = false
     const resultSets: QueryResultSet[] = []
     const pushCurrent = () => {
@@ -1205,6 +1266,7 @@ function streamQuery(
         rows,
         rowCount: total,
         truncated: limited || total > rows.length,
+        ...truncatedCellsField(cells),
         rowCountExact: true,
       })
       active = false
@@ -1231,6 +1293,7 @@ function streamQuery(
       rows = []
       total = 0
       limited = false
+      cells = []
       active = true
     })
     query.on('result', (row) => {
@@ -1239,9 +1302,9 @@ function streamQuery(
         if (rows.length < MAX_BUFFERED_ROWS) {
           const bounded = boundedRow(row as unknown[], bufferedBytes)
           if (bounded) {
+            noteTruncatedCells(cells, rows.length, bounded.truncatedColumns)
             rows.push(bounded.row)
             bufferedBytes += bounded.bytes
-            limited ||= bounded.truncated
           } else {
             limited = true
           }
@@ -1256,6 +1319,7 @@ function streamQuery(
         rows = []
         total = (row as { affectedRows?: number }).affectedRows ?? 0
         limited = false
+        cells = []
         active = true
         const serverStatus = (row as { serverStatus?: number }).serverStatus
         if (sessionState && serverStatus !== undefined) {

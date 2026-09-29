@@ -12,7 +12,7 @@ import { isReadOnlyQuery } from '../../src/sql-order'
 import { t } from '../../src/i18n'
 import { errorMessage } from './error-message'
 import { columnReference } from './column-reference'
-import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, noteTruncatedCells, POOL_IDLE_MS, truncatedCellsField } from './limits'
 import { byteCount, sizedRow } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
@@ -1319,21 +1319,23 @@ function streamQuery(
   sourceCache: Map<string, ColumnSource>,
 ): Promise<QueryResult> {
   return new Promise((resolve, reject) => {
-    const buffers = new Map<object, { rows: unknown[][]; total: number; bytes: number; limited: boolean }>()
+    type RowBuffer = { rows: unknown[][]; total: number; bytes: number; limited: boolean; cells: Array<[number, number]> }
+    const emptyBuffer = (): RowBuffer => ({ rows: [], total: 0, bytes: 0, limited: false, cells: [] })
+    const buffers = new Map<object, RowBuffer>()
     let bufferedBytes = 0
     const config: pg.QueryArrayConfig = { text: sql, values: params, rowMode: 'array' }
     const query = new pg.Query(config)
     query.on('row', (row: unknown[], result?: object) => {
       const key = result ?? query
-      const buffer = buffers.get(key) ?? { rows: [], total: 0, bytes: 0, limited: false }
+      const buffer = buffers.get(key) ?? emptyBuffer()
       buffer.total += 1
       if (buffer.rows.length < MAX_BUFFERED_ROWS) {
         const bounded = boundedRow(row, bufferedBytes)
         if (bounded) {
+          noteTruncatedCells(buffer.cells, buffer.rows.length, bounded.truncatedColumns)
           buffer.rows.push(bounded.row)
           buffer.bytes += bounded.bytes
           bufferedBytes += bounded.bytes
-          buffer.limited ||= bounded.truncated
         } else {
           buffer.limited = true
         }
@@ -1352,13 +1354,14 @@ function streamQuery(
       }
       void Promise.all(
         results.map(async (entry): Promise<QueryResultSet> => {
-          const buffer = buffers.get(entry as object) ?? { rows: [], total: 0, bytes: 0, limited: false }
+          const buffer = buffers.get(entry as object) ?? emptyBuffer()
           return {
             columns: entry.fields.map((field) => field.name),
             columnSources: await columnSourcesForFields(client, entry.fields, sourceCache),
             rows: buffer.rows,
             rowCount: entry.rowCount ?? buffer.total,
             truncated: buffer.limited || buffer.total > buffer.rows.length,
+            ...truncatedCellsField(buffer.cells),
             rowCountExact: true,
           }
         }),

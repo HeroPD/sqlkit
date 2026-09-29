@@ -49,7 +49,7 @@ import type { EmptyAction } from './editor-empty'
 import { clearInspectDraftCache, dropInspectDraft, exportInspectDraft, importInspectDraft, sweepInspectDrafts, type ColumnAlterEventDetail } from './table-inspect'
 import { connectionLabel } from '../connection-label'
 import { connectionLabelColorValue } from '../connection-label-colors'
-import { clearEditorStateCache, type EditorCommandDetail, type RunQueryDetail } from './sql-editor'
+import { clearEditorStateCache, renameEditorState, type EditorCommandDetail, type RunQueryDetail } from './sql-editor'
 import type { SelectionCommandId } from '../codemirror/selection-commands'
 import { firstStatement } from '../codemirror/run-query'
 import type { ObjectEditDetail, ObjectInspectDetail, TableBrowseDetail, TableCreateDetail, TableSelectDetail } from './explorer-view'
@@ -278,7 +278,6 @@ export class WorkbenchScreen extends LitElement {
   private _txn = new TransactionsController(this, {
     connections: () => this._config.connections,
     activeProfile: () => this._config.activeProfile(),
-    profileById: (profileId) => this._config.byId(profileId) ?? null,
     openOn: (profileId) => this._live.transaction(profileId),
     endTransaction: (profileId, mode) => this._live.endTransaction(profileId, mode),
     notice: (message) => this._surfaceTransactionNotice(message),
@@ -386,6 +385,8 @@ export class WorkbenchScreen extends LitElement {
     endTransaction: (mode) => {
       const profileId = this._txn.openProfile()?.id
       if (profileId) void this._txn.end(profileId, mode)
+      // Two open elsewhere and none here: which one is meant is the user's call, made in the manager.
+      else if (this._txn.owners().length > 1) this._txn.toggleManager(true)
     },
     showTransactionManager: () => this._txn.toggleManager(true),
     hasSqlTab: () => this._ctx.activeSqlTab() !== null,
@@ -409,7 +410,8 @@ export class WorkbenchScreen extends LitElement {
     navigateResult: (direction) => this._navigateResult(direction),
     addDatabase: () => this._onAddDatabase(),
     connectProfile: (profileId) => void this._connectProfile(profileId),
-    disconnectProfile: (profileId) => void this._live.disconnect(profileId),
+    disconnectProfile: (profileId) => this._requestDisconnect(profileId),
+    disconnectAll: () => this._requestDisconnectAll(),
     showView: (view) => {
       this._activeView = view as ViewId
     },
@@ -422,7 +424,9 @@ export class WorkbenchScreen extends LitElement {
   })
 
   // App-wide settings: load, follow the cross-window broadcast, persist.
-  private _settings = new SettingsController(this)
+  private _settings = new SettingsController(this, {
+    onSaveFailed: (error) => this._dialogs.notice(t('settings.saveFailed'), error),
+  })
 
   // Query results, tasks, and history; re-renders us as runs progress.
   private _queries = new QueriesController(this, (tabId) => this._ctx.tabExists(tabId), () => this._settings.app.resultFetchSize)
@@ -453,6 +457,7 @@ export class WorkbenchScreen extends LitElement {
       this._forgetInspectDirty(tabId)
       this._session.dropBuffer(tabId)
     },
+    isRunning: (tabId): boolean => this._queries.runFor(tabId).phase === 'running',
   })
 
   // Hot exit: mirrors the open tabs and their unsaved buffers into the workspace
@@ -483,6 +488,12 @@ export class WorkbenchScreen extends LitElement {
     sweepOrphanTabState: () => this._sweepOrphanTabState(),
     contextFolder: () => this._contextFolder(),
     onTabSaved: (tabId) => this._session.dropBuffer(tabId),
+    onTabRenamed: (oldId, newId) => {
+      renameEditorState(oldId, newId)
+      const scroll = this._tabScroll.get(oldId)
+      this._tabScroll.delete(oldId)
+      if (scroll) this._tabScroll.set(newId, scroll)
+    },
   })
 
   private _resultEditing = new ResultEditingController({
@@ -490,6 +501,7 @@ export class WorkbenchScreen extends LitElement {
     activeDbId: () => this._ctx.activeDbId,
     activeChildDb: () => this._ctx.activeChildDb,
     activeProfile: () => this._config.activeProfile(),
+    serverVersion: () => (this._ctx.activeDbId ? this._live.serverVersion(this._ctx.activeDbId) : undefined),
     run: () => this._queries.runFor(this._ctx.activeTabId),
     tables: () => (this._ctx.activeDbId ? (this._live.tables[this._ctx.activeDbId] ?? []) : []),
     columns: () => (this._ctx.activeDbId ? (this._live.columns[this._ctx.activeDbId] ?? []) : []),
@@ -1227,7 +1239,7 @@ export class WorkbenchScreen extends LitElement {
     // No engine gives us an undo, so an irreversible statement gets one look
     // first. After parameter binding, so the preview shows the values that will
     // really be sent.
-    const risks = preconfirmed || !this._settings.app.confirmDestructive ? [] : analyzeDestructive(sqlText, profile.engine)
+    const risks = preconfirmed || !this._settings.app.confirmDestructive ? [] : analyzeDestructive(sqlText, profile.engine, this._live.sqlMode(profile.id))
     if (risks.length) {
       if (this._destructivePrompt) return
       const confirmed = await new Promise<boolean>((resolve) => {
@@ -1321,7 +1333,7 @@ export class WorkbenchScreen extends LitElement {
     // path. Refreshed even on error: a failed script may have half-applied.
     // Deferred while a manual transaction is open (metadata reads could block
     // on its uncommitted DDL locks); endTransaction refreshes on commit.
-    if (!isReadOnlyQuery(sqlText, profile.engine) && !this._live.transaction(profile.id)) {
+    if (!isReadOnlyQuery(sqlText, profile.engine, this._live.sqlMode(profile.id)) && !this._live.transaction(profile.id)) {
       this._live.refresh(profile.id)
     }
   }
@@ -1774,9 +1786,15 @@ export class WorkbenchScreen extends LitElement {
     // Two pixels from Run, so an open transaction is named before it dies with
     // the connection — the Databases list can disconnect bare because getting
     // there is already deliberate.
-    const transaction = this._live.transaction(profile.id)
-    if (!transaction) {
-      void this._live.disconnect(profile.id)
+    this._requestDisconnect(profile.id)
+  }
+
+  // Disconnecting rolls back an open transaction, so it is named first (titlebar and palette alike).
+  private _requestDisconnect(profileId: string) {
+    const profile = this._config.byId(profileId)
+    const transaction = this._live.transaction(profileId)
+    if (!profile || !transaction) {
+      void this._live.disconnect(profileId)
       return
     }
     this._dialogs.confirm = {
@@ -1784,7 +1802,22 @@ export class WorkbenchScreen extends LitElement {
       detail: t('connection.disconnectTransactionDetail', { database: transaction.childDb }),
       confirmLabel: t('database.disconnect'),
       danger: true,
-      action: () => void this._live.disconnect(profile.id),
+      action: () => void this._live.disconnect(profileId),
+    }
+  }
+
+  private _requestDisconnectAll() {
+    const owners = this._txn.owners()
+    if (!owners.length) {
+      void this._live.disconnectAll()
+      return
+    }
+    this._dialogs.confirm = {
+      message: t('connection.disconnectAllTransactionTitle'),
+      detail: t('connection.disconnectAllTransactionDetail', { names: owners.map((owner) => owner.profile.name).join(', ') }),
+      confirmLabel: t('action.disconnectAll'),
+      danger: true,
+      action: () => void this._live.disconnectAll(),
     }
   }
 
@@ -3064,8 +3097,8 @@ export class WorkbenchScreen extends LitElement {
   // is a finished, read-only query, so re-running it to stream every row is safe.
   private _canStreamExport(): boolean {
     const run = this._queries.runFor(this._ctx.activeTabId)
-    const engine = this._config.activeProfile()?.engine
-    return run.phase === 'done' && !!run.sql && !!engine && isReadOnlyQuery(run.sql, engine)
+    const profile = this._config.activeProfile()
+    return run.phase === 'done' && !!run.sql && !!profile && isReadOnlyQuery(run.sql, profile.engine, this._live.sqlMode(profile.id))
   }
 
   // Streams the current query's full result to a file the user picks. Re-runs the

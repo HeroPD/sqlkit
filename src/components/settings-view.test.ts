@@ -190,6 +190,14 @@ describe('settings-view', () => {
       expect(changes.at(-1)!.keymapOverrides.runQuery).toBe('Mod-Shift-e')
     })
 
+    it('marks a shared chord however its modifiers are spelled', async () => {
+      const formatSql = KEYMAP_DEFAULTS.formatSql
+      expect(formatSql).toBe('Shift-Alt-f')
+      view.settings = { ...DEFAULT_APP_SETTINGS, keymapOverrides: { runQuery: 'Alt-Shift-F' } }
+      await show('Keymap')
+      expect(view.shadowRoot!.querySelectorAll('.binding.conflict')).toHaveLength(2)
+    })
+
     it('marks the commands that share a chord', async () => {
       view.settings = { ...DEFAULT_APP_SETTINGS, keymapOverrides: { runQuery: KEYMAP_DEFAULTS.commandPalette } }
       await show('Keymap')

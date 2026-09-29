@@ -1,5 +1,5 @@
 import mysql from 'mysql2/promise'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -392,6 +392,43 @@ describeDb('mysql driver (integration)', () => {
     } finally {
       await admin.query('set global sql_mode = ?', [mode]).catch(() => {})
       await driver.query('drop table if exists nbe_probe').catch(() => {})
+      await driver.disconnect()
+    }
+  })
+
+  // RESET CONNECTION hands each checkout the global mode as it is now, not as it was at connect.
+  it('binds and masks with the mode a checkout finds after the global mode changes mid-session', async () => {
+    const [[{ mode }]] = await admin.query('select @@global.sql_mode as mode') as unknown as [[{ mode: string }]]
+    const onSqlModeChange = vi.fn()
+    const profile = profileFromUrl(dbUrl, { engine: 'mysql' })
+    const driver = createMysqlDriver(profile, endpointFor(profile), { onError: () => {}, onSqlModeChange })
+    await driver.connect()
+    const values = ["x\\'; select 1 as injected; -- ", 'back\\slash', "it's"]
+    try {
+      await driver.query('create table nbe_late (id int primary key, v text)')
+      expect(driver.sqlMode!().noBackslashEscapes).not.toBe(true)
+      await admin.query("set global sql_mode = concat(@@global.sql_mode, ',NO_BACKSLASH_ESCAPES')")
+      // The pooled session was reset before the change; its next reset picks the new mode up.
+      for (let round = 0; round < 3; round += 1) {
+        const result = await driver.runBatch!(values.map((value, id) => ({
+          sql: 'insert into nbe_late values (?, ?) on duplicate key update v = values(v)',
+          params: [id, value],
+        })))
+        expect(result).toEqual({ success: true })
+        const [rows] = await admin.query('select v from nbe_late order by id')
+        expect((rows as Array<{ v: string }>).map((row) => row.v)).toEqual(values)
+        const echoed = await driver.query('select ? as v', [values[0]])
+        expect(echoed.rows).toEqual([[values[0]]])
+      }
+      expect(driver.sqlMode!().noBackslashEscapes).toBe(true)
+      expect(onSqlModeChange).toHaveBeenCalled()
+      // Masked with the session's mode, the backslash ends the literal and the tail is a second statement.
+      const exportTo = join(mkdtempSync(join(tmpdir(), 'sqlkit-nbe-')), 'out.csv')
+      await expect(driver.exportQuery!({ sql: "select 'a\\'; select 2 as b", params: [], childDb: null, sort: null, filePath: exportTo, format: 'csv' }))
+        .rejects.toThrow(/read-only/)
+    } finally {
+      await admin.query('set global sql_mode = ?', [mode]).catch(() => {})
+      await driver.query('drop table if exists nbe_late').catch(() => {})
       await driver.disconnect()
     }
   })
@@ -921,6 +958,21 @@ DELIMITER ;`)
         expect(driver.openTransaction!()).toBeNull()
       } finally {
         await admin.query('drop table if exists txn_ddl_probe').catch(() => {})
+        await driver.disconnect()
+      }
+    })
+
+    it('keeps the transaction open when a later statement in the same run fails', async () => {
+      const driver = await connectDriver()
+      try {
+        await admin.query('truncate table txn_probe')
+        await expect(driver.query('BEGIN; insert into txn_probe values (5); select no_such_column from txn_probe')).rejects.toThrow(/no_such_column/)
+        expect(driver.openTransaction!()).not.toBeNull()
+        await driver.query('COMMIT')
+        expect(driver.openTransaction!()).toBeNull()
+        const [after] = await admin.query('select count(*) as n from txn_probe')
+        expect((after as Array<{ n: number }>)[0]?.n).toBe(1)
+      } finally {
         await driver.disconnect()
       }
     })

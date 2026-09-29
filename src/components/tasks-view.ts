@@ -89,6 +89,10 @@ export class TasksView extends LitElement {
   private _poll: number | null = null
   /** Bumped on every context change; a slower in-flight fetch is stale. */
   private _generation = 0
+  /** The context polling was started for, so the first update does not start it a second time. */
+  private _pollingKey: string | null = null
+  /** Generation of the fetch still in flight; a tick waits for it rather than stacking another. */
+  private _inFlight: number | null = null
 
   connectedCallback() {
     super.connectedCallback()
@@ -103,12 +107,17 @@ export class TasksView extends LitElement {
     if (this._timer !== null) clearInterval(this._timer)
     this._timer = null
     this._stopPolling()
+    this._pollingKey = null
     // Invalidate anything in flight so it can't land on a remounted element.
     this._generation += 1
   }
 
+  private get _contextKey() {
+    return `${this.profileId ?? ''}\u0000${this.childDb ?? ''}\u0000${this.engine ?? ''}`
+  }
+
   protected willUpdate(changed: PropertyValues) {
-    if (changed.has('profileId') || changed.has('childDb') || changed.has('engine')) {
+    if ((changed.has('profileId') || changed.has('childDb') || changed.has('engine')) && this._contextKey !== this._pollingKey) {
       this._server = { phase: 'idle' }
       this._generation += 1
       if (this.isConnected) this._startPolling()
@@ -131,11 +140,12 @@ export class TasksView extends LitElement {
 
   private _startPolling() {
     this._stopPolling()
+    this._pollingKey = this._contextKey
     if (!this._serverSupported) return
     void this._load()
     this._poll = window.setInterval(() => {
       // A hidden window is not being read; don't query someone's database for it.
-      if (!document.hidden) void this._load()
+      if (!document.hidden && this._inFlight !== this._generation) void this._load()
     }, POLL_MS)
   }
 
@@ -152,11 +162,14 @@ export class TasksView extends LitElement {
     // panel doesn't flicker every few seconds.
     if (this._server.phase === 'idle') this._server = { phase: 'loading' }
     let result: Awaited<ReturnType<typeof window.sqlkit.serverActivity>>
+    this._inFlight = generation
     try {
       result = await window.sqlkit.serverActivity(profileId, this.childDb)
     } catch (error) {
       if (this._generation === generation) this._server = { phase: 'error', error: (error as Error).message }
       return
+    } finally {
+      if (this._inFlight === generation) this._inFlight = null
     }
     if (this._generation !== generation) return
     this._server = result.success

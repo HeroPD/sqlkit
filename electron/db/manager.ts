@@ -32,6 +32,7 @@ import type {
 import type { ExportFormat } from '../../src/result-export'
 import { isReadOnlyQuery } from '../../src/sql-order'
 import { isReadOnlyScript } from '../../src/sql-readonly'
+import type { SqlModeFlags } from '../../src/sql-mask'
 import { t } from '../../src/i18n'
 import { createDriver, type Driver } from './driver'
 import { writeExportAtomically } from './export'
@@ -54,8 +55,13 @@ type Active =
       transaction: OpenTransaction | null
       /** Read-only guardrail: structured write endpoints refuse to run. */
       readOnly: boolean
+      /** Mirror of the driver's last-seen MySQL sql_mode flags, for db:status. */
+      sqlMode: SqlModeFlags
     }
   | ({ phase: 'error'; profileId: string; error: string } & ConnectionResources)
+
+const sqlModeSet = (mode: SqlModeFlags) => mode.noBackslashEscapes === true || mode.ansiQuotes === true
+const sameSqlMode = (a: SqlModeFlags, b: SqlModeFlags) => (a.noBackslashEscapes === true) === (b.noBackslashEscapes === true) && (a.ansiQuotes === true) === (b.ansiQuotes === true)
 
 export type ConnectionManager = ReturnType<typeof createConnectionManager>
 
@@ -83,6 +89,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
       children: active.driver.children?.(),
       ...(active.transaction ? { transaction: active.transaction } : {}),
       ...(active.readOnly ? { readOnly: true } : {}),
+      ...(sqlModeSet(active.sqlMode) ? { sqlMode: active.sqlMode } : {}),
     }
   }
   const statuses = () => [...connections.values()].map(statusOf)
@@ -94,12 +101,16 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
 
   // Re-reads the driver's pinned-transaction state and rebroadcasts on change,
   // so the renderer's indicator tracks each run's BEGIN/COMMIT outcome.
+  // The sql_mode flags ride along: a session can pick up a changed global mode at any checkout.
   const syncTransaction = (profileId: string) => {
     const active = connections.get(profileId)
     if (!active || active.phase !== 'connected') return
     const transaction = active.driver.openTransaction?.() ?? null
-    if (active.transaction?.childDb === transaction?.childDb && active.transaction?.failed === transaction?.failed) return
+    const sqlMode = active.driver.sqlMode?.() ?? {}
+    const sameTransaction = active.transaction?.childDb === transaction?.childDb && active.transaction?.failed === transaction?.failed
+    if (sameTransaction && sameSqlMode(active.sqlMode, sqlMode)) return
     active.transaction = transaction
+    active.sqlMode = sqlMode
     broadcast(statuses())
   }
 
@@ -222,6 +233,9 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
         onTransactionChange: () => {
           if (connectedDriver(profile.id) === resources.driver) syncTransaction(profile.id)
         },
+        onSqlModeChange: () => {
+          if (connectedDriver(profile.id) === resources.driver) syncTransaction(profile.id)
+        },
       })
       if (isCurrent()) register({ phase: 'connecting', profileId: profile.id, ...resources })
       const serverVersion = await resources.driver.connect()
@@ -238,6 +252,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
         tunnel: resources.tunnel,
         transaction: null,
         readOnly: profile.readOnly ?? false,
+        sqlMode: resources.driver.sqlMode?.() ?? {},
       })
       return { success: true, serverVersion }
     } catch (error) {
@@ -376,7 +391,7 @@ export function createConnectionManager(broadcast: (statuses: ConnectionStatus[]
     // An export streams on its own connection: it would silently miss the
     // open transaction's uncommitted rows (or block on its locks on mssql).
     if (driver.openTransaction?.()) return { success: false, error: t('query.transactionExportBlocked') }
-    if (!isReadOnlyQuery(sql, active.engine)) return { success: false, error: t('export.readOnlyOnly') }
+    if (!isReadOnlyQuery(sql, active.engine, active.sqlMode)) return { success: false, error: t('export.readOnlyOnly') }
     // The engine comes from the live connection, never the renderer, so exported
     // literals are always spelled for the database they were read from.
     const sqlTarget = format === 'sql' ? { engine: active.engine, table: sqlTable } : undefined

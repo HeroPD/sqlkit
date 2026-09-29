@@ -281,7 +281,10 @@ export class StatusBar extends LitElement {
     `
   }
 
+  // Listens on window, so the focused control (the grid's double-Esc, an editor's
+  // completion list) has already had this Escape; one it claimed is not ours too.
   private _onKeydown = (event: KeyboardEvent) => {
+    if (event.defaultPrevented) return
     if (event.key === 'Escape' && (this._open || this._wsOpen || this._statsOpen)) {
       event.preventDefault()
       this._open = false

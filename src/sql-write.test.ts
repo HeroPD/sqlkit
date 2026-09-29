@@ -852,6 +852,32 @@ describe('engine-aware optimistic predicates', () => {
     expect(byFloatKey.sql).toContain('`k` <=> CAST(? AS FLOAT)')
   })
 
+  // CAST(… AS FLOAT) is a syntax error before MySQL 8.0.17 / MariaDB 10.4.5, failing every save.
+  it('keeps the plain FLOAT comparison on servers without CAST AS FLOAT', () => {
+    const ratio = col({ name: 'ratio', dataType: 'float' })
+    const guard = (serverVersion: string) => buildDeleteRows({
+      table: users,
+      rows: [[{ name: 'id', value: 1 }, { name: 'ratio', value: 0.5, columnMeta: ratio }]],
+      engine: 'mysql',
+      serverVersion,
+    }).sql
+    for (const old of ['MySQL 5.7.44', 'MySQL 8.0.16', 'MariaDB 10.3.39', 'MariaDB 10.4.4', 'MariaDB 5.5.5-10.2.44']) {
+      expect(guard(old)).toContain('`ratio` <=> ?')
+      expect(guard(old)).not.toContain('AS FLOAT')
+    }
+    for (const current of ['MySQL 8.0.17', 'MySQL 8.4.3', 'MySQL 9.3.0', 'MariaDB 10.4.5', 'MariaDB 11.4.2']) {
+      expect(guard(current)).toContain('`ratio` <=> CAST(? AS FLOAT)')
+    }
+    const [update] = buildBatchUpdates({
+      table: users,
+      engine: 'mysql',
+      serverVersion: 'MySQL 5.7.44',
+      edits: [{ column: 'ratio', columnMeta: ratio, value: '0.25', originalValue: 0.5, pks: [{ name: 'id', value: 1 }] }],
+    })
+    expect(update!.sql).toContain('`ratio` <=> ?')
+    expect(update!.sql).not.toContain('AS FLOAT')
+  })
+
   // Session language decides how SQL Server reads text into datetime; style 121 does not.
   it('converts ISO datetime text explicitly on SQL Server, and leaves other shapes to the session', () => {
     const at = col({ name: 'at', dataType: 'datetime' })

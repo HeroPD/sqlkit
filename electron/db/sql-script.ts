@@ -228,7 +228,7 @@ export function prepareSqlRun(args: {
   params?: unknown[]
   sort?: QuerySort | null
   filter?: string | null
-  /** MySQL: the session's masking-relevant sql_mode flags, read at connect. */
+  /** MySQL: the running session's masking-relevant sql_mode flags. */
   sqlMode?: SqlModeFlags
 }): SqlRunPlan {
   const params = args.params ?? []

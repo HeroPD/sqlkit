@@ -1,6 +1,7 @@
 import type { ExportFormat } from './result-export'
 import type { SelectionCommandId } from './codemirror/selection-commands'
 import type { AppSettings, WorkspacePreferences } from './settings'
+import type { SqlModeFlags } from './sql-mask'
 
 export type RecentWorkspace = {
   name: string
@@ -149,6 +150,9 @@ export type SessionTab =
       /** The buffer differs from the file on disk. Untitled tabs are backed up
        *  whether or not this is set — they have no file to fall back to. */
       dirty?: boolean
+      /** A digest of the file text a dirty buffer was based on (src/text-digest.ts),
+       *  so a restore notices the file changed on disk while the app was down. */
+      baseline?: string
     }
   | {
       kind: 'config'
@@ -208,6 +212,9 @@ export type ConnectionStatus = {
   /** The read-only guardrail the live session actually enforces — captured at
    * connect, so it can lag a profile edit until the next reconnect. */
   readOnly?: boolean
+  /** MySQL sql_mode flags that change how SQL reads (NO_BACKSLASH_ESCAPES, ANSI_QUOTES),
+   * as the session last reported them; absent when none apply. */
+  sqlMode?: SqlModeFlags
   error?: string
 }
 
@@ -230,6 +237,9 @@ export type QueryResultSet = {
   rowCount: number
   /** Result exceeded the buffer cap. */
   truncated?: boolean
+  /** Buffered cells (row index, column) shortened to fit the per-row budget:
+   * their text ends in a marker, not the value, so they must never be exported or copied as data. */
+  truncatedCells?: Array<[row: number, col: number]>
   /** False when execution was stopped at the cap and rowCount is only a lower bound. */
   rowCountExact?: boolean
   /** Set when more rows are buffered in the main process than were sent. */

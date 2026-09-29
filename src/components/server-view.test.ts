@@ -41,3 +41,17 @@ describe('ServerView stale-load guard', () => {
     expect(internals(view)._state).toMatchObject({ phase: 'done', sections: [section('Analytics')] })
   })
 })
+
+describe('ServerView failed load', () => {
+  // A rejected IPC call used to leave the loading spinner up for good.
+  it('shows the error when the inspect call rejects', async () => {
+    const inspectServer = vi.fn(() => Promise.reject(new Error('channel closed')))
+    ;(window as never as { sqlkit: { inspectServer: typeof inspectServer } }).sqlkit = { inspectServer }
+
+    const view = new ServerView()
+    view.profileId = 'p1'
+    await internals(view)._load()
+
+    expect(internals(view)._state).toEqual({ phase: 'error', error: 'channel closed' })
+  })
+})

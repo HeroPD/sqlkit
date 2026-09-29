@@ -7,7 +7,7 @@ import type { ColumnRef, ConnectionProfile, DbObject, InspectSection, QueryResul
 import { dialectFor, sqlOptionToken } from '../../src/dialect'
 import { errorMessage } from './error-message'
 import { columnReference } from './column-reference'
-import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, POOL_IDLE_MS } from './limits'
+import { APP_CONNECTION_NAME, BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, MAX_POOL_CONNECTIONS, MAX_SESSIONS, noteTruncatedCells, POOL_IDLE_MS, truncatedCellsField } from './limits'
 import { byteCount, sizedRow } from './table-stats'
 import { formatUptime } from './server-stats'
 import type { Driver, DriverEvents } from './driver'
@@ -462,6 +462,7 @@ export function createMssqlDriver(profile: ConnectionProfile, endpoint: Endpoint
           rows: result.rows,
           rowCount: result.rowCount,
           truncated: result.truncated,
+          truncatedCells: result.truncatedCells,
           rowCountExact: result.rowCountExact,
         }]))
 
@@ -1307,13 +1308,14 @@ function streamQuery(
     let sawRecordset = false
     let affected = 0
     let limited = false
+    let cells: Array<[number, number]> = []
     let active = false
     let fields: MssqlColumn[] = []
     let conversionError: Error | null = null
     const resultSets: QueryResultSet[] = []
     const pushCurrent = () => {
       if (!active) return
-      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length, rowCountExact: true })
+      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length, ...truncatedCellsField(cells), rowCountExact: true })
       active = false
     }
     request.on('recordset', (recordset: MssqlColumn[]) => {
@@ -1324,6 +1326,7 @@ function streamQuery(
       rows = []
       total = 0
       limited = false
+      cells = []
       active = true
     })
     request.on('row', (row: unknown[]) => {
@@ -1340,9 +1343,9 @@ function streamQuery(
       if (rows.length < MAX_BUFFERED_ROWS) {
         const bounded = boundedRow(normalized, budget.bytes)
         if (bounded) {
+          noteTruncatedCells(cells, rows.length, bounded.truncatedColumns)
           rows.push(bounded.row)
           budget.bytes += bounded.bytes
-          limited ||= bounded.truncated
         } else {
           limited = true
         }
@@ -1572,12 +1575,13 @@ function streamTediousBatch(
     let sawRecordset = false
     let affected = 0
     let limited = false
+    let cells: Array<[number, number]> = []
     let activeSet = false
     let conversionError: Error | null = null
     const resultSets: QueryResultSet[] = []
     const pushCurrent = () => {
       if (!activeSet) return
-      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length, rowCountExact: true })
+      resultSets.push({ columns, rows, rowCount: total, truncated: limited || total > rows.length, ...truncatedCellsField(cells), rowCountExact: true })
       activeSet = false
     }
     const request = new TediousRequest(sqlText, (err) => {
@@ -1601,6 +1605,7 @@ function streamTediousBatch(
       rows = []
       total = 0
       limited = false
+      cells = []
       activeSet = true
     })
     withEvents.on('row', (cols) => {
@@ -1617,9 +1622,9 @@ function streamTediousBatch(
       if (rows.length < MAX_BUFFERED_ROWS) {
         const bounded = boundedRow(normalized, budget.bytes)
         if (bounded) {
+          noteTruncatedCells(cells, rows.length, bounded.truncatedColumns)
           rows.push(bounded.row)
           budget.bytes += bounded.bytes
-          limited ||= bounded.truncated
         } else {
           limited = true
         }

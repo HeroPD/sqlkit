@@ -106,6 +106,21 @@ describe('activeSort', () => {
 })
 
 describe('isReadOnlyQuery', () => {
+  // Export re-runs the statement: PRAGMA journal_mode=WAL would change the database.
+  it('accepts only value-free, non-acting pragmas', () => {
+    expect(isReadOnlyQuery('PRAGMA user_version', 'sqlite')).toBe(true)
+    expect(isReadOnlyQuery('pragma main.journal_mode;', 'sqlite')).toBe(true)
+    expect(isReadOnlyQuery("PRAGMA table_info('users')", 'sqlite')).toBe(true)
+    expect(isReadOnlyQuery('PRAGMA main.index_list(users)', 'sqlite')).toBe(true)
+    expect(isReadOnlyQuery('PRAGMA journal_mode=WAL', 'sqlite')).toBe(false)
+    expect(isReadOnlyQuery('PRAGMA journal_mode = delete', 'sqlite')).toBe(false)
+    expect(isReadOnlyQuery('PRAGMA journal_mode(WAL)', 'sqlite')).toBe(false)
+    expect(isReadOnlyQuery('PRAGMA user_version = 7', 'sqlite')).toBe(false)
+    expect(isReadOnlyQuery('PRAGMA optimize', 'sqlite')).toBe(false)
+    expect(isReadOnlyQuery('PRAGMA wal_checkpoint', 'sqlite')).toBe(false)
+    expect(isReadOnlyQuery('PRAGMA incremental_vacuum', 'sqlite')).toBe(false)
+  })
+
   it('accepts single read-only statements', () => {
     expect(isReadOnlyQuery('SELECT * FROM users')).toBe(true)
     expect(isReadOnlyQuery('  select 1;\n')).toBe(true)

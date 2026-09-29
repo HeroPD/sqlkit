@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactiveControllerHost } from 'lit'
 import type { SessionContext } from '../electron'
 import { SessionController } from './session'
+import { textDigest } from '../text-digest'
 
 const host = (): ReactiveControllerHost =>
   ({ addController() {}, removeController() {}, requestUpdate() {}, updateComplete: Promise.resolve(true) })
@@ -521,5 +522,32 @@ describe('writes wait for the restore', () => {
     ctrl.scheduleLayoutWrite()
     await vi.advanceTimersByTimeAsync(400)
     expect(api.writeSession).toHaveBeenCalledTimes(1)
+  })
+})
+
+// A crash, then a pull that changed the file, then a relaunch: the pulled text must not be the baseline the save checks.
+describe('hydrate keeps a restored buffer honest about its baseline', () => {
+  const fileTab = (baseline: string) =>
+    sqlTab({ id: 'file:/ws/a.sql', name: 'a.sql', path: '/ws/a.sql', dirty: true, baseline })
+  const restore = async (baseline: string, disk: string) => {
+    stubSqlkit({
+      readSession: vi.fn(() => Promise.resolve({ version: 1, contexts: [context([fileTab(baseline)])] })),
+      readSessionBackup: vi.fn(() => Promise.resolve('my edit')),
+      readFile: vi.fn(() => Promise.resolve({ success: true, content: disk })),
+    })
+    const restored = await make().hydrate()
+    return restored?.buffers.get('file:/ws/a.sql')
+  }
+
+  it('drops the baseline when the file changed on disk since, so the next save reports a conflict', async () => {
+    expect(await restore(textDigest('before the pull'), 'after the pull')).toEqual({ content: 'my edit', savedContent: '', path: '/ws/a.sql' })
+  })
+
+  it('keeps the file as the baseline when it is still what the buffer was based on', async () => {
+    expect(await restore(textDigest('unchanged'), 'unchanged')).toEqual({ content: 'my edit', savedContent: 'unchanged', path: '/ws/a.sql' })
+  })
+
+  it('takes the file as the baseline for a digest it cannot compute', async () => {
+    expect((await restore('sha999:abc', 'after the pull'))?.savedContent).toBe('after the pull')
   })
 })

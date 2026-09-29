@@ -1,5 +1,6 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { ColumnRef, ConnectionPhase, ConnectionProfile, ConnectResult, ConnectionStatus, DbObjects, TableRef, TableStat } from '../electron'
+import type { SqlModeFlags } from '../sql-mask'
 
 const activeChildName = (status: ConnectionStatus | undefined): string | null =>
   status?.phase === 'connected' ? (status.children?.find((child) => child.inUse)?.name ?? null) : null
@@ -153,6 +154,18 @@ export class ConnectionsController implements ReactiveController {
   transaction(profileId: string) {
     const status = this.statuses[profileId]
     return status?.phase === 'connected' ? status.transaction : undefined
+  }
+
+  /** The live server's version banner ("MySQL 8.0.36"), while connected. */
+  serverVersion(profileId: string): string | undefined {
+    const status = this.statuses[profileId]
+    return status?.phase === 'connected' ? status.serverVersion : undefined
+  }
+
+  /** The MySQL session's sql_mode flags that change how SQL reads, while connected. */
+  sqlMode(profileId: string): SqlModeFlags | undefined {
+    const status = this.statuses[profileId]
+    return status?.phase === 'connected' ? status.sqlMode : undefined
   }
 
   /** The read-only guardrail the live session enforces — not what the saved

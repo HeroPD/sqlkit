@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ConnectionProfile } from '../../src/electron'
@@ -438,6 +438,26 @@ describe('sqlite driver: multi-statement', () => {
     expect(() => queryDatabase(db, 'insert into p values (?); insert into p values (?)', [1, 2]))
       .toThrow(/single-statement/i)
     expect(queryDatabase(db, 'insert into p values (?)', [7]).rowCount).toBe(1)
+  })
+
+  // SQLITE_OPEN_READONLY covers the opened file only; VACUUM INTO and ATTACH write elsewhere.
+  it('refuses VACUUM INTO and ATTACH on a read-only handle, but not on a writable one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sqlkit-sqlite-ro-'))
+    const file = join(dir, 'main.db')
+    const writable = openDatabase(file)
+    writable.exec('create table t(x); insert into t values (1)')
+    const db = openDatabase(file, true)
+    try {
+      expect(() => queryDatabase(db, `vacuum into '${join(dir, 'copy.db')}'`)).toThrow(/read-only/i)
+      expect(existsSync(join(dir, 'copy.db'))).toBe(false)
+      expect(() => queryDatabase(db, "attach ':memory:' as scratch")).toThrow(/read-only/i)
+      expect(queryDatabase(db, 'select x from t').rows).toEqual([[1]])
+      queryDatabase(writable, `vacuum into '${join(dir, 'backup.db')}'`)
+      expect(existsSync(join(dir, 'backup.db'))).toBe(true)
+    } finally {
+      db.close()
+      writable.close()
+    }
   })
 
   it('rolls back the whole DML script when a later statement fails', () => {

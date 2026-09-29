@@ -16,6 +16,8 @@ type Deps = {
   // A tab whose work is now on disk no longer needs its session backup, and any
   // write still queued for it has to be cancelled before it recreates one.
   onTabSaved?: (tabId: string) => void
+  // View state keyed by tab id (editor undo history, scroll offsets) follows a renamed tab.
+  onTabRenamed?: (oldId: string, newId: string) => void
 }
 
 // Tabs for workspace files take an id derived from the absolute path, so
@@ -253,6 +255,7 @@ export class FileOpsController {
       const newId = this.freeTabId(result.path)
       this.deps.ctx.retargetFileTab(oldId, newId, result.name, result.path)
       this.deps.queries.renameTab(oldId, newId)
+      this.deps.onTabRenamed?.(oldId, newId)
     }
     void this.deps.files.reload()
   }

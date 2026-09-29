@@ -7,6 +7,7 @@ import { activeSort, isReorderableQuery, type SortDir } from '../sql-order'
 import { aggregateCells } from '../result-aggregate'
 import { binaryText, cellToTsv, cellsToTsv, parseClipboardTsv, type ExportFormat, type SqlExportTarget } from '../result-export'
 import { toInsertStatements } from '../result-sql'
+import { hasTruncatedCells, isTruncatedCell } from '../result-truncation'
 import { SQL_NULL, isSqlNull, type CellInput } from '../sql-write'
 import { uuidv4, uuidv7 } from '../uuid'
 import { isFilterableQuery } from '../sql-filter'
@@ -999,8 +1000,9 @@ export class ResultsPanel extends LitElement {
     // and truncated results would silently insert different data, so refuse
     // (validated here, on click, so rendering never scans the selection).
     const result = this._shownResult()
-    if (!result || result.truncated || !results.every((row) => result.rows[row]?.every((value) =>
-      value === null || value === undefined || ['string', 'number', 'bigint', 'boolean'].includes(typeof value),
+    if (!result || result.truncated || !results.every((row) => result.rows[row]?.every((value, col) =>
+      (value === null || value === undefined || ['string', 'number', 'bigint', 'boolean'].includes(typeof value)) &&
+      !isTruncatedCell(result, row, col),
     ))) {
       this._notice(t('results.cannotDuplicateTitle'), t('results.cannotDuplicateDetail'))
       return
@@ -1278,8 +1280,9 @@ export class ResultsPanel extends LitElement {
     window.removeEventListener('keydown', this._onQueryInfoKeydown)
   }
 
+  // A window listener: an Escape the focused control already claimed is not also ours.
   private _onQueryInfoKeydown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape') this._closeQueryInfo()
+    if (event.key === 'Escape' && !event.defaultPrevented) this._closeQueryInfo()
   }
 
   // Anchors under the query-info button, flipping above when there is more room
@@ -1902,6 +1905,7 @@ export class ResultsPanel extends LitElement {
             <export-dialog
               .total=${result?.bufferedRowCount ?? result?.rows.length ?? 0}
               .truncated=${result?.truncated ?? false}
+              .shortened=${hasTruncatedCells(result)}
               .streamable=${this.streamExportAvailable}
               @dialog-cancel=${() => (this._export.dialogOpen = false)}
               @export-confirm=${(event: CustomEvent<ExportConfirmDetail>) => void this._export.confirm(event.detail)}
@@ -2071,7 +2075,10 @@ export class ResultsPanel extends LitElement {
 
   private async _onMenuPick(action: string, result: QueryResult, at: { row: number; col: number }) {
     const copy = (text: string) => void window.sqlkit.writeClipboardText(text)
-    if (action === 'copy-cell') copy(cellToTsv(this._recordValue({ kind: 'result', row: at.row }, at.col)))
+    if (action === 'copy-cell') {
+      const ref: RowRef = { kind: 'result', row: at.row }
+      this._copyText(cellToTsv(this._recordValue(ref, at.col)), this._isShortenedCell(ref, at.col))
+    }
     if (action === 'copy-row') this._copyRows(at.row)
     // Always whole rows: an INSERT of part of a row omits the rest of its
     // columns, which is rarely a statement anyone wants.
@@ -2152,9 +2159,10 @@ export class ResultsPanel extends LitElement {
     if (action === 'use-default') this._setSelectionDefault()
     if (action === 'uuid-v4') this._fillSelectionUuid(4)
     if (action === 'uuid-v7') this._fillSelectionUuid(7)
-    if (action === 'copy-cell' && col >= 0) void window.sqlkit.writeClipboardText(cellToTsv(this._recordValue(ref, col)))
+    if (action === 'copy-cell' && col >= 0) this._copyText(cellToTsv(this._recordValue(ref, col)), this._isShortenedCell(ref, col))
     if (action === 'copy-row') {
-      void window.sqlkit.writeClipboardText(this._rowValuesAt(ref).map((value) => cellToTsv(value)).join('\t'))
+      const values = this._rowValuesAt(ref)
+      this._copyText(values.map((value) => cellToTsv(value)).join('\t'), values.some((_, index) => this._isShortenedCell(ref, index)))
     }
     // Delete follows the unified selection: drafts are discarded (no DB write),
     // and any result rows selected alongside are staged for deletion.
@@ -2606,25 +2614,47 @@ export class ResultsPanel extends LitElement {
   // so a copy that has to name its values (INSERT) reads the same block a plain
   // TSV copy does. Bounds come in explicitly: a row-level copy passes the full
   // column range without having to widen the selection to say so.
-  private _blockAt(r0: number, r1: number, c0: number, c1: number): { columns: string[]; rows: unknown[][] } | null {
+  private _blockAt(r0: number, r1: number, c0: number, c1: number): { columns: string[]; rows: unknown[][]; shortened: boolean } | null {
     if (this.run.phase !== 'done') return null
     const { order } = this._display()
     const first = Math.max(0, r0)
     const last = Math.min(order.length - 1, r1)
     const names = this._shownResult()?.columns ?? []
     const rows: unknown[][] = []
+    let shortened = false
     for (let d = first; d <= last; d += 1) {
       const ref = order[d]
       if (!ref) continue
       const values = this._rowValuesAt(ref)
       const cells: unknown[] = []
-      for (let c = c0; c <= c1; c += 1) cells.push(values[c])
+      for (let c = c0; c <= c1; c += 1) {
+        cells.push(values[c])
+        shortened ||= this._isShortenedCell(ref, c)
+      }
       rows.push(cells)
     }
-    return { columns: names.slice(c0, c1 + 1), rows }
+    return { columns: names.slice(c0, c1 + 1), rows, shortened }
   }
 
-  private _selectedBlock(): { columns: string[]; rows: unknown[][] } | null {
+  // A buffered value cut to fit the grid; a staged edit replaces it with real input.
+  private _isShortenedCell(ref: RowRef, col: number): boolean {
+    return ref.kind === 'result' && !this.edits.has(`${ref.row}:${col}`) && isTruncatedCell(this._shownResult(), ref.row, col)
+  }
+
+  // Editing a cut value would save the cut: what the grid holds is not what the row holds.
+  private _refuseShortenedEdit(ref: RowRef, col: number): boolean {
+    if (!this._isShortenedCell(ref, col)) return false
+    this._notice(t('results.valuesShortened'), t('results.editShortenedDetail'))
+    return true
+  }
+
+  // Clipboard writes refuse shortened values: the paste would hold the marker, not the data.
+  private _copyText(text: string, shortened: boolean) {
+    if (shortened) return this._notice(t('results.valuesShortened'), t('results.copyShortenedDetail'))
+    void window.sqlkit.writeClipboardText(text)
+  }
+
+  private _selectedBlock(): { columns: string[]; rows: unknown[][]; shortened: boolean } | null {
     const sel = this._sel
     if (!sel) return null
     return this._blockAt(
@@ -2640,13 +2670,13 @@ export class ResultsPanel extends LitElement {
     if (!block) return
     // cellsToTsv applies full TSV field escaping: an embedded tab/newline is
     // quoted (stays one cell) and a formula-leading cell is neutralized.
-    void window.sqlkit.writeClipboardText(cellsToTsv(block.rows))
+    this._copyText(cellsToTsv(block.rows), block.shortened)
   }
 
   // The full-width block a row-level copy takes. Read rather than selected: a
   // copy that expanded the highlight to what it took would look like the grid had
   // jumped on its own.
-  private _rowBlockForCopy(row: number): { columns: string[]; rows: unknown[][] } | null {
+  private _rowBlockForCopy(row: number): { columns: string[]; rows: unknown[][]; shortened: boolean } | null {
     const lastCol = (this._shownResult()?.columns.length ?? 0) - 1
     if (lastCol < 0) return null
     const { r0, r1 } = this._rowRangeForCopy(row)
@@ -2655,14 +2685,15 @@ export class ResultsPanel extends LitElement {
 
   private _copyRows(row: number) {
     const block = this._rowBlockForCopy(row)
-    if (block) void window.sqlkit.writeClipboardText(cellsToTsv(block.rows))
+    if (block) this._copyText(cellsToTsv(block.rows), block.shortened)
   }
 
   private _copyRowsAsInsert(row: number) {
     const block = this._rowBlockForCopy(row)
     if (!block) return
-    void window.sqlkit.writeClipboardText(
+    this._copyText(
       toInsertStatements({ columns: block.columns, rows: block.rows, engine: this.engine, table: this.insertTable }),
+      block.shortened,
     )
   }
 
@@ -2780,6 +2811,8 @@ export class ResultsPanel extends LitElement {
   // Opens the inline editor on a cell; `seed` (a typed char) replaces the value.
   // The current selection is snapshotted so the committed value fills all of it.
   private _beginEdit(ref: RowRef, col: number, seed: string | null) {
+    // Typing over the cell replaces it whole; only an edit that starts from the cut text is refused.
+    if (seed === null && this._refuseShortenedEdit(ref, col)) return
     // A JSON document has no business in a one-line input: Enter and Escape
     // there mean "commit" and "cancel", and the value it commits is whatever
     // fits. Send every edit gesture on a JSON column to the editor instead.
@@ -2816,6 +2849,7 @@ export class ResultsPanel extends LitElement {
   // widened to json, a half-typed staged edit) opens exactly as it is stored,
   // since reformatting text that is not JSON would only garble it.
   private _openJson(ref: RowRef, col: number) {
+    if (this._refuseShortenedEdit(ref, col)) return
     this._dismissFind()
     this._editing = null
     // The grid leaves the DOM while the editor is up, so the body scrolls back

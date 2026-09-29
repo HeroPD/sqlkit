@@ -21,6 +21,7 @@ import type {
   TableStat,
 } from '../../src/electron'
 import type { ExportFormat, SqlExportTarget } from '../../src/result-export'
+import type { SqlModeFlags } from '../../src/sql-mask'
 import type { Endpoint } from './transport'
 import { createMssqlDriver } from './mssql'
 import { createMysqlDriver } from './mysql'
@@ -124,6 +125,8 @@ export type Driver = {
   /** Commits or rolls back the pinned manual transaction and releases its
    * connection back to the pool. Throws when no transaction is open. */
   endTransaction?(mode: 'commit' | 'rollback'): Promise<void>
+  /** The sql_mode flags a MySQL session last reported (they can change at any checkout). */
+  sqlMode?(): SqlModeFlags
 }
 
 export type DriverEvents = {
@@ -131,6 +134,8 @@ export type DriverEvents = {
   onError(message: string): void
   /** The pinned transaction ended outside a manager call (socket death). */
   onTransactionChange?(): void
+  /** A checkout found the session's sql_mode flags changed. */
+  onSqlModeChange?(): void
 }
 
 export { MAX_BUFFERED_ROWS } from './limits'

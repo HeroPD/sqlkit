@@ -98,6 +98,21 @@ export function isReorderableQuery(sql: string, engine?: Engine, mode?: SqlModeF
   return leadingKeyword(masked) === 'select'
 }
 
+// A PRAGMA reads only when it takes no value (`= x` or `(x)` sets journal_mode and friends), bar
+// those that act when called bare; the introspection pragmas' `(table)` names what to read.
+const ACTING_PRAGMAS = new Set(['optimize', 'incremental_vacuum', 'wal_checkpoint', 'shrink_memory'])
+const INTROSPECTION_PRAGMAS = new Set([
+  'table_info', 'table_xinfo', 'table_list', 'index_info', 'index_xinfo', 'index_list',
+  'foreign_key_list', 'foreign_key_check', 'integrity_check', 'quick_check',
+])
+
+function isReadOnlyPragma(masked: string): boolean {
+  const match = /^\s*pragma\s+(?:[A-Za-z_][\w$]*\s*\.\s*)?([A-Za-z_][\w$]*)\s*(\(\s*[^()=;]*\)\s*)?;?\s*$/i.exec(masked)
+  if (!match) return false
+  const name = match[1]!.toLowerCase()
+  return match[2] ? INTROSPECTION_PRAGMAS.has(name) : !ACTING_PRAGMAS.has(name)
+}
+
 // Whether a query is safe to re-run for a full-result export: one statement, no
 // writes or side effects. Streaming export re-executes the SQL, so anything that
 // modifies data (or a SELECT … INTO / FOR, which unsafeClause already flags)
@@ -108,7 +123,8 @@ export function isReadOnlyQuery(sql: string, engine?: Engine, mode?: SqlModeFlag
   const scanned = scan(masked, sql)
   if (scanned.multiStatement || scanned.unsafeClause) return false
   const head = leadingKeyword(masked)
-  if (head === 'select' || head === 'values' || head === 'show' || head === 'pragma' || head === 'table') return true
+  if (head === 'pragma') return isReadOnlyPragma(masked)
+  if (head === 'select' || head === 'values' || head === 'show' || head === 'table') return true
   // A CTE is read-only unless it drives a data-modifying statement
   // (WITH x AS (DELETE … RETURNING …) …), which Postgres permits.
   if (head === 'with') {

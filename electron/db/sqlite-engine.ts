@@ -1,9 +1,9 @@
-import { DatabaseSync, type StatementSync } from 'node:sqlite'
+import { constants, DatabaseSync, type StatementSync } from 'node:sqlite'
 import { closeSync, openSync, writeSync } from 'node:fs'
 import type { BatchResult, ColumnRef, DdlResult, InspectSection, QueryResult, QueryResultSet, TableInspection, TableRef } from '../../src/electron'
 import { createExportSerializer, type ExportFormat, type SqlExportTarget } from '../../src/result-export'
 import { t } from '../../src/i18n'
-import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS } from './limits'
+import { BATCH_ZERO_ROWS, boundedRow, MAX_BUFFERED_ROWS, noteTruncatedCells, truncatedCellsField } from './limits'
 import { columnReference } from './column-reference'
 import { assertSelfContainedTransaction, containsSqliteTrigger } from './sql-script'
 
@@ -16,8 +16,19 @@ import { assertSelfContainedTransaction, containsSqliteTrigger } from './sql-scr
 export type SqliteParam = string | number | bigint | null | Uint8Array
 
 // readOnly opens the file with SQLITE_OPEN_READONLY — the engine itself
-// rejects writes, and a missing file errors instead of being created.
-export const openDatabase = (file: string, readOnly = false): DatabaseSync => new DatabaseSync(file, { readBigInts: true, readOnly })
+// rejects writes, and a missing file errors instead of being created. That
+// flag guards only this file: ATTACH, and VACUUM INTO (which attaches its
+// target), can still create and write others, so the authorizer refuses them.
+export const openDatabase = (file: string, readOnly = false): DatabaseSync => {
+  const db = new DatabaseSync(file, { readBigInts: true, readOnly })
+  if (readOnly) {
+    db.setAuthorizer((action) => {
+      if (action === constants.SQLITE_ATTACH) throw new Error(t('sqlite.readOnlyAttach'))
+      return constants.SQLITE_OK
+    })
+  }
+  return db
+}
 
 export const serverVersion = (db: DatabaseSync): string => {
   const row = db.prepare('select sqlite_version() as version').get() as { version: string }
@@ -444,6 +455,7 @@ function run(statement: StatementSync, params: SqliteParam[], budget: { bytes: n
   statement.setReturnArrays(true)
   const rows: unknown[][] = []
   let truncated = false
+  const cells: Array<[number, number]> = []
   let stoppedEarly = false
   for (const row of statement.iterate(...params) as unknown as Iterable<unknown[]>) {
     if (rows.length >= MAX_BUFFERED_ROWS) {
@@ -457,10 +469,10 @@ function run(statement: StatementSync, params: SqliteParam[], budget: { bytes: n
       stoppedEarly = true
       break
     }
+    noteTruncatedCells(cells, rows.length, bounded.truncatedColumns)
     rows.push(bounded.row)
     budget.bytes += bounded.bytes
-    truncated ||= bounded.truncated
   }
   // Stopping early leaves the true count unknown; per-cell truncation does not.
-  return { columns, columnSources, rows, rowCount: rows.length, truncated, rowCountExact: !stoppedEarly }
+  return { columns, columnSources, rows, rowCount: rows.length, truncated, ...truncatedCellsField(cells), rowCountExact: !stoppedEarly }
 }

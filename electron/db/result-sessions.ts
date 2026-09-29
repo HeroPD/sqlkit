@@ -89,9 +89,9 @@ export class ResultSessionStore {
     const trim = (set: QueryResultSet) => {
       const rows = page(set.rows, 0, PAGE_SIZE, Math.min(MAX_PAGE_BYTES, remaining))
       remaining = Math.max(0, remaining - rowsBytes(rows))
-      return rows.length < set.rows.length
-        ? { ...set, rows, truncated: true, bufferedRowCount: rows.length }
-        : set
+      if (rows.length >= set.rows.length) return set
+      const cells = set.truncatedCells?.filter(([row]) => row < rows.length)
+      return { ...set, rows, truncated: true, truncatedCells: cells?.length ? cells : undefined, bufferedRowCount: rows.length }
     }
     if (!result.resultSets?.length) return trim(result) as QueryResult
     const resultSets = [...result.resultSets]

@@ -85,7 +85,9 @@ type Deps = {
   navigateResult: (direction: 'back' | 'forward') => void
   addDatabase: () => void
   connectProfile: (profileId: string) => void
+  // Both ask first when a transaction would be rolled back.
   disconnectProfile: (profileId: string) => void
+  disconnectAll: () => void
   showView: (view: string) => void
   refreshFiles: () => void
   toggleSidebar: () => void
@@ -407,7 +409,7 @@ export class CommandPaletteController implements ReactiveController {
         break
       }
       case 'disconnect-all':
-        void this.deps.live.disconnectAll()
+        this.deps.disconnectAll()
         break
       case 'refresh-files':
         this.deps.refreshFiles()

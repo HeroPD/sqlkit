@@ -225,6 +225,19 @@ describe('workspace config: credential round-trip', () => {
     expect(hydrateConnectionProfile(workspaceDir, renderer).password).toBe('new-secret')
   })
 
+  it('does not forward a saved password over a changed transport', () => {
+    const tunnel = { enabled: true, host: 'bastion', port: '22', username: 'ops', authType: 'password' as const, password: 'ssh-secret', keyPath: '', passphrase: '' }
+    writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'db-secret', ssl: { mode: 'require', ca: '' }, ssh: tunnel })] })
+    const renderer = readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!
+    expect(hydrateConnectionProfile(workspaceDir, renderer).password).toBe('db-secret')
+    expect(hydrateConnectionProfile(workspaceDir, { ...renderer, ssl: { mode: 'disable', ca: '' } }).password).toBe('')
+    expect(hydrateConnectionProfile(workspaceDir, { ...renderer, ssh: { ...renderer.ssh!, enabled: false } }).password).toBe('')
+    expect(hydrateConnectionProfile(workspaceDir, { ...renderer, ssh: { ...renderer.ssh!, host: 'elsewhere' } }).password).toBe('')
+    const moved = hydrateConnectionProfile(workspaceDir, { ...renderer, ssh: { ...renderer.ssh!, port: '2222' } })
+    expect(moved.password).toBe('')
+    expect(moved.ssh?.password).toBe('')
+  })
+
   it('does not forward a saved secret to a renderer-modified host', () => {
     writeWorkspaceConfig(workspaceDir, { version: 1, connections: [profile({ password: 'host-bound' })] })
     const renderer = readWorkspaceConfigForRenderer(workspaceDir).config.connections[0]!
@@ -605,6 +618,21 @@ describe('workspace data behind a symlink', () => {
     expect(fs.lstatSync(path.join(workspaceDir, '.sqlkit', '.gitignore')).isFile()).toBe(true)
   })
 
+  it('reads no config, history or .gitignore that is itself a symlink', () => {
+    fs.writeFileSync(path.join(outside, 'id_rsa'), 'PRIVATE KEY')
+    fs.writeFileSync(path.join(outside, 'config.json'), JSON.stringify({ version: 1, connections: [profile()] }))
+    fs.writeFileSync(path.join(outside, 'history.json'), JSON.stringify([{ id: 'h', contextKey: 'k', sql: 'select 1', success: true }]))
+    fs.mkdirSync(path.join(workspaceDir, '.sqlkit'), { recursive: true })
+    fs.symlinkSync(path.join(outside, 'config.json'), configPath())
+    fs.symlinkSync(path.join(outside, 'history.json'), path.join(workspaceDir, '.sqlkit', 'history.json'))
+    fs.symlinkSync(path.join(outside, 'id_rsa'), path.join(workspaceDir, '.sqlkit', '.gitignore'))
+    expect(readWorkspaceConfig(workspaceDir).config.connections).toEqual([])
+    expect(readWorkspaceConfig(workspaceDir).error).toContain('symbolic link')
+    expect(readWorkspaceHistory(workspaceDir)).toEqual([])
+    writeWorkspaceHistory(workspaceDir, [])
+    expect(fs.readFileSync(path.join(workspaceDir, '.sqlkit', '.gitignore'), 'utf8')).not.toContain('PRIVATE KEY')
+  })
+
   it('refuses a .sqlkit that is itself a symlink, and says why', () => {
     fs.symlinkSync(outside, path.join(workspaceDir, '.sqlkit'))
     openWorkspace(workspaceDir)
@@ -638,5 +666,34 @@ describe('history that cannot be read', () => {
     fs.writeFileSync(path.join(internal(), 'history.json'), 'not json')
     expect(updateWorkspaceHistory(workspaceDir, { clearAll: true }).success).toBe(true)
     expect(fs.readdirSync(internal()).filter((name) => name.startsWith('history.unreadable-'))).toEqual([])
+  })
+})
+
+// A crash between creating an atomic write's temp file and renaming it leaves the temp behind.
+describe('orphaned temp files', () => {
+  it('sweeps old temp files under .sqlkit on open, sparing fresh ones and never following a symlink', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlkit-outside-'))
+    try {
+      const internal = path.join(workspaceDir, '.sqlkit')
+      fs.mkdirSync(path.join(internal, 'backups', '1'), { recursive: true })
+      const old = new Date(Date.now() - 60 * 60 * 1000)
+      const stale = [path.join(internal, 'config.json.a1b2c3d4e5f6.tmp'), path.join(internal, 'backups', 'x.sql.0123456789ab.tmp'), path.join(internal, 'backups', '1', 'y.sql.0123456789ab.tmp')]
+      for (const file of stale) {
+        fs.writeFileSync(file, 'partial')
+        fs.utimesSync(file, old, old)
+      }
+      const fresh = path.join(internal, 'history.json.ffffffffffff.tmp')
+      fs.writeFileSync(fresh, 'in flight')
+      const target = path.join(outside, 'keep.tmp')
+      fs.writeFileSync(target, 'outside')
+      fs.utimesSync(target, old, old)
+      fs.symlinkSync(outside, path.join(internal, 'linked'))
+      expect(openWorkspace(workspaceDir).success).toBe(true)
+      for (const file of stale) expect(fs.existsSync(file)).toBe(false)
+      expect(fs.existsSync(fresh)).toBe(true)
+      expect(fs.readFileSync(target, 'utf8')).toBe('outside')
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true })
+    }
   })
 })

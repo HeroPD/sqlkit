@@ -23,6 +23,8 @@ type Deps = {
   activeDbId: () => string | null
   activeChildDb: () => string | null
   activeProfile: () => ConnectionProfile | null
+  /** The live connection's version banner, for syntax older servers lack. */
+  serverVersion?: () => string | undefined
   run: () => QueryRun
   tables: () => TableRef[]
   columns: () => ColumnRef[]
@@ -105,6 +107,7 @@ export class ResultEditingController {
     const deletes = this.deps.deletes()
     if (!editsList.length && !drafts.length && !deletes.length) return
     const input = this.input()
+    const serverVersion = this.deps.serverVersion?.()
     const statements: BatchStatement[] = []
 
     // A row marked for deletion needn't have its edits applied first.
@@ -114,7 +117,7 @@ export class ResultEditingController {
     if (liveEdits.length) {
       const built = buildPendingUpdate(input, liveEdits)
       if (!built.ok) return this.notice(built.issue)
-      statements.push(...buildBatchUpdates({ table: built.value.table, edits: built.value.edits, engine: profile.engine }))
+      statements.push(...buildBatchUpdates({ table: built.value.table, edits: built.value.edits, engine: profile.engine, serverVersion }))
     }
 
     if (drafts.length) {
@@ -128,7 +131,7 @@ export class ResultEditingController {
       if (!ctx) return
       const keys = rowKeysForDelete(ctx, deletes)
       if (!keys.ok) return this.notice(keys.issue)
-      statements.push(...buildDeleteRowBatches({ table: ctx.table, rows: keys.value, engine: profile.engine }))
+      statements.push(...buildDeleteRowBatches({ table: ctx.table, rows: keys.value, engine: profile.engine, serverVersion }))
     }
 
     if (!statements.length) return

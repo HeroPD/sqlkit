@@ -2940,3 +2940,65 @@ describe('results-panel remembers where the reader was in each result', () => {
     expect(body.scrollTop).toBe(1100)
   })
 })
+
+describe('results-panel copy of shortened cells', () => {
+  it('refuses to copy a row holding a value the driver shortened, and copies faithful rows', async () => {
+    const writeClipboardText = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { sqlkit: unknown }).sqlkit = { writeClipboardText }
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.run = {
+      phase: 'done',
+      result: { columns: ['a', 'b'], rows: [['a0', 'b0'], ['a1', 'b1\n… [cell truncated by SqlKit Studio]']], rowCount: 2, durationMs: 1, truncatedCells: [[1, 1]] },
+    }
+    document.body.append(el)
+    await el.updateComplete
+    const notices: string[] = []
+    el.addEventListener('grid-notice', (event) => notices.push((event as CustomEvent<{ title: string }>).detail.title))
+    const pick = async (row: number, id: string) => {
+      el.shadowRoot!.querySelector(`tr[data-row="${row}"] td:nth-child(2)`)!
+        .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 }))
+      await el.updateComplete
+      el.shadowRoot!.querySelector('context-menu')!.dispatchEvent(new CustomEvent('menu-pick', { detail: { id } }))
+      await el.updateComplete
+    }
+
+    await pick(1, 'copy-row')
+    await pick(1, 'copy-insert')
+    expect(writeClipboardText).not.toHaveBeenCalled()
+    expect(notices).toEqual(['Values were shortened', 'Values were shortened'])
+
+    await pick(0, 'copy-row')
+    expect(writeClipboardText).toHaveBeenCalledWith('a0\tb0')
+    el.remove()
+  })
+})
+
+// A shortened value opened for editing would be saved back shortened.
+describe('results-panel editing of shortened cells', () => {
+  it('refuses to open a shortened value for editing, but lets typing replace it whole', async () => {
+    const el = document.createElement('results-panel')
+    el.editable = true
+    el.rowEditable = true
+    el.run = {
+      phase: 'done',
+      result: { columns: ['a', 'b'], rows: [['a0', 'b0'], ['a1', 'b1\n… [cell truncated by SqlKit Studio]']], rowCount: 2, durationMs: 1, truncatedCells: [[1, 1]] },
+    }
+    document.body.append(el)
+    await el.updateComplete
+    const notices: string[] = []
+    el.addEventListener('grid-notice', (event) => notices.push((event as CustomEvent<{ title: string }>).detail.title))
+    const cell = (row: number, col: number) => el.shadowRoot!.querySelector(`tr[data-row="${row}"] td:nth-child(${col + 2})`)!
+    const editor = () => el.shadowRoot!.querySelector('input.cell-edit')
+
+    cell(1, 1).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, composed: true }))
+    await el.updateComplete
+    expect(editor()).toBeNull()
+    expect(notices).toEqual(['Values were shortened'])
+
+    cell(0, 1).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, composed: true }))
+    await el.updateComplete
+    expect(editor()).not.toBeNull()
+    el.remove()
+  })
+})

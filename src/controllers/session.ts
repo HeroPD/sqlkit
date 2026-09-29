@@ -1,6 +1,7 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
 import type { SessionContext, WorkspaceSession } from '../electron'
 import { recoverableContexts } from '../session-recovery'
+import { matchesDigest } from '../text-digest'
 
 // A tab's buffer as it should come back: what the editor shows, what the file
 // held, and where it lives now (null once its file has gone missing).
@@ -175,7 +176,11 @@ export class SessionController implements ReactiveController {
         // The file is still there: it is the baseline, and the backup (when one
         // exists) is the work that had not reached it yet.
         if (saved?.success) {
-          return [tab.id, { content: backup ?? saved.content, savedContent: saved.content, path: tab.path }, backup !== null] as const
+          // Changed on disk since the buffer's baseline (a pull while the app was down): an empty baseline, like an
+          // orphaned tab's, makes the next save report the conflict instead of silently overwriting it.
+          const drifted = backup !== null && backup !== saved.content && tab.baseline !== undefined
+            && matchesDigest(saved.content, tab.baseline) === false
+          return [tab.id, { content: backup ?? saved.content, savedContent: drifted ? '' : saved.content, path: tab.path }, backup !== null] as const
         }
         // Deleted or unreadable since. Unsaved work still comes back, as an
         // untitled tab; with nothing buffered there is nothing left to show.

@@ -16,9 +16,11 @@ export class SettingsController implements ReactiveController {
   private host: ReactiveControllerHost
   private _settings: AppSettings = DEFAULT_APP_SETTINGS
   private unsubscribe: (() => void) | null = null
+  private onSaveFailed: (error: string) => void
 
-  constructor(host: ReactiveControllerHost) {
+  constructor(host: ReactiveControllerHost, options: { onSaveFailed?: (error: string) => void } = {}) {
     this.host = host
+    this.onSaveFailed = options.onSaveFailed ?? (() => {})
     host.addController(this)
   }
 
@@ -43,7 +45,9 @@ export class SettingsController implements ReactiveController {
   /** A change made in this window: shown at once, then persisted and broadcast. */
   set(settings: AppSettings) {
     this.apply(settings)
-    void window.sqlkit.setSettings(this._settings).catch(() => {})
+    // The change still shows here, so say it did not stick rather than let the next launch undo it silently.
+    void window.sqlkit.setSettings(this._settings)
+      .catch((error: unknown) => this.onSaveFailed(error instanceof Error ? error.message : String(error)))
   }
 
   /** A change main has already stored — the View menu's theme items. */

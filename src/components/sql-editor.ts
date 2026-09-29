@@ -243,6 +243,20 @@ export function clearEditorStateCache() {
   stateCache.clear()
 }
 
+// Mounted editors, so a rename can retarget the one showing the tab: its live state is not in the cache.
+const renderedTabRetargets = new Set<(oldId: string, newId: string) => void>()
+
+/** Moves a tab's editor state (document, undo history, selection) to its new id, for a renamed file. */
+export function renameEditorState(oldId: string, newId: string) {
+  if (oldId === newId) return
+  const cached = stateCache.get(oldId)
+  if (cached) {
+    stateCache.delete(oldId)
+    stateCache.set(newId, cached)
+  }
+  for (const retarget of renderedTabRetargets) retarget(oldId, newId)
+}
+
 // Compartments are lookup keys, shared by all states so a state restored
 // across component instances can still be reconfigured.
 const languageCompartment = new Compartment()
@@ -452,9 +466,14 @@ export class SqlEditor extends LitElement {
     view.focus()
   }
 
+  private _retargetRendered = (oldId: string, newId: string) => {
+    if (this._renderedTabId === oldId) this._renderedTabId = newId
+  }
+
   protected firstUpdated() {
     const container = this.shadowRoot!.querySelector('.host')
     if (!container) return
+    renderedTabRetargets.add(this._retargetRendered)
 
     this._tablesKey = this._makeTablesKey(this.tables)
     this._lastEmittedValue = this.value
@@ -613,6 +632,7 @@ export class SqlEditor extends LitElement {
     // The element is dropped whenever a non-SQL tab takes the editor area;
     // stashing here lets the remounted editor pick the tab back up.
     this._stashState()
+    renderedTabRetargets.delete(this._retargetRendered)
     this._view?.destroy()
     this._view = null
   }

@@ -7,7 +7,7 @@ import type { EditorView } from '@codemirror/view'
 import type { ColumnRef } from '../electron'
 import { stubEditorLayout } from '../test/dom-stubs'
 import './sql-editor'
-import type { SqlEditor } from './sql-editor'
+import { renameEditorState, type SqlEditor } from './sql-editor'
 
 beforeAll(stubEditorLayout)
 
@@ -764,6 +764,36 @@ test('renders the doc and swaps state per tab, restoring on switch back', async 
   el.value = 'select 1;'
   await el.updateComplete
   expect(text(el)).toContain('select 1;')
+  el.remove()
+})
+
+// A renamed file's tab takes a new id; its undo history must follow it, whether it is on screen or stashed.
+test('a renamed tab keeps its undo history, shown or stashed', async () => {
+  const el = await mount('file:/ws/a.sql', 'select 1;')
+  const view = () => (el as unknown as { _view: EditorView })._view
+  const edit = async () => {
+    view().dispatch({ changes: { from: view().state.doc.length, insert: ' /* edited */' } })
+    el.value = view().state.doc.toString()
+    await el.updateComplete
+  }
+
+  await edit()
+  renameEditorState('file:/ws/a.sql', 'file:/ws/b.sql')
+  el.tabId = 'file:/ws/b.sql'
+  await el.updateComplete
+  expect(undo(view())).toBe(true)
+  expect(view().state.doc.toString()).toBe('select 1;')
+
+  await edit()
+  el.tabId = 'other'
+  el.value = 'select 2;'
+  await el.updateComplete
+  renameEditorState('file:/ws/b.sql', 'file:/ws/c.sql')
+  el.tabId = 'file:/ws/c.sql'
+  el.value = 'select 1; /* edited */'
+  await el.updateComplete
+  expect(undo(view())).toBe(true)
+  expect(view().state.doc.toString()).toBe('select 1;')
   el.remove()
 })
 
